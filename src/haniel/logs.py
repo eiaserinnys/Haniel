@@ -221,6 +221,28 @@ class LogManager:
             for capture in self._captures.values():
                 capture.stop()
 
+    def list_services(self) -> list[str]:
+        """List all services with log captures.
+
+        Returns:
+            List of service names
+        """
+        with self._lock:
+            return list(self._captures.keys())
+
+    def get_log_tail(self, service_name: str, n: int = 50) -> list[str]:
+        """Get the last N lines from a service's log file.
+
+        Args:
+            service_name: Name of the service
+            n: Number of lines to return (default: 50)
+
+        Returns:
+            List of the last N lines, or empty list if service not found
+        """
+        log_path = self.log_dir / f"{service_name}.log"
+        return get_log_tail(log_path, n)
+
 
 class StreamReader(threading.Thread):
     """Reads from a stream and writes to a LogCapture.
@@ -262,3 +284,49 @@ class StreamReader(threading.Thread):
     def stop(self) -> None:
         """Signal the reader to stop."""
         self._stop_event.set()
+
+
+def get_log_tail(
+    log_path: Path,
+    n: int = 50,
+    max_bytes: int = 10 * 1024 * 1024,
+) -> list[str]:
+    """Read the last N lines from a log file efficiently.
+
+    For large files, only reads the last `max_bytes` bytes to avoid
+    memory issues.
+
+    Args:
+        log_path: Path to the log file
+        n: Number of lines to return (default: 50)
+        max_bytes: Maximum bytes to read for large files (default: 10MB)
+
+    Returns:
+        List of the last N lines from the file
+    """
+    if not log_path.exists():
+        return []
+
+    try:
+        file_size = log_path.stat().st_size
+
+        # For small files, read all
+        if file_size <= max_bytes:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+                lines = [line.rstrip("\n\r") for line in lines]
+                lines = [line for line in lines if line]
+                return lines[-n:] if n < len(lines) else lines
+
+        # For large files, read from end to save memory
+        with open(log_path, "rb") as f:
+            f.seek(max(0, file_size - max_bytes))
+            # Skip partial first line if we didn't start at beginning
+            if file_size > max_bytes:
+                f.readline()  # Discard partial line
+            content = f.read().decode("utf-8", errors="replace")
+            lines = content.splitlines()
+            lines = [line for line in lines if line.strip()]
+            return lines[-n:] if n < len(lines) else lines
+    except OSError:
+        return []
