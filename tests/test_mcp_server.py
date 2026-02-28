@@ -1,0 +1,403 @@
+"""
+Tests for haniel MCP server.
+
+Tests the MCP server that provides Claude Code integration:
+- Resources: status, repos, logs
+- Tools: restart, stop, start, pull, enable, reload
+"""
+
+import asyncio
+import json
+import pytest
+from pathlib import Path
+from unittest.mock import MagicMock, AsyncMock, patch
+
+from haniel.config import HanielConfig, McpConfig, ServiceConfig, RepoConfig
+from haniel.health import ServiceState
+
+
+class TestHanielMcpServer:
+    """Test HanielMcpServer class."""
+
+    @pytest.fixture
+    def mock_runner(self):
+        """Create a mock ServiceRunner."""
+        runner = MagicMock()
+        runner.config = HanielConfig(
+            poll_interval=60,
+            mcp=McpConfig(enabled=True, transport="sse", port=3200),
+            services={
+                "web": ServiceConfig(run="python -m http.server"),
+                "worker": ServiceConfig(run="python worker.py"),
+            },
+            repos={
+                "main": RepoConfig(url="git@github.com:test/repo.git", path="./repo"),
+            },
+        )
+        runner.config_dir = Path("/tmp/test")
+
+        # Mock get_status
+        runner.get_status.return_value = {
+            "running": True,
+            "start_time": "2026-02-28T10:00:00",
+            "last_poll": "2026-02-28T14:00:00",
+            "poll_count": 100,
+            "poll_interval": 60,
+            "services": {
+                "web": {
+                    "state": "running",
+                    "uptime": 3600,
+                    "restart_count": 0,
+                    "consecutive_failures": 0,
+                },
+                "worker": {
+                    "state": "running",
+                    "uptime": 3600,
+                    "restart_count": 0,
+                    "consecutive_failures": 0,
+                },
+            },
+            "repos": {
+                "main": {
+                    "path": "./repo",
+                    "branch": "main",
+                    "last_head": "abc12345",
+                    "last_fetch": "2026-02-28T14:00:00",
+                    "fetch_error": None,
+                },
+            },
+        }
+
+        # Mock health manager
+        runner.health_manager = MagicMock()
+        runner.health_manager.get_health.return_value = MagicMock(
+            state=ServiceState.RUNNING,
+            get_uptime=lambda: 3600,
+            restart_count=0,
+            consecutive_failures=0,
+        )
+        runner.health_manager.reset_circuit = MagicMock()
+
+        # Mock process manager
+        runner.process_manager = MagicMock()
+        runner.process_manager.stop_service = MagicMock(return_value=True)
+        runner.process_manager.is_running = MagicMock(return_value=True)
+        runner.process_manager.log_manager = MagicMock()
+        runner.process_manager.log_manager.get_log_tail = MagicMock(
+            return_value=["[14:00:00] [stdout] Server started", "[14:00:01] [stdout] Ready"]
+        )
+
+        # Mock service methods
+        runner._start_service = MagicMock(return_value=True)
+        runner._pull_repo = MagicMock(return_value=True)
+        runner.get_affected_services = MagicMock(return_value=["web"])
+        runner.get_startup_order = MagicMock(return_value=["web", "worker"])
+        runner.get_shutdown_order = MagicMock(return_value=["worker", "web"])
+
+        # Mock enabled services
+        runner._enabled_services = runner.config.services
+
+        return runner
+
+    @pytest.fixture
+    def mcp_server(self, mock_runner):
+        """Create HanielMcpServer instance."""
+        from haniel.mcp_server import HanielMcpServer
+        return HanielMcpServer(mock_runner)
+
+    def test_server_creation(self, mcp_server, mock_runner):
+        """Test MCP server can be created."""
+        assert mcp_server is not None
+        assert mcp_server.runner is mock_runner
+
+    def test_get_port(self, mcp_server):
+        """Test getting MCP port from config."""
+        assert mcp_server.port == 3200
+
+
+class TestMcpResources:
+    """Test MCP resource handlers."""
+
+    @pytest.fixture
+    def mock_runner(self):
+        """Create a mock ServiceRunner."""
+        runner = MagicMock()
+        runner.config = HanielConfig(
+            poll_interval=60,
+            mcp=McpConfig(enabled=True, transport="sse", port=3200),
+            services={
+                "web": ServiceConfig(run="python -m http.server"),
+            },
+            repos={
+                "main": RepoConfig(url="git@github.com:test/repo.git", path="./repo"),
+            },
+        )
+        runner.config_dir = Path("/tmp/test")
+
+        runner.get_status.return_value = {
+            "running": True,
+            "services": {
+                "web": {"state": "running", "uptime": 3600},
+            },
+            "repos": {
+                "main": {"path": "./repo", "branch": "main", "last_head": "abc12345"},
+            },
+        }
+
+        runner.health_manager = MagicMock()
+        runner.health_manager.get_health.return_value = MagicMock(
+            state=ServiceState.RUNNING,
+            get_uptime=lambda: 3600,
+            restart_count=0,
+            consecutive_failures=0,
+        )
+
+        runner.process_manager = MagicMock()
+        runner.process_manager.log_manager = MagicMock()
+        runner.process_manager.log_manager.get_log_tail = MagicMock(
+            return_value=["[14:00:00] Log line 1", "[14:00:01] Log line 2"]
+        )
+
+        runner._enabled_services = runner.config.services
+
+        return runner
+
+    @pytest.fixture
+    def mcp_server(self, mock_runner):
+        """Create HanielMcpServer instance."""
+        from haniel.mcp_server import HanielMcpServer
+        return HanielMcpServer(mock_runner)
+
+    @pytest.mark.asyncio
+    async def test_read_status_resource(self, mcp_server):
+        """Test reading haniel://status resource."""
+        result = await mcp_server.read_resource("haniel://status")
+        assert result is not None
+        data = json.loads(result)
+        assert data["running"] is True
+        assert "services" in data
+
+    @pytest.mark.asyncio
+    async def test_read_status_service_resource(self, mcp_server, mock_runner):
+        """Test reading haniel://status/{service} resource."""
+        # Update mock to include service in status
+        mock_runner.get_status.return_value = {
+            "running": True,
+            "services": {
+                "web": {"state": "running", "uptime": 3600},
+            },
+            "repos": {},
+        }
+        result = await mcp_server.read_resource("haniel://status/web")
+        assert result is not None
+        data = json.loads(result)
+        assert data["state"] == "running"
+
+    @pytest.mark.asyncio
+    async def test_read_status_unknown_service(self, mcp_server, mock_runner):
+        """Test reading status for unknown service returns error."""
+        mock_runner.get_status.return_value = {
+            "running": True,
+            "services": {},  # No services
+            "repos": {},
+        }
+        result = await mcp_server.read_resource("haniel://status/unknown")
+        data = json.loads(result)
+        assert "error" in data
+
+    @pytest.mark.asyncio
+    async def test_read_repos_resource(self, mcp_server):
+        """Test reading haniel://repos resource."""
+        result = await mcp_server.read_resource("haniel://repos")
+        assert result is not None
+        data = json.loads(result)
+        assert "main" in data
+        assert data["main"]["path"] == "./repo"
+
+    @pytest.mark.asyncio
+    async def test_read_logs_resource(self, mcp_server, mock_runner):
+        """Test reading haniel://logs/{service} resource."""
+        result = await mcp_server.read_resource("haniel://logs/web?lines=50")
+        assert result is not None
+        assert "Log line 1" in result
+
+    @pytest.mark.asyncio
+    async def test_read_logs_default_lines(self, mcp_server, mock_runner):
+        """Test reading logs with default line count."""
+        result = await mcp_server.read_resource("haniel://logs/web")
+        assert result is not None
+        mock_runner.process_manager.log_manager.get_log_tail.assert_called_with("web", 50)
+
+
+class TestMcpTools:
+    """Test MCP tool handlers."""
+
+    @pytest.fixture
+    def mock_runner(self):
+        """Create a mock ServiceRunner."""
+        runner = MagicMock()
+        runner.config = HanielConfig(
+            poll_interval=60,
+            mcp=McpConfig(enabled=True, transport="sse", port=3200),
+            services={
+                "web": ServiceConfig(run="python -m http.server"),
+            },
+            repos={
+                "main": RepoConfig(url="git@github.com:test/repo.git", path="./repo"),
+            },
+        )
+        runner.config_dir = Path("/tmp/test")
+        runner.log_dir = Path("/tmp/test/logs")
+
+        # Mock get_status to include services and repos
+        runner.get_status.return_value = {
+            "running": True,
+            "services": {
+                "web": {"state": "running", "uptime": 3600},
+            },
+            "repos": {
+                "main": {"path": "./repo", "branch": "main", "last_head": "abc12345"},
+            },
+        }
+
+        runner.health_manager = MagicMock()
+        runner.health_manager.reset_circuit = MagicMock()
+
+        runner.process_manager = MagicMock()
+        runner.process_manager.stop_service = MagicMock(return_value=True)
+        runner.process_manager.is_running = MagicMock(return_value=True)
+
+        runner._start_service = MagicMock(return_value=True)
+        runner._pull_repo = MagicMock(return_value=True)
+        runner.get_affected_services = MagicMock(return_value=["web"])
+        runner.get_startup_order = MagicMock(return_value=["web"])
+        runner.get_shutdown_order = MagicMock(return_value=["web"])
+
+        runner._enabled_services = runner.config.services
+        runner._repo_states = {
+            "main": MagicMock(config=runner.config.repos["main"]),
+        }
+
+        return runner
+
+    @pytest.fixture
+    def mcp_server(self, mock_runner):
+        """Create HanielMcpServer instance."""
+        from haniel.mcp_server import HanielMcpServer
+        return HanielMcpServer(mock_runner)
+
+    @pytest.mark.asyncio
+    async def test_restart_service(self, mcp_server, mock_runner):
+        """Test haniel_restart tool."""
+        result = await mcp_server.call_tool("haniel_restart", {"service": "web"})
+        assert "success" in result.lower() or "restarted" in result.lower()
+        mock_runner.process_manager.stop_service.assert_called_with("web")
+        mock_runner._start_service.assert_called_with("web")
+
+    @pytest.mark.asyncio
+    async def test_restart_unknown_service(self, mcp_server, mock_runner):
+        """Test restart with unknown service."""
+        mock_runner.get_status.return_value = {"running": True, "services": {}, "repos": {}}
+        result = await mcp_server.call_tool("haniel_restart", {"service": "unknown"})
+        assert "error" in result.lower() or "not found" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_stop_service(self, mcp_server, mock_runner):
+        """Test haniel_stop tool."""
+        result = await mcp_server.call_tool("haniel_stop", {"service": "web"})
+        assert "stopped" in result.lower() or "success" in result.lower()
+        mock_runner.process_manager.stop_service.assert_called_with("web")
+
+    @pytest.mark.asyncio
+    async def test_start_service(self, mcp_server, mock_runner):
+        """Test haniel_start tool."""
+        mock_runner.process_manager.is_running = MagicMock(return_value=False)
+        result = await mcp_server.call_tool("haniel_start", {"service": "web"})
+        assert "started" in result.lower() or "success" in result.lower()
+        mock_runner._start_service.assert_called_with("web")
+
+    @pytest.mark.asyncio
+    async def test_start_already_running(self, mcp_server, mock_runner):
+        """Test start when service already running."""
+        mock_runner.process_manager.is_running = MagicMock(return_value=True)
+        result = await mcp_server.call_tool("haniel_start", {"service": "web"})
+        assert "already running" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_pull_repo(self, mcp_server, mock_runner):
+        """Test haniel_pull tool."""
+        result = await mcp_server.call_tool("haniel_pull", {"repo": "main"})
+        assert "pulled" in result.lower() or "success" in result.lower()
+        mock_runner._pull_repo.assert_called_with("main")
+
+    @pytest.mark.asyncio
+    async def test_pull_unknown_repo(self, mcp_server, mock_runner):
+        """Test pull with unknown repo."""
+        mock_runner.get_status.return_value = {"running": True, "services": {}, "repos": {}}
+        result = await mcp_server.call_tool("haniel_pull", {"repo": "unknown"})
+        assert "error" in result.lower() or "not found" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_enable_service(self, mcp_server, mock_runner):
+        """Test haniel_enable tool (circuit breaker reset)."""
+        result = await mcp_server.call_tool("haniel_enable", {"service": "web"})
+        assert "enabled" in result.lower() or "reset" in result.lower()
+        mock_runner.health_manager.reset_circuit.assert_called_with("web")
+
+    @pytest.mark.asyncio
+    async def test_reload_config(self, mcp_server, mock_runner):
+        """Test haniel_reload tool."""
+        with patch("haniel.mcp_server.load_config") as mock_load:
+            mock_load.return_value = mock_runner.config
+            result = await mcp_server.call_tool("haniel_reload", {})
+            assert "reloaded" in result.lower() or "success" in result.lower()
+
+
+class TestMcpServerIntegration:
+    """Integration tests for MCP server."""
+
+    @pytest.fixture
+    def mock_runner(self):
+        """Create a mock ServiceRunner."""
+        runner = MagicMock()
+        runner.config = HanielConfig(
+            poll_interval=60,
+            mcp=McpConfig(enabled=True, transport="sse", port=3200),
+            services={},
+            repos={},
+        )
+        runner.config_dir = Path("/tmp/test")
+        runner.get_status.return_value = {"running": True, "services": {}, "repos": {}}
+        runner._enabled_services = {}
+        runner.health_manager = MagicMock()
+        runner.process_manager = MagicMock()
+        runner.process_manager.log_manager = MagicMock()
+        return runner
+
+    @pytest.fixture
+    def mcp_server(self, mock_runner):
+        """Create HanielMcpServer instance."""
+        from haniel.mcp_server import HanielMcpServer
+        return HanielMcpServer(mock_runner)
+
+    def test_list_resources(self, mcp_server):
+        """Test listing available resources."""
+        resources = mcp_server.list_resources()
+        assert len(resources) >= 3
+        resource_uris = [r["uri"] for r in resources]
+        assert "haniel://status" in resource_uris
+        assert "haniel://repos" in resource_uris
+        # logs/{service} is a template, so check differently
+        assert any("logs" in uri for uri in resource_uris)
+
+    def test_list_tools(self, mcp_server):
+        """Test listing available tools."""
+        tools = mcp_server.list_tools()
+        assert len(tools) >= 6
+        tool_names = [t["name"] for t in tools]
+        assert "haniel_restart" in tool_names
+        assert "haniel_stop" in tool_names
+        assert "haniel_start" in tool_names
+        assert "haniel_pull" in tool_names
+        assert "haniel_enable" in tool_names
+        assert "haniel_reload" in tool_names

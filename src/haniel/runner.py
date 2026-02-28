@@ -276,6 +276,9 @@ class ServiceRunner:
         self._pending_restarts: dict[str, float] = {}  # service -> restart_time
         self._restart_lock = threading.Lock()
 
+        # MCP server (lazy initialized)
+        self._mcp_server = None
+
     @property
     def is_running(self) -> bool:
         """Check if the runner is active."""
@@ -451,7 +454,7 @@ class ServiceRunner:
                 self.process_manager.stop_service(name)
 
     def start(self) -> None:
-        """Start the runner (services + poll loop)."""
+        """Start the runner (services + poll loop + MCP server)."""
         if self._state.running:
             return
 
@@ -462,6 +465,9 @@ class ServiceRunner:
 
         # Initialize repo states (get current HEAD)
         self._init_repo_states()
+
+        # Start MCP server if enabled
+        self._start_mcp_server()
 
         # Start services
         self.start_services()
@@ -474,7 +480,7 @@ class ServiceRunner:
         self._poll_thread.start()
 
     def stop(self) -> None:
-        """Stop the runner (poll loop + services)."""
+        """Stop the runner (poll loop + services + MCP server)."""
         if not self._state.running:
             return
 
@@ -482,12 +488,36 @@ class ServiceRunner:
         self._state.running = False
         self._stop_event.set()
 
+        # Stop MCP server
+        if self._mcp_server:
+            try:
+                self._mcp_server.stop_sync()
+            except Exception as e:
+                logger.warning(f"Error stopping MCP server: {e}")
+
         # Wait for poll thread
         if self._poll_thread and self._poll_thread.is_alive():
             self._poll_thread.join(timeout=5)
 
         # Stop services
         self.stop_services()
+
+    def _start_mcp_server(self) -> None:
+        """Start the MCP server if enabled."""
+        if not self.config.mcp or not self.config.mcp.enabled:
+            logger.info("MCP server is disabled")
+            return
+
+        try:
+            from .mcp_server import HanielMcpServer
+
+            self._mcp_server = HanielMcpServer(self)
+            self._mcp_server.start_background()
+            logger.info(f"MCP server starting on port {self._mcp_server.port}")
+        except ImportError as e:
+            logger.warning(f"MCP dependencies not available: {e}")
+        except Exception as e:
+            logger.error(f"Failed to start MCP server: {e}")
 
     def _init_repo_states(self) -> None:
         """Initialize repo states with current HEAD."""
