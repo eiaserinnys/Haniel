@@ -382,6 +382,125 @@ class TestFinalizer:
             state.config_values["workspace-env"]["SLACK_TOKEN"] = "xoxb-1234"
             assert finalizer.check_all_configs_filled() is True
 
+    @patch("platform.system")
+    @patch("shutil.which")
+    @patch("subprocess.run")
+    def test_register_nssm_service_windows(
+        self, mock_run, mock_which, mock_system, finalizer_config
+    ):
+        """Test NSSM service registration on Windows."""
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+
+        # Mock Windows environment
+        mock_system.return_value = "Windows"
+        mock_which.side_effect = lambda cmd: {
+            "nssm": r"C:\tools\nssm.exe",
+            "python": r"C:\Python312\python.exe",
+        }.get(cmd)
+
+        # Mock all subprocess calls to succeed
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState()
+            finalizer = Finalizer(finalizer_config, config_dir, state)
+
+            finalizer.register_service()
+
+            # Verify NSSM commands were called
+            calls = mock_run.call_args_list
+            # Should have called: remove (cleanup), install, set DisplayName,
+            # set AppDirectory, set AppStdout, set AppStderr
+            assert len(calls) >= 4
+
+            # Check install command
+            install_call = calls[1]  # Second call after remove
+            assert "install" in install_call[0][0]
+            assert "haniel" in install_call[0][0]
+
+    @patch("platform.system")
+    @patch("shutil.which")
+    def test_register_nssm_service_nssm_not_found(
+        self, mock_which, mock_system, finalizer_config
+    ):
+        """Test error when NSSM is not installed."""
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+
+        mock_system.return_value = "Windows"
+        mock_which.return_value = None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState()
+            finalizer = Finalizer(finalizer_config, config_dir, state)
+
+            with pytest.raises(RuntimeError, match="NSSM not found"):
+                finalizer.register_service()
+
+    @patch("platform.system")
+    @patch("shutil.which")
+    @patch("subprocess.run")
+    def test_register_nssm_service_install_fails(
+        self, mock_run, mock_which, mock_system, finalizer_config
+    ):
+        """Test error handling when NSSM install fails."""
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+
+        mock_system.return_value = "Windows"
+        mock_which.side_effect = lambda cmd: {
+            "nssm": r"C:\tools\nssm.exe",
+            "python": r"C:\Python312\python.exe",
+        }.get(cmd)
+
+        # First call (remove) succeeds, second (install) fails
+        mock_run.side_effect = [
+            MagicMock(returncode=0),  # remove
+            MagicMock(returncode=1, stderr="Service already exists"),  # install fails
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState()
+            finalizer = Finalizer(finalizer_config, config_dir, state)
+
+            with pytest.raises(RuntimeError, match="NSSM install failed"):
+                finalizer.register_service()
+
+    @patch("platform.system")
+    def test_register_service_non_windows(self, mock_system, finalizer_config):
+        """Test service registration logs instructions on non-Windows."""
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+
+        mock_system.return_value = "Linux"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState()
+            finalizer = Finalizer(finalizer_config, config_dir, state)
+
+            # Should not raise, just log instructions
+            finalizer.register_service()
+
+    def test_register_service_no_service_config(self):
+        """Test that register_service skips when no service is configured."""
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+
+        config = HanielConfig(install=InstallConfig())  # No service config
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState()
+            finalizer = Finalizer(config, config_dir, state)
+
+            # Should not raise
+            finalizer.register_service()
+
 
 class TestInstallOrchestrator:
     """Tests for InstallOrchestrator flow control."""
