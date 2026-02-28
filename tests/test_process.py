@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -561,3 +562,327 @@ class TestLogManager:
         # Files should still exist
         assert (log_dir / "service-a.log").exists()
         assert (log_dir / "service-b.log").exists()
+
+
+class TestPosixHandler:
+    """Tests for PosixHandler."""
+
+    def test_terminate_process_already_terminated(self):
+        """Should handle already terminated process gracefully."""
+        from haniel.platform.posix import PosixHandler
+
+        handler = PosixHandler()
+
+        # Create a mock process that has already terminated
+        mock_process = MagicMock()
+        mock_process.poll.return_value = 0  # Already exited
+
+        # Should not raise
+        handler.terminate_process(mock_process)
+
+    def test_kill_process_already_terminated(self):
+        """Should handle already terminated process gracefully."""
+        from haniel.platform.posix import PosixHandler
+
+        handler = PosixHandler()
+
+        mock_process = MagicMock()
+        mock_process.poll.return_value = 0  # Already exited
+
+        # Should not raise
+        handler.kill_process(mock_process)
+
+    def test_setup_process_group(self):
+        """Should do nothing (process group set via Popen kwargs)."""
+        from haniel.platform.posix import PosixHandler
+
+        handler = PosixHandler()
+        mock_process = MagicMock()
+
+        # Should not raise
+        handler.setup_process_group(mock_process)
+
+    def test_is_port_listening_socket_error(self):
+        """Should return False on socket error."""
+        from haniel.platform.posix import PosixHandler
+        import socket
+
+        handler = PosixHandler()
+
+        with patch("socket.socket") as mock_socket_class:
+            mock_socket = MagicMock()
+            mock_socket.connect_ex.side_effect = socket.error("Connection refused")
+            mock_socket_class.return_value = mock_socket
+
+            result = handler.is_port_listening(8080)
+
+            assert result is False
+            mock_socket.close.assert_called_once()
+
+
+class TestCliDryRunInstall:
+    """Tests for CLI dry-run install functionality."""
+
+    def test_print_dry_run_install_requirements(self):
+        """Test dry-run install shows requirements."""
+        from haniel.cli import print_dry_run_install
+        from haniel.config import HanielConfig, InstallConfig
+
+        config = HanielConfig(
+            install=InstallConfig(
+                requirements={"python": ">=3.10", "node": ">=18.0"}
+            )
+        )
+
+        # Should not raise
+        print_dry_run_install(config)
+
+    def test_print_dry_run_install_directories(self):
+        """Test dry-run install shows directories."""
+        from haniel.cli import print_dry_run_install
+        from haniel.config import HanielConfig, InstallConfig
+
+        config = HanielConfig(
+            install=InstallConfig(
+                directories=["./logs", "./data"]
+            )
+        )
+
+        # Should not raise
+        print_dry_run_install(config)
+
+    def test_print_dry_run_install_repos(self):
+        """Test dry-run install shows repositories."""
+        from haniel.cli import print_dry_run_install
+        from haniel.config import HanielConfig, RepoConfig
+
+        config = HanielConfig(
+            repos={
+                "myrepo": RepoConfig(
+                    url="https://github.com/test/test.git",
+                    path="./repos/myrepo"
+                )
+            }
+        )
+
+        # Should not raise
+        print_dry_run_install(config)
+
+    def test_print_dry_run_install_environments(self):
+        """Test dry-run install shows environments."""
+        from haniel.cli import print_dry_run_install
+        from haniel.config import HanielConfig, InstallConfig, EnvironmentConfig
+
+        config = HanielConfig(
+            install=InstallConfig(
+                environments={
+                    "myenv": EnvironmentConfig(type="python", path="./.venv"),
+                    "nodeenv": EnvironmentConfig(type="npm", path="./node_modules")
+                }
+            )
+        )
+
+        # Should not raise
+        print_dry_run_install(config)
+
+    def test_print_dry_run_install_static_configs(self):
+        """Test dry-run install shows static config files."""
+        from haniel.cli import print_dry_run_install
+        from haniel.config import HanielConfig, InstallConfig, ConfigFileConfig
+
+        config = HanielConfig(
+            install=InstallConfig(
+                configs={
+                    "myconfig": ConfigFileConfig(
+                        path="./config.yaml",
+                        content="key: value"
+                    )
+                }
+            )
+        )
+
+        # Should not raise
+        print_dry_run_install(config)
+
+    def test_print_dry_run_install_interactive_configs(self):
+        """Test dry-run install shows interactive config files."""
+        from haniel.cli import print_dry_run_install
+        from haniel.config import HanielConfig, InstallConfig, ConfigFileConfig, ConfigKeyConfig
+
+        config = HanielConfig(
+            install=InstallConfig(
+                configs={
+                    "env": ConfigFileConfig(
+                        path="./.env",
+                        keys=[
+                            ConfigKeyConfig(key="API_KEY", prompt="Enter API key"),
+                            ConfigKeyConfig(key="DEBUG", default="false")
+                        ]
+                    )
+                }
+            )
+        )
+
+        # Should not raise
+        print_dry_run_install(config)
+
+    def test_print_dry_run_install_service(self):
+        """Test dry-run install shows service registration."""
+        from haniel.cli import print_dry_run_install
+        from haniel.config import HanielConfig, InstallConfig, ServiceDefinitionConfig
+
+        config = HanielConfig(
+            install=InstallConfig(
+                service=ServiceDefinitionConfig(
+                    name="myservice",
+                    display="My Service"
+                )
+            )
+        )
+
+        # Should not raise
+        print_dry_run_install(config)
+
+
+class TestCliDryRunRun:
+    """Tests for CLI dry-run run functionality."""
+
+    def test_print_dry_run_run_basic(self):
+        """Test dry-run run shows basic config."""
+        from haniel.cli import print_dry_run_run
+        from haniel.config import HanielConfig
+
+        config = HanielConfig(poll_interval=60)
+
+        # Should not raise
+        print_dry_run_run(config)
+
+    def test_print_dry_run_run_repos(self):
+        """Test dry-run run shows repositories."""
+        from haniel.cli import print_dry_run_run
+        from haniel.config import HanielConfig, RepoConfig
+
+        config = HanielConfig(
+            repos={
+                "repo1": RepoConfig(
+                    url="https://github.com/test/test1.git",
+                    path="./repos/test1",
+                    branch="main"
+                ),
+                "repo2": RepoConfig(
+                    url="https://github.com/test/test2.git",
+                    path="./repos/test2"
+                )
+            }
+        )
+
+        # Should not raise
+        print_dry_run_run(config)
+
+    def test_print_dry_run_run_services_with_deps(self):
+        """Test dry-run run shows services with dependencies."""
+        from haniel.cli import print_dry_run_run
+        from haniel.config import HanielConfig, ServiceConfig
+
+        config = HanielConfig(
+            services={
+                "db": ServiceConfig(run="start-db"),
+                "api": ServiceConfig(run="start-api", after=["db"]),
+                "worker": ServiceConfig(run="start-worker", after=["db", "api"])
+            }
+        )
+
+        # Should not raise
+        print_dry_run_run(config)
+
+    def test_print_dry_run_run_disabled_service(self):
+        """Test dry-run run shows disabled services."""
+        from haniel.cli import print_dry_run_run
+        from haniel.config import HanielConfig, ServiceConfig
+
+        config = HanielConfig(
+            services={
+                "enabled": ServiceConfig(run="start-enabled"),
+                "disabled": ServiceConfig(run="start-disabled", enabled=False)
+            }
+        )
+
+        # Should not raise
+        print_dry_run_run(config)
+
+
+class TestCliHelpers:
+    """Tests for CLI helper functions."""
+
+    def test_validate_config_file_none(self):
+        """Test validate_config_file returns None for None input."""
+        from haniel.cli import validate_config_file
+
+        result = validate_config_file(None, None, None)
+        assert result is None
+
+    def test_validate_config_file_not_found(self):
+        """Test validate_config_file raises for non-existent file."""
+        import click
+        from haniel.cli import validate_config_file
+
+        with pytest.raises(click.BadParameter):
+            validate_config_file(None, None, "/nonexistent/config.yaml")
+
+    def test_validate_config_file_exists(self, tmp_path: Path):
+        """Test validate_config_file returns Path for existing file."""
+        from haniel.cli import validate_config_file
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("poll_interval: 30")
+
+        result = validate_config_file(None, None, str(config_file))
+
+        assert result == config_file
+
+    def test_load_and_validate_pydantic_error(self, tmp_path: Path):
+        """Test load_and_validate returns errors for invalid schema."""
+        from haniel.cli import load_and_validate
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("poll_interval: not_a_number")
+
+        config, errors = load_and_validate(config_file)
+
+        assert config is None
+        assert len(errors) > 0
+        assert any("Schema error" in e for e in errors)
+
+    def test_load_and_validate_load_error(self, tmp_path: Path):
+        """Test load_and_validate handles load errors."""
+        from haniel.cli import load_and_validate
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("invalid: yaml: content: [")
+
+        config, errors = load_and_validate(config_file)
+
+        assert config is None
+        assert len(errors) > 0
+
+    def test_load_and_validate_semantic_error(self, tmp_path: Path):
+        """Test load_and_validate returns semantic validation errors."""
+        from haniel.cli import load_and_validate
+
+        # Create config with circular dependency
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+services:
+  svc-a:
+    run: echo a
+    after: [svc-b]
+  svc-b:
+    run: echo b
+    after: [svc-a]
+""")
+
+        config, errors = load_and_validate(config_file)
+
+        # Should have config but with semantic errors
+        assert config is not None
+        assert len(errors) > 0

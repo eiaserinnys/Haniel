@@ -416,3 +416,610 @@ class TestRunnerStatus:
 
         status = runner.get_status()
         assert "repo1" in status["repos"]
+
+
+# --- Extended Runner Tests ---
+
+
+class TestDependencyGraphExtended:
+    """Extended tests for DependencyGraph."""
+
+    def test_get_nonexistent_dependents(self):
+        """Get dependents for nonexistent service."""
+        services = {
+            "web": ServiceConfig(run="cmd"),
+        }
+        graph = DependencyGraph(services)
+
+        dependents = graph.get_dependents("nonexistent")
+        assert dependents == []
+
+    def test_get_nonexistent_dependencies(self):
+        """Get dependencies for nonexistent service."""
+        services = {
+            "web": ServiceConfig(run="cmd"),
+        }
+        graph = DependencyGraph(services)
+
+        deps = graph.get_dependencies("nonexistent")
+        assert deps == []
+
+    def test_get_all_dependents_transitive(self):
+        """Get all transitive dependents."""
+        services = {
+            "db": ServiceConfig(run="cmd"),
+            "cache": ServiceConfig(run="cmd", after=["db"]),
+            "api": ServiceConfig(run="cmd", after=["cache"]),
+            "web": ServiceConfig(run="cmd", after=["api"]),
+        }
+        graph = DependencyGraph(services)
+
+        all_deps = graph.get_all_dependents("db")
+        assert all_deps == {"cache", "api", "web"}
+
+
+class TestServiceRunnerExtended:
+    """Extended tests for ServiceRunner."""
+
+    @pytest.fixture
+    def runner_with_repo(self, tmp_path: Path):
+        """Create a runner with a repo."""
+        # Create a fake git repo
+        repo_path = tmp_path / "test-repo"
+        repo_path.mkdir()
+        git_dir = repo_path / ".git"
+        git_dir.mkdir()
+
+        config = HanielConfig(
+            poll_interval=5,
+            repos={
+                "test-repo": RepoConfig(
+                    url="git@github.com:test/test.git",
+                    branch="main",
+                    path="./test-repo",
+                ),
+            },
+            services={
+                "test-service": ServiceConfig(
+                    run="echo hello",
+                    repo="test-repo",
+                    enabled=True,
+                ),
+            },
+        )
+        return ServiceRunner(config, config_dir=tmp_path)
+
+    @patch("subprocess.run")
+    def test_hook_timeout(self, mock_run: MagicMock, tmp_path: Path):
+        """Test hook timeout handling."""
+        mock_run.side_effect = subprocess.TimeoutExpired("cmd", 300)
+
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={
+                "test-service": ServiceConfig(
+                    run="sleep 100",
+                    hooks=HooksConfig(post_pull="slow_command"),
+                ),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        result = runner.execute_hook("test-service", "post_pull")
+
+        assert result is False
+
+    @patch("subprocess.run")
+    def test_hook_generic_exception(self, mock_run: MagicMock, tmp_path: Path):
+        """Test hook generic exception handling."""
+        mock_run.side_effect = Exception("Something went wrong")
+
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={
+                "test-service": ServiceConfig(
+                    run="sleep 100",
+                    hooks=HooksConfig(post_pull="bad_command"),
+                ),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        result = runner.execute_hook("test-service", "post_pull")
+
+        assert result is False
+
+    def test_execute_hook_disabled_service(self, tmp_path: Path):
+        """Test hook execution for disabled service."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={
+                "disabled-service": ServiceConfig(
+                    run="sleep 100",
+                    enabled=False,
+                    hooks=HooksConfig(post_pull="echo test"),
+                ),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        result = runner.execute_hook("disabled-service", "post_pull")
+
+        # Should return True because service is not in enabled services
+        assert result is True
+
+    def test_get_status_structure(self, tmp_path: Path):
+        """Test that get_status returns proper structure."""
+        config = HanielConfig(
+            poll_interval=60,
+            repos={
+                "repo1": RepoConfig(
+                    url="git@github.com:test/test.git",
+                    branch="main",
+                    path="./repo1",
+                ),
+            },
+            services={
+                "svc1": ServiceConfig(run="sleep 100"),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        status = runner.get_status()
+
+        assert "running" in status
+        assert "start_time" in status
+        assert "last_poll" in status
+        assert "poll_count" in status
+        assert "poll_interval" in status
+        assert "services" in status
+        assert "repos" in status
+
+    def test_runner_is_running_property(self, tmp_path: Path):
+        """Test is_running property."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={},
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        assert runner.is_running is False
+
+    @patch("haniel.runner.ServiceRunner._start_mcp_server")
+    @patch("haniel.runner.ServiceRunner.start_services")
+    def test_runner_start_stop(self, mock_start_services, mock_mcp, tmp_path: Path):
+        """Test starting and stopping the runner."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={},
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        # Start
+        runner.start()
+        assert runner.is_running is True
+
+        # Stop
+        runner.stop()
+        assert runner.is_running is False
+
+    @patch("haniel.runner.ServiceRunner._start_mcp_server")
+    @patch("haniel.runner.ServiceRunner.start_services")
+    def test_runner_start_already_running(self, mock_start_services, mock_mcp, tmp_path: Path):
+        """Test starting when already running."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={},
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        runner.start()
+        mock_start_services.reset_mock()
+
+        # Start again - should not start services again
+        runner.start()
+        mock_start_services.assert_not_called()
+
+        runner.stop()
+
+    def test_runner_stop_not_running(self, tmp_path: Path):
+        """Test stopping when not running."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={},
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        # Should not raise
+        runner.stop()
+
+
+class TestCyclicDependencyError:
+    """Tests for CyclicDependencyError."""
+
+    def test_error_message(self):
+        """Test error message format."""
+        cycle = ["a", "b", "a"]
+        error = CyclicDependencyError(cycle)
+
+        assert "a -> b -> a" in str(error)
+        assert error.cycle == cycle
+
+
+class TestServiceRunnerPollCycle:
+    """Tests for ServiceRunner poll cycle."""
+
+    @pytest.fixture
+    def runner_with_mock_repo(self, tmp_path: Path):
+        """Create a runner with a mock repo."""
+        # Create a fake git repo
+        repo_path = tmp_path / "test-repo"
+        repo_path.mkdir()
+        git_dir = repo_path / ".git"
+        git_dir.mkdir()
+
+        config = HanielConfig(
+            poll_interval=1,
+            repos={
+                "test-repo": RepoConfig(
+                    url="git@github.com:test/test.git",
+                    branch="main",
+                    path="./test-repo",
+                ),
+            },
+            services={
+                "test-service": ServiceConfig(
+                    run="echo hello",
+                    repo="test-repo",
+                    enabled=True,
+                ),
+            },
+        )
+        return ServiceRunner(config, config_dir=tmp_path)
+
+    @patch("haniel.runner.fetch_repo")
+    @patch("haniel.runner.get_head")
+    def test_detect_changes_no_changes(self, mock_head, mock_fetch, runner_with_mock_repo):
+        """Test detecting no changes in repos."""
+        mock_fetch.return_value = False  # No changes
+        mock_head.return_value = "abc1234"
+
+        runner_with_mock_repo._init_repo_states()
+        changed = runner_with_mock_repo._detect_changes()
+
+        assert changed == []
+
+    @patch("haniel.runner.fetch_repo")
+    @patch("haniel.runner.get_head")
+    def test_detect_changes_with_changes(self, mock_head, mock_fetch, runner_with_mock_repo):
+        """Test detecting changes in repos."""
+        mock_fetch.return_value = True  # Has changes
+        mock_head.return_value = "abc1234"
+
+        runner_with_mock_repo._init_repo_states()
+        changed = runner_with_mock_repo._detect_changes()
+
+        assert "test-repo" in changed
+
+    @patch("haniel.runner.fetch_repo")
+    @patch("haniel.runner.get_head")
+    def test_detect_changes_fetch_error(self, mock_head, mock_fetch, runner_with_mock_repo):
+        """Test handling fetch errors."""
+        from haniel.git import GitError
+
+        mock_fetch.side_effect = GitError("Fetch failed")
+        mock_head.return_value = "abc1234"
+
+        runner_with_mock_repo._init_repo_states()
+        changed = runner_with_mock_repo._detect_changes()
+
+        assert changed == []
+        # Check error was recorded
+        state = runner_with_mock_repo._repo_states["test-repo"]
+        assert state.fetch_error is not None
+
+    def test_schedule_restart(self, tmp_path: Path):
+        """Test scheduling a service restart."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={
+                "test": ServiceConfig(run="sleep 100"),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        runner._schedule_restart("test", 5.0)
+
+        with runner._restart_lock:
+            assert "test" in runner._pending_restarts
+
+    @patch("haniel.runner.ServiceRunner._start_service")
+    def test_process_pending_restarts(self, mock_start, tmp_path: Path):
+        """Test processing pending restarts."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={
+                "test": ServiceConfig(run="sleep 100"),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        # Schedule restart in the past
+        import time
+        runner._pending_restarts["test"] = time.time() - 1
+
+        runner._process_pending_restarts()
+
+        mock_start.assert_called_with("test")
+
+    @patch("haniel.runner.pull_repo")
+    @patch("haniel.runner.get_head")
+    def test_pull_repo_success(self, mock_head, mock_pull, runner_with_mock_repo):
+        """Test pulling a repo successfully."""
+        mock_head.return_value = "new_commit"
+
+        result = runner_with_mock_repo._pull_repo("test-repo")
+
+        assert result is True
+        mock_pull.assert_called_once()
+
+    @patch("haniel.runner.pull_repo")
+    def test_pull_repo_failure(self, mock_pull, runner_with_mock_repo):
+        """Test pulling a repo with failure."""
+        from haniel.git import GitError
+
+        mock_pull.side_effect = GitError("Pull failed")
+
+        result = runner_with_mock_repo._pull_repo("test-repo")
+
+        assert result is False
+
+    def test_pull_repo_unknown(self, tmp_path: Path):
+        """Test pulling unknown repo."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={},
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        result = runner._pull_repo("unknown")
+
+        assert result is False
+
+
+class TestServiceRunnerMcp:
+    """Tests for ServiceRunner MCP integration."""
+
+    @patch("haniel.runner.ServiceRunner._start_mcp_server")
+    @patch("haniel.runner.ServiceRunner.start_services")
+    def test_start_with_mcp_disabled(self, mock_start_services, mock_mcp, tmp_path: Path):
+        """Test starting runner with MCP disabled."""
+        from haniel.config import McpConfig
+
+        config = HanielConfig(
+            poll_interval=5,
+            mcp=McpConfig(enabled=False),
+            repos={},
+            services={},
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        runner.start()
+        runner.stop()
+
+        mock_mcp.assert_called_once()
+
+    def test_start_mcp_server_disabled(self, tmp_path: Path):
+        """Test _start_mcp_server when disabled."""
+        from haniel.config import McpConfig
+
+        config = HanielConfig(
+            poll_interval=5,
+            mcp=McpConfig(enabled=False),
+            repos={},
+            services={},
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        # Should not raise
+        runner._start_mcp_server()
+
+        # MCP server should not be set
+        assert runner._mcp_server is None
+
+    @patch("haniel.mcp_server.HanielMcpServer")
+    def test_start_mcp_server_enabled(self, mock_mcp_class, tmp_path: Path):
+        """Test _start_mcp_server when enabled."""
+        from haniel.config import McpConfig
+
+        config = HanielConfig(
+            poll_interval=5,
+            mcp=McpConfig(enabled=True, port=3200),
+            repos={},
+            services={},
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        mock_server = MagicMock()
+        mock_mcp_class.return_value = mock_server
+
+        runner._start_mcp_server()
+
+        mock_server.start_background.assert_called_once()
+
+    @patch("haniel.mcp_server.HanielMcpServer")
+    def test_start_mcp_server_import_error(self, mock_mcp_class, tmp_path: Path):
+        """Test _start_mcp_server with import error."""
+        from haniel.config import McpConfig
+
+        config = HanielConfig(
+            poll_interval=5,
+            mcp=McpConfig(enabled=True, port=3200),
+            repos={},
+            services={},
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        mock_mcp_class.side_effect = ImportError("No module")
+
+        # Should not raise
+        runner._start_mcp_server()
+
+    @patch("haniel.mcp_server.HanielMcpServer")
+    def test_start_mcp_server_exception(self, mock_mcp_class, tmp_path: Path):
+        """Test _start_mcp_server with exception."""
+        from haniel.config import McpConfig
+
+        config = HanielConfig(
+            poll_interval=5,
+            mcp=McpConfig(enabled=True, port=3200),
+            repos={},
+            services={},
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        mock_mcp_class.side_effect = Exception("Server failed")
+
+        # Should not raise
+        runner._start_mcp_server()
+
+
+class TestServiceRunnerServices:
+    """Tests for ServiceRunner service management."""
+
+    @patch("haniel.process.ProcessManager.start_service")
+    def test_start_services_order(self, mock_start, tmp_path: Path):
+        """Test starting services in order."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={
+                "db": ServiceConfig(run="sleep 100"),
+                "api": ServiceConfig(run="sleep 100", after=["db"]),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        runner.start_services()
+
+        # Should be called for both services
+        assert mock_start.call_count == 2
+
+    @patch("haniel.process.ProcessManager.stop_service")
+    @patch("haniel.process.ProcessManager.is_running")
+    def test_stop_services_order(self, mock_running, mock_stop, tmp_path: Path):
+        """Test stopping services in order."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={
+                "db": ServiceConfig(run="sleep 100"),
+                "api": ServiceConfig(run="sleep 100", after=["db"]),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        mock_running.return_value = True
+
+        runner.stop_services()
+
+        # Should be called in reverse order
+        assert mock_stop.call_count == 2
+
+    @patch("haniel.process.ProcessManager.start_service")
+    def test_start_service_failure(self, mock_start, tmp_path: Path):
+        """Test handling service start failure."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={
+                "test": ServiceConfig(run="sleep 100"),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        mock_start.side_effect = Exception("Start failed")
+
+        result = runner._start_service("test")
+
+        assert result is False
+
+    def test_start_service_not_enabled(self, tmp_path: Path):
+        """Test starting a service that doesn't exist in enabled services."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={
+                "disabled": ServiceConfig(run="sleep 100", enabled=False),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        result = runner._start_service("disabled")
+
+        assert result is False
+
+
+class TestServiceRunnerCallbacks:
+    """Tests for ServiceRunner callbacks."""
+
+    def test_on_service_ready_callback(self, tmp_path: Path):
+        """Test on_service_ready callback."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={
+                "test": ServiceConfig(run="sleep 100"),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        # Should not raise
+        runner._on_service_ready("test")
+
+    @patch("haniel.runner.ServiceRunner._schedule_restart")
+    def test_on_service_crash_with_restart(self, mock_schedule, tmp_path: Path):
+        """Test on_service_crash when restart is allowed."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={
+                "test": ServiceConfig(run="sleep 100"),
+            },
+            backoff=BackoffConfig(base_delay=1.0, max_delay=10.0),
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        # Mock should_restart to return True
+        runner.health_manager.should_restart = MagicMock(return_value=True)
+        runner.health_manager.get_health = MagicMock(return_value=MagicMock(
+            get_restart_delay=MagicMock(return_value=1.0)
+        ))
+
+        runner._on_service_crash("test", 1)
+
+        mock_schedule.assert_called_once()
+
+    def test_on_service_crash_circuit_breaker_open(self, tmp_path: Path):
+        """Test on_service_crash when circuit breaker is open."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={
+                "test": ServiceConfig(run="sleep 100"),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        # Mock should_restart to return False (circuit breaker open)
+        runner.health_manager.should_restart = MagicMock(return_value=False)
+
+        # Should not raise
+        runner._on_service_crash("test", 1)
