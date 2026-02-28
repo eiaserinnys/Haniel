@@ -466,3 +466,254 @@ class TestInstallOrchestrator:
             # Claude Code installed
             mock_which.return_value = "/usr/bin/claude"
             assert orchestrator.check_claude_code() is True
+
+
+class TestInstallMcpServer:
+    """Tests for InstallMcpServer."""
+
+    @pytest.fixture
+    def mcp_config(self):
+        """Create a config with interactive configs for MCP testing."""
+        return HanielConfig(
+            install=InstallConfig(
+                configs={
+                    "workspace-env": ConfigFileConfig(
+                        path="./workspace/.env",
+                        keys=[
+                            ConfigKeyConfig(
+                                key="API_KEY",
+                                prompt="API Key",
+                                guide="Get it from https://example.com",
+                            ),
+                            ConfigKeyConfig(
+                                key="DEBUG",
+                                default="false",
+                            ),
+                        ],
+                    ),
+                },
+            ),
+        )
+
+    def test_install_mcp_server_tools(self, mcp_config):
+        """Test InstallMcpServer returns correct tools."""
+        from haniel.installer.interactive import InteractiveInstaller
+        from haniel.installer.install_mcp_server import InstallMcpServer
+        from haniel.installer.state import InstallState
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState()
+            installer = InteractiveInstaller(mcp_config, config_dir, state)
+            server = InstallMcpServer(installer)
+
+            tools = server.list_tools()
+
+            # Check all expected tools are present
+            tool_names = [t["name"] for t in tools]
+            assert "haniel_install_status" in tool_names
+            assert "haniel_set_config" in tool_names
+            assert "haniel_get_config" in tool_names
+            assert "haniel_retry_step" in tool_names
+            assert "haniel_finalize_install" in tool_names
+
+    @pytest.mark.asyncio
+    async def test_install_mcp_server_call_tool(self, mcp_config):
+        """Test calling tools through InstallMcpServer."""
+        from haniel.installer.interactive import InteractiveInstaller
+        from haniel.installer.install_mcp_server import InstallMcpServer
+        from haniel.installer.state import InstallState, InstallPhase
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState(phase=InstallPhase.INTERACTIVE)
+            installer = InteractiveInstaller(mcp_config, config_dir, state)
+            server = InstallMcpServer(installer)
+
+            # Test haniel_install_status
+            result = await server.call_tool("haniel_install_status", {})
+            result_data = json.loads(result)
+            assert result_data["phase"] == "interactive"
+
+            # Test haniel_set_config
+            result = await server.call_tool("haniel_set_config", {
+                "config_name": "workspace-env",
+                "key": "API_KEY",
+                "value": "test-key-123",
+            })
+            result_data = json.loads(result)
+            assert result_data["success"] is True
+
+            # Verify value was set
+            assert state.config_values["workspace-env"]["API_KEY"] == "test-key-123"
+
+            # Test haniel_get_config
+            result = await server.call_tool("haniel_get_config", {
+                "config_name": "workspace-env",
+            })
+            result_data = json.loads(result)
+            assert "API_KEY" in result_data["filled_keys"]
+
+    @pytest.mark.asyncio
+    async def test_install_mcp_server_finalize(self, mcp_config):
+        """Test finalize flow through InstallMcpServer."""
+        from haniel.installer.interactive import InteractiveInstaller
+        from haniel.installer.install_mcp_server import InstallMcpServer
+        from haniel.installer.state import InstallState, InstallPhase
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState(phase=InstallPhase.INTERACTIVE)
+            installer = InteractiveInstaller(mcp_config, config_dir, state)
+            server = InstallMcpServer(installer)
+
+            # Set required config
+            await server.call_tool("haniel_set_config", {
+                "config_name": "workspace-env",
+                "key": "API_KEY",
+                "value": "test-key-123",
+            })
+
+            # Finalize
+            result = await server.call_tool("haniel_finalize_install", {})
+            result_data = json.loads(result)
+            assert result_data["success"] is True
+
+            # Check state transitioned
+            assert installer.is_finalize_requested()
+            assert state.phase == InstallPhase.FINALIZE
+
+
+class TestInteractiveInstallerClaudeSession:
+    """Tests for InteractiveInstaller Claude Code session integration."""
+
+    @pytest.fixture
+    def session_config(self):
+        """Create a config for session testing."""
+        return HanielConfig(
+            install=InstallConfig(
+                configs={
+                    "test-env": ConfigFileConfig(
+                        path="./test/.env",
+                        keys=[
+                            ConfigKeyConfig(key="SECRET", prompt="Secret"),
+                        ],
+                    ),
+                },
+            ),
+        )
+
+    def test_get_claude_prompt(self, session_config):
+        """Test Claude prompt generation."""
+        from haniel.installer.interactive import InteractiveInstaller
+        from haniel.installer.state import InstallState, InstallPhase
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState(phase=InstallPhase.INTERACTIVE)
+            installer = InteractiveInstaller(session_config, config_dir, state)
+
+            prompt = installer.get_claude_prompt()
+
+            # Check prompt contains essential elements
+            assert "haniel" in prompt.lower()
+            assert "haniel_install_status" in prompt
+            assert "haniel_set_config" in prompt
+            assert "haniel_finalize_install" in prompt
+            assert "test-env" in prompt
+            assert "SECRET" in prompt
+
+    def test_get_install_mcp_port(self, session_config):
+        """Test MCP port calculation."""
+        from haniel.installer.interactive import InteractiveInstaller
+        from haniel.installer.state import InstallState
+        from haniel.config import McpConfig
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState()
+
+            # Without MCP config
+            installer = InteractiveInstaller(session_config, config_dir, state)
+            assert installer._get_install_mcp_port() == 3201
+
+            # With MCP config
+            config_with_mcp = HanielConfig(
+                mcp=McpConfig(enabled=True, port=3200),
+                install=session_config.install,
+            )
+            installer = InteractiveInstaller(config_with_mcp, config_dir, state)
+            assert installer._get_install_mcp_port() == 3201  # 3200 + 1
+
+    @patch("haniel.installer.install_mcp_server.InstallMcpServer")
+    @patch("haniel.installer.interactive.shutil.which")
+    @patch("haniel.installer.interactive.subprocess.Popen")
+    def test_launch_claude_code_session_success(
+        self, mock_popen, mock_which, mock_server_class, session_config
+    ):
+        """Test launching Claude Code session successfully."""
+        from haniel.installer.interactive import InteractiveInstaller
+        from haniel.installer.state import InstallState, InstallPhase
+
+        # Mock Claude Code executable
+        mock_which.return_value = "/usr/bin/claude"
+
+        # Mock subprocess - simulate Claude Code running and exiting
+        mock_process = MagicMock()
+        mock_process.wait.return_value = 0
+        mock_popen.return_value = mock_process
+
+        # Mock MCP server
+        mock_server = MagicMock()
+        mock_server_class.return_value = mock_server
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState(phase=InstallPhase.INTERACTIVE)
+            installer = InteractiveInstaller(session_config, config_dir, state)
+
+            # Manually set finalize as if Claude Code called it
+            installer._finalize_requested = True
+
+            result = installer.launch_claude_code_session()
+
+            # Should return True since finalize was "called"
+            assert result is True
+
+            # Check Claude Code was launched
+            mock_popen.assert_called_once()
+            call_args = mock_popen.call_args
+            assert "/usr/bin/claude" in call_args[0][0]
+
+            # Check MCP server was started and stopped
+            mock_server.start_background.assert_called_once()
+            mock_server.stop_background.assert_called_once()
+
+    @patch("haniel.installer.install_mcp_server.InstallMcpServer")
+    @patch("haniel.installer.interactive.shutil.which")
+    def test_launch_claude_code_session_no_claude(
+        self, mock_which, mock_server_class, session_config
+    ):
+        """Test launching session when Claude Code is not installed."""
+        from haniel.installer.interactive import InteractiveInstaller
+        from haniel.installer.state import InstallState, InstallPhase
+
+        # Claude Code not installed
+        mock_which.return_value = None
+
+        # Mock MCP server
+        mock_server = MagicMock()
+        mock_server_class.return_value = mock_server
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState(phase=InstallPhase.INTERACTIVE)
+            installer = InteractiveInstaller(session_config, config_dir, state)
+
+            result = installer.launch_claude_code_session()
+
+            # Should return False
+            assert result is False
+
+            # MCP server should still be cleaned up
+            mock_server.stop_background.assert_called_once()

@@ -15,6 +15,7 @@ from .orchestrator import InstallOrchestrator
 from .mechanical import MechanicalInstaller
 from .interactive import InteractiveInstaller
 from .finalize import Finalizer
+from .install_mcp_server import InstallMcpServer
 
 __all__ = [
     "InstallState",
@@ -24,4 +25,5 @@ __all__ = [
     "MechanicalInstaller",
     "InteractiveInstaller",
     "Finalizer",
+    "InstallMcpServer",
 ]

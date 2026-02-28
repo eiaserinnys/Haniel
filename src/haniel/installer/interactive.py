@@ -12,14 +12,22 @@ and waits for finalize signal.
 
 import json
 import logging
+import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from ..config import HanielConfig
 from .state import InstallState, InstallPhase
 
 logger = logging.getLogger(__name__)
+
+# Timeout for waiting for Claude Code to finish (in seconds)
+CLAUDE_CODE_TIMEOUT = 3600  # 1 hour max
+# Poll interval for checking finalize status (in seconds)
+FINALIZE_POLL_INTERVAL = 1.0
 
 
 class InteractiveInstaller:
@@ -42,6 +50,8 @@ class InteractiveInstaller:
         self.config_dir = config_dir
         self.state = state
         self._finalize_requested = False
+        self._mcp_server: Optional["InstallMcpServer"] = None
+        self._claude_process: Optional[subprocess.Popen] = None
 
     def has_pending_configs(self) -> bool:
         """Check if there are pending configs requiring user input.
@@ -312,16 +322,26 @@ haniel MCP 도구를 사용하여:
     def launch_claude_code_session(self) -> bool:
         """Launch a Claude Code session for interactive config.
 
-        Returns:
-            True if session completed successfully
-        """
-        prompt = self.get_claude_prompt()
+        This method:
+        1. Starts the install MCP server in a background thread
+        2. Creates a temporary MCP config file
+        3. Launches Claude Code with the prompt
+        4. Waits for Claude Code to finish or finalize signal
+        5. Cleans up
 
-        # Create a temporary MCP config for the install session
+        Returns:
+            True if session completed successfully (finalize was called)
+        """
+        from .install_mcp_server import InstallMcpServer
+
+        prompt = self.get_claude_prompt()
+        mcp_port = self._get_install_mcp_port()
+
+        # Create MCP config for the install session
         mcp_config = {
             "mcpServers": {
                 "haniel": {
-                    "url": f"http://localhost:{self._get_install_mcp_port()}/sse"
+                    "url": f"http://localhost:{mcp_port}/sse"
                 }
             }
         }
@@ -330,29 +350,124 @@ haniel MCP 도구를 사용하여:
         mcp_config_path.write_text(json.dumps(mcp_config, indent=2))
 
         try:
+            # Start the install MCP server in background
+            logger.info(f"Starting install MCP server on port {mcp_port}...")
+            self._mcp_server = InstallMcpServer(self, port=mcp_port)
+            self._mcp_server.start_background()
+
+            # Find claude executable
+            claude_path = shutil.which("claude")
+            if not claude_path:
+                logger.error("Claude Code executable not found in PATH")
+                return False
+
+            # Launch Claude Code
             logger.info("Launching Claude Code session...")
+            logger.info(f"MCP config: {mcp_config_path}")
 
-            # Note: In practice, this would start the MCP server in the background
-            # and then launch Claude Code. For now, we just log the intent.
-            logger.info(f"Would run: claude -p --mcp-config {mcp_config_path}")
-            logger.info(f"Prompt: {prompt[:200]}...")
+            # Build the command
+            # Use -p for prompt mode with the initial prompt
+            cmd = [
+                claude_path,
+                "-p", prompt,
+                "--mcp-config", str(mcp_config_path),
+            ]
 
-            # In a real implementation:
-            # 1. Start MCP server in background thread
-            # 2. Run: subprocess.run(["claude", "-p", "--mcp-config", str(mcp_config_path)])
-            # 3. Wait for finalize signal
-            # 4. Stop MCP server
+            logger.info(f"Running: {' '.join(cmd[:3])}...")
 
-            # For now, return True (implementation will be completed when integrating)
-            return True
+            # Run Claude Code - this blocks until Claude Code exits
+            # We run it in a way that inherits stdin/stdout for user interaction
+            self._claude_process = subprocess.Popen(
+                cmd,
+                stdin=sys.stdin,
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+                cwd=str(self.config_dir),
+            )
+
+            # Wait for Claude Code to complete
+            return_code = self._claude_process.wait(timeout=CLAUDE_CODE_TIMEOUT)
+            self._claude_process = None
+
+            if return_code != 0:
+                logger.warning(f"Claude Code exited with code {return_code}")
+
+            # Check if finalize was called
+            if self._finalize_requested:
+                logger.info("Installation finalized successfully")
+                return True
+            else:
+                logger.warning(
+                    "Claude Code exited without calling haniel_finalize_install()"
+                )
+                return False
+
+        except subprocess.TimeoutExpired:
+            logger.error("Claude Code session timed out")
+            if self._claude_process:
+                self._claude_process.terminate()
+                self._claude_process = None
+            return False
 
         except Exception as e:
             logger.error(f"Failed to launch Claude Code: {e}")
             return False
+
         finally:
-            # Cleanup
+            # Stop MCP server
+            if self._mcp_server:
+                logger.info("Stopping install MCP server...")
+                self._mcp_server.stop_background()
+                self._mcp_server = None
+
+            # Cleanup MCP config file
             if mcp_config_path.exists():
-                mcp_config_path.unlink()
+                try:
+                    mcp_config_path.unlink()
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup MCP config: {e}")
+
+    def run_headless_session(self, timeout: float = 300.0) -> bool:
+        """Run an interactive session in headless mode (for testing).
+
+        This starts the MCP server but doesn't launch Claude Code,
+        allowing tests to interact with the MCP tools directly.
+
+        Args:
+            timeout: Maximum time to wait for finalize signal
+
+        Returns:
+            True if finalize was called within timeout
+        """
+        from .install_mcp_server import InstallMcpServer
+
+        mcp_port = self._get_install_mcp_port()
+
+        try:
+            # Start the install MCP server in background
+            logger.info(f"Starting headless install MCP server on port {mcp_port}...")
+            self._mcp_server = InstallMcpServer(self, port=mcp_port)
+            self._mcp_server.start_background()
+
+            # Wait for finalize signal
+            start_time = time.time()
+            while not self._finalize_requested:
+                if time.time() - start_time > timeout:
+                    logger.error("Headless session timed out waiting for finalize")
+                    return False
+                time.sleep(FINALIZE_POLL_INTERVAL)
+
+            logger.info("Headless session finalized successfully")
+            return True
+
+        except Exception as e:
+            logger.error(f"Headless session error: {e}")
+            return False
+
+        finally:
+            if self._mcp_server:
+                self._mcp_server.stop_background()
+                self._mcp_server = None
 
     def _get_install_mcp_port(self) -> int:
         """Get the port for install-mode MCP server.
