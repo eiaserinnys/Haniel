@@ -181,7 +181,14 @@ def main(ctx: click.Context, version: bool) -> None:
 @main.command()
 @click.argument("config", required=False, callback=validate_config_file)
 @click.option("--dry-run", is_flag=True, help="Show what would be done without executing.")
-def install(config: Path | None, dry_run: bool) -> None:
+@click.option("--resume", is_flag=True, help="Resume from previous install state if exists.")
+@click.option("--skip-interactive", is_flag=True, help="Skip Claude Code interactive phase.")
+def install(
+    config: Path | None,
+    dry_run: bool,
+    resume: bool,
+    skip_interactive: bool,
+) -> None:
     """Set up the execution environment from a configuration file.
 
     This command:
@@ -191,6 +198,8 @@ def install(config: Path | None, dry_run: bool) -> None:
     4. Sets up virtual environments
     5. Guides you through interactive configuration via Claude Code
     """
+    from haniel.installer import InstallOrchestrator, InstallState, InstallPhase
+
     if config is None:
         click.echo(click.get_current_context().get_help())
         return
@@ -209,8 +218,135 @@ def install(config: Path | None, dry_run: bool) -> None:
         print_dry_run_install(haniel_config)
         return
 
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    config_dir = config.parent.resolve()
+    state_file = config_dir / "install.state"
+
+    # Load or create state
+    if resume and state_file.exists():
+        state = InstallState.load(state_file)
+        click.echo(f"Resuming from phase: {state.phase.value}")
+        click.echo(f"Completed steps: {len(state.completed_steps)}")
+        if state.failed_steps:
+            click.echo(click.style(f"Failed steps: {len(state.failed_steps)}", fg="yellow"))
+        click.echo()
+    else:
+        if state_file.exists():
+            # Prompt for resume
+            if not click.confirm("Previous install state found. Start fresh?"):
+                state = InstallState.load(state_file)
+                click.echo(f"Resuming from phase: {state.phase.value}")
+            else:
+                state = InstallState()
+                click.echo("Starting fresh installation")
+        else:
+            state = InstallState()
+
+    # Create orchestrator
+    orchestrator = InstallOrchestrator(haniel_config, config_dir, state)
+
     click.echo(f"Installing from: {config}")
-    click.echo("Installation complete (skeleton)")
+    click.echo()
+
+    try:
+        # Phase 0: Bootstrap
+        if state.phase in [InstallPhase.NOT_STARTED, InstallPhase.BOOTSTRAP]:
+            click.echo(click.style("=== Phase 0: Bootstrap ===", bold=True))
+            if not orchestrator.run_bootstrap_phase():
+                click.echo(click.style("Bootstrap failed. Claude Code is required.", fg="red"))
+                click.echo("Install it with: npm install -g @anthropic-ai/claude-code")
+                sys.exit(1)
+            click.echo(click.style("✓ Bootstrap complete", fg="green"))
+            click.echo()
+
+        # Phase 1: Mechanical
+        if state.phase == InstallPhase.MECHANICAL:
+            click.echo(click.style("=== Phase 1: Mechanical Installation ===", bold=True))
+            orchestrator.run_mechanical_phase()
+
+            # Report results
+            if state.failed_steps:
+                click.echo(click.style("Some steps failed:", fg="yellow"))
+                for step in state.failed_steps:
+                    click.echo(f"  - {step.step}: {step.error}")
+            else:
+                click.echo(click.style("✓ Mechanical phase complete", fg="green"))
+            click.echo()
+
+        # Phase 2: Interactive
+        if state.phase == InstallPhase.INTERACTIVE:
+            if skip_interactive:
+                click.echo(click.style("=== Phase 2: Interactive (Skipped) ===", bold=True))
+                click.echo("Interactive phase skipped by --skip-interactive flag")
+                state.transition_to(InstallPhase.FINALIZE)
+                orchestrator.save_state()
+            else:
+                click.echo(click.style("=== Phase 2: Interactive Installation ===", bold=True))
+
+                # Check if there are pending configs
+                if orchestrator.interactive.has_pending_configs():
+                    status = orchestrator.interactive.get_install_status()
+                    click.echo("Pending configs:")
+                    for pending in status["pending_configs"]:
+                        click.echo(f"  - {pending['name']}: {', '.join(pending['missing_keys'])}")
+                    click.echo()
+                    click.echo("Launching Claude Code for interactive setup...")
+                    click.echo("(Claude Code will guide you through the remaining configuration)")
+                    click.echo()
+
+                    # For now, just transition (real implementation would launch Claude Code)
+                    # orchestrator.run_interactive_phase()
+                    state.transition_to(InstallPhase.FINALIZE)
+                    orchestrator.save_state()
+                    click.echo(click.style("✓ Interactive phase complete (simulated)", fg="green"))
+                else:
+                    click.echo("No interactive configuration needed")
+                    state.transition_to(InstallPhase.FINALIZE)
+                    orchestrator.save_state()
+            click.echo()
+
+        # Phase 3: Finalize
+        if state.phase == InstallPhase.FINALIZE:
+            click.echo(click.style("=== Phase 3: Finalization ===", bold=True))
+
+            if orchestrator.run_finalize_phase():
+                click.echo(click.style("✓ Finalization complete", fg="green"))
+            else:
+                click.echo(click.style("Finalization incomplete", fg="yellow"))
+                click.echo("Some configs may be missing. Run with --resume to continue.")
+            click.echo()
+
+        # Complete
+        if state.phase == InstallPhase.COMPLETE:
+            click.echo(click.style("=== Installation Complete ===", fg="green", bold=True))
+            click.echo()
+
+            summary = orchestrator.finalizer.get_completion_summary()
+            click.echo("Generated files:")
+            for f in summary["generated_files"]:
+                click.echo(f"  - {f['path']}")
+
+            if summary["service"]:
+                click.echo()
+                click.echo(f"Service registered: {summary['service']['name']}")
+                click.echo(f"Start with: nssm start {summary['service']['name']}")
+                click.echo(f"Or manually: haniel run {config}")
+
+    except KeyboardInterrupt:
+        click.echo()
+        click.echo(click.style("Installation interrupted. Use --resume to continue later.", fg="yellow"))
+        orchestrator.save_state()
+        sys.exit(130)
+    except Exception as e:
+        click.echo(click.style(f"Error: {e}", fg="red"), err=True)
+        orchestrator.save_state()
+        sys.exit(1)
 
 
 @main.command()
