@@ -136,6 +136,102 @@ function Test-Node {
     return $false
 }
 
+# NSSM Configuration
+$script:NSSM_VERSION = "2.24-101-g897c7ad"
+$script:NSSM_URL = "https://nssm.cc/ci/nssm-2.24-101-g897c7ad.zip"
+$script:NSSM_INSTALL_PATH = "C:\Tools\nssm"
+
+# Install NSSM
+function Install-NSSM {
+    Write-Info "Installing NSSM $script:NSSM_VERSION..."
+
+    # Check administrator privileges (required for PATH modification)
+    if (-not (Test-Administrator)) {
+        Write-Error "Administrator privileges required to install NSSM"
+        Write-Info "Please run PowerShell as Administrator and try again"
+        return $false
+    }
+
+    # Create temp directory for download
+    $tempDir = Join-Path $env:TEMP "nssm_install_$(Get-Random)"
+    $zipPath = Join-Path $tempDir "nssm.zip"
+
+    try {
+        # Create temp directory
+        New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+
+        # Download NSSM
+        Write-Info "Downloading from $script:NSSM_URL..."
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $script:NSSM_URL -OutFile $zipPath -UseBasicParsing
+
+        if (-not (Test-Path $zipPath)) {
+            Write-Error "Failed to download NSSM"
+            return $false
+        }
+        Write-Info "Download complete"
+
+        # Extract zip
+        Write-Info "Extracting..."
+        Expand-Archive -Path $zipPath -DestinationPath $tempDir -Force
+
+        # Find the extracted folder (contains version in name)
+        $extractedDir = Get-ChildItem -Path $tempDir -Directory | Where-Object { $_.Name -like "nssm-*" } | Select-Object -First 1
+        if (-not $extractedDir) {
+            Write-Error "Could not find extracted NSSM directory"
+            return $false
+        }
+
+        # Determine architecture (64-bit or 32-bit)
+        $arch = if ([Environment]::Is64BitOperatingSystem) { "win64" } else { "win32" }
+        $nssmBinaryDir = Join-Path $extractedDir.FullName $arch
+
+        if (-not (Test-Path $nssmBinaryDir)) {
+            Write-Error "Could not find NSSM binary directory for $arch"
+            return $false
+        }
+
+        # Create installation directory
+        if (-not (Test-Path $script:NSSM_INSTALL_PATH)) {
+            Write-Info "Creating installation directory: $script:NSSM_INSTALL_PATH"
+            New-Item -ItemType Directory -Path $script:NSSM_INSTALL_PATH -Force | Out-Null
+        }
+
+        # Copy nssm.exe to installation directory
+        $nssmExe = Join-Path $nssmBinaryDir "nssm.exe"
+        $destExe = Join-Path $script:NSSM_INSTALL_PATH "nssm.exe"
+        Copy-Item -Path $nssmExe -Destination $destExe -Force
+
+        Write-Info "NSSM installed to $destExe"
+
+        # Add to PATH (Machine level)
+        $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+        if ($machinePath -notlike "*$script:NSSM_INSTALL_PATH*") {
+            Write-Info "Adding NSSM to system PATH..."
+            $newPath = $machinePath + ";" + $script:NSSM_INSTALL_PATH
+            [Environment]::SetEnvironmentVariable("Path", $newPath, "Machine")
+            Write-Info "PATH updated (Machine level)"
+        } else {
+            Write-Info "NSSM already in system PATH"
+        }
+
+        # Update current session PATH
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+
+        Write-Success "NSSM $script:NSSM_VERSION installed successfully"
+        return $true
+
+    } catch {
+        Write-Error "Failed to install NSSM: $($_.Exception.Message)"
+        return $false
+    } finally {
+        # Cleanup temp directory
+        if (Test-Path $tempDir) {
+            Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 # Check NSSM installation
 function Test-NSSM {
     try {
@@ -144,7 +240,6 @@ function Test-NSSM {
         return $true
     } catch {
         Write-Warning "NSSM not found in PATH"
-        Write-Info "Download from https://nssm.cc/download"
         return $false
     }
 }
@@ -262,6 +357,14 @@ function Main {
     }
     if (-not $nssmOk) {
         Write-Warning "NSSM is required for Windows service registration"
+        $installNssm = Read-Host "Install NSSM automatically? (Y/n)"
+        if ($installNssm -ne "n" -and $installNssm -ne "N") {
+            $nssmOk = Install-NSSM
+            if (-not $nssmOk) {
+                Write-Warning "NSSM installation failed. You can install it manually later."
+                Write-Info "Download from https://nssm.cc/download"
+            }
+        }
     }
     if (-not $claudeOk) {
         Write-Warning "Claude Code is required for interactive setup"
