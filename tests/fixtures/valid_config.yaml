@@ -1,0 +1,88 @@
+# Valid haniel.yaml configuration for testing
+poll_interval: 60
+
+shutdown:
+  timeout: 10
+  kill_timeout: 30
+
+backoff:
+  base_delay: 5
+  max_delay: 300
+  circuit_breaker: 5
+  circuit_window: 300
+
+webhooks:
+  - url: https://hooks.slack.com/services/T.../B.../...
+    format: slack
+
+mcp:
+  enabled: true
+  transport: sse
+  port: 3200
+
+repos:
+  test-repo:
+    url: git@github.com:example/test.git
+    branch: main
+    path: ./projects/test
+
+  another-repo:
+    url: git@github.com:example/another.git
+    branch: develop
+    path: ./projects/another
+
+services:
+  mcp-server:
+    run: python -m mcp_server --port 3100
+    cwd: ./projects/test
+    repo: test-repo
+    ready: port:3100
+    restart_delay: 3
+
+  main-app:
+    run: python -m main_app
+    cwd: ./projects/test
+    repo: test-repo
+    after: mcp-server
+    shutdown:
+      signal: SIGTERM
+      timeout: 15
+
+install:
+  requirements:
+    python: ">=3.11"
+    node: ">=18"
+
+  directories:
+    - ./runtime
+    - ./runtime/logs
+
+  environments:
+    main-venv:
+      type: python-venv
+      path: ./runtime/venv
+      requirements:
+        - ./runtime/requirements.txt
+
+  configs:
+    app-env:
+      path: ./app/.env
+      keys:
+        - key: API_KEY
+          prompt: "Enter API Key"
+        - key: DEBUG
+          default: "false"
+
+    app-mcp:
+      path: ./app/.mcp.json
+      content: |
+        {
+          "mcpServers": {
+            "local": { "url": "http://localhost:3100/sse" }
+          }
+        }
+
+  service:
+    name: haniel
+    display: "Haniel Service Runner"
+    working_directory: "{root}"

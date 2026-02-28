@@ -1,0 +1,13 @@
+# Invalid: service references non-existent repo
+poll_interval: 60
+
+repos:
+  existing-repo:
+    url: git@github.com:example/existing.git
+    branch: main
+    path: ./projects/existing
+
+services:
+  my-service:
+    run: python -m my_service
+    repo: non-existent-repo

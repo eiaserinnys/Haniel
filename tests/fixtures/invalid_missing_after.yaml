@@ -1,0 +1,9 @@
+# Invalid: after references non-existent service
+poll_interval: 60
+
+repos: {}
+
+services:
+  service-a:
+    run: python -m service_a
+    after: non-existent-service

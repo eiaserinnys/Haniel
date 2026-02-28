@@ -1,0 +1,15 @@
+# Invalid: duplicate repository paths
+poll_interval: 60
+
+repos:
+  repo-a:
+    url: git@github.com:example/repo-a.git
+    branch: main
+    path: ./projects/shared
+
+  repo-b:
+    url: git@github.com:example/repo-b.git
+    branch: main
+    path: ./projects/shared
+
+services: {}

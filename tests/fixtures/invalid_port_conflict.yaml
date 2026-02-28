@@ -1,0 +1,17 @@
+# Invalid: port conflict - multiple services use same port
+poll_interval: 60
+
+repos: {}
+
+services:
+  service-a:
+    run: python -m service_a
+    ready: port:3100
+
+  service-b:
+    run: python -m service_b
+    ready: port:3100
+
+  service-c:
+    run: python -m service_c
+    ready: port:3200

@@ -1,0 +1,18 @@
+# Invalid: circular dependency in after fields
+# A -> B -> C -> A creates a cycle
+poll_interval: 60
+
+repos: {}
+
+services:
+  service-a:
+    run: python -m service_a
+    after: service-c
+
+  service-b:
+    run: python -m service_b
+    after: service-a
+
+  service-c:
+    run: python -m service_c
+    after: service-b
