@@ -82,10 +82,11 @@ class TestRunCommand:
         result = cli_runner.invoke(main, ["run", "nonexistent.yaml"])
         assert result.exit_code != 0
 
-    def test_run_with_valid_config(self, cli_runner: CliRunner, tmp_config):
-        """run with valid config should succeed (skeleton)."""
-        result = cli_runner.invoke(main, ["run", str(tmp_config)])
+    def test_run_with_valid_config_dry_run(self, cli_runner: CliRunner, tmp_config):
+        """run --dry-run with valid config should succeed."""
+        result = cli_runner.invoke(main, ["run", "--dry-run", str(tmp_config)])
         assert result.exit_code == 0
+        assert "dry-run" in result.output.lower()
 
 
 class TestStatusCommand:
@@ -147,11 +148,11 @@ class TestInstallDryRun:
 class TestRunForeground:
     """Test run --foreground functionality."""
 
-    def test_run_foreground(self, cli_runner: CliRunner, tmp_config):
-        """run --foreground should run in foreground mode."""
-        result = cli_runner.invoke(main, ["run", "--foreground", str(tmp_config)])
+    def test_run_foreground_dry_run(self, cli_runner: CliRunner, tmp_config):
+        """run --foreground --dry-run should show dry run output."""
+        result = cli_runner.invoke(main, ["run", "--foreground", "--dry-run", str(tmp_config)])
         assert result.exit_code == 0
-        assert "foreground" in result.output.lower()
+        assert "dry-run" in result.output.lower()
 
 
 class TestStatusJson:
@@ -162,13 +163,14 @@ class TestStatusJson:
         result = cli_runner.invoke(main, ["status", "--json"])
         assert result.exit_code == 0
         assert "{" in result.output
-        assert "status" in result.output
+        assert "running" in result.output
 
     def test_status_with_config(self, cli_runner: CliRunner, tmp_config):
-        """status with config should show config path."""
+        """status with config should show status details."""
         result = cli_runner.invoke(main, ["status", str(tmp_config)])
         assert result.exit_code == 0
-        assert "Config:" in result.output
+        # Should show status info
+        assert "Status:" in result.output
 
 
 class TestModuleExecution:
@@ -320,6 +322,6 @@ class TestRunDryRunDetailed:
 
     def test_run_with_invalid_config_fails(self, cli_runner: CliRunner):
         """run with invalid config should fail."""
-        result = cli_runner.invoke(main, ["run", str(self.FIXTURES_DIR / "invalid_circular.yaml")])
+        result = cli_runner.invoke(main, ["run", "--dry-run", str(self.FIXTURES_DIR / "invalid_circular.yaml")])
         assert result.exit_code != 0
         assert "Configuration errors" in result.output

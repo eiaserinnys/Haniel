@@ -1,0 +1,695 @@
+"""
+haniel runner module.
+
+Implements the poll → pull → restart cycle:
+- Phase 1: Change detection (git fetch)
+- Phase 2: Change application (shutdown → pull → hooks → restart)
+- Phase 3: Health check (process survival)
+
+haniel doesn't care what it runs. It polls, pulls, and restarts as configured.
+"""
+
+import logging
+import shlex
+import subprocess
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Callable
+
+from .config import (
+    BackoffConfig,
+    HanielConfig,
+    RepoConfig,
+    ServiceConfig,
+    ShutdownConfig,
+)
+from .git import fetch_repo, pull_repo, get_head, GitError
+from .health import HealthManager, ServiceState
+from .process import ProcessManager
+
+
+logger = logging.getLogger(__name__)
+
+
+class CyclicDependencyError(Exception):
+    """Raised when a cyclic dependency is detected in service dependencies."""
+
+    def __init__(self, cycle: list[str]):
+        self.cycle = cycle
+        super().__init__(f"Cyclic dependency detected: {' -> '.join(cycle)}")
+
+
+class DependencyGraph:
+    """Represents service dependency relationships.
+
+    Used for:
+    - Topological sort for startup order
+    - Reverse sort for shutdown order
+    - Finding affected services when a repo changes
+    """
+
+    def __init__(self, services: dict[str, ServiceConfig]):
+        """Initialize the dependency graph.
+
+        Args:
+            services: Dict of service name to config
+        """
+        self._services = services
+        self._build_graph()
+
+    def _build_graph(self) -> None:
+        """Build adjacency lists for the graph."""
+        # Forward edges: service -> services it depends on
+        self._dependencies: dict[str, set[str]] = {}
+        # Reverse edges: service -> services that depend on it
+        self._dependents: dict[str, set[str]] = {}
+
+        for name in self._services:
+            self._dependencies[name] = set()
+            self._dependents[name] = set()
+
+        for name, config in self._services.items():
+            for dep in config.after:
+                if dep in self._services:  # Only track existing services
+                    self._dependencies[name].add(dep)
+                    self._dependents[dep].add(name)
+
+    def topological_sort(self, reverse: bool = False) -> list[str]:
+        """Return services in topological order.
+
+        Args:
+            reverse: If True, return reverse order (for shutdown)
+
+        Returns:
+            List of service names in dependency order
+
+        Raises:
+            CyclicDependencyError: If a cycle is detected
+        """
+        if not self._services:
+            return []
+
+        # Kahn's algorithm
+        in_degree: dict[str, int] = {name: 0 for name in self._services}
+        for name in self._services:
+            for dep in self._dependencies[name]:
+                in_degree[name] += 1
+
+        # Pre-compute order indices for O(1) lookup in sorting
+        order_index = {name: i for i, name in enumerate(self._services.keys())}
+
+        # Start with nodes that have no dependencies
+        queue = [name for name, degree in in_degree.items() if degree == 0]
+        result: list[str] = []
+
+        while queue:
+            # Sort queue for deterministic order (YAML order preserved for ties)
+            queue.sort(key=lambda x: order_index[x])
+            node = queue.pop(0)
+            result.append(node)
+
+            for dependent in self._dependents[node]:
+                in_degree[dependent] -= 1
+                if in_degree[dependent] == 0:
+                    queue.append(dependent)
+
+        if len(result) != len(self._services):
+            # Cycle detected - find it for error message
+            remaining = [n for n in self._services if n not in result]
+            raise CyclicDependencyError(remaining)
+
+        if reverse:
+            result.reverse()
+
+        return result
+
+    def get_dependents(self, service: str) -> list[str]:
+        """Get all services that depend on the given service.
+
+        Args:
+            service: Service name
+
+        Returns:
+            List of dependent service names
+        """
+        if service not in self._dependents:
+            return []
+        return list(self._dependents[service])
+
+    def get_dependencies(self, service: str) -> list[str]:
+        """Get all services that the given service depends on.
+
+        Args:
+            service: Service name
+
+        Returns:
+            List of dependency service names
+        """
+        if service not in self._dependencies:
+            return []
+        return list(self._dependencies[service])
+
+    def get_all_dependents(self, service: str) -> set[str]:
+        """Get all services that transitively depend on the given service.
+
+        Args:
+            service: Service name
+
+        Returns:
+            Set of all dependent service names (transitive closure)
+        """
+        result: set[str] = set()
+        queue = list(self._dependents.get(service, set()))
+
+        while queue:
+            dep = queue.pop(0)
+            if dep not in result:
+                result.add(dep)
+                queue.extend(self._dependents.get(dep, set()))
+
+        return result
+
+
+def topological_sort(services: dict[str, ServiceConfig], reverse: bool = False) -> list[str]:
+    """Standalone topological sort function.
+
+    Args:
+        services: Dict of service name to config
+        reverse: If True, return reverse order
+
+    Returns:
+        List of service names in dependency order
+    """
+    graph = DependencyGraph(services)
+    return graph.topological_sort(reverse=reverse)
+
+
+@dataclass
+class RepoState:
+    """Tracks the state of a repository."""
+
+    name: str
+    config: RepoConfig
+    last_head: str | None = None
+    last_fetch: datetime | None = None
+    fetch_error: str | None = None
+
+
+@dataclass
+class RunnerState:
+    """Overall runner state."""
+
+    running: bool = False
+    start_time: datetime | None = None
+    last_poll: datetime | None = None
+    poll_count: int = 0
+
+
+class ServiceRunner:
+    """Manages the poll → pull → restart cycle.
+
+    Responsibilities:
+    - Start services in dependency order
+    - Poll repositories for changes
+    - Restart affected services when repos change
+    - Handle process crashes (via HealthManager)
+    """
+
+    def __init__(
+        self,
+        config: HanielConfig,
+        config_dir: Path,
+        log_dir: Path | None = None,
+    ):
+        """Initialize the runner.
+
+        Args:
+            config: Haniel configuration
+            config_dir: Base directory for resolving relative paths
+            log_dir: Directory for log files (default: config_dir/logs)
+        """
+        self.config = config
+        self.config_dir = config_dir
+        self.log_dir = log_dir or config_dir / "logs"
+
+        self.poll_interval = config.poll_interval
+
+        # Extract backoff config
+        backoff = config.backoff or BackoffConfig()
+        shutdown = config.shutdown or ShutdownConfig()
+
+        # Initialize managers
+        self.health_manager = HealthManager(
+            base_delay=backoff.base_delay,
+            max_delay=backoff.max_delay,
+            circuit_breaker_threshold=backoff.circuit_breaker,
+            circuit_breaker_window=backoff.circuit_window,
+        )
+        self.process_manager = ProcessManager(
+            config_dir=config_dir,
+            log_dir=self.log_dir,
+            shutdown_config=shutdown,
+            health_manager=self.health_manager,
+        )
+
+        # Build dependency graph for enabled services only
+        self._enabled_services = {
+            name: svc for name, svc in config.services.items() if svc.enabled
+        }
+        self._dependency_graph = DependencyGraph(self._enabled_services)
+
+        # Initialize repo states
+        self._repo_states: dict[str, RepoState] = {}
+        for name, repo_config in config.repos.items():
+            self._repo_states[name] = RepoState(name=name, config=repo_config)
+
+        # Runner state
+        self._state = RunnerState()
+        self._state_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._poll_thread: threading.Thread | None = None
+
+        # Restart scheduling
+        self._pending_restarts: dict[str, float] = {}  # service -> restart_time
+        self._restart_lock = threading.Lock()
+
+    @property
+    def is_running(self) -> bool:
+        """Check if the runner is active."""
+        return self._state.running
+
+    def get_startup_order(self) -> list[str]:
+        """Get the order in which services should start.
+
+        Returns:
+            List of service names in startup order
+        """
+        return self._dependency_graph.topological_sort()
+
+    def get_shutdown_order(self) -> list[str]:
+        """Get the order in which services should stop.
+
+        Returns:
+            List of service names in shutdown order (reverse of startup)
+        """
+        return self._dependency_graph.topological_sort(reverse=True)
+
+    def get_affected_services(self, repo_name: str) -> list[str]:
+        """Get services affected by changes to a repository.
+
+        Args:
+            repo_name: Name of the repository
+
+        Returns:
+            List of service names that depend on this repo
+        """
+        # Find services that directly depend on this repo
+        directly_affected: set[str] = set()
+        for name, config in self._enabled_services.items():
+            if config.repo == repo_name:
+                directly_affected.add(name)
+
+        # Include transitively dependent services
+        all_affected: set[str] = set(directly_affected)
+        for service in directly_affected:
+            all_affected.update(self._dependency_graph.get_all_dependents(service))
+
+        return list(all_affected)
+
+    def execute_hook(self, service_name: str, hook_name: str) -> bool:
+        """Execute a lifecycle hook for a service.
+
+        Args:
+            service_name: Name of the service
+            hook_name: Name of the hook (e.g., "post_pull")
+
+        Returns:
+            True if hook executed successfully or doesn't exist
+        """
+        if service_name not in self._enabled_services:
+            return True
+
+        config = self._enabled_services[service_name]
+        if not config.hooks:
+            return True
+
+        hook_cmd = getattr(config.hooks, hook_name, None)
+        if not hook_cmd:
+            return True
+
+        # Determine working directory
+        cwd = self.config_dir
+        if config.cwd:
+            cwd = self.config_dir / config.cwd
+
+        logger.info(f"Executing {hook_name} hook for {service_name}: {hook_cmd}")
+
+        try:
+            subprocess.run(
+                shlex.split(hook_cmd),
+                cwd=cwd,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout for hooks
+            )
+            logger.info(f"Hook {hook_name} for {service_name} completed successfully")
+            return True
+        except subprocess.CalledProcessError as e:
+            logger.error(
+                f"Hook {hook_name} for {service_name} failed with exit code {e.returncode}: {e.stderr}"
+            )
+            return False
+        except subprocess.TimeoutExpired:
+            logger.error(f"Hook {hook_name} for {service_name} timed out")
+            return False
+        except Exception as e:
+            logger.error(f"Hook {hook_name} for {service_name} failed: {e}")
+            return False
+
+    def start_services(self) -> None:
+        """Start all enabled services in dependency order."""
+        startup_order = self.get_startup_order()
+        logger.info(f"Starting services in order: {startup_order}")
+
+        for name in startup_order:
+            self._start_service(name)
+
+    def _start_service(self, name: str) -> bool:
+        """Start a single service.
+
+        Args:
+            name: Service name
+
+        Returns:
+            True if started successfully
+        """
+        if name not in self._enabled_services:
+            return False
+
+        config = self._enabled_services[name]
+        logger.info(f"Starting service: {name}")
+
+        try:
+            self.process_manager.start_service(
+                name=name,
+                config=config,
+                on_ready=lambda n=name: self._on_service_ready(n),
+                on_crash=lambda exit_code, n=name: self._on_service_crash(n, exit_code),
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to start service {name}: {e}")
+            return False
+
+    def _on_service_ready(self, name: str) -> None:
+        """Called when a service becomes ready."""
+        logger.info(f"Service {name} is ready")
+
+    def _on_service_crash(self, name: str, exit_code: int | None) -> None:
+        """Called when a service crashes.
+
+        Args:
+            name: Service name
+            exit_code: Exit code (None if signal)
+        """
+        logger.warning(f"Service {name} crashed with exit code {exit_code}")
+
+        # record_crash returns the delay and handles circuit breaker atomically
+        # Note: The crash is already recorded by ProcessManager's crash monitor,
+        # so we just need to check if we should restart
+        if self.health_manager.should_restart(name):
+            health = self.health_manager.get_health(name)
+            delay = health.get_restart_delay()
+            logger.info(f"Scheduling restart of {name} in {delay}s")
+            self._schedule_restart(name, delay)
+        else:
+            logger.error(f"Circuit breaker open for {name}, not restarting")
+
+    def _schedule_restart(self, name: str, delay: float) -> None:
+        """Schedule a service restart after a delay.
+
+        Args:
+            name: Service name
+            delay: Delay in seconds
+        """
+        with self._restart_lock:
+            restart_time = time.time() + delay
+            self._pending_restarts[name] = restart_time
+
+    def stop_services(self) -> None:
+        """Stop all services in reverse dependency order."""
+        shutdown_order = self.get_shutdown_order()
+        logger.info(f"Stopping services in order: {shutdown_order}")
+
+        for name in shutdown_order:
+            if self.process_manager.is_running(name):
+                logger.info(f"Stopping service: {name}")
+                self.process_manager.stop_service(name)
+
+    def start(self) -> None:
+        """Start the runner (services + poll loop)."""
+        if self._state.running:
+            return
+
+        logger.info("Starting ServiceRunner")
+        self._state.running = True
+        self._state.start_time = datetime.now()
+        self._stop_event.clear()
+
+        # Initialize repo states (get current HEAD)
+        self._init_repo_states()
+
+        # Start services
+        self.start_services()
+
+        # Start poll loop in background
+        self._poll_thread = threading.Thread(
+            target=self._poll_loop,
+            daemon=True,
+        )
+        self._poll_thread.start()
+
+    def stop(self) -> None:
+        """Stop the runner (poll loop + services)."""
+        if not self._state.running:
+            return
+
+        logger.info("Stopping ServiceRunner")
+        self._state.running = False
+        self._stop_event.set()
+
+        # Wait for poll thread
+        if self._poll_thread and self._poll_thread.is_alive():
+            self._poll_thread.join(timeout=5)
+
+        # Stop services
+        self.stop_services()
+
+    def _init_repo_states(self) -> None:
+        """Initialize repo states with current HEAD."""
+        for name, state in self._repo_states.items():
+            repo_path = self.config_dir / state.config.path
+            if repo_path.exists():
+                try:
+                    state.last_head = get_head(repo_path)
+                    logger.info(f"Repo {name} at HEAD: {state.last_head[:8]}")
+                except GitError as e:
+                    logger.warning(f"Failed to get HEAD for {name}: {e}")
+
+    def _poll_loop(self) -> None:
+        """Main poll loop."""
+        while not self._stop_event.is_set():
+            try:
+                self._poll_cycle()
+            except Exception as e:
+                logger.exception(f"Error in poll cycle: {e}")
+
+            # Wait for next poll interval (interruptible)
+            self._stop_event.wait(timeout=self.poll_interval)
+
+    def _poll_cycle(self) -> None:
+        """Execute one poll cycle.
+
+        Phase 1: Check for changes (git fetch)
+        Phase 2: Apply changes (shutdown → pull → hooks → restart)
+        Phase 3: Health check (process pending restarts)
+        """
+        with self._state_lock:
+            self._state.last_poll = datetime.now()
+            self._state.poll_count += 1
+
+        # Phase 1: Change detection
+        changed_repos = self._detect_changes()
+
+        # Phase 2: Apply changes
+        if changed_repos:
+            self._apply_changes(changed_repos)
+
+        # Phase 3: Process pending restarts
+        self._process_pending_restarts()
+
+    def _detect_changes(self) -> list[str]:
+        """Detect changes in all repositories.
+
+        Returns:
+            List of repo names that have changes
+        """
+        changed: list[str] = []
+
+        for name, state in self._repo_states.items():
+            repo_path = self.config_dir / state.config.path
+
+            if not repo_path.exists():
+                logger.warning(f"Repo {name} path does not exist: {repo_path}")
+                continue
+
+            try:
+                has_changes = fetch_repo(
+                    path=repo_path,
+                    branch=state.config.branch,
+                )
+                state.last_fetch = datetime.now()
+                state.fetch_error = None
+
+                if has_changes:
+                    logger.info(f"Changes detected in repo: {name}")
+                    changed.append(name)
+
+            except GitError as e:
+                logger.error(f"Failed to fetch {name}: {e}")
+                state.fetch_error = str(e)
+
+        return changed
+
+    def _apply_changes(self, changed_repos: list[str]) -> None:
+        """Apply changes from the specified repositories.
+
+        Args:
+            changed_repos: List of repo names with changes
+        """
+        # Collect all affected services
+        all_affected: set[str] = set()
+        for repo in changed_repos:
+            all_affected.update(self.get_affected_services(repo))
+
+        if not all_affected:
+            # No services affected, just pull
+            for repo in changed_repos:
+                self._pull_repo(repo)
+            return
+
+        logger.info(f"Services affected by changes: {all_affected}")
+
+        # Get proper shutdown order for affected services
+        shutdown_order = [s for s in self.get_shutdown_order() if s in all_affected]
+
+        # Phase 2a: Shutdown affected services (reverse order)
+        for name in shutdown_order:
+            if self.process_manager.is_running(name):
+                logger.info(f"Stopping {name} for update")
+                self.process_manager.stop_service(name)
+
+        # Phase 2b: Pull changes
+        for repo in changed_repos:
+            self._pull_repo(repo)
+
+        # Phase 2c: Execute post_pull hooks
+        for name in all_affected:
+            self.execute_hook(name, "post_pull")
+
+        # Phase 2d: Restart affected services (forward order)
+        startup_order = [s for s in self.get_startup_order() if s in all_affected]
+        for name in startup_order:
+            logger.info(f"Restarting {name} after update")
+            self._start_service(name)
+
+    def _pull_repo(self, repo_name: str) -> bool:
+        """Pull changes for a repository.
+
+        Args:
+            repo_name: Name of the repository
+
+        Returns:
+            True if pull succeeded
+        """
+        if repo_name not in self._repo_states:
+            return False
+
+        state = self._repo_states[repo_name]
+        repo_path = self.config_dir / state.config.path
+
+        try:
+            pull_repo(
+                path=repo_path,
+                branch=state.config.branch,
+            )
+            state.last_head = get_head(repo_path)
+            head_short = state.last_head[:8] if state.last_head else "unknown"
+            logger.info(f"Pulled {repo_name}, new HEAD: {head_short}")
+            return True
+        except GitError as e:
+            logger.error(f"Failed to pull {repo_name}: {e}")
+            return False
+
+    def _process_pending_restarts(self) -> None:
+        """Process any pending service restarts."""
+        now = time.time()
+
+        with self._restart_lock:
+            ready = [
+                name for name, restart_time in self._pending_restarts.items()
+                if restart_time <= now
+            ]
+
+            for name in ready:
+                del self._pending_restarts[name]
+
+        for name in ready:
+            if not self.process_manager.is_running(name):
+                logger.info(f"Executing scheduled restart for {name}")
+                self._start_service(name)
+
+    def get_status(self) -> dict:
+        """Get current status of the runner.
+
+        Returns:
+            Status dict with runner state, services, and repos
+        """
+        # Service states from health manager
+        service_status = {}
+        for name in self._enabled_services:
+            health = self.health_manager.get_health(name)
+            service_status[name] = {
+                "state": health.state.value,
+                "uptime": health.get_uptime(),
+                "restart_count": health.restart_count,
+                "consecutive_failures": health.consecutive_failures,
+            }
+
+        # Repo states
+        repo_status = {}
+        for name, state in self._repo_states.items():
+            head_short = state.last_head[:8] if state.last_head else None
+            repo_status[name] = {
+                "path": str(state.config.path),
+                "branch": state.config.branch,
+                "last_head": head_short,
+                "last_fetch": state.last_fetch.isoformat() if state.last_fetch else None,
+                "fetch_error": state.fetch_error,
+            }
+
+        # Read runner state with lock for thread safety
+        with self._state_lock:
+            return {
+                "running": self._state.running,
+                "start_time": self._state.start_time.isoformat() if self._state.start_time else None,
+                "last_poll": self._state.last_poll.isoformat() if self._state.last_poll else None,
+                "poll_count": self._state.poll_count,
+                "poll_interval": self.poll_interval,
+                "services": service_status,
+                "repos": repo_status,
+            }

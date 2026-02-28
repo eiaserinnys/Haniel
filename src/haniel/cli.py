@@ -8,6 +8,9 @@ Commands:
     validate - Check configuration validity
 """
 
+import json
+import logging
+import signal
 import sys
 from pathlib import Path
 
@@ -214,7 +217,8 @@ def install(config: Path | None, dry_run: bool) -> None:
 @click.argument("config", required=False, callback=validate_config_file)
 @click.option("--foreground", "-f", is_flag=True, help="Run in foreground (don't daemonize).")
 @click.option("--dry-run", is_flag=True, help="Show what would be done without executing.")
-def run(config: Path | None, foreground: bool, dry_run: bool) -> None:
+@click.option("--log-level", default="INFO", help="Log level (DEBUG, INFO, WARNING, ERROR).")
+def run(config: Path | None, foreground: bool, dry_run: bool, log_level: str) -> None:
     """Start services and begin the poll loop.
 
     This command:
@@ -222,6 +226,8 @@ def run(config: Path | None, foreground: bool, dry_run: bool) -> None:
     2. Starts all enabled services in order
     3. Enters the poll loop (git fetch, restart on changes)
     """
+    from haniel.runner import ServiceRunner
+
     if config is None:
         click.echo(click.get_current_context().get_help())
         return
@@ -240,10 +246,69 @@ def run(config: Path | None, foreground: bool, dry_run: bool) -> None:
         print_dry_run_run(haniel_config)
         return
 
-    click.echo(f"Running with config: {config}")
-    if foreground:
-        click.echo("Running in foreground mode")
-    click.echo("Run complete (skeleton)")
+    # Configure logging
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper(), logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    logger = logging.getLogger("haniel")
+
+    click.echo(f"Starting haniel with config: {config}")
+    click.echo(f"Poll interval: {haniel_config.poll_interval}s")
+    click.echo(f"Services: {len(haniel_config.services)}")
+    click.echo(f"Repositories: {len(haniel_config.repos)}")
+    click.echo()
+
+    # Create runner
+    config_dir = config.parent.resolve()
+    runner = ServiceRunner(
+        config=haniel_config,
+        config_dir=config_dir,
+    )
+
+    # Signal handlers for graceful shutdown
+    def handle_signal(signum: int, frame) -> None:
+        sig_name = signal.Signals(signum).name
+        click.echo(f"\nReceived {sig_name}, shutting down...")
+        runner.stop()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    try:
+        # Print startup order
+        startup_order = runner.get_startup_order()
+        click.echo("Startup order:")
+        for i, name in enumerate(startup_order, 1):
+            svc = haniel_config.services[name]
+            after_str = f" (after: {', '.join(svc.after)})" if svc.after else ""
+            click.echo(f"  {i}. {name}{after_str}")
+        click.echo()
+
+        # Start the runner
+        runner.start()
+        click.echo(click.style("Services started. Entering poll loop.", fg="green"))
+        click.echo("Press Ctrl+C to stop.")
+        click.echo()
+
+        # Keep main thread alive
+        while runner.is_running:
+            try:
+                # Sleep in small intervals to allow signal handling
+                import time
+                time.sleep(1)
+            except KeyboardInterrupt:
+                break
+
+    except Exception as e:
+        logger.exception(f"Runner error: {e}")
+        click.echo(click.style(f"Error: {e}", fg="red"), err=True)
+        sys.exit(1)
+    finally:
+        runner.stop()
+        click.echo("Shutdown complete.")
 
 
 @main.command()
@@ -257,14 +322,104 @@ def status(config: Path | None, as_json: bool) -> None:
     - Repository status (HEAD, last fetch time)
     - MCP server status (if enabled)
     """
-    if as_json:
-        click.echo('{"status": "not_running", "services": [], "repos": []}')
+    from haniel.runner import ServiceRunner
+    from haniel.health import ServiceState
+
+    # If no config provided, show basic status
+    if config is None:
+        if as_json:
+            click.echo(json.dumps({"running": False, "services": {}, "repos": {}}))
+        else:
+            click.echo("haniel status")
+            click.echo("Status: Not running (no config specified)")
         return
 
-    click.echo("haniel status")
-    click.echo("Status: Not running")
-    if config:
-        click.echo(f"Config: {config}")
+    # Load config to show configured services
+    haniel_config, errors = load_and_validate(config)
+    if errors:
+        if as_json:
+            click.echo(json.dumps({"error": "Invalid config", "errors": errors}))
+        else:
+            click.echo(click.style("Configuration errors:", fg="red", bold=True), err=True)
+            for error in errors:
+                click.echo(f"  - {error}", err=True)
+        sys.exit(1)
+
+    # Create a runner to get status info (not starting it)
+    config_dir = config.parent.resolve()
+    runner = ServiceRunner(
+        config=haniel_config,
+        config_dir=config_dir,
+    )
+
+    status_data = runner.get_status()
+
+    if as_json:
+        click.echo(json.dumps(status_data, indent=2))
+        return
+
+    # Human-readable output
+    click.echo(click.style("haniel status", bold=True))
+    click.echo()
+
+    running = status_data.get("running", False)
+    status_str = click.style("Running", fg="green") if running else click.style("Stopped", fg="yellow")
+    click.echo(f"Status: {status_str}")
+
+    if status_data.get("start_time"):
+        click.echo(f"Started: {status_data['start_time']}")
+    if status_data.get("last_poll"):
+        click.echo(f"Last poll: {status_data['last_poll']}")
+    if status_data.get("poll_count"):
+        click.echo(f"Poll count: {status_data['poll_count']}")
+
+    click.echo(f"Poll interval: {status_data.get('poll_interval', 'N/A')}s")
+    click.echo()
+
+    # Services
+    services = status_data.get("services", {})
+    if services:
+        click.echo(click.style("Services:", bold=True))
+        for name, svc_status in services.items():
+            state = svc_status.get("state", "unknown")
+
+            # Color based on state
+            if state == "running" or state == "ready":
+                state_str = click.style(state, fg="green")
+            elif state == "stopped":
+                state_str = click.style(state, fg="yellow")
+            elif state == "crashed" or state == "circuit_open":
+                state_str = click.style(state, fg="red")
+            else:
+                state_str = click.style(state, fg="white")
+
+            uptime = svc_status.get("uptime")
+            uptime_str = f" (uptime: {int(uptime)}s)" if uptime else ""
+
+            restarts = svc_status.get("restart_count", 0)
+            restart_str = f" [restarts: {restarts}]" if restarts > 0 else ""
+
+            click.echo(f"  {name}: {state_str}{uptime_str}{restart_str}")
+        click.echo()
+
+    # Repos
+    repos = status_data.get("repos", {})
+    if repos:
+        click.echo(click.style("Repositories:", bold=True))
+        for name, repo_status in repos.items():
+            head = repo_status.get("last_head", "unknown")
+            branch = repo_status.get("branch", "?")
+            last_fetch = repo_status.get("last_fetch")
+            error = repo_status.get("fetch_error")
+
+            if error:
+                status_str = click.style(f"ERROR: {error}", fg="red")
+            elif last_fetch:
+                status_str = f"HEAD: {head} (fetched: {last_fetch})"
+            else:
+                status_str = f"HEAD: {head or 'N/A'}"
+
+            click.echo(f"  {name} ({branch}): {status_str}")
 
 
 @main.command()
