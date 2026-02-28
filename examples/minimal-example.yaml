@@ -1,0 +1,33 @@
+# Minimal haniel configuration example
+# This file demonstrates the basic structure of a haniel.yaml
+
+poll_interval: 60  # seconds between git fetch checks
+
+# Global shutdown settings
+shutdown:
+  timeout: 10       # graceful shutdown timeout
+  kill_timeout: 30  # force kill after this
+
+# Backoff settings for crashed services
+backoff:
+  base_delay: 5
+  max_delay: 300
+  circuit_breaker: 5   # max restarts in window
+  circuit_window: 300  # window in seconds
+
+# Repository definitions
+repos:
+  my-app:
+    url: git@github.com:example/my-app.git
+    branch: main
+    path: ./projects/my-app
+
+# Service definitions (started in YAML order)
+services:
+  my-service:
+    run: python -m my_app.server
+    cwd: ./projects/my-app
+    repo: my-app
+    ready: port:8080
+    hooks:
+      post_pull: pip install -r requirements.txt
