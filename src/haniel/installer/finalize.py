@@ -253,8 +253,12 @@ class Finalizer:
 
             # Set environment variables
             if service_cfg.environment:
+                resolved_env = {
+                    k: v.replace("{root}", str(self.config_dir))
+                    for k, v in service_cfg.environment.items()
+                }
                 env_str = " ".join(
-                    f"{k}={v}" for k, v in service_cfg.environment.items()
+                    f"{k}={v}" for k, v in resolved_env.items()
                 )
                 subprocess.run(
                     [nssm_path, "set", service_name, "AppEnvironmentExtra", env_str],
@@ -314,6 +318,18 @@ class Finalizer:
         logger.info(f"  cd {working_dir}")
         logger.info(f"  haniel run haniel.yaml")
         logger.info("")
+        # Resolve environment variables
+        env_lines = ""
+        if service_cfg.environment:
+            resolved_env = {
+                k: v.replace("{root}", str(self.config_dir))
+                for k, v in service_cfg.environment.items()
+            }
+            env_lines = "\n".join(
+                f"Environment={k}={v}" for k, v in resolved_env.items()
+            )
+            env_lines = "\n" + env_lines
+
         logger.info("For systemd, create /etc/systemd/system/{service_name}.service:")
         logger.info(
             f"""
@@ -324,7 +340,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory={working_dir}
-ExecStart=/usr/bin/python -m haniel.cli run haniel.yaml
+ExecStart=/usr/bin/python -m haniel.cli run haniel.yaml{env_lines}
 Restart=always
 RestartSec=5
 
