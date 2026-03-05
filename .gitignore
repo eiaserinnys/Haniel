@@ -46,4 +46,5 @@ Thumbs.db
 *.log
 logs/
 .projects/
+.services/
 install.state
