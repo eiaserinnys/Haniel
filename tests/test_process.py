@@ -17,10 +17,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from haniel.config import ServiceConfig, ServiceShutdownConfig
-from haniel.health import HealthManager, ServiceState
-from haniel.logs import LogManager, LogCapture
+from haniel.core.health import HealthManager, ServiceState
+from haniel.core.logs import LogManager, LogCapture
 from haniel.platform import get_platform_handler
-from haniel.process import ProcessManager, ReadyCondition, ReadyConditionType
+from haniel.core.process import ProcessManager, ReadyCondition, ReadyConditionType
 
 
 # Path to the dummy server

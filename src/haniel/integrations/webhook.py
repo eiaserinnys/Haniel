@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 
-from haniel.config import WebhookConfig
+from ..config import WebhookConfig
 
 logger = logging.getLogger(__name__)
 

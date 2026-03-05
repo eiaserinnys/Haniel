@@ -18,9 +18,9 @@ from typing import Any, TYPE_CHECKING, Optional
 from urllib.parse import parse_qs, urlparse
 
 if TYPE_CHECKING:
-    from .runner import ServiceRunner
+    from ..core.runner import ServiceRunner
 
-from .config import load_config
+from ..config import load_config
 
 logger = logging.getLogger(__name__)
 

@@ -18,8 +18,7 @@ import click
 from pydantic import ValidationError as PydanticValidationError
 
 from haniel import __version__
-from haniel.config import load_config, HanielConfig
-from haniel.validators import validate_config, ValidationError
+from haniel.config import load_config, HanielConfig, validate_config, ValidationError
 
 
 def validate_config_file(ctx: click.Context, param: click.Parameter, value: str | None) -> Path | None:
@@ -362,7 +361,7 @@ def run(config: Path | None, foreground: bool, dry_run: bool, log_level: str) ->
     2. Starts all enabled services in order
     3. Enters the poll loop (git fetch, restart on changes)
     """
-    from haniel.runner import ServiceRunner
+    from haniel.core.runner import ServiceRunner
 
     if config is None:
         click.echo(click.get_current_context().get_help())
@@ -458,8 +457,8 @@ def status(config: Path | None, as_json: bool) -> None:
     - Repository status (HEAD, last fetch time)
     - MCP server status (if enabled)
     """
-    from haniel.runner import ServiceRunner
-    from haniel.health import ServiceState
+    from haniel.core.runner import ServiceRunner
+    from haniel.core.health import ServiceState
 
     # If no config provided, show basic status
     if config is None:

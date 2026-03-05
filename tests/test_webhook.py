@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from haniel.webhook import (
+from haniel.integrations.webhook import (
     WebhookFormat,
     WebhookNotifier,
     WebhookMessage,
@@ -270,7 +270,7 @@ class TestWebhookNotifier:
             message="Test message",
         )
 
-        with patch("haniel.webhook.aiohttp.ClientSession") as mock_session_class:
+        with patch("haniel.integrations.webhook.aiohttp.ClientSession") as mock_session_class:
             mock_session = MagicMock()
             mock_session.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session.__aexit__ = AsyncMock(return_value=None)
@@ -304,7 +304,7 @@ class TestWebhookNotifier:
             message="Test message",
         )
 
-        with patch("haniel.webhook.aiohttp.ClientSession") as mock_session_class:
+        with patch("haniel.integrations.webhook.aiohttp.ClientSession") as mock_session_class:
             mock_session = MagicMock()
             mock_session.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session.__aexit__ = AsyncMock(return_value=None)
@@ -331,7 +331,7 @@ class TestWebhookNotifier:
             message="Test message",
         )
 
-        with patch("haniel.webhook.aiohttp.ClientSession") as mock_session_class:
+        with patch("haniel.integrations.webhook.aiohttp.ClientSession") as mock_session_class:
             mock_session = MagicMock()
             mock_session.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session.__aexit__ = AsyncMock(return_value=None)
@@ -353,7 +353,7 @@ class TestHelperMethods:
 
     def test_service_started_helper(self):
         """Test helper for service started event."""
-        from haniel.webhook import create_service_started_message
+        from haniel.integrations.webhook import create_service_started_message
 
         msg = create_service_started_message("my-service")
         assert msg.event_type == EventType.SERVICE_STARTED
@@ -361,7 +361,7 @@ class TestHelperMethods:
 
     def test_change_detected_helper(self):
         """Test helper for change detected event."""
-        from haniel.webhook import create_change_detected_message
+        from haniel.integrations.webhook import create_change_detected_message
 
         commits = ["abc123: Fix bug", "def456: Add feature"]
         msg = create_change_detected_message("my-service", "my-repo", commits)
@@ -371,21 +371,21 @@ class TestHelperMethods:
 
     def test_deploying_helper(self):
         """Test helper for deploying event."""
-        from haniel.webhook import create_deploying_message
+        from haniel.integrations.webhook import create_deploying_message
 
         msg = create_deploying_message("my-service")
         assert msg.event_type == EventType.DEPLOYING
 
     def test_deploy_complete_helper(self):
         """Test helper for deploy complete event."""
-        from haniel.webhook import create_deploy_complete_message
+        from haniel.integrations.webhook import create_deploy_complete_message
 
         msg = create_deploy_complete_message("my-service")
         assert msg.event_type == EventType.DEPLOY_COMPLETE
 
     def test_graceful_failed_helper(self):
         """Test helper for graceful failed event."""
-        from haniel.webhook import create_graceful_failed_message
+        from haniel.integrations.webhook import create_graceful_failed_message
 
         msg = create_graceful_failed_message("my-service", timeout=15)
         assert msg.event_type == EventType.GRACEFUL_FAILED
@@ -393,7 +393,7 @@ class TestHelperMethods:
 
     def test_circuit_breaker_helper(self):
         """Test helper for circuit breaker event."""
-        from haniel.webhook import create_circuit_breaker_message
+        from haniel.integrations.webhook import create_circuit_breaker_message
 
         msg = create_circuit_breaker_message(
             "my-service", failure_count=5, window=300

@@ -23,10 +23,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
-from .config import ServiceConfig, ServiceShutdownConfig, ShutdownConfig
+from ..config import ServiceConfig, ServiceShutdownConfig, ShutdownConfig
 from .health import HealthManager, ServiceState
 from .logs import LogCapture, LogManager, StreamReader
-from .platform import get_platform_handler
+from ..platform import get_platform_handler
 
 
 class ReadyConditionType(Enum):
