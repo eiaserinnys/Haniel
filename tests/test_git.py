@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from haniel.git import (
+from haniel.core.git import (
     GitError,
     GitCloneError,
     GitFetchError,

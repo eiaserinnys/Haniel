@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Literal
 import re
 
-from haniel.config import HanielConfig
+from .model import HanielConfig
 
 
 @dataclass

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from haniel.config import load_config
-from haniel.validators import (
+from haniel.config.validators import (
     validate_config,
     check_circular_dependencies,
     check_port_conflicts,

@@ -18,8 +18,8 @@ from haniel.config import (
     ShutdownConfig,
     HooksConfig,
 )
-from haniel.health import HealthManager, ServiceState
-from haniel.runner import (
+from haniel.core.health import HealthManager, ServiceState
+from haniel.core.runner import (
     ServiceRunner,
     DependencyGraph,
     topological_sort,
@@ -586,8 +586,8 @@ class TestServiceRunnerExtended:
 
         assert runner.is_running is False
 
-    @patch("haniel.runner.ServiceRunner._start_mcp_server")
-    @patch("haniel.runner.ServiceRunner.start_services")
+    @patch("haniel.core.runner.ServiceRunner._start_mcp_server")
+    @patch("haniel.core.runner.ServiceRunner.start_services")
     def test_runner_start_stop(self, mock_start_services, mock_mcp, tmp_path: Path):
         """Test starting and stopping the runner."""
         config = HanielConfig(
@@ -605,8 +605,8 @@ class TestServiceRunnerExtended:
         runner.stop()
         assert runner.is_running is False
 
-    @patch("haniel.runner.ServiceRunner._start_mcp_server")
-    @patch("haniel.runner.ServiceRunner.start_services")
+    @patch("haniel.core.runner.ServiceRunner._start_mcp_server")
+    @patch("haniel.core.runner.ServiceRunner.start_services")
     def test_runner_start_already_running(self, mock_start_services, mock_mcp, tmp_path: Path):
         """Test starting when already running."""
         config = HanielConfig(
@@ -681,8 +681,8 @@ class TestServiceRunnerPollCycle:
         )
         return ServiceRunner(config, config_dir=tmp_path)
 
-    @patch("haniel.runner.fetch_repo")
-    @patch("haniel.runner.get_head")
+    @patch("haniel.core.runner.fetch_repo")
+    @patch("haniel.core.runner.get_head")
     def test_detect_changes_no_changes(self, mock_head, mock_fetch, runner_with_mock_repo):
         """Test detecting no changes in repos."""
         mock_fetch.return_value = False  # No changes
@@ -693,8 +693,8 @@ class TestServiceRunnerPollCycle:
 
         assert changed == []
 
-    @patch("haniel.runner.fetch_repo")
-    @patch("haniel.runner.get_head")
+    @patch("haniel.core.runner.fetch_repo")
+    @patch("haniel.core.runner.get_head")
     def test_detect_changes_with_changes(self, mock_head, mock_fetch, runner_with_mock_repo):
         """Test detecting changes in repos."""
         mock_fetch.return_value = True  # Has changes
@@ -705,11 +705,11 @@ class TestServiceRunnerPollCycle:
 
         assert "test-repo" in changed
 
-    @patch("haniel.runner.fetch_repo")
-    @patch("haniel.runner.get_head")
+    @patch("haniel.core.runner.fetch_repo")
+    @patch("haniel.core.runner.get_head")
     def test_detect_changes_fetch_error(self, mock_head, mock_fetch, runner_with_mock_repo):
         """Test handling fetch errors."""
-        from haniel.git import GitError
+        from haniel.core.git import GitError
 
         mock_fetch.side_effect = GitError("Fetch failed")
         mock_head.return_value = "abc1234"
@@ -738,7 +738,7 @@ class TestServiceRunnerPollCycle:
         with runner._restart_lock:
             assert "test" in runner._pending_restarts
 
-    @patch("haniel.runner.ServiceRunner._start_service")
+    @patch("haniel.core.runner.ServiceRunner._start_service")
     def test_process_pending_restarts(self, mock_start, tmp_path: Path):
         """Test processing pending restarts."""
         config = HanielConfig(
@@ -758,8 +758,8 @@ class TestServiceRunnerPollCycle:
 
         mock_start.assert_called_with("test")
 
-    @patch("haniel.runner.pull_repo")
-    @patch("haniel.runner.get_head")
+    @patch("haniel.core.runner.pull_repo")
+    @patch("haniel.core.runner.get_head")
     def test_pull_repo_success(self, mock_head, mock_pull, runner_with_mock_repo):
         """Test pulling a repo successfully."""
         mock_head.return_value = "new_commit"
@@ -769,10 +769,10 @@ class TestServiceRunnerPollCycle:
         assert result is True
         mock_pull.assert_called_once()
 
-    @patch("haniel.runner.pull_repo")
+    @patch("haniel.core.runner.pull_repo")
     def test_pull_repo_failure(self, mock_pull, runner_with_mock_repo):
         """Test pulling a repo with failure."""
-        from haniel.git import GitError
+        from haniel.core.git import GitError
 
         mock_pull.side_effect = GitError("Pull failed")
 
@@ -797,8 +797,8 @@ class TestServiceRunnerPollCycle:
 class TestServiceRunnerMcp:
     """Tests for ServiceRunner MCP integration."""
 
-    @patch("haniel.runner.ServiceRunner._start_mcp_server")
-    @patch("haniel.runner.ServiceRunner.start_services")
+    @patch("haniel.core.runner.ServiceRunner._start_mcp_server")
+    @patch("haniel.core.runner.ServiceRunner.start_services")
     def test_start_with_mcp_disabled(self, mock_start_services, mock_mcp, tmp_path: Path):
         """Test starting runner with MCP disabled."""
         from haniel.config import McpConfig
@@ -834,7 +834,7 @@ class TestServiceRunnerMcp:
         # MCP server should not be set
         assert runner._mcp_server is None
 
-    @patch("haniel.mcp_server.HanielMcpServer")
+    @patch("haniel.integrations.mcp_server.HanielMcpServer")
     def test_start_mcp_server_enabled(self, mock_mcp_class, tmp_path: Path):
         """Test _start_mcp_server when enabled."""
         from haniel.config import McpConfig
@@ -854,7 +854,7 @@ class TestServiceRunnerMcp:
 
         mock_server.start_background.assert_called_once()
 
-    @patch("haniel.mcp_server.HanielMcpServer")
+    @patch("haniel.integrations.mcp_server.HanielMcpServer")
     def test_start_mcp_server_import_error(self, mock_mcp_class, tmp_path: Path):
         """Test _start_mcp_server with import error."""
         from haniel.config import McpConfig
@@ -872,7 +872,7 @@ class TestServiceRunnerMcp:
         # Should not raise
         runner._start_mcp_server()
 
-    @patch("haniel.mcp_server.HanielMcpServer")
+    @patch("haniel.integrations.mcp_server.HanielMcpServer")
     def test_start_mcp_server_exception(self, mock_mcp_class, tmp_path: Path):
         """Test _start_mcp_server with exception."""
         from haniel.config import McpConfig
@@ -894,7 +894,7 @@ class TestServiceRunnerMcp:
 class TestServiceRunnerServices:
     """Tests for ServiceRunner service management."""
 
-    @patch("haniel.process.ProcessManager.start_service")
+    @patch("haniel.core.process.ProcessManager.start_service")
     def test_start_services_order(self, mock_start, tmp_path: Path):
         """Test starting services in order."""
         config = HanielConfig(
@@ -912,8 +912,8 @@ class TestServiceRunnerServices:
         # Should be called for both services
         assert mock_start.call_count == 2
 
-    @patch("haniel.process.ProcessManager.stop_service")
-    @patch("haniel.process.ProcessManager.is_running")
+    @patch("haniel.core.process.ProcessManager.stop_service")
+    @patch("haniel.core.process.ProcessManager.is_running")
     def test_stop_services_order(self, mock_running, mock_stop, tmp_path: Path):
         """Test stopping services in order."""
         config = HanielConfig(
@@ -933,7 +933,7 @@ class TestServiceRunnerServices:
         # Should be called in reverse order
         assert mock_stop.call_count == 2
 
-    @patch("haniel.process.ProcessManager.start_service")
+    @patch("haniel.core.process.ProcessManager.start_service")
     def test_start_service_failure(self, mock_start, tmp_path: Path):
         """Test handling service start failure."""
         config = HanielConfig(
@@ -984,7 +984,7 @@ class TestServiceRunnerCallbacks:
         # Should not raise
         runner._on_service_ready("test")
 
-    @patch("haniel.runner.ServiceRunner._schedule_restart")
+    @patch("haniel.core.runner.ServiceRunner._schedule_restart")
     def test_on_service_crash_with_restart(self, mock_schedule, tmp_path: Path):
         """Test on_service_crash when restart is allowed."""
         config = HanielConfig(

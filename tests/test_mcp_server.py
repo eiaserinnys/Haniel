@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, AsyncMock, patch
 
 from haniel.config import HanielConfig, McpConfig, ServiceConfig, RepoConfig
-from haniel.health import ServiceState
+from haniel.core.health import ServiceState
 
 
 class TestHanielMcpServer:
@@ -102,7 +102,7 @@ class TestHanielMcpServer:
     @pytest.fixture
     def mcp_server(self, mock_runner):
         """Create HanielMcpServer instance."""
-        from haniel.mcp_server import HanielMcpServer
+        from haniel.integrations.mcp_server import HanielMcpServer
         return HanielMcpServer(mock_runner)
 
     def test_server_creation(self, mcp_server, mock_runner):
@@ -165,7 +165,7 @@ class TestMcpResources:
     @pytest.fixture
     def mcp_server(self, mock_runner):
         """Create HanielMcpServer instance."""
-        from haniel.mcp_server import HanielMcpServer
+        from haniel.integrations.mcp_server import HanielMcpServer
         return HanielMcpServer(mock_runner)
 
     @pytest.mark.asyncio
@@ -283,7 +283,7 @@ class TestMcpTools:
     @pytest.fixture
     def mcp_server(self, mock_runner):
         """Create HanielMcpServer instance."""
-        from haniel.mcp_server import HanielMcpServer
+        from haniel.integrations.mcp_server import HanielMcpServer
         return HanielMcpServer(mock_runner)
 
     @pytest.mark.asyncio
@@ -347,7 +347,7 @@ class TestMcpTools:
     @pytest.mark.asyncio
     async def test_reload_config(self, mcp_server, mock_runner):
         """Test haniel_reload tool."""
-        with patch("haniel.mcp_server.load_config") as mock_load:
+        with patch("haniel.integrations.mcp_server.load_config") as mock_load:
             mock_load.return_value = mock_runner.config
             result = await mcp_server.call_tool("haniel_reload", {})
             assert "reloaded" in result.lower() or "success" in result.lower()
@@ -377,7 +377,7 @@ class TestMcpServerIntegration:
     @pytest.fixture
     def mcp_server(self, mock_runner):
         """Create HanielMcpServer instance."""
-        from haniel.mcp_server import HanielMcpServer
+        from haniel.integrations.mcp_server import HanielMcpServer
         return HanielMcpServer(mock_runner)
 
     def test_list_resources(self, mcp_server):
@@ -446,7 +446,7 @@ class TestMcpServerExtended:
     @pytest.fixture
     def mcp_server(self, mock_runner):
         """Create HanielMcpServer instance."""
-        from haniel.mcp_server import HanielMcpServer
+        from haniel.integrations.mcp_server import HanielMcpServer
         return HanielMcpServer(mock_runner)
 
     @pytest.mark.asyncio
@@ -572,7 +572,7 @@ class TestMcpServerExtended:
     @pytest.mark.asyncio
     async def test_reload_exception_handling(self, mcp_server, mock_runner):
         """Test reload with exception."""
-        with patch("haniel.mcp_server.load_config") as mock_load:
+        with patch("haniel.integrations.mcp_server.load_config") as mock_load:
             mock_load.side_effect = Exception("Load failed")
             result = await mcp_server.call_tool("haniel_reload", {})
             data = json.loads(result)
@@ -580,7 +580,7 @@ class TestMcpServerExtended:
 
     def test_enabled_property_no_mcp_config(self):
         """Test enabled property when MCP config is not set."""
-        from haniel.mcp_server import HanielMcpServer
+        from haniel.integrations.mcp_server import HanielMcpServer
 
         runner = MagicMock()
         runner.config = HanielConfig(poll_interval=60, services={}, repos={})  # No mcp
@@ -592,7 +592,7 @@ class TestMcpServerExtended:
 
     def test_port_property_no_mcp_config(self):
         """Test port property when MCP config is not set."""
-        from haniel.mcp_server import HanielMcpServer
+        from haniel.integrations.mcp_server import HanielMcpServer
 
         runner = MagicMock()
         runner.config = HanielConfig(poll_interval=60, services={}, repos={})  # No mcp
@@ -622,7 +622,7 @@ class TestMcpServerLifecycle:
     @pytest.fixture
     def mcp_server(self, mock_runner):
         """Create HanielMcpServer instance."""
-        from haniel.mcp_server import HanielMcpServer
+        from haniel.integrations.mcp_server import HanielMcpServer
         return HanielMcpServer(mock_runner)
 
     @pytest.mark.asyncio

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from haniel.logs import LogCapture, LogManager, StreamReader
+from haniel.core.logs import LogCapture, LogManager, StreamReader
 
 
 class TestLogCapture:
@@ -282,7 +282,7 @@ class TestLogTail:
         log_file.write_text("\n".join([f"Line {i}" for i in range(100)]))
 
         # Import the function we need to implement
-        from haniel.logs import get_log_tail
+        from haniel.core.logs import get_log_tail
 
         tail = get_log_tail(log_file, n=10)
         assert len(tail) == 10
@@ -294,7 +294,7 @@ class TestLogTail:
         log_file = tmp_path / "test.log"
         log_file.write_text("Line 1\nLine 2\nLine 3")
 
-        from haniel.logs import get_log_tail
+        from haniel.core.logs import get_log_tail
 
         tail = get_log_tail(log_file, n=10)
         assert len(tail) == 3
@@ -304,7 +304,7 @@ class TestLogTail:
         log_file = tmp_path / "test.log"
         log_file.write_text("")
 
-        from haniel.logs import get_log_tail
+        from haniel.core.logs import get_log_tail
 
         tail = get_log_tail(log_file, n=10)
         assert len(tail) == 0
@@ -313,7 +313,7 @@ class TestLogTail:
         """Test with non-existent file."""
         log_file = tmp_path / "nonexistent.log"
 
-        from haniel.logs import get_log_tail
+        from haniel.core.logs import get_log_tail
 
         tail = get_log_tail(log_file, n=10)
         assert tail == []

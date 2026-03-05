@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from .config import (
+from ..config import (
     BackoffConfig,
     HanielConfig,
     RepoConfig,
@@ -509,7 +509,7 @@ class ServiceRunner:
             return
 
         try:
-            from .mcp_server import HanielMcpServer
+            from ..integrations.mcp_server import HanielMcpServer
 
             self._mcp_server = HanielMcpServer(self)
             self._mcp_server.start_background()
