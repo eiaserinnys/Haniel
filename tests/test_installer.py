@@ -1577,6 +1577,101 @@ class TestFinalizerExtended:
             assert (config_dir / "workspace").exists()
             assert (config_dir / "workspace" / ".env").exists()
 
+    @patch("platform.system")
+    @patch("shutil.which")
+    @patch("subprocess.run")
+    def test_nssm_environment_resolves_root_template(
+        self, mock_run, mock_which, mock_system
+    ):
+        """Test that {root} in service environment values is resolved to config_dir."""
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+
+        config = HanielConfig(
+            install=InstallConfig(
+                service=ServiceDefinitionConfig(
+                    name="haniel-test",
+                    display="Test Service",
+                    working_directory="{root}",
+                    environment={
+                        "PYTHONUTF8": "1",
+                        "PYTHONPATH": "{root}/src",
+                    },
+                ),
+            ),
+        )
+
+        mock_system.return_value = "Windows"
+        mock_which.side_effect = lambda cmd: {
+            "nssm": r"C:\tools\nssm.exe",
+            "python": r"C:\Python312\python.exe",
+        }.get(cmd)
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState()
+            finalizer = Finalizer(config, config_dir, state)
+
+            finalizer.register_service()
+
+            # Find the AppEnvironmentExtra call
+            env_call = None
+            for call in mock_run.call_args_list:
+                args = call[0][0]
+                if "AppEnvironmentExtra" in args:
+                    env_call = args
+                    break
+
+            assert env_call is not None, "AppEnvironmentExtra was not set"
+
+            # The env string is the last argument
+            env_str = env_call[-1]
+
+            # {root} should be resolved to config_dir, not left as literal
+            assert "{root}" not in env_str
+            assert f"PYTHONPATH={config_dir}" in env_str or f"PYTHONPATH={str(config_dir)}" in env_str
+            assert "PYTHONUTF8=1" in env_str
+
+    @patch("platform.system")
+    def test_systemd_environment_resolves_root_template(self, mock_system):
+        """Test that {root} in service environment is resolved in systemd instructions."""
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+
+        config = HanielConfig(
+            install=InstallConfig(
+                service=ServiceDefinitionConfig(
+                    name="haniel-test",
+                    display="Test Service",
+                    working_directory="{root}",
+                    environment={
+                        "PYTHONPATH": "{root}/src",
+                    },
+                ),
+            ),
+        )
+
+        mock_system.return_value = "Linux"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState()
+            finalizer = Finalizer(config, config_dir, state)
+
+            # Should not raise; just logs instructions
+            with patch("haniel.installer.finalize.logger") as mock_logger:
+                finalizer.register_service()
+
+                # Find the log call containing Environment=
+                logged_texts = [
+                    str(call) for call in mock_logger.info.call_args_list
+                ]
+                joined = " ".join(logged_texts)
+
+                assert "Environment=PYTHONPATH=" in joined
+                assert "{root}" not in joined
+
 
 class TestOrchestratorPhases:
     """Tests for InstallOrchestrator phases."""
