@@ -3,309 +3,238 @@
     Haniel bootstrapper for Windows.
 
 .DESCRIPTION
-    This script bootstraps haniel on a fresh Windows machine:
-    1. Checks/installs Python via winget
-    2. Prompts for installation directory
-    3. Creates venv and installs haniel
-    4. Runs haniel install
+    Bootstraps haniel on a fresh Windows machine with a single command:
+
+        irm https://raw.githubusercontent.com/eiaserinnys/Haniel/main/install-haniel.ps1 | iex
+
+    The script handles prerequisite installation (Git, Python, NSSM),
+    clones the haniel repository, downloads a service config file,
+    and delegates all environment setup to `haniel install`.
 
 .EXAMPLE
-    .\install-haniel.ps1
+    # One-liner (downloads and runs)
+    irm https://raw.githubusercontent.com/eiaserinnys/Haniel/main/install-haniel.ps1 | iex
 
 .EXAMPLE
-    .\install-haniel.ps1 -InstallPath "D:\Services\Haniel"
+    # Direct execution with parameters
+    .\install-haniel.ps1 -InstallPath "D:\Services\Haniel" -ConfigUrl "https://raw.githubusercontent.com/.../seosoyoung.yaml"
 
 .NOTES
-    Requires PowerShell 5.1 or higher.
-    Requires winget for automatic Python installation.
+    Requires PowerShell 5.1+.
+    Requires winget for automatic Git/Python installation.
+    Administrator privileges required for NSSM installation and PATH modification.
 #>
 
 [CmdletBinding()]
 param(
-    [Parameter(HelpMessage="Installation directory")]
+    [Parameter(HelpMessage = "Haniel clone path")]
     [string]$InstallPath,
 
-    [Parameter(HelpMessage="Skip Python installation check")]
-    [switch]$SkipPythonCheck,
+    [Parameter(HelpMessage = "Service config file raw URL")]
+    [string]$ConfigUrl,
 
-    [Parameter(HelpMessage="Haniel config file (haniel.yaml)")]
-    [string]$ConfigFile
+    [Parameter(HelpMessage = "Skip Git installation check")]
+    [switch]$SkipGitCheck,
+
+    [Parameter(HelpMessage = "Skip Python installation check")]
+    [switch]$SkipPythonCheck
 )
 
 $ErrorActionPreference = "Stop"
 
-# Colors for output
+# ============================================================
+# Output helpers
+# ============================================================
+
 function Write-Header($text) {
     Write-Host ""
     Write-Host "=== $text ===" -ForegroundColor Cyan
     Write-Host ""
 }
 
+function Write-Step($step, $text) {
+    Write-Host ""
+    Write-Host "[$step] $text" -ForegroundColor Cyan
+    Write-Host ""
+}
+
 function Write-Success($text) {
-    Write-Host "[OK] $text" -ForegroundColor Green
+    Write-Host "  [OK] $text" -ForegroundColor Green
 }
 
-function Write-Warning($text) {
-    Write-Host "[!] $text" -ForegroundColor Yellow
+function Write-Warn($text) {
+    Write-Host "  [!] $text" -ForegroundColor Yellow
 }
 
-function Write-Error($text) {
-    Write-Host "[X] $text" -ForegroundColor Red
+function Write-Fail($text) {
+    Write-Host "  [X] $text" -ForegroundColor Red
 }
 
 function Write-Info($text) {
-    Write-Host "    $text" -ForegroundColor Gray
+    Write-Host "      $text" -ForegroundColor Gray
 }
 
-# Check if running as administrator
+function Update-SessionPath {
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+}
+
+# ============================================================
+# Prerequisite checks
+# ============================================================
+
 function Test-Administrator {
     $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-# Check Python installation
+function Test-Git {
+    try {
+        $version = & git --version 2>&1
+        if ($version -match "git version") {
+            Write-Success "Git found: $version"
+            return $true
+        }
+    }
+    catch { }
+    Write-Warn "Git not found in PATH"
+    return $false
+}
+
+function Install-Git {
+    Write-Info "Installing Git via winget..."
+    & winget install --id Git.Git -e --source winget --accept-source-agreements --accept-package-agreements 2>&1 | ForEach-Object { Write-Info $_ }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "Failed to install Git via winget"
+        Write-Info "Please install Git manually from https://git-scm.com"
+        exit 1
+    }
+    Update-SessionPath
+    Write-Success "Git installed"
+}
+
 function Test-Python {
     try {
-        $pythonVersion = & python --version 2>&1
-        if ($pythonVersion -match "Python (\d+)\.(\d+)\.(\d+)") {
+        $version = & python --version 2>&1
+        if ($version -match "Python (\d+)\.(\d+)\.(\d+)") {
             $major = [int]$Matches[1]
             $minor = [int]$Matches[2]
             if ($major -ge 3 -and $minor -ge 11) {
                 Write-Success "Python $($Matches[0]) found"
                 return $true
-            } else {
-                Write-Warning "Python found but version too old: $($Matches[0]) (need 3.11+)"
+            }
+            else {
+                Write-Warn "Python version too old: $($Matches[0]) (need 3.11+)"
                 return $false
             }
         }
-    } catch {
-        Write-Warning "Python not found in PATH"
-        return $false
     }
+    catch { }
+    Write-Warn "Python not found in PATH"
     return $false
 }
 
-# Install Python via winget
 function Install-Python {
-    Write-Info "Checking for winget..."
-
-    try {
-        $wingetVersion = & winget --version 2>&1
-        Write-Info "winget found: $wingetVersion"
-    } catch {
-        Write-Error "winget not found. Please install Python manually from https://python.org"
-        exit 1
-    }
-
-    Write-Info "Installing Python 3.12 via winget..."
-
-    & winget install Python.Python.3.12 --accept-source-agreements --accept-package-agreements
-
+    Write-Info "Installing Python 3.13 via winget..."
+    & winget install --id Python.Python.3.13 -e --source winget --accept-source-agreements --accept-package-agreements 2>&1 | ForEach-Object { Write-Info $_ }
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to install Python via winget"
+        Write-Fail "Failed to install Python via winget"
         Write-Info "Please install Python manually from https://python.org"
         exit 1
     }
-
-    # Refresh PATH
-    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-
-    Write-Success "Python installed successfully"
-    Write-Info "You may need to restart your terminal for PATH changes to take effect"
+    Update-SessionPath
+    Write-Success "Python installed"
 }
 
-# Check Node.js installation
-function Test-Node {
-    try {
-        $nodeVersion = & node --version 2>&1
-        if ($nodeVersion -match "v(\d+)\.") {
-            $major = [int]$Matches[1]
-            if ($major -ge 18) {
-                Write-Success "Node.js $nodeVersion found"
-                return $true
-            } else {
-                Write-Warning "Node.js found but version too old: $nodeVersion (need 18+)"
-                return $false
-            }
-        }
-    } catch {
-        Write-Warning "Node.js not found in PATH"
-        return $false
-    }
-    return $false
-}
-
-# NSSM Configuration
+# NSSM constants
 $script:NSSM_VERSION = "2.24-101-g897c7ad"
 $script:NSSM_URL = "https://nssm.cc/ci/nssm-2.24-101-g897c7ad.zip"
 $script:NSSM_INSTALL_PATH = "C:\Tools\nssm"
 
-# Install NSSM
-function Install-NSSM {
-    Write-Info "Installing NSSM $script:NSSM_VERSION..."
+function Test-NSSM {
+    try {
+        $nssmCmd = Get-Command nssm -ErrorAction Stop
+        Write-Success "NSSM found at $($nssmCmd.Source)"
+        return $true
+    }
+    catch { }
+    Write-Warn "NSSM not found in PATH"
+    return $false
+}
 
-    # Check administrator privileges (required for PATH modification)
+function Install-NSSM {
     if (-not (Test-Administrator)) {
-        Write-Error "Administrator privileges required to install NSSM"
+        Write-Fail "Administrator privileges required to install NSSM"
         Write-Info "Please run PowerShell as Administrator and try again"
         return $false
     }
 
-    # Create temp directory for download
+    Write-Info "Installing NSSM $script:NSSM_VERSION..."
+
     $tempDir = Join-Path $env:TEMP "nssm_install_$(Get-Random)"
     $zipPath = Join-Path $tempDir "nssm.zip"
 
     try {
-        # Create temp directory
         New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 
-        # Download NSSM
         Write-Info "Downloading from $script:NSSM_URL..."
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri $script:NSSM_URL -OutFile $zipPath -UseBasicParsing
 
         if (-not (Test-Path $zipPath)) {
-            Write-Error "Failed to download NSSM"
+            Write-Fail "Failed to download NSSM"
             return $false
         }
-        Write-Info "Download complete"
 
-        # Extract zip
         Write-Info "Extracting..."
         Expand-Archive -Path $zipPath -DestinationPath $tempDir -Force
 
-        # Find the extracted folder (contains version in name)
         $extractedDir = Get-ChildItem -Path $tempDir -Directory | Where-Object { $_.Name -like "nssm-*" } | Select-Object -First 1
         if (-not $extractedDir) {
-            Write-Error "Could not find extracted NSSM directory"
+            Write-Fail "Could not find extracted NSSM directory"
             return $false
         }
 
-        # Determine architecture (64-bit or 32-bit)
         $arch = if ([Environment]::Is64BitOperatingSystem) { "win64" } else { "win32" }
         $nssmBinaryDir = Join-Path $extractedDir.FullName $arch
 
         if (-not (Test-Path $nssmBinaryDir)) {
-            Write-Error "Could not find NSSM binary directory for $arch"
+            Write-Fail "NSSM binary not found for $arch"
             return $false
         }
 
-        # Create installation directory
         if (-not (Test-Path $script:NSSM_INSTALL_PATH)) {
-            Write-Info "Creating installation directory: $script:NSSM_INSTALL_PATH"
             New-Item -ItemType Directory -Path $script:NSSM_INSTALL_PATH -Force | Out-Null
         }
 
-        # Copy nssm.exe to installation directory
-        $nssmExe = Join-Path $nssmBinaryDir "nssm.exe"
-        $destExe = Join-Path $script:NSSM_INSTALL_PATH "nssm.exe"
-        Copy-Item -Path $nssmExe -Destination $destExe -Force
+        Copy-Item -Path (Join-Path $nssmBinaryDir "nssm.exe") -Destination (Join-Path $script:NSSM_INSTALL_PATH "nssm.exe") -Force
 
-        Write-Info "NSSM installed to $destExe"
-
-        # Add to PATH (Machine level)
+        # Add to system PATH if not already present
         $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
         if ($machinePath -notlike "*$script:NSSM_INSTALL_PATH*") {
-            Write-Info "Adding NSSM to system PATH..."
-            $newPath = $machinePath + ";" + $script:NSSM_INSTALL_PATH
-            [Environment]::SetEnvironmentVariable("Path", $newPath, "Machine")
-            Write-Info "PATH updated (Machine level)"
-        } else {
-            Write-Info "NSSM already in system PATH"
+            [Environment]::SetEnvironmentVariable("Path", "$machinePath;$script:NSSM_INSTALL_PATH", "Machine")
+            Write-Info "NSSM added to system PATH"
         }
 
-        # Update current session PATH
-        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-
-        Write-Success "NSSM $script:NSSM_VERSION installed successfully"
+        Update-SessionPath
+        Write-Success "NSSM $script:NSSM_VERSION installed"
         return $true
-
-    } catch {
-        Write-Error "Failed to install NSSM: $($_.Exception.Message)"
+    }
+    catch {
+        Write-Fail "Failed to install NSSM: $($_.Exception.Message)"
         return $false
-    } finally {
-        # Cleanup temp directory
+    }
+    finally {
         if (Test-Path $tempDir) {
             Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 }
 
-# Check NSSM installation
-function Test-NSSM {
-    try {
-        $nssmPath = Get-Command nssm -ErrorAction Stop
-        Write-Success "NSSM found at $($nssmPath.Source)"
-        return $true
-    } catch {
-        Write-Warning "NSSM not found in PATH"
-        return $false
-    }
-}
+# ============================================================
+# Main
+# ============================================================
 
-# Check Claude Code installation
-function Test-ClaudeCode {
-    try {
-        $claudePath = Get-Command claude -ErrorAction Stop
-        Write-Success "Claude Code found at $($claudePath.Source)"
-        return $true
-    } catch {
-        Write-Warning "Claude Code not found in PATH"
-        Write-Info "Install with: npm install -g @anthropic-ai/claude-code"
-        return $false
-    }
-}
-
-# Create virtual environment
-function New-HanielVenv {
-    param($Path)
-
-    $venvPath = Join-Path $Path ".venv"
-
-    if (Test-Path $venvPath) {
-        Write-Info "Virtual environment already exists at $venvPath"
-        return $venvPath
-    }
-
-    Write-Info "Creating virtual environment at $venvPath..."
-    & python -m venv $venvPath
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to create virtual environment"
-        exit 1
-    }
-
-    Write-Success "Virtual environment created"
-    return $venvPath
-}
-
-# Install haniel in venv
-function Install-Haniel {
-    param($VenvPath)
-
-    $pipPath = Join-Path $VenvPath "Scripts\pip.exe"
-
-    Write-Info "Installing haniel..."
-
-    # Install from PyPI or local
-    if (Test-Path ".\pyproject.toml") {
-        Write-Info "Installing from local source..."
-        & $pipPath install -e ".[dev]"
-    } else {
-        Write-Info "Installing from PyPI..."
-        & $pipPath install haniel
-    }
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to install haniel"
-        exit 1
-    }
-
-    Write-Success "haniel installed"
-}
-
-# Main script
 function Main {
     Write-Host ""
     Write-Host "  _   _             _      _ " -ForegroundColor Magenta
@@ -314,169 +243,253 @@ function Main {
     Write-Host " |  _  | (_| | | | | |  __/ |" -ForegroundColor Magenta
     Write-Host " |_| |_|\__,_|_| |_|_|\___|_|" -ForegroundColor Magenta
     Write-Host ""
-    Write-Host "  Configuration-based service runner" -ForegroundColor Gray
+    Write-Host "  Bootstrap Installer" -ForegroundColor Gray
     Write-Host ""
 
-    # Check administrator privileges (recommended for NSSM)
     if (-not (Test-Administrator)) {
-        Write-Warning "Not running as Administrator. Some features may not work."
-        Write-Info "Consider running PowerShell as Administrator for full functionality."
+        Write-Warn "Not running as Administrator."
+        Write-Info "NSSM installation and PATH modification require Administrator privileges."
+        Write-Info "Consider restarting PowerShell as Administrator."
         Write-Host ""
     }
 
-    # Step 1: Check requirements
-    Write-Header "Step 1: Checking Requirements"
+    # --------------------------------------------------------
+    # Step 0: Git
+    # --------------------------------------------------------
+    Write-Step "0/5" "Git"
 
-    $pythonOk = $false
-    if (-not $SkipPythonCheck) {
-        $pythonOk = Test-Python
-        if (-not $pythonOk) {
-            $install = Read-Host "Install Python via winget? (Y/n)"
-            if ($install -ne "n" -and $install -ne "N") {
-                Install-Python
-                $pythonOk = Test-Python
+    if (-not $SkipGitCheck) {
+        if (-not (Test-Git)) {
+            $answer = Read-Host "  Install Git via winget? (Y/n)"
+            if ($answer -ne "n" -and $answer -ne "N") {
+                Install-Git
+                if (-not (Test-Git)) {
+                    Write-Fail "Git still not available after installation."
+                    Write-Info "Please restart your terminal and try again."
+                    exit 1
+                }
+            }
+            else {
+                Write-Fail "Git is required. Please install it and try again."
+                exit 1
             }
         }
-    } else {
+    }
+    else {
+        Write-Info "Skipping Git check"
+    }
+
+    # --------------------------------------------------------
+    # Step 1: Python
+    # --------------------------------------------------------
+    Write-Step "1/5" "Python"
+
+    if (-not $SkipPythonCheck) {
+        if (-not (Test-Python)) {
+            $answer = Read-Host "  Install Python 3.13 via winget? (Y/n)"
+            if ($answer -ne "n" -and $answer -ne "N") {
+                Install-Python
+                if (-not (Test-Python)) {
+                    Write-Fail "Python still not available after installation."
+                    Write-Info "Please restart your terminal and try again."
+                    exit 1
+                }
+            }
+            else {
+                Write-Fail "Python 3.11+ is required. Please install it and try again."
+                exit 1
+            }
+        }
+    }
+    else {
         Write-Info "Skipping Python check"
-        $pythonOk = $true
     }
 
-    $nodeOk = Test-Node
-    $nssmOk = Test-NSSM
-    $claudeOk = Test-ClaudeCode
+    # --------------------------------------------------------
+    # Step 2: NSSM
+    # --------------------------------------------------------
+    Write-Step "2/5" "NSSM"
 
-    if (-not $pythonOk) {
-        Write-Error "Python 3.11+ is required. Please install it and try again."
-        exit 1
-    }
-
-    # Warnings for optional dependencies
-    if (-not $nodeOk) {
-        Write-Warning "Node.js is recommended for npm-based MCP servers"
-    }
-    if (-not $nssmOk) {
-        Write-Warning "NSSM is required for Windows service registration"
-        $installNssm = Read-Host "Install NSSM automatically? (Y/n)"
-        if ($installNssm -ne "n" -and $installNssm -ne "N") {
-            $nssmOk = Install-NSSM
-            if (-not $nssmOk) {
-                Write-Warning "NSSM installation failed. You can install it manually later."
+    if (-not (Test-NSSM)) {
+        $answer = Read-Host "  Install NSSM automatically? (Y/n)"
+        if ($answer -ne "n" -and $answer -ne "N") {
+            $ok = Install-NSSM
+            if (-not $ok) {
+                Write-Warn "NSSM installation failed. You can install it manually later."
                 Write-Info "Download from https://nssm.cc/download"
             }
         }
-    }
-    if (-not $claudeOk) {
-        Write-Warning "Claude Code is required for interactive setup"
+        else {
+            Write-Warn "NSSM is required for Windows service registration."
+            Write-Info "You can install it later: https://nssm.cc/download"
+        }
     }
 
-    # Step 2: Choose installation directory
-    Write-Header "Step 2: Installation Directory"
+    # --------------------------------------------------------
+    # Step 3: Install path + clone haniel
+    # --------------------------------------------------------
+    Write-Step "3/5" "Clone Haniel"
 
-    if (-not $InstallPath) {
+    if ([string]::IsNullOrWhiteSpace($InstallPath)) {
         $defaultPath = "C:\Services\Haniel"
-        $InstallPath = Read-Host "Installation directory [$defaultPath]"
+        $InstallPath = Read-Host "  Install path [$defaultPath]"
         if ([string]::IsNullOrWhiteSpace($InstallPath)) {
             $InstallPath = $defaultPath
         }
     }
 
-    # Create directory if it doesn't exist
-    if (-not (Test-Path $InstallPath)) {
-        Write-Info "Creating directory: $InstallPath"
-        New-Item -ItemType Directory -Path $InstallPath -Force | Out-Null
+    if (Test-Path (Join-Path $InstallPath ".git")) {
+        Write-Info "Haniel repository already exists at $InstallPath"
+        Write-Info "Pulling latest changes..."
+        & git -C $InstallPath pull --ff-only 2>&1 | ForEach-Object { Write-Info $_ }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "git pull failed (exit code $LASTEXITCODE). Continuing with existing state."
+            Write-Info "You may want to resolve this manually: git -C $InstallPath status"
+        }
+    }
+    else {
+        if (Test-Path $InstallPath) {
+            # Directory exists but is not a git repo — check if empty
+            $contents = Get-ChildItem -Path $InstallPath -Force
+            if ($contents.Count -gt 0) {
+                Write-Fail "Directory $InstallPath exists and is not empty."
+                Write-Info "Please choose a different path or remove the existing directory."
+                exit 1
+            }
+            # Empty directory — remove so git clone can create it
+            Remove-Item -Path $InstallPath -Force -Recurse
+        }
+
+        Write-Info "Cloning haniel to $InstallPath..."
+        & git clone https://github.com/eiaserinnys/Haniel.git $InstallPath 2>&1 | ForEach-Object { Write-Info $_ }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail "Failed to clone haniel repository"
+            exit 1
+        }
     }
 
-    Write-Success "Installation directory: $InstallPath"
+    Write-Success "Haniel repository ready at $InstallPath"
 
-    # Step 3: Create venv and install haniel
-    Write-Header "Step 3: Installing Haniel"
+    # Create venv + editable install
+    $venvPath = Join-Path $InstallPath ".venv"
+    $pipExe = Join-Path $venvPath "Scripts\pip.exe"
+    $hanielExe = Join-Path $venvPath "Scripts\haniel.exe"
 
-    $venvPath = New-HanielVenv -Path $InstallPath
-    Install-Haniel -VenvPath $venvPath
+    if (-not (Test-Path $venvPath)) {
+        Write-Info "Creating virtual environment..."
+        & python -m venv $venvPath
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail "Failed to create virtual environment"
+            exit 1
+        }
+    }
 
-    # Step 4: Create or find config file
-    Write-Header "Step 4: Configuration"
+    Write-Info "Installing haniel (editable)..."
+    & $pipExe install -e $InstallPath 2>&1 | ForEach-Object { Write-Info $_ }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "Failed to install haniel"
+        exit 1
+    }
 
-    $hanielPath = Join-Path $venvPath "Scripts\haniel.exe"
-    $configPath = if ($ConfigFile) { $ConfigFile } else { Join-Path $InstallPath "haniel.yaml" }
+    Write-Success "haniel installed"
+
+    # --------------------------------------------------------
+    # Step 4: Download config file
+    # --------------------------------------------------------
+    Write-Step "4/5" "Service Configuration"
+
+    if ([string]::IsNullOrWhiteSpace($ConfigUrl)) {
+        $ConfigUrl = Read-Host "  Config file URL (e.g. https://raw.githubusercontent.com/.../seosoyoung.yaml)"
+        if ([string]::IsNullOrWhiteSpace($ConfigUrl)) {
+            Write-Fail "Config URL is required."
+            exit 1
+        }
+    }
+
+    # Validate HTTPS
+    if ($ConfigUrl -notmatch '^https://') {
+        Write-Fail "Config URL must use HTTPS."
+        exit 1
+    }
+
+    # Extract service name from URL filename (strip query string first)
+    $uri = [System.Uri]$ConfigUrl
+    $fileName = [System.IO.Path]::GetFileName($uri.AbsolutePath)
+    $serviceName = [System.IO.Path]::GetFileNameWithoutExtension($fileName)
+
+    if ($serviceName -notmatch '^[a-zA-Z0-9_-]+$') {
+        Write-Fail "Invalid service name derived from URL: '$serviceName'"
+        Write-Info "Service name must contain only letters, numbers, hyphens, and underscores."
+        exit 1
+    }
+    $serviceDir = Join-Path $InstallPath ".services" $serviceName
+
+    Write-Info "Service name : $serviceName"
+    Write-Info "Config dir   : $serviceDir"
+
+    New-Item -ItemType Directory -Path $serviceDir -Force | Out-Null
+
+    $configPath = Join-Path $serviceDir $fileName
+    Write-Info "Downloading $ConfigUrl..."
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $ConfigUrl -OutFile $configPath -UseBasicParsing
+    }
+    catch {
+        Write-Fail "Failed to download config: $($_.Exception.Message)"
+        exit 1
+    }
 
     if (-not (Test-Path $configPath)) {
-        Write-Warning "No haniel.yaml found at $configPath"
-        Write-Info "You need to create a haniel.yaml configuration file."
-        Write-Info "See: https://github.com/eiaserinnys/Haniel for examples"
-        Write-Host ""
-        $createSample = Read-Host "Create a sample config? (Y/n)"
-        if ($createSample -ne "n" -and $createSample -ne "N") {
-            $sampleConfig = @"
-# Haniel Configuration
-# See https://github.com/eiaserinnys/Haniel for full documentation
-
-poll_interval: 60
-
-repos: {}
-
-services: {}
-
-install:
-  requirements:
-    python: ">=3.11"
-    nssm: true
-    claude-code: true
-
-  directories:
-    - ./runtime
-    - ./runtime/logs
-    - ./workspace
-
-  configs:
-    workspace-env:
-      path: ./workspace/.env
-      keys:
-        - key: DEBUG
-          default: "false"
-
-  service:
-    name: haniel
-    display: "Haniel Service Runner"
-    working_directory: "{root}"
-"@
-            Set-Content -Path $configPath -Value $sampleConfig
-            Write-Success "Sample config created at $configPath"
-            Write-Info "Edit the config file to add your services and repositories"
-        }
-    } else {
-        Write-Success "Config found: $configPath"
+        Write-Fail "Config file download failed."
+        exit 1
     }
 
-    # Step 5: Run haniel install
-    Write-Header "Step 5: Running Haniel Install"
+    Write-Success "Config saved to $configPath"
 
-    if (Test-Path $configPath) {
-        $runInstall = Read-Host "Run 'haniel install' now? (Y/n)"
-        if ($runInstall -ne "n" -and $runInstall -ne "N") {
-            Push-Location $InstallPath
-            try {
-                Write-Info "Running: $hanielPath install $configPath --skip-interactive"
-                & $hanielPath install (Split-Path $configPath -Leaf) --skip-interactive
-            } finally {
-                Pop-Location
-            }
-        }
+    # --------------------------------------------------------
+    # Step 5: haniel install
+    # --------------------------------------------------------
+    Write-Step "5/5" "Running haniel install"
+
+    Write-Info "Working directory: $serviceDir"
+    Write-Info "Command: $hanielExe install $fileName"
+    Write-Host ""
+
+    Push-Location $serviceDir
+    try {
+        & $hanielExe install $fileName
+        $installExitCode = $LASTEXITCODE
+    }
+    finally {
+        Pop-Location
     }
 
+    if ($installExitCode -ne 0) {
+        Write-Fail "haniel install exited with code $installExitCode"
+        Write-Info "Check the output above for details."
+        Write-Info "You can re-run: $hanielExe install $fileName"
+        Write-Info "  (from directory: $serviceDir)"
+        exit 1
+    }
+
+    # --------------------------------------------------------
     # Done
+    # --------------------------------------------------------
     Write-Header "Installation Complete"
 
-    Write-Host "Haniel has been installed to: $InstallPath" -ForegroundColor Green
+    Write-Host "  Service '$serviceName' has been set up at:" -ForegroundColor Green
+    Write-Host "    $serviceDir" -ForegroundColor Green
     Write-Host ""
-    Write-Host "Next steps:" -ForegroundColor Yellow
-    Write-Host "  1. Edit $configPath to configure your services" -ForegroundColor White
-    Write-Host "  2. Run: $hanielPath install haniel.yaml" -ForegroundColor White
-    Write-Host "  3. Start manually: $hanielPath run haniel.yaml" -ForegroundColor White
-    Write-Host "  4. Or start as service: nssm start haniel" -ForegroundColor White
+    Write-Host "  Haniel commands:" -ForegroundColor Yellow
+    Write-Host "    Start service : $hanielExe run $fileName" -ForegroundColor White
+    Write-Host "    Validate      : $hanielExe validate $fileName" -ForegroundColor White
+    Write-Host "    NSSM start    : nssm start $serviceName" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Config directory: $serviceDir" -ForegroundColor Gray
+    Write-Host "  Haniel root     : $InstallPath" -ForegroundColor Gray
     Write-Host ""
 }
 
-# Run main
+# Run
 Main
