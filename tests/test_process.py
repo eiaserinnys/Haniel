@@ -497,14 +497,14 @@ while True:
         (work_dir / "marker.txt").write_text("test")
 
         config = ServiceConfig(
-            run=f"{sys.executable} -c \"import os; print(os.getcwd()); import time; time.sleep(60)\"",
+            run=f"{sys.executable} -u -c \"import os; print(os.getcwd()); import time; time.sleep(60)\"",
             cwd="workdir",
         )
 
         managed = process_manager.start_service("test", config)
 
         try:
-            time.sleep(0.5)
+            time.sleep(1.0)  # Allow time for output flush on Windows
             lines = managed.log_capture.get_recent_lines()
             # Check that the cwd was set correctly
             assert any("workdir" in line for line in lines)

@@ -1074,6 +1074,7 @@ class TestMechanicalInstallerExtended:
 
     def test_resolve_path_absolute(self, sample_config):
         """Test resolving absolute path."""
+        import sys
         from haniel.installer.mechanical import MechanicalInstaller
         from haniel.installer.state import InstallState
 
@@ -1082,8 +1083,14 @@ class TestMechanicalInstallerExtended:
             state = InstallState()
             installer = MechanicalInstaller(sample_config, config_dir, state)
 
-            result = installer._resolve_path("/absolute/path")
-            assert result == Path("/absolute/path")
+            # Use platform-appropriate absolute path
+            if sys.platform == "win32":
+                abs_path = "C:/absolute/path"
+            else:
+                abs_path = "/absolute/path"
+
+            result = installer._resolve_path(abs_path)
+            assert result == Path(abs_path)
 
     def test_check_version_greater_equal(self, sample_config):
         """Test version checking with >=."""
@@ -1220,8 +1227,8 @@ class TestMechanicalInstallerExtended:
 
             config_file = config_dir / "config.json"
             assert config_file.exists()
-            content = json.loads(config_file.read_text())
-            assert content["root"] == str(config_dir)
+            content = json.loads(config_file.read_text(encoding="utf-8"))
+            assert content["root"] == config_dir.as_posix()
 
     @patch("subprocess.run")
     def test_clone_repos_already_exists(self, mock_run, sample_config):

@@ -173,6 +173,7 @@ def _run_git(
         cwd=cwd,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=check,
         timeout=timeout,
         env=env,
@@ -266,7 +267,7 @@ def clone_repo(url: str, branch: str, path: Path, timeout: int = DEFAULT_GIT_TIM
         raise GitCloneError(
             f"Failed to clone repository",
             url=url,
-            stderr=e.stderr.strip(),
+            stderr=e.stderr.strip() if e.stderr else None,
             returncode=e.returncode,
         ) from e
 
