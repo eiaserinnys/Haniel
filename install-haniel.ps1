@@ -7,7 +7,7 @@
 
         irm https://raw.githubusercontent.com/eiaserinnys/Haniel/main/install-haniel.ps1 | iex
 
-    The script handles prerequisite installation (Git, Python, NSSM),
+    The script handles prerequisite installation (Git, Python, WinSW),
     clones the haniel repository, downloads a service config file,
     and delegates all environment setup to `haniel install`.
 
@@ -22,7 +22,7 @@
 .NOTES
     Requires PowerShell 5.1+.
     Requires winget for automatic Git/Python installation.
-    Administrator privileges required for NSSM installation and PATH modification.
+    Administrator privileges required for service registration and PATH modification.
 #>
 
 [CmdletBinding()]
@@ -146,88 +146,37 @@ function Install-Python {
     Write-Success "Python installed"
 }
 
-# NSSM constants
-$script:NSSM_VERSION = "2.24-101-g897c7ad"
-$script:NSSM_URL = "https://nssm.cc/ci/nssm-2.24-101-g897c7ad.zip"
-$script:NSSM_INSTALL_PATH = "C:\Tools\nssm"
+# WinSW constants
+$script:WINSW_VERSION = "v2.12.0"
+$script:WINSW_URL = "https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe"
 
-function Test-NSSM {
-    try {
-        $nssmCmd = Get-Command nssm -ErrorAction Stop
-        Write-Success "NSSM found at $($nssmCmd.Source)"
+function Install-WinSW {
+    $binDir = Join-Path $InstallPath "bin"
+    $dest = Join-Path $binDir "winsw.exe"
+
+    if (Test-Path $dest) {
+        Write-Success "WinSW already exists at $dest"
         return $true
     }
-    catch { }
-    Write-Warn "NSSM not found in PATH"
-    return $false
-}
 
-function Install-NSSM {
-    if (-not (Test-Administrator)) {
-        Write-Fail "Administrator privileges required to install NSSM"
-        Write-Info "Please run PowerShell as Administrator and try again"
-        return $false
-    }
-
-    Write-Info "Installing NSSM $script:NSSM_VERSION..."
-
-    $tempDir = Join-Path $env:TEMP "nssm_install_$(Get-Random)"
-    $zipPath = Join-Path $tempDir "nssm.zip"
+    Write-Info "Downloading WinSW $script:WINSW_VERSION..."
 
     try {
-        New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
-
-        Write-Info "Downloading from $script:NSSM_URL..."
+        New-Item -ItemType Directory -Path $binDir -Force | Out-Null
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri $script:NSSM_URL -OutFile $zipPath -UseBasicParsing
+        Invoke-WebRequest -Uri $script:WINSW_URL -OutFile $dest -UseBasicParsing
 
-        if (-not (Test-Path $zipPath)) {
-            Write-Fail "Failed to download NSSM"
+        if (-not (Test-Path $dest)) {
+            Write-Fail "Failed to download WinSW"
             return $false
         }
 
-        Write-Info "Extracting..."
-        Expand-Archive -Path $zipPath -DestinationPath $tempDir -Force
-
-        $extractedDir = Get-ChildItem -Path $tempDir -Directory | Where-Object { $_.Name -like "nssm-*" } | Select-Object -First 1
-        if (-not $extractedDir) {
-            Write-Fail "Could not find extracted NSSM directory"
-            return $false
-        }
-
-        $arch = if ([Environment]::Is64BitOperatingSystem) { "win64" } else { "win32" }
-        $nssmBinaryDir = Join-Path $extractedDir.FullName $arch
-
-        if (-not (Test-Path $nssmBinaryDir)) {
-            Write-Fail "NSSM binary not found for $arch"
-            return $false
-        }
-
-        if (-not (Test-Path $script:NSSM_INSTALL_PATH)) {
-            New-Item -ItemType Directory -Path $script:NSSM_INSTALL_PATH -Force | Out-Null
-        }
-
-        Copy-Item -Path (Join-Path $nssmBinaryDir "nssm.exe") -Destination (Join-Path $script:NSSM_INSTALL_PATH "nssm.exe") -Force
-
-        # Add to system PATH if not already present
-        $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-        if ($machinePath -notlike "*$script:NSSM_INSTALL_PATH*") {
-            [Environment]::SetEnvironmentVariable("Path", "$machinePath;$script:NSSM_INSTALL_PATH", "Machine")
-            Write-Info "NSSM added to system PATH"
-        }
-
-        Update-SessionPath
-        Write-Success "NSSM $script:NSSM_VERSION installed"
+        Write-Success "WinSW $script:WINSW_VERSION downloaded to $dest"
         return $true
     }
     catch {
-        Write-Fail "Failed to install NSSM: $($_.Exception.Message)"
+        Write-Fail "Failed to download WinSW: $($_.Exception.Message)"
         return $false
-    }
-    finally {
-        if (Test-Path $tempDir) {
-            Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
     }
 }
 
@@ -247,10 +196,10 @@ function Main {
     Write-Host ""
 
     if (-not (Test-Administrator)) {
-        Write-Warn "Not running as Administrator."
-        Write-Info "NSSM installation and PATH modification require Administrator privileges."
-        Write-Info "Consider restarting PowerShell as Administrator."
-        Write-Host ""
+        Write-Fail "Administrator privileges required."
+        Write-Info "Service registration and PATH modification need elevated permissions."
+        Write-Info "Right-click PowerShell -> 'Run as Administrator' and try again."
+        exit 1
     }
 
     # --------------------------------------------------------
@@ -306,23 +255,15 @@ function Main {
     }
 
     # --------------------------------------------------------
-    # Step 2: NSSM
+    # Step 2: WinSW (Service Wrapper)
     # --------------------------------------------------------
-    Write-Step "2/5" "NSSM"
+    Write-Step "2/5" "WinSW (Service Wrapper)"
 
-    if (-not (Test-NSSM)) {
-        $answer = Read-Host "  Install NSSM automatically? (Y/n)"
-        if ($answer -ne "n" -and $answer -ne "N") {
-            $ok = Install-NSSM
-            if (-not $ok) {
-                Write-Warn "NSSM installation failed. You can install it manually later."
-                Write-Info "Download from https://nssm.cc/download"
-            }
-        }
-        else {
-            Write-Warn "NSSM is required for Windows service registration."
-            Write-Info "You can install it later: https://nssm.cc/download"
-        }
+    $ok = Install-WinSW
+    if (-not $ok) {
+        Write-Fail "WinSW is required for Windows service registration."
+        Write-Info "You can download it manually from https://github.com/winsw/winsw/releases"
+        exit 1
     }
 
     # --------------------------------------------------------
@@ -482,9 +423,10 @@ function Main {
     Write-Host "    $serviceDir" -ForegroundColor Green
     Write-Host ""
     Write-Host "  Haniel commands:" -ForegroundColor Yellow
-    Write-Host "    Start service : $hanielExe run $fileName" -ForegroundColor White
+    Write-Host "    Start service : sc start $serviceName" -ForegroundColor White
+    Write-Host "    Stop service  : sc stop $serviceName" -ForegroundColor White
+    Write-Host "    Run manually  : $hanielExe run $fileName" -ForegroundColor White
     Write-Host "    Validate      : $hanielExe validate $fileName" -ForegroundColor White
-    Write-Host "    NSSM start    : nssm start $serviceName" -ForegroundColor White
     Write-Host ""
     Write-Host "  Config directory: $serviceDir" -ForegroundColor Gray
     Write-Host "  Haniel root     : $InstallPath" -ForegroundColor Gray

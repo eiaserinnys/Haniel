@@ -28,7 +28,7 @@ class InstallPhase(str, Enum):
     BOOTSTRAP = "bootstrap"  # Phase 0: Check Claude Code
     MECHANICAL = "mechanical"  # Phase 1: Directories, clone, venv
     INTERACTIVE = "interactive"  # Phase 2: Claude Code session
-    FINALIZE = "finalize"  # Phase 3: Config generation, NSSM
+    FINALIZE = "finalize"  # Phase 3: Config generation, WinSW
     COMPLETE = "complete"
 
 

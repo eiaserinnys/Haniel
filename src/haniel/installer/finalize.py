@@ -3,7 +3,7 @@ Finalizer - Phase 3.
 
 Handles the final installation steps:
 - Generate config files from collected values
-- Register system service (NSSM on Windows)
+- Register system service (WinSW on Windows)
 
 haniel doesn't care what the configs contain - it just writes files.
 """
@@ -11,12 +11,16 @@ haniel doesn't care what the configs contain - it just writes files.
 import json
 import logging
 import platform
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape as xml_escape, quoteattr as xml_quoteattr
 
 from ..config import HanielConfig
+from ..config.model import ServiceDefinitionConfig
 from .state import InstallState
+from .utils import find_winsw
 
 logger = logging.getLogger(__name__)
 
@@ -29,17 +33,20 @@ class Finalizer:
         config: HanielConfig,
         config_dir: Path,
         state: InstallState,
+        config_filename: str = "haniel.yaml",
     ):
         """Initialize the finalizer.
 
         Args:
             config: Haniel configuration
-            config_dir: Directory containing haniel.yaml
+            config_dir: Directory containing the config file
             state: Installation state
+            config_filename: Name of the config file (e.g. "haniel.yaml")
         """
         self.config = config
         self.config_dir = config_dir
         self.state = state
+        self.config_filename = config_filename
 
     def _resolve_path(self, path: str) -> Path:
         """Resolve a path relative to config_dir.
@@ -175,7 +182,7 @@ class Finalizer:
     def register_service(self) -> None:
         """Register the system service.
 
-        On Windows, uses NSSM. On other platforms, logs instructions.
+        On Windows, uses WinSW. On other platforms, logs instructions.
         """
         if not self.config.install or not self.config.install.service:
             logger.info("No service configuration, skipping registration")
@@ -184,21 +191,79 @@ class Finalizer:
         service_cfg = self.config.install.service
 
         if platform.system() == "Windows":
-            self._register_nssm_service(service_cfg)
+            self._register_winsw_service(service_cfg)
         else:
             self._log_service_instructions(service_cfg)
 
-    def _register_nssm_service(self, service_cfg) -> None:
-        """Register service using NSSM on Windows.
+    def _generate_winsw_xml(self, service_cfg: ServiceDefinitionConfig, working_dir: str) -> str:
+        """Generate WinSW XML configuration.
+
+        Args:
+            service_cfg: Service configuration
+            working_dir: Resolved working directory path
+
+        Returns:
+            XML configuration string
+        """
+        python_path = shutil.which("python")
+        if not python_path:
+            raise RuntimeError("Python not found in PATH")
+
+        lines = [
+            '<?xml version="1.0" encoding="utf-8"?>',
+            "<service>",
+            f"  <id>{xml_escape(service_cfg.name)}</id>",
+            f"  <executable>{xml_escape(python_path)}</executable>",
+            f"  <arguments>-m haniel.cli run {xml_escape(self.config_filename)}</arguments>",
+        ]
+
+        if service_cfg.display:
+            lines.append(f"  <name>{xml_escape(service_cfg.display)}</name>")
+
+        lines.append(f"  <workingdirectory>{xml_escape(working_dir)}</workingdirectory>")
+
+        # Environment variables
+        if service_cfg.environment:
+            for k, v in service_cfg.environment.items():
+                resolved = v.replace("{root}", str(self.config_dir))
+                lines.append(f'  <env name={xml_quoteattr(k)} value={xml_quoteattr(resolved)}/>')
+
+        # Logging with roll-by-size
+        lines.extend([
+            '  <log mode="roll">',
+            "    <sizeThreshold>10240</sizeThreshold>",
+            "    <keepFiles>8</keepFiles>",
+            "    <logpath>%BASE%\\logs</logpath>",
+            "  </log>",
+        ])
+
+        # Graceful shutdown timeout and failure recovery
+        lines.extend([
+            "  <stoptimeout>15 sec</stoptimeout>",
+            '  <onfailure action="restart" delay="10 sec"/>',
+            '  <onfailure action="restart" delay="30 sec"/>',
+            '  <onfailure action="none"/>',
+            "  <startmode>Automatic</startmode>",
+            "</service>",
+        ])
+
+        return "\n".join(lines) + "\n"
+
+    def _register_winsw_service(self, service_cfg: ServiceDefinitionConfig) -> None:
+        """Register service using WinSW on Windows.
+
+        Creates a WinSW XML config and service executable, then registers
+        the service with Windows Service Control Manager.
 
         Args:
             service_cfg: Service configuration
         """
-        import shutil
-
-        nssm_path = shutil.which("nssm")
-        if not nssm_path:
-            raise RuntimeError("NSSM not found in PATH")
+        winsw_path = find_winsw(self.config_dir)
+        if not winsw_path:
+            raise RuntimeError(
+                "WinSW not found. Expected in bin/winsw.exe (walking up from "
+                f"{self.config_dir}) or in PATH"
+            )
 
         service_name = service_cfg.name
 
@@ -207,96 +272,46 @@ class Finalizer:
             "{root}", str(self.config_dir)
         )
 
-        # Get Python executable
-        python_path = shutil.which("python")
-        if not python_path:
-            raise RuntimeError("Python not found in PATH")
-
         try:
-            # Remove existing service if present
+            # Copy winsw.exe as {service_name}.exe (WinSW naming convention)
+            service_exe = self.config_dir / f"{service_name}.exe"
+            shutil.copy2(winsw_path, service_exe)
+
+            # Generate XML configuration
+            xml_path = self.config_dir / f"{service_name}.xml"
+            xml_content = self._generate_winsw_xml(service_cfg, working_dir)
+            xml_path.write_text(xml_content, encoding="utf-8")
+
+            # Create log directory
+            log_dir = self.config_dir / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+
+            # Remove existing service if present (ignore errors)
             subprocess.run(
-                [nssm_path, "remove", service_name, "confirm"],
+                [str(service_exe), "stop", "--no-elevate"],
+                capture_output=True,
+            )
+            subprocess.run(
+                [str(service_exe), "uninstall", "--no-elevate"],
                 capture_output=True,
             )
 
-            # Install the service
-            # haniel run haniel.yaml
+            # Register the service
             result = subprocess.run(
-                [
-                    nssm_path,
-                    "install",
-                    service_name,
-                    python_path,
-                    "-m",
-                    "haniel.cli",
-                    "run",
-                    "haniel.yaml",
-                ],
+                [str(service_exe), "install", "--no-elevate"],
                 capture_output=True,
                 text=True,
             )
             if result.returncode != 0:
-                raise RuntimeError(f"NSSM install failed: {result.stderr}")
+                raise RuntimeError(f"WinSW install failed: {result.stderr}")
 
-            # Set display name
-            if service_cfg.display:
-                subprocess.run(
-                    [nssm_path, "set", service_name, "DisplayName", service_cfg.display],
-                    capture_output=True,
-                )
-
-            # Set working directory
-            subprocess.run(
-                [nssm_path, "set", service_name, "AppDirectory", working_dir],
-                capture_output=True,
-            )
-
-            # Set environment variables
-            if service_cfg.environment:
-                resolved_env = {
-                    k: v.replace("{root}", str(self.config_dir))
-                    for k, v in service_cfg.environment.items()
-                }
-                env_str = " ".join(
-                    f"{k}={v}" for k, v in resolved_env.items()
-                )
-                subprocess.run(
-                    [nssm_path, "set", service_name, "AppEnvironmentExtra", env_str],
-                    capture_output=True,
-                )
-
-            # Set stdout/stderr logging
-            log_dir = Path(working_dir) / "logs"
-            log_dir.mkdir(parents=True, exist_ok=True)
-
-            subprocess.run(
-                [
-                    nssm_path,
-                    "set",
-                    service_name,
-                    "AppStdout",
-                    str(log_dir / f"{service_name}.log"),
-                ],
-                capture_output=True,
-            )
-            subprocess.run(
-                [
-                    nssm_path,
-                    "set",
-                    service_name,
-                    "AppStderr",
-                    str(log_dir / f"{service_name}.err.log"),
-                ],
-                capture_output=True,
-            )
-
-            logger.info(f"Registered NSSM service: {service_name}")
-            logger.info(f"  Start with: nssm start {service_name}")
-            logger.info(f"  Stop with: nssm stop {service_name}")
-            logger.info(f"  Status: nssm status {service_name}")
+            logger.info(f"Registered Windows service: {service_name}")
+            logger.info(f"  Start with: sc start {service_name}")
+            logger.info(f"  Stop with: sc stop {service_name}")
+            logger.info(f"  Status: sc query {service_name}")
 
         except Exception as e:
-            logger.error(f"Failed to register NSSM service: {e}")
+            logger.error(f"Failed to register WinSW service: {e}")
             raise
 
     def _log_service_instructions(self, service_cfg) -> None:

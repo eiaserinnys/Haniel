@@ -29,17 +29,20 @@ class InstallOrchestrator:
         config: HanielConfig,
         config_dir: Path,
         state: InstallState,
+        config_filename: str = "haniel.yaml",
     ):
         """Initialize the orchestrator.
 
         Args:
             config: Haniel configuration
-            config_dir: Directory containing haniel.yaml
+            config_dir: Directory containing the config file
             state: Installation state
+            config_filename: Name of the config file (e.g. "haniel.yaml")
         """
         self.config = config
         self.config_dir = config_dir
         self.state = state
+        self.config_filename = config_filename
         self._state_file = config_dir / "install.state"
 
         # Lazy import to avoid circular dependencies
@@ -75,7 +78,9 @@ class InstallOrchestrator:
         if self._finalizer is None:
             from .finalize import Finalizer
 
-            self._finalizer = Finalizer(self.config, self.config_dir, self.state)
+            self._finalizer = Finalizer(
+                self.config, self.config_dir, self.state, self.config_filename
+            )
         return self._finalizer
 
     def check_claude_code(self) -> bool:
