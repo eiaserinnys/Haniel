@@ -22,11 +22,13 @@ from .health import HealthManager, ServiceState
 from .logs import LogCapture, LogManager, StreamReader
 from .process import ProcessManager, ReadyCondition, ReadyConditionType
 from .runner import DependencyGraph, ServiceRunner
+from .. import SelfUpdateExit
 
 __all__ = [
     # runner
     "ServiceRunner",
     "DependencyGraph",
+    "SelfUpdateExit",
     # process
     "ProcessManager",
     "ReadyCondition",

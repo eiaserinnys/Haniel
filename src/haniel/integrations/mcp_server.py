@@ -181,6 +181,14 @@ class HanielMcpServer:
                     "properties": {},
                 },
             },
+            {
+                "name": "haniel_approve_update",
+                "description": "Approve a pending haniel self-update. Shuts down all services and restarts with updated code.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
         ]
 
     async def read_resource(self, uri: str) -> str:
@@ -249,6 +257,8 @@ class HanielMcpServer:
             return await self._enable_service(arguments.get("service", ""))
         elif name == "haniel_reload":
             return await self._reload_config()
+        elif name == "haniel_approve_update":
+            return await self._approve_self_update()
         else:
             return f"Error: Unknown tool '{name}'"
 
@@ -464,6 +474,16 @@ class HanielMcpServer:
         except Exception as e:
             logger.error(f"Failed to reload config: {e}")
             return json.dumps({"error": f"Failed to reload configuration: {e}"})
+
+    async def _approve_self_update(self) -> str:
+        """Approve a pending self-update.
+
+        Delegates to runner.approve_self_update() which signals the main
+        thread to exit with code 10 for the wrapper script to handle.
+        """
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, self.runner.approve_self_update)
+        return result
 
     async def start(self) -> None:
         """Start the MCP server.

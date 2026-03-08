@@ -226,4 +226,12 @@ def check_missing_references(config: HanielConfig) -> list[ValidationError]:
                 location=f"services.{name}.repo"
             ))
 
+    # Check self-update repo reference
+    if config.self_update and config.self_update.repo not in repo_names:
+        errors.append(ValidationError(
+            message=f"Self-update references non-existent repo '{config.self_update.repo}'",
+            severity="error",
+            location="self.repo"
+        ))
+
     return errors

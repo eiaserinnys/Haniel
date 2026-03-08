@@ -206,6 +206,7 @@ class RunnerState:
     start_time: datetime | None = None
     last_poll: datetime | None = None
     poll_count: int = 0
+    self_update_pending: bool = False
 
 
 class ServiceRunner:
@@ -278,6 +279,12 @@ class ServiceRunner:
 
         # MCP server (lazy initialized)
         self._mcp_server = None
+
+        # Self-update (see ADR-0002)
+        self._self_repo: str | None = (
+            config.self_update.repo if config.self_update else None
+        )
+        self._self_update_requested = threading.Event()
 
     @property
     def is_running(self) -> bool:
@@ -485,7 +492,8 @@ class ServiceRunner:
             return
 
         logger.info("Stopping ServiceRunner")
-        self._state.running = False
+        with self._state_lock:
+            self._state.running = False
         self._stop_event.set()
 
         # Stop MCP server
@@ -598,9 +606,21 @@ class ServiceRunner:
     def _apply_changes(self, changed_repos: list[str]) -> None:
         """Apply changes from the specified repositories.
 
+        If the self-update repo is among the changed repos, it is handled
+        separately via _initiate_self_update() instead of the normal
+        pull → restart flow. See ADR-0002 for architecture details.
+
         Args:
             changed_repos: List of repo names with changes
         """
+        # Check for self-update repo
+        if self._self_repo and self._self_repo in changed_repos:
+            self._initiate_self_update()
+            # Remove self-repo from list; remaining repos still get normal treatment
+            changed_repos = [r for r in changed_repos if r != self._self_repo]
+            if not changed_repos:
+                return
+
         # Collect all affected services
         all_affected: set[str] = set()
         for repo in changed_repos:
@@ -636,6 +656,114 @@ class ServiceRunner:
         for name in startup_order:
             logger.info(f"Restarting {name} after update")
             self._start_service(name)
+
+    def _initiate_self_update(self) -> None:
+        """Handle detection of changes in haniel's own repo.
+
+        If auto_update is true, immediately signals the main thread to exit
+        for update. Otherwise, sets pending state and sends a webhook notification.
+        The actual update is deferred until approve_self_update() is called.
+
+        This method is called from the poll thread, so it cannot raise
+        SelfUpdateExit directly (SystemExit in a daemon thread terminates
+        only that thread). Instead, it signals the main thread via an event.
+
+        See ADR-0002 for the full self-update architecture.
+        """
+        if self.config.self_update is None:
+            raise RuntimeError("self_update config required for self-update")
+
+        if self.config.self_update.auto_update:
+            logger.info("Self-update: auto_update=true, exiting for update")
+            self._notify_self_update_detected(auto=True)
+            self._self_update_requested.set()
+            self.stop()
+            return
+
+        # Manual approval mode
+        with self._state_lock:
+            if self._state.self_update_pending:
+                logger.debug("Self-update already pending, skipping duplicate")
+                return
+            self._state.self_update_pending = True
+
+        logger.info("Self-update: changes detected, awaiting approval")
+        self._notify_self_update_detected(auto=False)
+
+    def approve_self_update(self) -> str:
+        """Approve a pending self-update.
+
+        Called via MCP tool. Signals the main thread to exit with code 10,
+        which tells the wrapper script to perform the update.
+
+        Returns:
+            Status message
+        """
+        with self._state_lock:
+            if not self._state.self_update_pending:
+                return "No self-update pending."
+
+        logger.info("Self-update approved, shutting down for update")
+        self._notify_self_update_approved()
+        self._self_update_requested.set()
+        self.stop()
+        return "Self-update approved. Shutting down for update."
+
+    @property
+    def self_update_requested(self) -> bool:
+        """Check if self-update exit has been requested."""
+        return self._self_update_requested.is_set()
+
+    def _notify_self_update(
+        self,
+        event_type_name: str,
+        message: str,
+        details: dict | None = None,
+    ) -> None:
+        """Send a self-update webhook notification.
+
+        Args:
+            event_type_name: EventType enum value name (e.g., "SELF_UPDATE_DETECTED")
+            message: Human-readable message
+            details: Optional details dict
+        """
+        try:
+            from ..integrations.webhook import (
+                EventType,
+                WebhookMessage,
+                WebhookNotifier,
+            )
+
+            if not self.config.webhooks:
+                return
+
+            event_type = EventType[event_type_name]
+            msg = WebhookMessage(
+                event_type=event_type,
+                service_name="haniel",
+                message=message,
+                details=details or {},
+            )
+            notifier = WebhookNotifier(self.config.webhooks)
+            notifier.notify_sync(msg)
+        except Exception as e:
+            logger.warning(f"Failed to send self-update notification: {e}")
+
+    def _notify_self_update_detected(self, *, auto: bool) -> None:
+        """Send webhook notification for self-update detection."""
+        mode = "auto-updating" if auto else "awaiting approval"
+        self._notify_self_update(
+            "SELF_UPDATE_DETECTED",
+            f"Changes detected in haniel's own repository. {mode.capitalize()}.",
+            {"repo": self._self_repo, "mode": mode},
+        )
+
+    def _notify_self_update_approved(self) -> None:
+        """Send webhook notification for self-update approval."""
+        self._notify_self_update(
+            "SELF_UPDATE_APPROVED",
+            "Self-update approved. Shutting down for update.",
+        )
 
     def _pull_repo(self, repo_name: str) -> bool:
         """Pull changes for a repository.
@@ -714,7 +842,7 @@ class ServiceRunner:
 
         # Read runner state with lock for thread safety
         with self._state_lock:
-            return {
+            result = {
                 "running": self._state.running,
                 "start_time": self._state.start_time.isoformat() if self._state.start_time else None,
                 "last_poll": self._state.last_poll.isoformat() if self._state.last_poll else None,
@@ -723,3 +851,12 @@ class ServiceRunner:
                 "services": service_status,
                 "repos": repo_status,
             }
+            if self._self_repo:
+                result["self_update"] = {
+                    "repo": self._self_repo,
+                    "pending": self._state.self_update_pending,
+                    "auto_update": self.config.self_update.auto_update
+                    if self.config.self_update
+                    else False,
+                }
+            return result

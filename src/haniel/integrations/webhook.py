@@ -56,6 +56,8 @@ class EventType(str, Enum):
     DEPLOY_COMPLETE = "deploy_complete"
     GRACEFUL_FAILED = "graceful_failed"
     CIRCUIT_BREAKER = "circuit_breaker"
+    SELF_UPDATE_DETECTED = "self_update_detected"
+    SELF_UPDATE_APPROVED = "self_update_approved"
 
 
 # Event metadata for styling
@@ -95,6 +97,18 @@ EVENT_METADATA = {
         "color": 0xE74C3C,  # Red
         "slack_color": "danger",
         "title": "Circuit Breaker Tripped",
+    },
+    EventType.SELF_UPDATE_DETECTED: {
+        "emoji": ":package:",
+        "color": 0x9B59B6,  # Purple
+        "slack_color": "#9B59B6",
+        "title": "Self-Update Available",
+    },
+    EventType.SELF_UPDATE_APPROVED: {
+        "emoji": ":white_check_mark:",
+        "color": 0x2ECC71,  # Green
+        "slack_color": "good",
+        "title": "Self-Update Approved",
     },
 }
 
