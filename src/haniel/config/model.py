@@ -120,7 +120,7 @@ class ConfigFileConfig(BaseModel):
 
 
 class ServiceDefinitionConfig(BaseModel):
-    """Configuration for system service registration (NSSM, systemd)."""
+    """Configuration for system service registration (WinSW, systemd)."""
 
     name: str = Field(..., description="Service name")
     display: str | None = Field(default=None, description="Display name")

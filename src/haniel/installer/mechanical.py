@@ -23,6 +23,7 @@ from typing import Any
 
 from ..config import HanielConfig
 from .state import InstallState
+from .utils import find_winsw
 
 logger = logging.getLogger(__name__)
 
@@ -172,22 +173,22 @@ class MechanicalInstaller:
                     "error": str(e),
                 })
 
-        # Check NSSM (Windows only)
-        if "nssm" in requirements and requirements["nssm"]:
+        # Check WinSW (Windows only)
+        if "winsw" in requirements and requirements["winsw"]:
             if platform.system() == "Windows":
-                nssm_path = shutil.which("nssm")
+                winsw_path = find_winsw(self.config_dir)
                 results.append({
-                    "name": "nssm",
-                    "installed": nssm_path is not None,
-                    "path": nssm_path,
-                    "error": None if nssm_path else "nssm not found in PATH",
+                    "name": "winsw",
+                    "installed": winsw_path is not None,
+                    "path": str(winsw_path) if winsw_path else None,
+                    "error": None if winsw_path else "WinSW not found in bin/ or PATH",
                 })
             else:
-                # NSSM is Windows-only, skip on other platforms
+                # WinSW is Windows-only, skip on other platforms
                 results.append({
-                    "name": "nssm",
+                    "name": "winsw",
                     "installed": True,
-                    "message": "NSSM check skipped (not Windows)",
+                    "message": "WinSW check skipped (not Windows)",
                 })
 
         # Check Claude Code

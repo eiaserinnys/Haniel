@@ -248,7 +248,9 @@ def install(
             state = InstallState()
 
     # Create orchestrator
-    orchestrator = InstallOrchestrator(haniel_config, config_dir, state)
+    orchestrator = InstallOrchestrator(
+        haniel_config, config_dir, state, config_filename=config.name
+    )
 
     click.echo(f"Installing from: {config}")
     click.echo()
@@ -334,7 +336,7 @@ def install(
             if summary["service"]:
                 click.echo()
                 click.echo(f"Service registered: {summary['service']['name']}")
-                click.echo(f"Start with: nssm start {summary['service']['name']}")
+                click.echo(f"Start with: sc start {summary['service']['name']}")
                 click.echo(f"Or manually: haniel run {config}")
 
     except KeyboardInterrupt:

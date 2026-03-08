@@ -52,7 +52,7 @@ class TestInstallState:
             state = InstallState(
                 phase=InstallPhase.MECHANICAL,
                 completed_steps=["directories", "repos"],
-                failed_steps=[StepStatus(step="requirements", error="nssm not found")],
+                failed_steps=[StepStatus(step="requirements", error="winsw not found")],
                 config_values={"workspace-env": {"DEBUG": "false"}},
             )
             state.save(state_file)
@@ -255,7 +255,7 @@ class TestInteractiveInstaller:
             state = InstallState(
                 phase=InstallPhase.INTERACTIVE,
                 completed_steps=["directories", "repos"],
-                failed_steps=[StepStatus(step="requirements", error="nssm not found")],
+                failed_steps=[StepStatus(step="requirements", error="winsw not found")],
             )
             installer = InteractiveInstaller(interactive_config, config_dir, state)
 
@@ -385,89 +385,116 @@ class TestFinalizer:
     @patch("platform.system")
     @patch("shutil.which")
     @patch("subprocess.run")
-    def test_register_nssm_service_windows(
+    def test_register_winsw_service_windows(
         self, mock_run, mock_which, mock_system, finalizer_config
     ):
-        """Test NSSM service registration on Windows."""
+        """Test WinSW service registration on Windows."""
         from haniel.installer.finalize import Finalizer
         from haniel.installer.state import InstallState
 
-        # Mock Windows environment
         mock_system.return_value = "Windows"
         mock_which.side_effect = lambda cmd: {
-            "nssm": r"C:\tools\nssm.exe",
             "python": r"C:\Python312\python.exe",
         }.get(cmd)
-
-        # Mock all subprocess calls to succeed
         mock_run.return_value = MagicMock(returncode=0, stderr="")
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_dir = Path(tmpdir)
+            # Simulate real layout: InstallPath/.services/servicename/
+            install_root = Path(tmpdir) / "Haniel"
+            config_dir = install_root / ".services" / "myservice"
+            config_dir.mkdir(parents=True)
+
+            # Create a fake winsw.exe in bin/ (at install root level)
+            bin_dir = install_root / "bin"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            winsw_exe = bin_dir / "winsw.exe"
+            winsw_exe.write_bytes(b"fake-winsw")
+
             state = InstallState()
             finalizer = Finalizer(finalizer_config, config_dir, state)
 
             finalizer.register_service()
 
-            # Verify NSSM commands were called
-            calls = mock_run.call_args_list
-            # Should have called: remove (cleanup), install, set DisplayName,
-            # set AppDirectory, set AppStdout, set AppStderr
-            assert len(calls) >= 4
+            # Verify service exe was copied
+            service_exe = config_dir / "haniel.exe"
+            assert service_exe.exists()
 
-            # Check install command
-            install_call = calls[1]  # Second call after remove
+            # Verify XML was generated
+            xml_path = config_dir / "haniel.xml"
+            assert xml_path.exists()
+            xml_content = xml_path.read_text(encoding="utf-8")
+            assert "<id>haniel</id>" in xml_content
+            assert "<executable>" in xml_content
+            assert "<arguments>-m haniel.cli run haniel.yaml</arguments>" in xml_content
+
+            # Verify WinSW commands were called (stop, uninstall, install)
+            calls = mock_run.call_args_list
+            assert len(calls) >= 3
+            install_call = calls[-1]
             assert "install" in install_call[0][0]
-            assert "haniel" in install_call[0][0]
+            assert "--no-elevate" in install_call[0][0]
 
     @patch("platform.system")
     @patch("shutil.which")
-    def test_register_nssm_service_nssm_not_found(
+    def test_register_winsw_service_not_found(
         self, mock_which, mock_system, finalizer_config
     ):
-        """Test error when NSSM is not installed."""
+        """Test error when WinSW is not available."""
         from haniel.installer.finalize import Finalizer
         from haniel.installer.state import InstallState
 
         mock_system.return_value = "Windows"
-        mock_which.return_value = None
+        # Python is found but WinSW is not (no bin/winsw.exe, not in PATH)
+        mock_which.side_effect = lambda cmd: {
+            "python": r"C:\Python312\python.exe",
+        }.get(cmd)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_dir = Path(tmpdir)
+            # Use a nested dir so config_dir.parent / "bin" doesn't leak
+            config_dir = Path(tmpdir) / "services" / "test"
+            config_dir.mkdir(parents=True)
+            # No bin/winsw.exe created — WinSW should not be found
             state = InstallState()
             finalizer = Finalizer(finalizer_config, config_dir, state)
 
-            with pytest.raises(RuntimeError, match="NSSM not found"):
+            with pytest.raises(RuntimeError, match="WinSW not found"):
                 finalizer.register_service()
 
     @patch("platform.system")
     @patch("shutil.which")
     @patch("subprocess.run")
-    def test_register_nssm_service_install_fails(
+    def test_register_winsw_service_install_fails(
         self, mock_run, mock_which, mock_system, finalizer_config
     ):
-        """Test error handling when NSSM install fails."""
+        """Test error handling when WinSW install fails."""
         from haniel.installer.finalize import Finalizer
         from haniel.installer.state import InstallState
 
         mock_system.return_value = "Windows"
         mock_which.side_effect = lambda cmd: {
-            "nssm": r"C:\tools\nssm.exe",
             "python": r"C:\Python312\python.exe",
         }.get(cmd)
 
-        # First call (remove) succeeds, second (install) fails
+        # stop and uninstall succeed, install fails
         mock_run.side_effect = [
-            MagicMock(returncode=0),  # remove
-            MagicMock(returncode=1, stderr="Service already exists"),  # install fails
+            MagicMock(returncode=0),  # stop
+            MagicMock(returncode=0),  # uninstall
+            MagicMock(returncode=1, stderr="Access denied"),  # install fails
         ]
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_dir = Path(tmpdir)
+            install_root = Path(tmpdir) / "Haniel"
+            config_dir = install_root / ".services" / "myservice"
+            config_dir.mkdir(parents=True)
+
+            bin_dir = install_root / "bin"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            (bin_dir / "winsw.exe").write_bytes(b"fake-winsw")
+
             state = InstallState()
             finalizer = Finalizer(finalizer_config, config_dir, state)
 
-            with pytest.raises(RuntimeError, match="NSSM install failed"):
+            with pytest.raises(RuntimeError, match="WinSW install failed"):
                 finalizer.register_service()
 
     @patch("platform.system")
@@ -1016,7 +1043,7 @@ class TestMechanicalInstallerExtended:
         """Create a sample config for testing."""
         return HanielConfig(
             install=InstallConfig(
-                requirements={"python": ">=3.11", "node": ">=18", "nssm": True, "claude-code": True},
+                requirements={"python": ">=3.11", "node": ">=18", "winsw": True, "claude-code": True},
                 directories=["./runtime", "./runtime/logs"],
                 environments={
                     "main-venv": EnvironmentConfig(
@@ -1114,29 +1141,36 @@ class TestMechanicalInstallerExtended:
             assert passes is False
 
     @patch("platform.system")
-    @patch("shutil.which")
-    def test_check_requirements_nssm_windows(self, mock_which, mock_system, sample_config):
-        """Test NSSM check on Windows."""
+    def test_check_requirements_winsw_windows(self, mock_system, sample_config):
+        """Test WinSW check on Windows."""
         from haniel.installer.mechanical import MechanicalInstaller
         from haniel.installer.state import InstallState
 
         mock_system.return_value = "Windows"
-        mock_which.return_value = "C:\\tools\\nssm.exe"
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_dir = Path(tmpdir)
+            # Simulate real layout: InstallPath/.services/servicename/
+            install_root = Path(tmpdir) / "Haniel"
+            config_dir = install_root / ".services" / "myservice"
+            config_dir.mkdir(parents=True)
+
+            # Create a fake winsw.exe at install root level
+            bin_dir = install_root / "bin"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            (bin_dir / "winsw.exe").write_bytes(b"fake-winsw")
+
             state = InstallState()
             installer = MechanicalInstaller(sample_config, config_dir, state)
 
             results = installer.check_requirements()
-            nssm_result = next((r for r in results if r["name"] == "nssm"), None)
+            winsw_result = next((r for r in results if r["name"] == "winsw"), None)
 
-            assert nssm_result is not None
-            assert nssm_result["installed"] is True
+            assert winsw_result is not None
+            assert winsw_result["installed"] is True
 
     @patch("platform.system")
-    def test_check_requirements_nssm_non_windows(self, mock_system, sample_config):
-        """Test NSSM check on non-Windows."""
+    def test_check_requirements_winsw_non_windows(self, mock_system, sample_config):
+        """Test WinSW check on non-Windows."""
         from haniel.installer.mechanical import MechanicalInstaller
         from haniel.installer.state import InstallState
 
@@ -1148,10 +1182,10 @@ class TestMechanicalInstallerExtended:
             installer = MechanicalInstaller(sample_config, config_dir, state)
 
             results = installer.check_requirements()
-            nssm_result = next((r for r in results if r["name"] == "nssm"), None)
+            winsw_result = next((r for r in results if r["name"] == "winsw"), None)
 
-            assert nssm_result is not None
-            assert nssm_result["installed"] is True  # Skipped on non-Windows
+            assert winsw_result is not None
+            assert winsw_result["installed"] is True  # Skipped on non-Windows
 
     @patch("shutil.which")
     def test_check_requirements_claude_code(self, mock_which, sample_config):
@@ -1529,30 +1563,43 @@ class TestFinalizerExtended:
     @patch("platform.system")
     @patch("shutil.which")
     @patch("subprocess.run")
-    def test_register_nssm_service_set_commands(
+    def test_register_winsw_service_xml_content(
         self, mock_run, mock_which, mock_system, finalizer_config
     ):
-        """Test NSSM service registration with set commands."""
+        """Test WinSW XML configuration content."""
         from haniel.installer.finalize import Finalizer
         from haniel.installer.state import InstallState
 
         mock_system.return_value = "Windows"
         mock_which.side_effect = lambda cmd: {
-            "nssm": r"C:\tools\nssm.exe",
             "python": r"C:\Python312\python.exe",
         }.get(cmd)
         mock_run.return_value = MagicMock(returncode=0, stderr="")
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_dir = Path(tmpdir)
+            install_root = Path(tmpdir) / "Haniel"
+            config_dir = install_root / ".services" / "myservice"
+            config_dir.mkdir(parents=True)
+
+            bin_dir = install_root / "bin"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            (bin_dir / "winsw.exe").write_bytes(b"fake-winsw")
+
             state = InstallState()
             finalizer = Finalizer(finalizer_config, config_dir, state)
 
             finalizer.register_service()
 
-            # Check that nssm commands were called
-            calls = mock_run.call_args_list
-            assert len(calls) >= 4  # remove, install, set DisplayName, set AppDirectory, etc
+            # Verify XML content
+            xml_path = config_dir / "haniel.xml"
+            xml_content = xml_path.read_text(encoding="utf-8")
+
+            assert "<id>haniel</id>" in xml_content
+            assert "<name>Haniel Service Runner</name>" in xml_content
+            assert "<workingdirectory>" in xml_content
+            assert '<log mode="roll">' in xml_content
+            assert "<stoptimeout>15 sec</stoptimeout>" in xml_content
+            assert "<startmode>Automatic</startmode>" in xml_content
 
     def test_generate_config_files_creates_parent(self, finalizer_config):
         """Test that generate_config_files creates parent directories."""
@@ -1580,10 +1627,10 @@ class TestFinalizerExtended:
     @patch("platform.system")
     @patch("shutil.which")
     @patch("subprocess.run")
-    def test_nssm_environment_resolves_root_template(
+    def test_winsw_environment_resolves_root_template(
         self, mock_run, mock_which, mock_system
     ):
-        """Test that {root} in service environment values is resolved to config_dir."""
+        """Test that {root} in service environment values is resolved in WinSW XML."""
         from haniel.installer.finalize import Finalizer
         from haniel.installer.state import InstallState
 
@@ -1603,35 +1650,33 @@ class TestFinalizerExtended:
 
         mock_system.return_value = "Windows"
         mock_which.side_effect = lambda cmd: {
-            "nssm": r"C:\tools\nssm.exe",
             "python": r"C:\Python312\python.exe",
         }.get(cmd)
         mock_run.return_value = MagicMock(returncode=0, stderr="")
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_dir = Path(tmpdir)
+            install_root = Path(tmpdir) / "Haniel"
+            config_dir = install_root / ".services" / "myservice"
+            config_dir.mkdir(parents=True)
+
+            bin_dir = install_root / "bin"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            (bin_dir / "winsw.exe").write_bytes(b"fake-winsw")
+
             state = InstallState()
             finalizer = Finalizer(config, config_dir, state)
 
             finalizer.register_service()
 
-            # Find the AppEnvironmentExtra call
-            env_call = None
-            for call in mock_run.call_args_list:
-                args = call[0][0]
-                if "AppEnvironmentExtra" in args:
-                    env_call = args
-                    break
-
-            assert env_call is not None, "AppEnvironmentExtra was not set"
-
-            # The env string is the last argument
-            env_str = env_call[-1]
+            # Verify XML environment variables
+            xml_path = config_dir / "haniel-test.xml"
+            xml_content = xml_path.read_text(encoding="utf-8")
 
             # {root} should be resolved to config_dir, not left as literal
-            assert "{root}" not in env_str
-            assert f"PYTHONPATH={config_dir}" in env_str or f"PYTHONPATH={str(config_dir)}" in env_str
-            assert "PYTHONUTF8=1" in env_str
+            assert "{root}" not in xml_content
+            assert 'name="PYTHONUTF8" value="1"' in xml_content
+            assert f'name="PYTHONPATH" value="{config_dir}/src"' in xml_content or \
+                   f'name="PYTHONPATH" value="{str(config_dir)}/src"' in xml_content
 
     @patch("platform.system")
     def test_systemd_environment_resolves_root_template(self, mock_system):

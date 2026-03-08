@@ -136,7 +136,7 @@ install:
   requirements:
     python: ">=3.11"
     node: ">=18"
-    nssm: true
+    winsw: true
     claude-code: true
 
   directories:
@@ -261,7 +261,7 @@ install:
 - venv 생성, pip install
 - npm install
 - 정적 파일 생성 (.mcp.json 등)
-- NSSM 서비스 등록
+- WinSW 서비스 등록
 
 **대화형 작업** — Claude Code에게 위임:
 - 시크릿 수집 (Slack 토큰, API 키 등)
@@ -291,7 +291,7 @@ haniel install haniel.yaml
   │
   ├─ Phase 1: 기계적 설치 (haniel 단독)
   │     haniel.yaml 로드
-  │     requirements 검증 (python, node, nssm)
+  │     requirements 검증 (python, node, winsw)
   │       미충족 항목 → 목록을 기록해두고 Phase 2에서 Claude Code가 안내
   │     directories 생성
   │     repos clone (가능한 것만)
@@ -325,12 +325,12 @@ haniel install haniel.yaml
   ├─ Phase 3: 마무리 (haniel 단독)
   │     finalize 신호를 받으면:
   │       대화형으로 수집된 값으로 config 파일 생성
-  │       NSSM 서비스 등록
+  │       WinSW 서비스 등록
   │       MCP 서버 중지 (install 모드 종료)
   │       install.state를 complete로 표시
   │
   └─ 완료
-      "haniel install 완료. 'nssm start haniel'로 서비스를 시작하세요."
+      "haniel install 완료. 'sc start haniel'로 서비스를 시작하세요."
 ```
 
 ### 설치 전용 MCP 도구
@@ -343,7 +343,7 @@ haniel_install_status()
     {
       "phase": "interactive",
       "completed": ["directories", "repos", "environments"],
-      "failed": [{"step": "requirements", "detail": "nssm not found"}],
+      "failed": [{"step": "requirements", "detail": "winsw not found"}],
       "pending_configs": [
         {
           "name": "workspace-env",
@@ -363,11 +363,11 @@ haniel_get_config(config_name)
 
 haniel_retry_step(step_name)
   → 실패한 설치 단계 재시도
-  → 예: haniel_retry_step("requirements") — 사용자가 nssm을 설치한 후 재검증
+  → 예: haniel_retry_step("requirements") — 사용자가 winsw를 설치한 후 재검증
 
 haniel_finalize_install()
   → 모든 필수 값이 채워졌는지 확인
-  → config 파일 생성, NSSM 등록, install 모드 종료
+  → config 파일 생성, WinSW 등록, install 모드 종료
   → Claude Code 세션 종료 신호 전송
 ```
 
@@ -402,7 +402,7 @@ install:
   requirements:
     python: ">=3.11"
     node: ">=18"
-    nssm: true
+    winsw: true
     claude-code: true     # Phase 0에서 사전 검증 (필수 전제)
 ```
 
@@ -472,7 +472,7 @@ configs:
 
 파일이 이미 존재하면 기존 값을 유지하고, 새로 추가된 키만 missing_keys로 표시.
 
-### `service` — NSSM 서비스 등록
+### `service` — WinSW 서비스 등록
 
 ```yaml
 install:
@@ -484,7 +484,7 @@ install:
       PYTHONUTF8: "1"
 ```
 
-Phase 3(finalize)에서 `nssm install`로 등록.
+Phase 3(finalize)에서 WinSW를 이용해 Windows 서비스로 등록.
 
 ## `repos` 섹션
 
@@ -699,7 +699,7 @@ haniel install --dry-run haniel.yaml
 출력 예시:
 ```
 [dry-run] Phase 1: 기계적 설치
-  - requirements 검증: python >=3.11, node >=18, nssm, claude-code
+  - requirements 검증: python >=3.11, node >=18, winsw, claude-code
   - directories 생성: ./runtime, ./runtime/logs, ./workspace, ...
   - repos clone: seosoyoung → ./.projects/seosoyoung
   - environments: main-venv (python-venv), runtime-node (npm)
@@ -711,7 +711,7 @@ haniel install --dry-run haniel.yaml
     - 기본값 사용: LOG_PATH, SESSION_PATH, DEBUG, ...
 
 [dry-run] Phase 3: 마무리
-  - NSSM 서비스 등록: haniel
+  - WinSW 서비스 등록: haniel
 ```
 
 ## 사례: 현재 서소영 슬랙봇 구성
@@ -720,7 +720,7 @@ haniel install --dry-run haniel.yaml
 
 | 현행 | haniel |
 |------|--------|
-| watchdog.ps1 + supervisor 이중 구조 | NSSM → haniel 단일 프로세스 |
+| watchdog.ps1 + supervisor 이중 구조 | WinSW → haniel 단일 프로세스 |
 | config.py (프로세스별 하드코딩) | haniel.yaml `services` |
 | git_poller.py (3개 고정) | haniel.yaml `repos` |
 | deployer.py (상태 머신) | poll 루프 Phase 2 |
@@ -844,7 +844,7 @@ install:
   requirements:
     python: ">=3.11"
     node: ">=18"
-    nssm: true
+    winsw: true
     claude-code: true
 
   directories:
@@ -1089,7 +1089,7 @@ haniel은 런타임에 .env를 절대 로드하지 않으므로,
      └─ 미설치 → "npm install -g @anthropic-ai/claude-code 를 실행하세요" 출력 후 중단
 
    [Phase 1] 기계적 설치 (사용자 입력 없음, 자동 진행)
-     requirements: python ✓, node ✓, nssm ✗ (기록)
+     requirements: python ✓, node ✓, winsw ✗ (기록)
      directories: 12개 생성 ✓
      repos: seosoyoung clone ✓, soulstream clone ✓, eb_lore clone ✓
      environments: main-venv ✓, mcp-venv ✓, soulstream-venv ✓, node ✓
@@ -1097,10 +1097,10 @@ haniel은 런타임에 .env를 절대 로드하지 않으므로,
 
    [Phase 2] Claude Code 세션 시작
      Claude Code: "안녕하세요! haniel 설치를 도와드리겠습니다."
-     Claude Code: "먼저, nssm이 설치되지 않았습니다.
-                   https://nssm.cc/download 에서 다운로드해주세요."
+     Claude Code: "먼저, WinSW가 설치되지 않았습니다.
+                   bin/winsw.exe에 배치하거나 PATH에 추가해주세요."
      사용자: "설치했어"
-     Claude Code: → haniel_retry_step("requirements") → nssm ✓
+     Claude Code: → haniel_retry_step("requirements") → winsw ✓
      Claude Code: "이제 설정 값을 입력해주세요.
                    먼저 Slack Bot Token이 필요합니다.
                    https://api.slack.com/apps 에서 발급받을 수 있어요."
@@ -1116,9 +1116,9 @@ haniel은 런타임에 .env를 절대 로드하지 않으므로,
    [Phase 3] 마무리
      .env 파일 생성 (수집된 값으로)
      watchdog_config.json 생성
-     NSSM 서비스 등록
+     WinSW 서비스 등록
 
-5. nssm start haniel → 서비스 시작
+5. sc start haniel → 서비스 시작
 ```
 
 결론: **가능**. 사용자가 직접 타이핑해야 하는 것은 시크릿 값뿐이고,
@@ -1151,7 +1151,7 @@ haniel/
 │       │   ├── orchestrator.py  # Phase 1-2-3 흐름 제어
 │       │   ├── mechanical.py    # Phase 1: 디렉토리, clone, venv, npm
 │       │   ├── interactive.py   # Phase 2: Claude Code 세션 관리
-│       │   └── finalize.py      # Phase 3: 파일 생성, NSSM 등록
+│       │   └── finalize.py      # Phase 3: 파일 생성, WinSW 등록
 │       ├── runner.py            # run 모드: poll 루프
 │       ├── process.py           # 프로세스 생성, 감시, 종료
 │       ├── git.py               # git fetch, pull, clone
