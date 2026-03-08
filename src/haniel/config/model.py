@@ -138,6 +138,18 @@ class InstallConfig(BaseModel):
     service: ServiceDefinitionConfig | None = Field(default=None, description="System service registration")
 
 
+class SelfUpdateConfig(BaseModel):
+    """Configuration for haniel self-update mechanism.
+
+    When configured, haniel polls its own repo for changes and can
+    update itself via exit code signaling to the wrapper script.
+    See ADR-0002 for architecture details.
+    """
+
+    repo: str = Field(..., description="Key from repos section identifying haniel's own repo")
+    auto_update: bool = Field(default=False, description="If true, update immediately without approval")
+
+
 class HanielConfig(BaseModel):
     """Root configuration for haniel.yaml."""
 
@@ -149,6 +161,9 @@ class HanielConfig(BaseModel):
     repos: dict[str, RepoConfig] = Field(default_factory=dict, description="Git repositories")
     services: dict[str, ServiceConfig] = Field(default_factory=dict, description="Services to manage")
     install: InstallConfig | None = Field(default=None, description="Install phase configuration")
+    self_update: SelfUpdateConfig | None = Field(
+        default=None, alias="self", description="Self-update configuration"
+    )
 
 
 def load_config(path: Path) -> HanielConfig:

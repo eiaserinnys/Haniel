@@ -17,7 +17,7 @@ from pathlib import Path
 import click
 from pydantic import ValidationError as PydanticValidationError
 
-from haniel import __version__
+from haniel import __version__, EXIT_SELF_UPDATE
 from haniel.config import load_config, HanielConfig, validate_config, ValidationError
 
 
@@ -445,6 +445,9 @@ def run(config: Path | None, foreground: bool, dry_run: bool, log_level: str) ->
         sys.exit(1)
     finally:
         runner.stop()
+        if runner.self_update_requested:
+            click.echo(click.style("Exiting for self-update (exit code 10).", fg="yellow"))
+            sys.exit(EXIT_SELF_UPDATE)
         click.echo("Shutdown complete.")
 
 
