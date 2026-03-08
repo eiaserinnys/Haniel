@@ -351,7 +351,7 @@ class TestGitErrorClasses:
         )
         error_str = str(error)
         assert "Failed to fetch" in error_str
-        assert "/tmp/repo" in error_str
+        assert str(Path("/tmp/repo")) in error_str
         assert "Network unreachable" in error_str
 
     def test_git_pull_error_str(self):
@@ -364,7 +364,7 @@ class TestGitErrorClasses:
         )
         error_str = str(error)
         assert "Failed to pull" in error_str
-        assert "/tmp/repo" in error_str
+        assert str(Path("/tmp/repo")) in error_str
         assert "Merge conflict" in error_str
 
     def test_git_timeout_error(self):

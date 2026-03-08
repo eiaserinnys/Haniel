@@ -11,6 +11,7 @@ haniel doesn't care what it runs. It just starts, monitors, and stops processes
 as specified in the configuration.
 """
 
+import os
 import re
 import shlex
 import subprocess
@@ -164,7 +165,13 @@ class ProcessManager:
         self.health_manager.record_start(name)
 
         # Parse command
-        cmd = shlex.split(config.run)
+        # On Windows, subprocess.Popen accepts a string directly and delegates
+        # argument parsing to CreateProcess, avoiding shlex.split() mishandling
+        # backslash path separators. On POSIX, shlex.split() is correct.
+        if os.name == "nt":
+            cmd = config.run
+        else:
+            cmd = shlex.split(config.run)
 
         # Get platform-specific subprocess kwargs
         popen_kwargs = self.platform.get_subprocess_kwargs()
