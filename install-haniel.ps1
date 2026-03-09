@@ -8,8 +8,10 @@
         irm https://raw.githubusercontent.com/eiaserinnys/Haniel/main/install-haniel.ps1 | iex
 
     The script handles prerequisite installation (Git, Python, WinSW),
-    clones the haniel repository, downloads a service config file,
-    and delegates all environment setup to `haniel install`.
+    clones the haniel repository into .self/, downloads a haniel.yaml
+    config, and delegates all environment setup to `haniel install`.
+
+    See docs/adr/0003-directory-structure.md for the directory layout.
 
 .EXAMPLE
     # One-liner (downloads and runs)
@@ -17,7 +19,7 @@
 
 .EXAMPLE
     # Direct execution with parameters
-    .\install-haniel.ps1 -InstallPath "D:\Services\Haniel" -ConfigUrl "https://raw.githubusercontent.com/.../seosoyoung.yaml"
+    .\install-haniel.ps1 -InstallPath "D:\Services\Haniel" -ConfigUrl "https://raw.githubusercontent.com/.../haniel.yaml"
 
 .NOTES
     Requires PowerShell 5.1+.
@@ -27,10 +29,10 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(HelpMessage = "Haniel clone path")]
+    [Parameter(HelpMessage = "Haniel root directory")]
     [string]$InstallPath,
 
-    [Parameter(HelpMessage = "Service config file raw URL")]
+    [Parameter(HelpMessage = "haniel.yaml config file raw URL")]
     [string]$ConfigUrl,
 
     [Parameter(HelpMessage = "Skip Git installation check")]
@@ -255,21 +257,9 @@ function Main {
     }
 
     # --------------------------------------------------------
-    # Step 2: WinSW (Service Wrapper)
+    # Step 2: Install path + create root
     # --------------------------------------------------------
-    Write-Step "2/6" "WinSW (Service Wrapper)"
-
-    $ok = Install-WinSW
-    if (-not $ok) {
-        Write-Fail "WinSW is required for Windows service registration."
-        Write-Info "You can download it manually from https://github.com/winsw/winsw/releases"
-        exit 1
-    }
-
-    # --------------------------------------------------------
-    # Step 3: Install path + clone haniel
-    # --------------------------------------------------------
-    Write-Step "3/6" "Clone Haniel"
+    Write-Step "2/6" "Install Directory"
 
     if ([string]::IsNullOrWhiteSpace($InstallPath)) {
         $defaultPath = "C:\Services\Haniel"
@@ -279,40 +269,57 @@ function Main {
         }
     }
 
-    if (Test-Path (Join-Path $InstallPath ".git")) {
-        Write-Info "Haniel repository already exists at $InstallPath"
+    # Create root directory
+    New-Item -ItemType Directory -Path $InstallPath -Force | Out-Null
+    Write-Success "Root directory: $InstallPath"
+
+    # --------------------------------------------------------
+    # Step 3: Clone haniel into .self/ + install
+    # --------------------------------------------------------
+    Write-Step "3/6" "Clone Haniel"
+
+    # WinSW (needs InstallPath set first)
+    $binDir = Join-Path $InstallPath "bin"
+    $winsw = Install-WinSW
+    if (-not $winsw) {
+        Write-Fail "WinSW is required for Windows service registration."
+        Write-Info "You can download it manually from https://github.com/winsw/winsw/releases"
+        exit 1
+    }
+
+    $selfDir = Join-Path $InstallPath ".self"
+
+    if (Test-Path (Join-Path $selfDir ".git")) {
+        Write-Info "Haniel repository already exists at $selfDir"
         Write-Info "Pulling latest changes..."
-        & git -C $InstallPath pull --ff-only 2>&1 | ForEach-Object { Write-Info $_ }
+        & git -C $selfDir pull --ff-only 2>&1 | ForEach-Object { Write-Info $_ }
         if ($LASTEXITCODE -ne 0) {
             Write-Warn "git pull failed (exit code $LASTEXITCODE). Continuing with existing state."
-            Write-Info "You may want to resolve this manually: git -C $InstallPath status"
         }
     }
     else {
-        if (Test-Path $InstallPath) {
-            # Directory exists but is not a git repo — check if empty
-            $contents = Get-ChildItem -Path $InstallPath -Force
+        if (Test-Path $selfDir) {
+            $contents = Get-ChildItem -Path $selfDir -Force
             if ($contents.Count -gt 0) {
-                Write-Fail "Directory $InstallPath exists and is not empty."
-                Write-Info "Please choose a different path or remove the existing directory."
+                Write-Fail "Directory $selfDir exists and is not empty."
+                Write-Info "Please remove it or choose a different install path."
                 exit 1
             }
-            # Empty directory — remove so git clone can create it
-            Remove-Item -Path $InstallPath -Force -Recurse
+            Remove-Item -Path $selfDir -Force -Recurse
         }
 
-        Write-Info "Cloning haniel to $InstallPath..."
-        & git clone https://github.com/eiaserinnys/Haniel.git $InstallPath 2>&1 | ForEach-Object { Write-Info $_ }
+        Write-Info "Cloning haniel to $selfDir..."
+        & git clone https://github.com/eiaserinnys/Haniel.git $selfDir 2>&1 | ForEach-Object { Write-Info $_ }
         if ($LASTEXITCODE -ne 0) {
             Write-Fail "Failed to clone haniel repository"
             exit 1
         }
     }
 
-    Write-Success "Haniel repository ready at $InstallPath"
+    Write-Success "Haniel repository ready at $selfDir"
 
-    # Create venv + editable install
-    $venvPath = Join-Path $InstallPath ".venv"
+    # Create venv inside .self/ + editable install
+    $venvPath = Join-Path $selfDir ".venv"
     $pipExe = Join-Path $venvPath "Scripts\pip.exe"
     $hanielExe = Join-Path $venvPath "Scripts\haniel.exe"
 
@@ -326,7 +333,7 @@ function Main {
     }
 
     Write-Info "Installing haniel (editable)..."
-    & $pipExe install -e $InstallPath 2>&1 | ForEach-Object { Write-Info $_ }
+    & $pipExe install -e $selfDir 2>&1 | ForEach-Object { Write-Info $_ }
     if ($LASTEXITCODE -ne 0) {
         Write-Fail "Failed to install haniel"
         exit 1
@@ -335,71 +342,70 @@ function Main {
     Write-Success "haniel installed"
 
     # --------------------------------------------------------
-    # Step 4: Download config file
+    # Step 4: Download haniel.yaml to root
     # --------------------------------------------------------
-    Write-Step "4/6" "Service Configuration"
+    Write-Step "4/6" "Configuration"
 
-    if ([string]::IsNullOrWhiteSpace($ConfigUrl)) {
-        $ConfigUrl = Read-Host "  Config file URL (e.g. https://raw.githubusercontent.com/.../seosoyoung.yaml)"
+    $configPath = Join-Path $InstallPath "haniel.yaml"
+
+    if (Test-Path $configPath) {
+        Write-Info "haniel.yaml already exists at $configPath"
+        $answer = Read-Host "  Overwrite with new config? (y/N)"
+        if ($answer -ne "y" -and $answer -ne "Y") {
+            Write-Info "Keeping existing config"
+        }
+        else {
+            $downloadConfig = $true
+        }
+    }
+    else {
+        $downloadConfig = $true
+    }
+
+    if ($downloadConfig) {
         if ([string]::IsNullOrWhiteSpace($ConfigUrl)) {
-            Write-Fail "Config URL is required."
+            $ConfigUrl = Read-Host "  Config file URL (e.g. https://raw.githubusercontent.com/.../haniel.yaml)"
+            if ([string]::IsNullOrWhiteSpace($ConfigUrl)) {
+                Write-Fail "Config URL is required."
+                exit 1
+            }
+        }
+
+        if ($ConfigUrl -notmatch '^https://') {
+            Write-Fail "Config URL must use HTTPS."
+            exit 1
+        }
+
+        Write-Info "Downloading $ConfigUrl..."
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri $ConfigUrl -OutFile $configPath -UseBasicParsing
+        }
+        catch {
+            Write-Fail "Failed to download config: $($_.Exception.Message)"
+            exit 1
+        }
+
+        if (-not (Test-Path $configPath)) {
+            Write-Fail "Config file download failed."
             exit 1
         }
     }
 
-    # Validate HTTPS
-    if ($ConfigUrl -notmatch '^https://') {
-        Write-Fail "Config URL must use HTTPS."
-        exit 1
-    }
-
-    # Extract service name from URL filename (strip query string first)
-    $uri = [System.Uri]$ConfigUrl
-    $fileName = [System.IO.Path]::GetFileName($uri.AbsolutePath)
-    $serviceName = [System.IO.Path]::GetFileNameWithoutExtension($fileName)
-
-    if ($serviceName -notmatch '^[a-zA-Z0-9_-]+$') {
-        Write-Fail "Invalid service name derived from URL: '$serviceName'"
-        Write-Info "Service name must contain only letters, numbers, hyphens, and underscores."
-        exit 1
-    }
-    $serviceDir = Join-Path $InstallPath ".services" $serviceName
-
-    Write-Info "Service name : $serviceName"
-    Write-Info "Config dir   : $serviceDir"
-
-    New-Item -ItemType Directory -Path $serviceDir -Force | Out-Null
-
-    $configPath = Join-Path $serviceDir $fileName
-    Write-Info "Downloading $ConfigUrl..."
-    try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri $ConfigUrl -OutFile $configPath -UseBasicParsing
-    }
-    catch {
-        Write-Fail "Failed to download config: $($_.Exception.Message)"
-        exit 1
-    }
-
-    if (-not (Test-Path $configPath)) {
-        Write-Fail "Config file download failed."
-        exit 1
-    }
-
-    Write-Success "Config saved to $configPath"
+    Write-Success "Config ready at $configPath"
 
     # --------------------------------------------------------
     # Step 5: haniel install
     # --------------------------------------------------------
     Write-Step "5/6" "Running haniel install"
 
-    Write-Info "Working directory: $serviceDir"
-    Write-Info "Command: $hanielExe install $fileName"
+    Write-Info "Working directory: $InstallPath"
+    Write-Info "Command: $hanielExe install haniel.yaml"
     Write-Host ""
 
-    Push-Location $serviceDir
+    Push-Location $InstallPath
     try {
-        & $hanielExe install $fileName
+        & $hanielExe install haniel.yaml
         $installExitCode = $LASTEXITCODE
     }
     finally {
@@ -409,8 +415,8 @@ function Main {
     if ($installExitCode -ne 0) {
         Write-Fail "haniel install exited with code $installExitCode"
         Write-Info "Check the output above for details."
-        Write-Info "You can re-run: $hanielExe install $fileName"
-        Write-Info "  (from directory: $serviceDir)"
+        Write-Info "You can re-run: $hanielExe install haniel.yaml"
+        Write-Info "  (from directory: $InstallPath)"
         exit 1
     }
 
@@ -418,6 +424,19 @@ function Main {
     # Step 6: Start service
     # --------------------------------------------------------
     Write-Step "6/6" "Starting Service"
+
+    # Read service name from install.service.name in YAML
+    # Fall back to "haniel" if we can't parse it
+    $serviceName = "haniel"
+    try {
+        $yamlContent = Get-Content $configPath -Raw
+        if ($yamlContent -match '(?m)^\s+name:\s+(\S+)') {
+            $serviceName = $Matches[1]
+        }
+    }
+    catch {
+        Write-Info "Could not parse service name from YAML, using default: haniel"
+    }
 
     Write-Info "Starting service '$serviceName'..."
     try {
@@ -441,16 +460,18 @@ function Main {
     Write-Header "Installation Complete"
 
     Write-Host "  Service '$serviceName' is running at:" -ForegroundColor Green
-    Write-Host "    $serviceDir" -ForegroundColor Green
+    Write-Host "    $InstallPath" -ForegroundColor Green
     Write-Host ""
-    Write-Host "  Haniel commands:" -ForegroundColor Yellow
-    Write-Host "    Stop service  : sc stop $serviceName" -ForegroundColor White
-    Write-Host "    Restart       : sc stop $serviceName && sc start $serviceName" -ForegroundColor White
-    Write-Host "    Run manually  : $hanielExe run $fileName" -ForegroundColor White
-    Write-Host "    Validate      : $hanielExe validate $fileName" -ForegroundColor White
+    Write-Host "  Directory layout:" -ForegroundColor Yellow
+    Write-Host "    haniel.yaml    : $configPath" -ForegroundColor White
+    Write-Host "    haniel repo    : $selfDir" -ForegroundColor White
+    Write-Host "    haniel venv    : $venvPath" -ForegroundColor White
     Write-Host ""
-    Write-Host "  Config directory: $serviceDir" -ForegroundColor Gray
-    Write-Host "  Haniel root     : $InstallPath" -ForegroundColor Gray
+    Write-Host "  Commands:" -ForegroundColor Yellow
+    Write-Host "    Stop service   : sc stop $serviceName" -ForegroundColor White
+    Write-Host "    Restart        : sc stop $serviceName && sc start $serviceName" -ForegroundColor White
+    Write-Host "    Run manually   : $hanielExe run haniel.yaml" -ForegroundColor White
+    Write-Host "    Validate       : $hanielExe validate haniel.yaml" -ForegroundColor White
     Write-Host ""
 }
 

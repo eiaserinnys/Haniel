@@ -45,13 +45,30 @@ The bootstrap script handles everything:
 |------|-------------|
 | 0. Git | Checks for Git, offers to install via winget if missing |
 | 1. Python | Checks for Python 3.11+, offers to install via winget if missing |
-| 2. WinSW | Downloads the Windows service wrapper |
-| 3. Clone | Clones the haniel repository |
-| 4. Config | Downloads your `haniel.yaml` (you provide the URL) |
+| 2. Directory | Creates root directory, downloads WinSW |
+| 3. Clone | Clones haniel into `.self/`, creates venv, installs |
+| 4. Config | Downloads your `haniel.yaml` to root |
 | 5. Install | Runs `haniel install` (directories, venvs, WinSW registration) |
 | 6. Start | Starts the Windows service via `sc start` |
 
 After completion, haniel is running as a Windows service and polling for updates.
+
+### Directory layout
+
+```
+{root}/                      # e.g. C:\Services\Haniel
++-- haniel.yaml              # Single config for all services
++-- .self/                   # haniel's own repo (self-update)
+|   +-- .venv/               # haniel's Python venv
+|   +-- src/haniel/...
+|   +-- haniel-runner.ps1
++-- .services/               # Managed service repos
+    +-- soulstream/
+    +-- seosoyoung/
+```
+
+Adding a new service = edit `haniel.yaml` + restart. No re-bootstrapping needed.
+See [ADR-0003](docs/adr/0003-directory-structure.md) for details.
 
 ### Self-managing config
 
@@ -62,9 +79,9 @@ poll_interval: 300
 
 repos:
   haniel:
-    url: git@github.com:eiaserinnys/Haniel.git
+    url: https://github.com/eiaserinnys/Haniel.git
     branch: main
-    path: ./haniel
+    path: ./.self
 
 self:
   repo: haniel
@@ -131,6 +148,7 @@ haniel status haniel.yaml
 - [Specifications](docs/specifications.md) — Full configuration reference and runtime behavior
 - [ADR-0001: WinSW over NSSM](docs/adr/0001-winsw-over-nssm.md) — Windows service wrapper choice
 - [ADR-0002: Self-update architecture](docs/adr/0002-self-update-architecture.md) — Two-loop self-update mechanism
+- [ADR-0003: Directory structure](docs/adr/0003-directory-structure.md) — `.self/` + `.services/` layout
 
 ## Development
 

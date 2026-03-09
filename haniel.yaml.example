@@ -1,11 +1,13 @@
-# Full haniel configuration example.
+# Full haniel configuration example — multi-service setup.
 #
-# This example shows a multi-service setup with:
-# - Multiple git repositories
-# - Service dependency ordering (after/ready)
-# - Lifecycle hooks (post_pull)
-# - Self-update configuration
-# - Interactive installation (Claude Code-assisted secret collection)
+# Directory structure (see docs/adr/0003-directory-structure.md):
+#   {root}/
+#   +-- haniel.yaml            <- this file
+#   +-- .self/                 <- haniel repo (self-update)
+#   +-- .services/
+#       +-- my-app/            <- cloned repo
+#       |   +-- logs/          <- service stdout/stderr
+#       +-- my-lib/            <- cloned repo
 
 poll_interval: 60
 
@@ -30,19 +32,19 @@ mcp:
 
 repos:
   haniel:
-    url: git@github.com:eiaserinnys/Haniel.git
+    url: https://github.com/eiaserinnys/Haniel.git
     branch: main
-    path: ./.projects/haniel
+    path: ./.self
 
   my-app:
     url: git@github.com:org/my-app.git
     branch: main
-    path: ./.projects/my-app
+    path: ./.services/my-app
 
   my-lib:
     url: git@github.com:org/my-lib.git
     branch: main
-    path: ./.projects/my-lib
+    path: ./.services/my-lib
 
 self:
   repo: haniel
@@ -52,29 +54,29 @@ services:
   # MCP servers (no `after`, start in parallel)
   mcp-slack:
     run: npx -y supergateway --stdio "npx -y @anthropic/mcp-slack" --port 3101
-    cwd: ./runtime
+    cwd: ./.services/my-app
     restart_delay: 3
 
   mcp-my-app:
     run: ./runtime/venv/Scripts/python.exe -m my_app.mcp --port=3104
-    cwd: ./workspace
+    cwd: ./.services/my-app
     repo: my-app
     ready: port:3104
     restart_delay: 3
     hooks:
-      post_pull: ./runtime/venv/Scripts/pip.exe install -r ./runtime/requirements.txt
+      post_pull: ./runtime/venv/Scripts/pip.exe install -r ./.services/my-app/requirements.txt
 
   # Main service (depends on MCP)
   bot:
     run: ./runtime/venv/Scripts/python.exe -m my_app.bot
-    cwd: ./workspace
+    cwd: ./.services/my-app
     repo: my-app
     after: mcp-my-app
     shutdown:
       signal: SIGTERM
       timeout: 15
     hooks:
-      post_pull: ./runtime/venv/Scripts/pip.exe install -r ./runtime/requirements.txt
+      post_pull: ./runtime/venv/Scripts/pip.exe install -r ./.services/my-app/requirements.txt
 
 install:
   requirements:
@@ -84,40 +86,35 @@ install:
     claude-code: true
 
   directories:
+    - ./.self/logs
+    - ./.services
     - ./runtime
     - ./runtime/logs
     - ./runtime/data
-    - ./workspace
-    - ./workspace/.local
-    - ./workspace/.local/tmp
 
   environments:
     main-venv:
       type: python-venv
       path: ./runtime/venv
       requirements:
-        - ./runtime/requirements.txt
+        - ./.services/my-app/requirements.txt
 
     runtime-node:
       type: npm
-      path: ./runtime
+      path: ./.services/my-app
 
   configs:
-    workspace-env:
-      path: ./workspace/.env
+    app-env:
+      path: ./.services/my-app/.env
       keys:
         - key: SLACK_BOT_TOKEN
           prompt: "Slack Bot Token (xoxb-...)"
           guide: "https://api.slack.com/apps -> select app -> OAuth & Permissions -> Bot User OAuth Token"
-          validate: "curl -s -H 'Authorization: Bearer {value}' https://slack.com/api/auth.test | jq -e '.ok'"
-        - key: SLACK_APP_TOKEN
-          prompt: "Slack App Token (xapp-...)"
-          guide: "https://api.slack.com/apps -> select app -> Basic Information -> App-Level Tokens"
         - key: DEBUG
           default: "false"
 
-    workspace-mcp:
-      path: ./workspace/.mcp.json
+    app-mcp:
+      path: ./.services/my-app/.mcp.json
       content: |
         {
           "mcpServers": {
@@ -126,13 +123,6 @@ install:
             "slack": { "url": "http://localhost:3101/sse" }
           }
         }
-
-    webhook-config:
-      path: ./runtime/data/watchdog_config.json
-      keys:
-        - key: slackWebhookUrl
-          prompt: "Slack Webhook URL (for notifications)"
-          guide: "https://api.slack.com/apps -> Incoming Webhooks -> Webhook URL"
 
   service:
     name: haniel

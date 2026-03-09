@@ -12,8 +12,10 @@ chcp 65001 | Out-Null
 $ErrorActionPreference = "Continue"
 
 # Load configuration from haniel-runner.conf
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ConfPath = Join-Path $ScriptDir "haniel-runner.conf"
+# Paths are relative to working directory (set by WinSW), not script location.
+# See ADR-0003 for directory structure.
+$RootDir = $PWD.Path
+$ConfPath = Join-Path $RootDir "haniel-runner.conf"
 
 if (-not (Test-Path $ConfPath)) {
     Write-Error "Configuration file not found: $ConfPath"
@@ -43,9 +45,9 @@ if (-not $HanielRepo -or -not $ConfigFile) {
     exit 1
 }
 
-# Resolve paths relative to script directory
-$RepoPath = Join-Path $ScriptDir $HanielRepo
-$ConfigPath = Join-Path $ScriptDir $ConfigFile
+# Resolve paths relative to working directory
+$RepoPath = Join-Path $RootDir $HanielRepo
+$ConfigPath = Join-Path $RootDir $ConfigFile
 
 function Send-Webhook {
     param([string]$Message, [string]$Level = "info")
