@@ -49,9 +49,9 @@ repo is isolated in `.self/`, and managed services are cloned into `.services/`:
 |   +-- haniel-runner.ps1        # Wrapper script (lives in repo)
 |   +-- logs/                    # haniel's own operational logs
 +-- .services/
-    +-- soulstream/              # git clone of soulstream
+    +-- some-service-a/          # git clone of soulstream
     |   +-- logs/                # stdout/stderr logs for soulstream services
-    +-- seosoyoung/              # git clone of seosoyoung
+    +-- some-service-b/          # git clone of seosoyoung
         +-- logs/                # stdout/stderr logs for seosoyoung services
 ```
 
@@ -92,7 +92,7 @@ repos:
   haniel:
     path: ./.self                    # Self-update repo
   soulstream:
-    path: ./.services/soulstream     # Managed service repo
+    path: ./.services/some-service-a # Managed service repo
 ```
 
 ## Consequences
