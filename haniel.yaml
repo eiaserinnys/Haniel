@@ -1,4 +1,9 @@
-# Minimal haniel configuration — manages and updates itself.
+# Minimal haniel configuration — manages and updates only itself.
+#
+# Directory structure (see docs/adr/0003-directory-structure.md):
+#   {root}/
+#   +-- haniel.yaml       <- this file
+#   +-- .self/             <- haniel repo (cloned by bootstrap)
 #
 # For a full multi-service example, see haniel.yaml.example.
 
@@ -6,9 +11,9 @@ poll_interval: 300
 
 repos:
   haniel:
-    url: git@github.com:eiaserinnys/Haniel.git
+    url: https://github.com/eiaserinnys/Haniel.git
     branch: main
-    path: ./haniel
+    path: ./.self
 
 self:
   repo: haniel
@@ -28,8 +33,7 @@ install:
     python: ">=3.11"
 
   directories:
-    - ./haniel
-    - ./logs
+    - ./.self/logs
 
   service:
     name: haniel

@@ -211,17 +211,25 @@ class Finalizer:
         use_wrapper = self.config.self_update is not None
 
         if use_wrapper:
-            # Wrapper mode: WinSW → powershell → haniel-runner.ps1
+            # Wrapper mode: WinSW → powershell → {self-repo}/haniel-runner.ps1
+            # The script lives in the haniel repo (e.g. .self/) but WinSW runs
+            # from root. See ADR-0003 for directory structure.
             powershell_path = shutil.which("powershell")
             if not powershell_path:
                 raise RuntimeError("PowerShell not found in PATH")
+
+            # Resolve wrapper script path from self repo
+            repo_key = self.config.self_update.repo
+            repo_config = self.config.repos.get(repo_key)
+            repo_path = repo_config.path if repo_config else ".self"
+            runner_script = f"{repo_path}/haniel-runner.ps1"
 
             lines = [
                 '<?xml version="1.0" encoding="utf-8"?>',
                 "<service>",
                 f"  <id>{xml_escape(service_cfg.name)}</id>",
                 f"  <executable>{xml_escape(powershell_path)}</executable>",
-                f"  <arguments>-ExecutionPolicy Bypass -File {xml_escape('haniel-runner.ps1')}</arguments>",
+                f"  <arguments>-ExecutionPolicy Bypass -File {xml_escape(runner_script)}</arguments>",
             ]
         else:
             # Direct mode: WinSW → python → haniel
