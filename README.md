@@ -24,17 +24,38 @@ Whether it's a Slack bot, an MCP server, or a web dashboard, haniel treats every
 - Port number semantics
 - Host system configuration beyond what's in `haniel.yaml`
 
-## Installation
-
-```bash
-pip install haniel
-```
-
 ## Quick start
 
-The simplest use case is haniel managing and updating itself.
+### Prerequisites
 
-### 1. Create `haniel.yaml`
+- Windows 10+ with PowerShell 5.1+
+- **Administrator privileges** (required for service registration and PATH modification)
+
+### One-liner install
+
+Open PowerShell **as Administrator** (right-click → "Run as Administrator") and run:
+
+```powershell
+irm https://raw.githubusercontent.com/eiaserinnys/Haniel/main/install-haniel.ps1 | iex
+```
+
+The bootstrap script handles everything:
+
+| Step | What it does |
+|------|-------------|
+| 0. Git | Checks for Git, offers to install via winget if missing |
+| 1. Python | Checks for Python 3.11+, offers to install via winget if missing |
+| 2. WinSW | Downloads the Windows service wrapper |
+| 3. Clone | Clones the haniel repository |
+| 4. Config | Downloads your `haniel.yaml` (you provide the URL) |
+| 5. Install | Runs `haniel install` (directories, venvs, WinSW registration) |
+| 6. Start | Starts the Windows service via `sc start` |
+
+After completion, haniel is running as a Windows service and polling for updates.
+
+### Self-managing config
+
+The included [`haniel.yaml`](haniel.yaml) is a minimal config where haniel manages and updates only itself:
 
 ```yaml
 poll_interval: 300
@@ -48,49 +69,13 @@ repos:
 self:
   repo: haniel
   auto_update: false
-
-webhooks:
-  - url: https://hooks.slack.com/services/YOUR/WEBHOOK/URL
-    format: slack
-
-mcp:
-  enabled: true
-  transport: sse
-  port: 3200
-
-install:
-  requirements:
-    python: ">=3.11"
-  directories:
-    - ./haniel
-    - ./logs
-  service:
-    name: haniel
-    display: "Haniel Service Runner"
-    working_directory: "{root}"
-    environment:
-      PYTHONUTF8: "1"
 ```
 
-### 2. Install and register as a Windows service
+haniel polls its own repo every 5 minutes. When it detects a new version, it sends a webhook notification and waits for approval.
 
-```bash
-haniel install haniel.yaml
-```
+### Approving a self-update
 
-This clones the repo, validates requirements, and registers haniel as a Windows service via WinSW.
-
-### 3. Start the service
-
-```bash
-sc start haniel
-```
-
-haniel now polls the repo every 5 minutes. When it detects changes to its own repo, it sends a webhook notification and waits for approval.
-
-### 4. Approve a self-update
-
-When haniel detects a new version of itself, it enters a pending state. Approve via the MCP tool (from Claude Code):
+When haniel detects changes to its own repo, it enters a pending state. Approve via the MCP tool (from Claude Code):
 
 ```
 haniel_approve_update()
@@ -98,7 +83,7 @@ haniel_approve_update()
 
 haniel exits with code 10. The wrapper script (`haniel-runner.ps1`) picks this up, runs `git pull` + `pip install`, and restarts haniel with the new code.
 
-If you prefer automatic updates, set `auto_update: true` in the `self` section.
+For automatic updates without approval, set `auto_update: true`.
 
 ## Self-update architecture
 

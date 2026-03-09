@@ -205,7 +205,7 @@ function Main {
     # --------------------------------------------------------
     # Step 0: Git
     # --------------------------------------------------------
-    Write-Step "0/5" "Git"
+    Write-Step "0/6" "Git"
 
     if (-not $SkipGitCheck) {
         if (-not (Test-Git)) {
@@ -231,7 +231,7 @@ function Main {
     # --------------------------------------------------------
     # Step 1: Python
     # --------------------------------------------------------
-    Write-Step "1/5" "Python"
+    Write-Step "1/6" "Python"
 
     if (-not $SkipPythonCheck) {
         if (-not (Test-Python)) {
@@ -257,7 +257,7 @@ function Main {
     # --------------------------------------------------------
     # Step 2: WinSW (Service Wrapper)
     # --------------------------------------------------------
-    Write-Step "2/5" "WinSW (Service Wrapper)"
+    Write-Step "2/6" "WinSW (Service Wrapper)"
 
     $ok = Install-WinSW
     if (-not $ok) {
@@ -269,7 +269,7 @@ function Main {
     # --------------------------------------------------------
     # Step 3: Install path + clone haniel
     # --------------------------------------------------------
-    Write-Step "3/5" "Clone Haniel"
+    Write-Step "3/6" "Clone Haniel"
 
     if ([string]::IsNullOrWhiteSpace($InstallPath)) {
         $defaultPath = "C:\Services\Haniel"
@@ -337,7 +337,7 @@ function Main {
     # --------------------------------------------------------
     # Step 4: Download config file
     # --------------------------------------------------------
-    Write-Step "4/5" "Service Configuration"
+    Write-Step "4/6" "Service Configuration"
 
     if ([string]::IsNullOrWhiteSpace($ConfigUrl)) {
         $ConfigUrl = Read-Host "  Config file URL (e.g. https://raw.githubusercontent.com/.../seosoyoung.yaml)"
@@ -391,7 +391,7 @@ function Main {
     # --------------------------------------------------------
     # Step 5: haniel install
     # --------------------------------------------------------
-    Write-Step "5/5" "Running haniel install"
+    Write-Step "5/6" "Running haniel install"
 
     Write-Info "Working directory: $serviceDir"
     Write-Info "Command: $hanielExe install $fileName"
@@ -415,16 +415,37 @@ function Main {
     }
 
     # --------------------------------------------------------
+    # Step 6: Start service
+    # --------------------------------------------------------
+    Write-Step "6/6" "Starting Service"
+
+    Write-Info "Starting service '$serviceName'..."
+    try {
+        & sc.exe start $serviceName 2>&1 | ForEach-Object { Write-Info $_ }
+        if ($LASTEXITCODE -eq 0) {
+            Write-Success "Service '$serviceName' started"
+        }
+        else {
+            Write-Warn "sc start exited with code $LASTEXITCODE"
+            Write-Info "You can start the service manually: sc start $serviceName"
+        }
+    }
+    catch {
+        Write-Warn "Failed to start service: $($_.Exception.Message)"
+        Write-Info "You can start the service manually: sc start $serviceName"
+    }
+
+    # --------------------------------------------------------
     # Done
     # --------------------------------------------------------
     Write-Header "Installation Complete"
 
-    Write-Host "  Service '$serviceName' has been set up at:" -ForegroundColor Green
+    Write-Host "  Service '$serviceName' is running at:" -ForegroundColor Green
     Write-Host "    $serviceDir" -ForegroundColor Green
     Write-Host ""
     Write-Host "  Haniel commands:" -ForegroundColor Yellow
-    Write-Host "    Start service : sc start $serviceName" -ForegroundColor White
     Write-Host "    Stop service  : sc stop $serviceName" -ForegroundColor White
+    Write-Host "    Restart       : sc stop $serviceName && sc start $serviceName" -ForegroundColor White
     Write-Host "    Run manually  : $hanielExe run $fileName" -ForegroundColor White
     Write-Host "    Validate      : $hanielExe validate $fileName" -ForegroundColor White
     Write-Host ""
