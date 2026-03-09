@@ -63,8 +63,8 @@ After completion, haniel is running as a Windows service and polling for updates
 |   +-- src/haniel/...
 |   +-- haniel-runner.ps1
 +-- .services/               # Managed service repos
-    +-- soulstream/
-    +-- seosoyoung/
+    +-- some-service-a/
+    +-- some-service-b/
 ```
 
 Adding a new service = edit `haniel.yaml` + restart. No re-bootstrapping needed.
