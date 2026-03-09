@@ -1,7 +1,7 @@
 """
-haniel - Configuration-based, intentionally ignorant service runner.
+haniel - Configuration-based, intentionally indifferent service runner.
 
-haniel doesn't know what it runs. It checks git repos, pulls changes,
+haniel doesn't care what it runs. It checks git repos, pulls changes,
 and starts processes as specified. That's all it does.
 """
 

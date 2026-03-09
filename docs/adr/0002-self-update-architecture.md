@@ -67,8 +67,8 @@ via MCP tool." The caller could be:
 - A Slack bot forwarding a user's button click
 - An automated policy (e.g., "approve if tests pass")
 
-This keeps haniel ignorant of the approval mechanism, consistent with its
-"intentionally ignorant" design philosophy.
+This keeps haniel indifferent to the approval mechanism, consistent with its
+"intentionally indifferent" design philosophy.
 
 ### Wrapper Script Design
 
