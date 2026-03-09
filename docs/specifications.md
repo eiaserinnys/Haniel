@@ -1,6 +1,6 @@
 # haniel
 
-The angel of resurrection. A configuration-based, intentionally indifferent service runner.
+The Angel of Blood and Pact. A configuration-based, intentionally indifferent service runner.
 
 ## Core concept
 
