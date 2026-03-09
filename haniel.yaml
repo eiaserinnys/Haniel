@@ -1,0 +1,39 @@
+# Minimal haniel configuration — manages and updates itself.
+#
+# For a full multi-service example, see haniel.yaml.example.
+
+poll_interval: 300
+
+repos:
+  haniel:
+    url: git@github.com:eiaserinnys/Haniel.git
+    branch: main
+    path: ./haniel
+
+self:
+  repo: haniel
+  auto_update: false
+
+webhooks:
+  - url: https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+    format: slack
+
+mcp:
+  enabled: true
+  transport: sse
+  port: 3200
+
+install:
+  requirements:
+    python: ">=3.11"
+
+  directories:
+    - ./haniel
+    - ./logs
+
+  service:
+    name: haniel
+    display: "Haniel Service Runner"
+    working_directory: "{root}"
+    environment:
+      PYTHONUTF8: "1"
