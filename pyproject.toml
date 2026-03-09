@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "haniel"
 version = "0.1.0"
-description = "Configuration-based, intentionally ignorant service runner"
+description = "Configuration-based, intentionally indifferent service runner"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"

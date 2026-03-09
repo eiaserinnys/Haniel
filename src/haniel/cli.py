@@ -164,9 +164,9 @@ def print_dry_run_run(config: HanielConfig) -> None:
 @click.option("--version", is_flag=True, help="Show version and exit.")
 @click.pass_context
 def main(ctx: click.Context, version: bool) -> None:
-    """haniel - Configuration-based, intentionally ignorant service runner.
+    """haniel - Configuration-based, intentionally indifferent service runner.
 
-    haniel doesn't know what it runs. It checks git repos, pulls changes,
+    haniel doesn't care what it runs. It checks git repos, pulls changes,
     and starts processes as specified in the config file.
     """
     if version:

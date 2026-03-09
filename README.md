@@ -1,62 +1,33 @@
 # haniel
 
-부활시키는 천사. 설정 기반의 극단적으로 무지한 서비스 러너.
+Configuration-based, intentionally indifferent service runner.
 
-## 철학
+haniel monitors git repositories, pulls changes, and restarts processes.
+Whether it's a Slack bot, an MCP server, or a web dashboard, haniel treats everything as just a "process."
 
-haniel은 자기가 무엇을 돌리는지 모른다.
-git 리포를 체크하고, 변경이 있으면 pull 받고, 명시된 명령어로 프로세스를 기동한다.
-그것이 슬랙봇이든 MCP 서버든 웹 대시보드든, haniel에게는 전부 "프로세스"일 뿐이다.
+## What haniel does
 
-### haniel이 아는 것
+- **Git polling**: Watches configured repositories for new commits
+- **Process management**: Starts, stops, and restarts services based on YAML config
+- **Lifecycle hooks**: Runs post-pull commands (dependency installs, builds, etc.)
+- **Health monitoring**: Detects crashes and restarts with exponential backoff + circuit breaker
+- **Dependency ordering**: Starts services in the right order using `after` and `ready` conditions
+- **Webhook notifications**: Sends alerts on deployments, crashes, and failures
+- **MCP server**: Exposes status and control tools for Claude Code integration
+- **Self-update**: Updates its own code via a two-loop architecture (see [ADR-0002](docs/adr/0002-self-update-architecture.md))
 
-- 설정 파일(YAML)에 적힌 내용
-- git fetch/pull 결과
-- 프로세스가 살아있는지 여부
+## What haniel doesn't care about
 
-### haniel이 모르는 것
+- What `.env` files contain (processes load their own)
+- What processes actually do
+- Business dependencies between services
+- Port number semantics
+- Host system configuration beyond what's in `haniel.yaml`
 
-- `.env`의 내용과 의미 — **읽지도, 로드하지도, 자식에게 주입하지도 않는다**
-- `.mcp.json`의 내용 — 설치 시 생성만 하고, 런타임에 건드리지 않는다
-- 프로세스가 무슨 일을 하는지
-- 프로세스 간의 비즈니스 의존성
-- 포트 번호의 의미
-- 호스트 시스템의 나머지 구성
-
-## 설치
-
-```bash
-pip install haniel
-```
-
-개발 모드:
-```bash
-git clone https://github.com/eiaserinnys/Haniel.git
-cd Haniel
-pip install -e ".[dev]"
-```
-
-## 사용법
-
-### 네 가지 모드
-
-```bash
-# 환경 설치 (디렉토리, venv, git clone 등)
-haniel install haniel.yaml
-
-# 서비스 실행 (poll 루프 시작)
-haniel run haniel.yaml
-
-# 상태 조회
-haniel status
-
-# 설정 검증
-haniel validate haniel.yaml
-```
-
-### 기본 설정
+## Quick start
 
 ```yaml
+# haniel.yaml
 poll_interval: 60
 
 repos:
@@ -73,22 +44,51 @@ services:
     ready: port:8080
 ```
 
-자세한 설정 방법은 [설계 문서](docs/haniel-spec.md)를 참조하세요.
-
-## 개발
+## Commands
 
 ```bash
-# 테스트 실행
+# Set up the execution environment (directories, venvs, secrets via Claude Code)
+haniel install haniel.yaml
+
+# Start services and enter the poll loop
+haniel run haniel.yaml
+
+# Show current status
+haniel status haniel.yaml
+
+# Validate configuration without running
+haniel validate haniel.yaml
+```
+
+## Installation
+
+```bash
+pip install haniel
+```
+
+Development:
+
+```bash
+git clone https://github.com/eiaserinnys/Haniel.git
+cd Haniel
+pip install -e ".[dev]"
+```
+
+## Documentation
+
+- [Specifications](docs/specifications.md) - Full configuration reference and runtime behavior
+- [ADR-0001: WinSW over NSSM](docs/adr/0001-winsw-over-nssm.md) - Windows service wrapper choice
+- [ADR-0002: Self-update architecture](docs/adr/0002-self-update-architecture.md) - Two-loop self-update mechanism
+
+## Development
+
+```bash
 pytest
-
-# 커버리지와 함께
 pytest --cov=src/haniel
-
-# 린트
 ruff check src/ tests/
 ruff format src/ tests/
 ```
 
-## 라이선스
+## License
 
 MIT
