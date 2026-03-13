@@ -72,6 +72,30 @@ function Write-Fail($text) {
     Write-Host "  [X] $text" -ForegroundColor Red
 }
 
+function Invoke-NativeCommand {
+    <#
+    .SYNOPSIS
+        Run an external command, streaming combined stdout/stderr through Write-Info.
+        $ErrorActionPreference = "Stop" makes PowerShell throw on stderr ErrorRecords
+        from native commands piped through 2>&1. We temporarily switch to "Continue"
+        so that stderr lines are logged instead of aborting the script.
+    #>
+    param([scriptblock]$Command)
+    $savedPref = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $Command 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                Write-Info $_.Exception.Message
+            } else {
+                Write-Info $_
+            }
+        }
+    } finally {
+        $ErrorActionPreference = $savedPref
+    }
+}
+
 function Write-Info($text) {
     Write-Host "      $text" -ForegroundColor Gray
 }
@@ -105,7 +129,7 @@ function Test-Git {
 
 function Install-Git {
     Write-Info "Installing Git via winget..."
-    & winget install --id Git.Git -e --source winget --accept-source-agreements --accept-package-agreements 2>&1 | ForEach-Object { Write-Info $_ }
+    Invoke-NativeCommand { winget install --id Git.Git -e --source winget --accept-source-agreements --accept-package-agreements }
     if ($LASTEXITCODE -ne 0) {
         Write-Fail "Failed to install Git via winget"
         Write-Info "Please install Git manually from https://git-scm.com"
@@ -138,7 +162,7 @@ function Test-Python {
 
 function Install-Python {
     Write-Info "Installing Python 3.13 via winget..."
-    & winget install --id Python.Python.3.13 -e --source winget --accept-source-agreements --accept-package-agreements 2>&1 | ForEach-Object { Write-Info $_ }
+    Invoke-NativeCommand { winget install --id Python.Python.3.13 -e --source winget --accept-source-agreements --accept-package-agreements }
     if ($LASTEXITCODE -ne 0) {
         Write-Fail "Failed to install Python via winget"
         Write-Info "Please install Python manually from https://python.org"
@@ -292,7 +316,7 @@ function Main {
     if (Test-Path (Join-Path $selfDir ".git")) {
         Write-Info "Haniel repository already exists at $selfDir"
         Write-Info "Pulling latest changes..."
-        & git -C $selfDir pull --ff-only 2>&1 | ForEach-Object { Write-Info $_ }
+        Invoke-NativeCommand { git -C $selfDir pull --ff-only }
         if ($LASTEXITCODE -ne 0) {
             Write-Warn "git pull failed (exit code $LASTEXITCODE). Continuing with existing state."
         }
@@ -309,7 +333,7 @@ function Main {
         }
 
         Write-Info "Cloning haniel to $selfDir..."
-        & git clone https://github.com/eiaserinnys/haniel.git $selfDir 2>&1 | ForEach-Object { Write-Info $_ }
+        Invoke-NativeCommand { git clone https://github.com/eiaserinnys/haniel.git $selfDir }
         if ($LASTEXITCODE -ne 0) {
             Write-Fail "Failed to clone haniel repository"
             exit 1
@@ -333,7 +357,7 @@ function Main {
     }
 
     Write-Info "Installing haniel (editable)..."
-    & $pipExe install -e $selfDir 2>&1 | ForEach-Object { Write-Info $_ }
+    Invoke-NativeCommand { & $pipExe install -e $selfDir }
     if ($LASTEXITCODE -ne 0) {
         Write-Fail "Failed to install haniel"
         exit 1
@@ -440,7 +464,7 @@ function Main {
 
     Write-Info "Starting service '$serviceName'..."
     try {
-        & sc.exe start $serviceName 2>&1 | ForEach-Object { Write-Info $_ }
+        Invoke-NativeCommand { sc.exe start $serviceName }
         if ($LASTEXITCODE -eq 0) {
             Write-Success "Service '$serviceName' started"
         }
