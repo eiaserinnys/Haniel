@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-import pytest
 
 from haniel.config import load_config
 from haniel.config.validators import (
@@ -11,7 +10,6 @@ from haniel.config.validators import (
     check_port_conflicts,
     check_duplicate_paths,
     check_missing_references,
-    ValidationError as HanielValidationError,
 )
 
 
@@ -46,7 +44,10 @@ class TestValidateConfig:
         config = load_config(FIXTURES_DIR / "invalid_path_duplicate.yaml")
         errors = validate_config(config)
         assert len(errors) > 0
-        assert any("path" in e.message.lower() or "duplicate" in e.message.lower() for e in errors)
+        assert any(
+            "path" in e.message.lower() or "duplicate" in e.message.lower()
+            for e in errors
+        )
 
 
 class TestCircularDependencies:
@@ -73,12 +74,7 @@ class TestCircularDependencies:
 
         config = HanielConfig(
             repos={},
-            services={
-                "self-ref": ServiceConfig(
-                    run="echo hello",
-                    after=["self-ref"]
-                )
-            }
+            services={"self-ref": ServiceConfig(run="echo hello", after=["self-ref"])},
         )
         errors = check_circular_dependencies(config)
         assert len(errors) > 0
@@ -111,7 +107,7 @@ class TestPortConflicts:
             services={
                 "svc-a": ServiceConfig(run="echo a", ready="delay:5"),
                 "svc-b": ServiceConfig(run="echo b", ready="log:started"),
-            }
+            },
         )
         errors = check_port_conflicts(config)
         assert len(errors) == 0

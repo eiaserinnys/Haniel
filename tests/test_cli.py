@@ -3,7 +3,6 @@
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 from click.testing import CliRunner
 
 from haniel.cli import main
@@ -58,7 +57,9 @@ class TestInstallCommand:
         assert "not found" in result.output.lower() or "error" in result.output.lower()
 
     @patch("shutil.which", return_value="/usr/bin/claude")
-    def test_install_with_valid_config(self, mock_which, cli_runner: CliRunner, tmp_config):
+    def test_install_with_valid_config(
+        self, mock_which, cli_runner: CliRunner, tmp_config
+    ):
         """install with valid config should succeed (skeleton)."""
         result = cli_runner.invoke(main, ["install", str(tmp_config)])
         # Skeleton just acknowledges the command
@@ -152,7 +153,9 @@ class TestRunForeground:
 
     def test_run_foreground_dry_run(self, cli_runner: CliRunner, tmp_config):
         """run --foreground --dry-run should show dry run output."""
-        result = cli_runner.invoke(main, ["run", "--foreground", "--dry-run", str(tmp_config)])
+        result = cli_runner.invoke(
+            main, ["run", "--foreground", "--dry-run", str(tmp_config)]
+        )
         assert result.exit_code == 0
         assert "dry-run" in result.output.lower()
 
@@ -181,6 +184,7 @@ class TestModuleExecution:
     def test_module_import(self):
         """haniel module should be importable."""
         import haniel
+
         assert hasattr(haniel, "__version__")
         assert haniel.__version__ == "0.1.0"
 
@@ -188,6 +192,7 @@ class TestModuleExecution:
         """haniel.__main__ should import main from cli."""
         from haniel.__main__ import main as main_func
         from haniel.cli import main as cli_main
+
         assert main_func is cli_main
 
 
@@ -198,7 +203,9 @@ class TestValidateWithRealFixtures:
 
     def test_validate_valid_config_shows_summary(self, cli_runner: CliRunner):
         """validate with valid config shows detailed summary."""
-        result = cli_runner.invoke(main, ["validate", str(self.FIXTURES_DIR / "valid_config.yaml")])
+        result = cli_runner.invoke(
+            main, ["validate", str(self.FIXTURES_DIR / "valid_config.yaml")]
+        )
         assert result.exit_code == 0
         assert "Validation passed" in result.output
         assert "Poll interval: 60s" in result.output
@@ -207,35 +214,45 @@ class TestValidateWithRealFixtures:
 
     def test_validate_circular_dependency(self, cli_runner: CliRunner):
         """validate detects circular dependencies."""
-        result = cli_runner.invoke(main, ["validate", str(self.FIXTURES_DIR / "invalid_circular.yaml")])
+        result = cli_runner.invoke(
+            main, ["validate", str(self.FIXTURES_DIR / "invalid_circular.yaml")]
+        )
         assert result.exit_code != 0
         assert "Validation FAILED" in result.output
         assert "Circular dependency" in result.output
 
     def test_validate_port_conflict(self, cli_runner: CliRunner):
         """validate detects port conflicts."""
-        result = cli_runner.invoke(main, ["validate", str(self.FIXTURES_DIR / "invalid_port_conflict.yaml")])
+        result = cli_runner.invoke(
+            main, ["validate", str(self.FIXTURES_DIR / "invalid_port_conflict.yaml")]
+        )
         assert result.exit_code != 0
         assert "Validation FAILED" in result.output
         assert "3100" in result.output
 
     def test_validate_duplicate_paths(self, cli_runner: CliRunner):
         """validate detects duplicate repository paths."""
-        result = cli_runner.invoke(main, ["validate", str(self.FIXTURES_DIR / "invalid_path_duplicate.yaml")])
+        result = cli_runner.invoke(
+            main, ["validate", str(self.FIXTURES_DIR / "invalid_path_duplicate.yaml")]
+        )
         assert result.exit_code != 0
         assert "Validation FAILED" in result.output
         assert "Duplicate" in result.output or "path" in result.output.lower()
 
     def test_validate_missing_after(self, cli_runner: CliRunner):
         """validate detects missing after references."""
-        result = cli_runner.invoke(main, ["validate", str(self.FIXTURES_DIR / "invalid_missing_after.yaml")])
+        result = cli_runner.invoke(
+            main, ["validate", str(self.FIXTURES_DIR / "invalid_missing_after.yaml")]
+        )
         assert result.exit_code != 0
         assert "Validation FAILED" in result.output
         assert "non-existent-service" in result.output
 
     def test_validate_missing_repo(self, cli_runner: CliRunner):
         """validate detects missing repo references."""
-        result = cli_runner.invoke(main, ["validate", str(self.FIXTURES_DIR / "invalid_missing_repo.yaml")])
+        result = cli_runner.invoke(
+            main, ["validate", str(self.FIXTURES_DIR / "invalid_missing_repo.yaml")]
+        )
         assert result.exit_code != 0
         assert "Validation FAILED" in result.output
         assert "non-existent-repo" in result.output
@@ -248,7 +265,9 @@ class TestInstallDryRunDetailed:
 
     def test_install_dry_run_shows_phases(self, cli_runner: CliRunner):
         """install --dry-run shows all three phases."""
-        result = cli_runner.invoke(main, ["install", "--dry-run", str(self.FIXTURES_DIR / "valid_config.yaml")])
+        result = cli_runner.invoke(
+            main, ["install", "--dry-run", str(self.FIXTURES_DIR / "valid_config.yaml")]
+        )
         assert result.exit_code == 0
         assert "Phase 1" in result.output
         assert "Phase 2" in result.output
@@ -256,35 +275,45 @@ class TestInstallDryRunDetailed:
 
     def test_install_dry_run_shows_requirements(self, cli_runner: CliRunner):
         """install --dry-run shows requirements."""
-        result = cli_runner.invoke(main, ["install", "--dry-run", str(self.FIXTURES_DIR / "valid_config.yaml")])
+        result = cli_runner.invoke(
+            main, ["install", "--dry-run", str(self.FIXTURES_DIR / "valid_config.yaml")]
+        )
         assert result.exit_code == 0
         assert "python" in result.output
         assert ">=3.11" in result.output
 
     def test_install_dry_run_shows_directories(self, cli_runner: CliRunner):
         """install --dry-run shows directories to create."""
-        result = cli_runner.invoke(main, ["install", "--dry-run", str(self.FIXTURES_DIR / "valid_config.yaml")])
+        result = cli_runner.invoke(
+            main, ["install", "--dry-run", str(self.FIXTURES_DIR / "valid_config.yaml")]
+        )
         assert result.exit_code == 0
         assert "./runtime" in result.output
         assert "./runtime/logs" in result.output
 
     def test_install_dry_run_shows_repos(self, cli_runner: CliRunner):
         """install --dry-run shows repositories to clone."""
-        result = cli_runner.invoke(main, ["install", "--dry-run", str(self.FIXTURES_DIR / "valid_config.yaml")])
+        result = cli_runner.invoke(
+            main, ["install", "--dry-run", str(self.FIXTURES_DIR / "valid_config.yaml")]
+        )
         assert result.exit_code == 0
         assert "test-repo" in result.output
         assert "another-repo" in result.output
 
     def test_install_dry_run_shows_service(self, cli_runner: CliRunner):
         """install --dry-run shows service registration."""
-        result = cli_runner.invoke(main, ["install", "--dry-run", str(self.FIXTURES_DIR / "valid_config.yaml")])
+        result = cli_runner.invoke(
+            main, ["install", "--dry-run", str(self.FIXTURES_DIR / "valid_config.yaml")]
+        )
         assert result.exit_code == 0
         assert "haniel" in result.output
         assert "Haniel Service Runner" in result.output
 
     def test_install_with_invalid_config_fails(self, cli_runner: CliRunner):
         """install with invalid config should fail."""
-        result = cli_runner.invoke(main, ["install", str(self.FIXTURES_DIR / "invalid_circular.yaml")])
+        result = cli_runner.invoke(
+            main, ["install", str(self.FIXTURES_DIR / "invalid_circular.yaml")]
+        )
         assert result.exit_code != 0
         assert "Configuration errors" in result.output
 
@@ -296,20 +325,26 @@ class TestRunDryRunDetailed:
 
     def test_run_dry_run_shows_poll_interval(self, cli_runner: CliRunner):
         """run --dry-run shows poll interval."""
-        result = cli_runner.invoke(main, ["run", "--dry-run", str(self.FIXTURES_DIR / "valid_config.yaml")])
+        result = cli_runner.invoke(
+            main, ["run", "--dry-run", str(self.FIXTURES_DIR / "valid_config.yaml")]
+        )
         assert result.exit_code == 0
         assert "Poll interval: 60s" in result.output
 
     def test_run_dry_run_shows_repos(self, cli_runner: CliRunner):
         """run --dry-run shows repositories to monitor."""
-        result = cli_runner.invoke(main, ["run", "--dry-run", str(self.FIXTURES_DIR / "valid_config.yaml")])
+        result = cli_runner.invoke(
+            main, ["run", "--dry-run", str(self.FIXTURES_DIR / "valid_config.yaml")]
+        )
         assert result.exit_code == 0
         assert "test-repo" in result.output
         assert "main" in result.output
 
     def test_run_dry_run_shows_services(self, cli_runner: CliRunner):
         """run --dry-run shows services in startup order."""
-        result = cli_runner.invoke(main, ["run", "--dry-run", str(self.FIXTURES_DIR / "valid_config.yaml")])
+        result = cli_runner.invoke(
+            main, ["run", "--dry-run", str(self.FIXTURES_DIR / "valid_config.yaml")]
+        )
         assert result.exit_code == 0
         assert "mcp-server" in result.output
         assert "main-app" in result.output
@@ -318,12 +353,16 @@ class TestRunDryRunDetailed:
 
     def test_run_dry_run_shows_ready_conditions(self, cli_runner: CliRunner):
         """run --dry-run shows ready conditions."""
-        result = cli_runner.invoke(main, ["run", "--dry-run", str(self.FIXTURES_DIR / "valid_config.yaml")])
+        result = cli_runner.invoke(
+            main, ["run", "--dry-run", str(self.FIXTURES_DIR / "valid_config.yaml")]
+        )
         assert result.exit_code == 0
         assert "ready: port:3100" in result.output
 
     def test_run_with_invalid_config_fails(self, cli_runner: CliRunner):
         """run with invalid config should fail."""
-        result = cli_runner.invoke(main, ["run", "--dry-run", str(self.FIXTURES_DIR / "invalid_circular.yaml")])
+        result = cli_runner.invoke(
+            main, ["run", "--dry-run", str(self.FIXTURES_DIR / "invalid_circular.yaml")]
+        )
         assert result.exit_code != 0
         assert "Configuration errors" in result.output

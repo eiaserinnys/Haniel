@@ -21,7 +21,9 @@ from haniel import __version__, EXIT_SELF_UPDATE
 from haniel.config import load_config, HanielConfig, validate_config
 
 
-def validate_config_file(ctx: click.Context, param: click.Parameter, value: str | None) -> Path | None:
+def validate_config_file(
+    ctx: click.Context, param: click.Parameter, value: str | None
+) -> Path | None:
     """Validate that a config file exists and return its Path."""
     if value is None:
         return None
@@ -96,11 +98,15 @@ def print_dry_run_install(config: HanielConfig) -> None:
                 click.echo(f"      {name} -> {cfg.path}")
 
     click.echo()
-    click.echo(click.style("[dry-run] Phase 2: Interactive setup (Claude Code)", bold=True))
+    click.echo(
+        click.style("[dry-run] Phase 2: Interactive setup (Claude Code)", bold=True)
+    )
 
     # Interactive configs
     if config.install and config.install.configs:
-        interactive_configs = {k: v for k, v in config.install.configs.items() if v.keys}
+        interactive_configs = {
+            k: v for k, v in config.install.configs.items() if v.keys
+        }
         if interactive_configs:
             click.echo("  - Config files (interactive):")
             for name, cfg in interactive_configs.items():
@@ -145,7 +151,9 @@ def print_dry_run_run(config: HanielConfig) -> None:
                 service = config.services[name]
                 deps = set(service.after)
                 if deps <= started:
-                    after_str = f" (after: {', '.join(service.after)})" if service.after else ""
+                    after_str = (
+                        f" (after: {', '.join(service.after)})" if service.after else ""
+                    )
                     ready_str = f" [ready: {service.ready}]" if service.ready else ""
                     enabled_str = "" if service.enabled else " (DISABLED)"
                     click.echo(f"    - {name}{after_str}{ready_str}{enabled_str}")
@@ -179,9 +187,15 @@ def main(ctx: click.Context, version: bool) -> None:
 
 @main.command()
 @click.argument("config", required=False, callback=validate_config_file)
-@click.option("--dry-run", is_flag=True, help="Show what would be done without executing.")
-@click.option("--resume", is_flag=True, help="Resume from previous install state if exists.")
-@click.option("--skip-interactive", is_flag=True, help="Skip Claude Code interactive phase.")
+@click.option(
+    "--dry-run", is_flag=True, help="Show what would be done without executing."
+)
+@click.option(
+    "--resume", is_flag=True, help="Resume from previous install state if exists."
+)
+@click.option(
+    "--skip-interactive", is_flag=True, help="Skip Claude Code interactive phase."
+)
 def install(
     config: Path | None,
     dry_run: bool,
@@ -233,7 +247,9 @@ def install(
         click.echo(f"Resuming from phase: {state.phase.value}")
         click.echo(f"Completed steps: {len(state.completed_steps)}")
         if state.failed_steps:
-            click.echo(click.style(f"Failed steps: {len(state.failed_steps)}", fg="yellow"))
+            click.echo(
+                click.style(f"Failed steps: {len(state.failed_steps)}", fg="yellow")
+            )
         click.echo()
     else:
         if state_file.exists():
@@ -260,7 +276,9 @@ def install(
         if state.phase in [InstallPhase.NOT_STARTED, InstallPhase.BOOTSTRAP]:
             click.echo(click.style("=== Phase 0: Bootstrap ===", bold=True))
             if not orchestrator.run_bootstrap_phase():
-                click.echo(click.style("Bootstrap failed. Claude Code is required.", fg="red"))
+                click.echo(
+                    click.style("Bootstrap failed. Claude Code is required.", fg="red")
+                )
                 click.echo("Install it with: npm install -g @anthropic-ai/claude-code")
                 sys.exit(1)
             click.echo(click.style("✓ Bootstrap complete", fg="green"))
@@ -268,7 +286,9 @@ def install(
 
         # Phase 1: Mechanical
         if state.phase == InstallPhase.MECHANICAL:
-            click.echo(click.style("=== Phase 1: Mechanical Installation ===", bold=True))
+            click.echo(
+                click.style("=== Phase 1: Mechanical Installation ===", bold=True)
+            )
             orchestrator.run_mechanical_phase()
 
             # Report results
@@ -283,29 +303,41 @@ def install(
         # Phase 2: Interactive
         if state.phase == InstallPhase.INTERACTIVE:
             if skip_interactive:
-                click.echo(click.style("=== Phase 2: Interactive (Skipped) ===", bold=True))
+                click.echo(
+                    click.style("=== Phase 2: Interactive (Skipped) ===", bold=True)
+                )
                 click.echo("Interactive phase skipped by --skip-interactive flag")
                 state.transition_to(InstallPhase.FINALIZE)
                 orchestrator.save_state()
             else:
-                click.echo(click.style("=== Phase 2: Interactive Installation ===", bold=True))
+                click.echo(
+                    click.style("=== Phase 2: Interactive Installation ===", bold=True)
+                )
 
                 # Check if there are pending configs
                 if orchestrator.interactive.has_pending_configs():
                     status = orchestrator.interactive.get_install_status()
                     click.echo("Pending configs:")
                     for pending in status["pending_configs"]:
-                        click.echo(f"  - {pending['name']}: {', '.join(pending['missing_keys'])}")
+                        click.echo(
+                            f"  - {pending['name']}: {', '.join(pending['missing_keys'])}"
+                        )
                     click.echo()
                     click.echo("Launching Claude Code for interactive setup...")
-                    click.echo("(Claude Code will guide you through the remaining configuration)")
+                    click.echo(
+                        "(Claude Code will guide you through the remaining configuration)"
+                    )
                     click.echo()
 
                     # For now, just transition (real implementation would launch Claude Code)
                     # orchestrator.run_interactive_phase()
                     state.transition_to(InstallPhase.FINALIZE)
                     orchestrator.save_state()
-                    click.echo(click.style("✓ Interactive phase complete (simulated)", fg="green"))
+                    click.echo(
+                        click.style(
+                            "✓ Interactive phase complete (simulated)", fg="green"
+                        )
+                    )
                 else:
                     click.echo("No interactive configuration needed")
                     state.transition_to(InstallPhase.FINALIZE)
@@ -320,12 +352,16 @@ def install(
                 click.echo(click.style("✓ Finalization complete", fg="green"))
             else:
                 click.echo(click.style("Finalization incomplete", fg="yellow"))
-                click.echo("Some configs may be missing. Run with --resume to continue.")
+                click.echo(
+                    "Some configs may be missing. Run with --resume to continue."
+                )
             click.echo()
 
         # Complete
         if state.phase == InstallPhase.COMPLETE:
-            click.echo(click.style("=== Installation Complete ===", fg="green", bold=True))
+            click.echo(
+                click.style("=== Installation Complete ===", fg="green", bold=True)
+            )
             click.echo()
 
             summary = orchestrator.finalizer.get_completion_summary()
@@ -341,7 +377,11 @@ def install(
 
     except KeyboardInterrupt:
         click.echo()
-        click.echo(click.style("Installation interrupted. Use --resume to continue later.", fg="yellow"))
+        click.echo(
+            click.style(
+                "Installation interrupted. Use --resume to continue later.", fg="yellow"
+            )
+        )
         orchestrator.save_state()
         sys.exit(130)
     except Exception as e:
@@ -352,9 +392,15 @@ def install(
 
 @main.command()
 @click.argument("config", required=False, callback=validate_config_file)
-@click.option("--foreground", "-f", is_flag=True, help="Run in foreground (don't daemonize).")
-@click.option("--dry-run", is_flag=True, help="Show what would be done without executing.")
-@click.option("--log-level", default="INFO", help="Log level (DEBUG, INFO, WARNING, ERROR).")
+@click.option(
+    "--foreground", "-f", is_flag=True, help="Run in foreground (don't daemonize)."
+)
+@click.option(
+    "--dry-run", is_flag=True, help="Show what would be done without executing."
+)
+@click.option(
+    "--log-level", default="INFO", help="Log level (DEBUG, INFO, WARNING, ERROR)."
+)
 def run(config: Path | None, foreground: bool, dry_run: bool, log_level: str) -> None:
     """Start services and begin the poll loop.
 
@@ -435,6 +481,7 @@ def run(config: Path | None, foreground: bool, dry_run: bool, log_level: str) ->
             try:
                 # Sleep in small intervals to allow signal handling
                 import time
+
                 time.sleep(1)
             except KeyboardInterrupt:
                 break
@@ -446,7 +493,9 @@ def run(config: Path | None, foreground: bool, dry_run: bool, log_level: str) ->
     finally:
         runner.stop()
         if runner.self_update_requested:
-            click.echo(click.style("Exiting for self-update (exit code 10).", fg="yellow"))
+            click.echo(
+                click.style("Exiting for self-update (exit code 10).", fg="yellow")
+            )
             sys.exit(EXIT_SELF_UPDATE)
         click.echo("Shutdown complete.")
 
@@ -463,7 +512,6 @@ def status(config: Path | None, as_json: bool) -> None:
     - MCP server status (if enabled)
     """
     from haniel.core.runner import ServiceRunner
-    from haniel.core.health import ServiceState
 
     # If no config provided, show basic status
     if config is None:
@@ -480,7 +528,9 @@ def status(config: Path | None, as_json: bool) -> None:
         if as_json:
             click.echo(json.dumps({"error": "Invalid config", "errors": errors}))
         else:
-            click.echo(click.style("Configuration errors:", fg="red", bold=True), err=True)
+            click.echo(
+                click.style("Configuration errors:", fg="red", bold=True), err=True
+            )
             for error in errors:
                 click.echo(f"  - {error}", err=True)
         sys.exit(1)
@@ -503,7 +553,11 @@ def status(config: Path | None, as_json: bool) -> None:
     click.echo()
 
     running = status_data.get("running", False)
-    status_str = click.style("Running", fg="green") if running else click.style("Stopped", fg="yellow")
+    status_str = (
+        click.style("Running", fg="green")
+        if running
+        else click.style("Stopped", fg="yellow")
+    )
     click.echo(f"Status: {status_str}")
 
     if status_data.get("start_time"):

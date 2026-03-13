@@ -123,8 +123,10 @@ class ServiceHealth:
         """Update the current backoff delay using exponential backoff."""
         # Exponential backoff: base_delay * 2^(failures-1)
         # Capped at max_delay
-        exponent = min(self.consecutive_failures - 1, 10)  # Cap exponent to prevent overflow
-        delay = self.base_delay * (2 ** exponent)
+        exponent = min(
+            self.consecutive_failures - 1, 10
+        )  # Cap exponent to prevent overflow
+        delay = self.base_delay * (2**exponent)
         self.current_backoff = min(delay, self.max_delay)
 
     def get_restart_delay(self) -> float:
@@ -148,8 +150,7 @@ class ServiceHealth:
         now = time.time()
         window_start = now - self.circuit_breaker_window
         failures_in_window = sum(
-            1 for record in self.restart_history
-            if record.timestamp >= window_start
+            1 for record in self.restart_history if record.timestamp >= window_start
         )
 
         return failures_in_window >= self.circuit_breaker_threshold
@@ -162,7 +163,11 @@ class ServiceHealth:
         """
         if self.start_time is None:
             return None
-        if self.state not in (ServiceState.STARTING, ServiceState.READY, ServiceState.RUNNING):
+        if self.state not in (
+            ServiceState.STARTING,
+            ServiceState.READY,
+            ServiceState.RUNNING,
+        ):
             return None
         return time.time() - self.start_time
 

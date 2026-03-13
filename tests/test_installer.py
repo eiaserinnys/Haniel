@@ -276,10 +276,14 @@ class TestInteractiveInstaller:
             state = InstallState()
             installer = InteractiveInstaller(interactive_config, config_dir, state)
 
-            result = installer.set_config("workspace-env", "SLACK_BOT_TOKEN", "xoxb-1234")
+            result = installer.set_config(
+                "workspace-env", "SLACK_BOT_TOKEN", "xoxb-1234"
+            )
 
             assert result["success"] is True
-            assert state.config_values["workspace-env"]["SLACK_BOT_TOKEN"] == "xoxb-1234"
+            assert (
+                state.config_values["workspace-env"]["SLACK_BOT_TOKEN"] == "xoxb-1234"
+            )
 
     def test_get_config_status(self, interactive_config):
         """Test getting config status."""
@@ -556,9 +560,7 @@ class TestInstallOrchestrator:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir)
             state = InstallState()
-            orchestrator = InstallOrchestrator(
-                orchestrator_config, config_dir, state
-            )
+            orchestrator = InstallOrchestrator(orchestrator_config, config_dir, state)
 
             # Initial state
             assert state.phase == InstallPhase.NOT_STARTED
@@ -585,9 +587,7 @@ class TestInstallOrchestrator:
 
             # Load and resume
             loaded_state = InstallState.load(state_file)
-            orchestrator = InstallOrchestrator(
-                orchestrator_config, config_dir, loaded_state
-            )
+            InstallOrchestrator(orchestrator_config, config_dir, loaded_state)
 
             assert loaded_state.phase == InstallPhase.INTERACTIVE
             assert "directories" in loaded_state.completed_steps
@@ -601,9 +601,7 @@ class TestInstallOrchestrator:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir)
             state = InstallState()
-            orchestrator = InstallOrchestrator(
-                orchestrator_config, config_dir, state
-            )
+            orchestrator = InstallOrchestrator(orchestrator_config, config_dir, state)
 
             # Claude Code not installed
             mock_which.return_value = None
@@ -682,11 +680,14 @@ class TestInstallMcpServer:
             assert result_data["phase"] == "interactive"
 
             # Test haniel_set_config
-            result = await server.call_tool("haniel_set_config", {
-                "config_name": "workspace-env",
-                "key": "API_KEY",
-                "value": "test-key-123",
-            })
+            result = await server.call_tool(
+                "haniel_set_config",
+                {
+                    "config_name": "workspace-env",
+                    "key": "API_KEY",
+                    "value": "test-key-123",
+                },
+            )
             result_data = json.loads(result)
             assert result_data["success"] is True
 
@@ -694,9 +695,12 @@ class TestInstallMcpServer:
             assert state.config_values["workspace-env"]["API_KEY"] == "test-key-123"
 
             # Test haniel_get_config
-            result = await server.call_tool("haniel_get_config", {
-                "config_name": "workspace-env",
-            })
+            result = await server.call_tool(
+                "haniel_get_config",
+                {
+                    "config_name": "workspace-env",
+                },
+            )
             result_data = json.loads(result)
             assert "API_KEY" in result_data["filled_keys"]
 
@@ -714,11 +718,14 @@ class TestInstallMcpServer:
             server = InstallMcpServer(installer)
 
             # Set required config
-            await server.call_tool("haniel_set_config", {
-                "config_name": "workspace-env",
-                "key": "API_KEY",
-                "value": "test-key-123",
-            })
+            await server.call_tool(
+                "haniel_set_config",
+                {
+                    "config_name": "workspace-env",
+                    "key": "API_KEY",
+                    "value": "test-key-123",
+                },
+            )
 
             # Finalize
             result = await server.call_tool("haniel_finalize_install", {})
@@ -952,9 +959,7 @@ class TestOrchestratorExtended:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir)
             state = InstallState(phase=InstallPhase.MECHANICAL)
-            orchestrator = InstallOrchestrator(
-                orchestrator_config, config_dir, state
-            )
+            orchestrator = InstallOrchestrator(orchestrator_config, config_dir, state)
 
             orchestrator.save_state()
 
@@ -972,9 +977,7 @@ class TestOrchestratorExtended:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir)
             state = InstallState()
-            orchestrator = InstallOrchestrator(
-                orchestrator_config, config_dir, state
-            )
+            orchestrator = InstallOrchestrator(orchestrator_config, config_dir, state)
 
             result = orchestrator.run_bootstrap_phase()
 
@@ -992,9 +995,7 @@ class TestOrchestratorExtended:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir)
             state = InstallState()
-            orchestrator = InstallOrchestrator(
-                orchestrator_config, config_dir, state
-            )
+            orchestrator = InstallOrchestrator(orchestrator_config, config_dir, state)
 
             result = orchestrator.run_bootstrap_phase()
 
@@ -1008,9 +1009,7 @@ class TestOrchestratorExtended:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir)
             state = InstallState(phase=InstallPhase.MECHANICAL)
-            orchestrator = InstallOrchestrator(
-                orchestrator_config, config_dir, state
-            )
+            orchestrator = InstallOrchestrator(orchestrator_config, config_dir, state)
 
             result = orchestrator.retry_step("directories")
 
@@ -1025,9 +1024,7 @@ class TestOrchestratorExtended:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir)
             state = InstallState()
-            orchestrator = InstallOrchestrator(
-                orchestrator_config, config_dir, state
-            )
+            orchestrator = InstallOrchestrator(orchestrator_config, config_dir, state)
 
             result = orchestrator.retry_step("unknown_step")
 
@@ -1043,7 +1040,12 @@ class TestMechanicalInstallerExtended:
         """Create a sample config for testing."""
         return HanielConfig(
             install=InstallConfig(
-                requirements={"python": ">=3.11", "node": ">=18", "winsw": True, "claude-code": True},
+                requirements={
+                    "python": ">=3.11",
+                    "node": ">=18",
+                    "winsw": True,
+                    "claude-code": True,
+                },
                 directories=["./runtime", "./runtime/logs"],
                 environments={
                     "main-venv": EnvironmentConfig(
@@ -1682,8 +1684,10 @@ class TestFinalizerExtended:
             # {root} should be resolved to config_dir, not left as literal
             assert "{root}" not in xml_content
             assert 'name="PYTHONUTF8" value="1"' in xml_content
-            assert f'name="PYTHONPATH" value="{config_dir}/src"' in xml_content or \
-                   f'name="PYTHONPATH" value="{str(config_dir)}/src"' in xml_content
+            assert (
+                f'name="PYTHONPATH" value="{config_dir}/src"' in xml_content
+                or f'name="PYTHONPATH" value="{str(config_dir)}/src"' in xml_content
+            )
 
     @patch("platform.system")
     def test_systemd_environment_resolves_root_template(self, mock_system):
@@ -1716,9 +1720,7 @@ class TestFinalizerExtended:
                 finalizer.register_service()
 
                 # Find the log call containing Environment=
-                logged_texts = [
-                    str(call) for call in mock_logger.info.call_args_list
-                ]
+                logged_texts = [str(call) for call in mock_logger.info.call_args_list]
                 joined = " ".join(logged_texts)
 
                 assert "Environment=PYTHONPATH=" in joined
@@ -1759,9 +1761,7 @@ class TestOrchestratorPhases:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir)
             state = InstallState(phase=InstallPhase.MECHANICAL)
-            orchestrator = InstallOrchestrator(
-                orchestrator_config, config_dir, state
-            )
+            orchestrator = InstallOrchestrator(orchestrator_config, config_dir, state)
 
             result = orchestrator.run_mechanical_phase()
 
@@ -1789,9 +1789,7 @@ class TestOrchestratorPhases:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir)
             state = InstallState(phase=InstallPhase.INTERACTIVE)
-            orchestrator = InstallOrchestrator(
-                config_no_keys, config_dir, state
-            )
+            orchestrator = InstallOrchestrator(config_no_keys, config_dir, state)
 
             result = orchestrator.run_interactive_phase()
 
@@ -1807,9 +1805,7 @@ class TestOrchestratorPhases:
             config_dir = Path(tmpdir)
             state = InstallState(phase=InstallPhase.FINALIZE)
             # Don't set required config values
-            orchestrator = InstallOrchestrator(
-                orchestrator_config, config_dir, state
-            )
+            orchestrator = InstallOrchestrator(orchestrator_config, config_dir, state)
 
             result = orchestrator.run_finalize_phase()
 
@@ -1824,9 +1820,7 @@ class TestOrchestratorPhases:
             config_dir = Path(tmpdir)
             state = InstallState(phase=InstallPhase.FINALIZE)
             state.config_values["test-env"] = {"TEST_KEY": "value"}
-            orchestrator = InstallOrchestrator(
-                orchestrator_config, config_dir, state
-            )
+            orchestrator = InstallOrchestrator(orchestrator_config, config_dir, state)
 
             result = orchestrator.run_finalize_phase()
 
@@ -1858,9 +1852,7 @@ class TestOrchestratorPhases:
             repo_path.mkdir(parents=True)
             (repo_path / ".git").mkdir()
 
-            orchestrator = InstallOrchestrator(
-                config_with_repo, config_dir, state
-            )
+            orchestrator = InstallOrchestrator(config_with_repo, config_dir, state)
 
             result = orchestrator.retry_step("repos")
 
@@ -1873,17 +1865,13 @@ class TestOrchestratorPhases:
         from haniel.installer.state import InstallState, InstallPhase
 
         mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="Python 3.12.0",
-            stderr=""
+            returncode=0, stdout="Python 3.12.0", stderr=""
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir)
             state = InstallState(phase=InstallPhase.MECHANICAL)
-            orchestrator = InstallOrchestrator(
-                orchestrator_config, config_dir, state
-            )
+            orchestrator = InstallOrchestrator(orchestrator_config, config_dir, state)
 
             result = orchestrator.retry_step("requirements:python")
 
@@ -2327,7 +2315,9 @@ class TestInteractiveInstallerSession:
             installer = InteractiveInstaller(session_config, config_dir, state)
 
             # Retry an unknown step
-            result = await installer.call_mcp_tool("haniel_retry_step", {"step_name": "unknown"})
+            result = await installer.call_mcp_tool(
+                "haniel_retry_step", {"step_name": "unknown"}
+            )
             result_data = json.loads(result)
 
             assert result_data["success"] is False
@@ -2568,7 +2558,9 @@ class TestOrchestratorMechanicalPhaseErrors:
     @patch("haniel.installer.mechanical.MechanicalInstaller.clone_repos")
     @patch("haniel.installer.mechanical.MechanicalInstaller.create_directories")
     @patch("subprocess.run")
-    def test_mechanical_phase_repos_error(self, mock_run, mock_dirs, mock_repos, full_config):
+    def test_mechanical_phase_repos_error(
+        self, mock_run, mock_dirs, mock_repos, full_config
+    ):
         """Test mechanical phase when repos fail."""
         from haniel.installer.orchestrator import InstallOrchestrator
         from haniel.installer.state import InstallState, InstallPhase
@@ -2641,7 +2633,10 @@ class TestInstallMcpServerUnit:
 
     def test_init(self):
         """Test InstallMcpServer initialization."""
-        from haniel.installer.install_mcp_server import InstallMcpServer, DEFAULT_INSTALL_MCP_PORT
+        from haniel.installer.install_mcp_server import (
+            InstallMcpServer,
+            DEFAULT_INSTALL_MCP_PORT,
+        )
 
         mock_installer = MagicMock()
         server = InstallMcpServer(mock_installer)
@@ -2689,7 +2684,9 @@ class TestInstallMcpServerUnit:
         result = await server.call_tool("test_tool", {"arg": "value"})
 
         assert result == "result"
-        mock_installer.call_mcp_tool.assert_called_once_with("test_tool", {"arg": "value"})
+        mock_installer.call_mcp_tool.assert_called_once_with(
+            "test_tool", {"arg": "value"}
+        )
 
     def test_is_running_false_no_thread(self):
         """Test is_running returns False when no thread exists."""
@@ -2819,7 +2816,9 @@ class TestInstallMcpServerUnit:
         server = InstallMcpServer(mock_installer)
 
         with patch.dict("sys.modules", {"mcp.server": None}):
-            with patch("haniel.installer.install_mcp_server.asyncio.Event") as mock_event_class:
+            with patch(
+                "haniel.installer.install_mcp_server.asyncio.Event"
+            ) as mock_event_class:
                 mock_event = MagicMock()
                 mock_event_class.return_value = mock_event
 

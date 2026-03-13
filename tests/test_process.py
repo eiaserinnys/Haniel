@@ -8,7 +8,6 @@ Tests cover:
 - Circuit breaker and backoff
 """
 
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -16,7 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from haniel.config import ServiceConfig, ServiceShutdownConfig
+from haniel.config import ServiceConfig
 from haniel.core.health import HealthManager, ServiceState
 from haniel.core.logs import LogManager, LogCapture
 from haniel.platform import get_platform_handler
@@ -132,6 +131,7 @@ class TestLogCapture:
         capture.start()
 
         matched = []
+
         def callback(line: str):
             matched.append(line)
 
@@ -239,7 +239,9 @@ class TestHealthManager:
     def test_exponential_backoff(self):
         """Should apply exponential backoff to restart delays."""
         # Use high threshold to prevent circuit breaker from tripping
-        manager = HealthManager(base_delay=1, max_delay=60, circuit_breaker_threshold=10)
+        manager = HealthManager(
+            base_delay=1, max_delay=60, circuit_breaker_threshold=10
+        )
 
         delays = []
         for _ in range(5):
@@ -256,7 +258,7 @@ class TestHealthManager:
 
         for _ in range(5):
             manager.record_start("test-service")
-            delay = manager.record_crash("test-service", exit_code=1)
+            manager.record_crash("test-service", exit_code=1)
 
         health = manager.get_health("test-service")
         assert health.current_backoff <= 30
@@ -265,7 +267,9 @@ class TestHealthManager:
 class TestProcessManager:
     """Tests for ProcessManager."""
 
-    def test_start_simple_process(self, process_manager: ProcessManager, tmp_path: Path):
+    def test_start_simple_process(
+        self, process_manager: ProcessManager, tmp_path: Path
+    ):
         """Should start a simple process."""
         config = ServiceConfig(
             run=f"{sys.executable} -c \"import time; print('Hello'); time.sleep(60)\"",
@@ -283,7 +287,7 @@ class TestProcessManager:
     def test_stop_process(self, process_manager: ProcessManager, tmp_path: Path):
         """Should stop a running process."""
         config = ServiceConfig(
-            run=f"{sys.executable} -c \"import time; time.sleep(60)\"",
+            run=f'{sys.executable} -c "import time; time.sleep(60)"',
         )
 
         process_manager.start_service("test", config)
@@ -297,11 +301,11 @@ class TestProcessManager:
     def test_ready_condition_delay(self, process_manager: ProcessManager):
         """Should wait for delay condition."""
         config = ServiceConfig(
-            run=f"{sys.executable} -c \"import time; time.sleep(60)\"",
+            run=f'{sys.executable} -c "import time; time.sleep(60)"',
             ready="delay:0.1",
         )
 
-        managed = process_manager.start_service("test", config)
+        process_manager.start_service("test", config)
 
         try:
             # Should become ready almost immediately
@@ -324,7 +328,7 @@ class TestProcessManager:
             ready=f"port:{port}",
         )
 
-        managed = process_manager.start_service("test", config)
+        process_manager.start_service("test", config)
 
         try:
             is_ready = process_manager.wait_for_ready("test", timeout=10)
@@ -349,7 +353,7 @@ class TestProcessManager:
             ready="log:READY",
         )
 
-        managed = process_manager.start_service("test", config)
+        process_manager.start_service("test", config)
 
         try:
             is_ready = process_manager.wait_for_ready("test", timeout=10)
@@ -370,7 +374,7 @@ class TestProcessManager:
             ready=f"http:localhost:{port}/health",
         )
 
-        managed = process_manager.start_service("test", config)
+        process_manager.start_service("test", config)
 
         try:
             is_ready = process_manager.wait_for_ready("test", timeout=10)
@@ -396,7 +400,7 @@ while True:
     time.sleep(0.1)
 """
         config = ServiceConfig(
-            run=f"{sys.executable} -c \"{script}\"",
+            run=f'{sys.executable} -c "{script}"',
         )
 
         process_manager.start_service("test", config)
@@ -419,7 +423,7 @@ while True:
     time.sleep(0.1)
 """
         config = ServiceConfig(
-            run=f"{sys.executable} -c \"{script}\"",
+            run=f'{sys.executable} -c "{script}"',
         )
 
         process_manager.start_service("test", config)
@@ -434,7 +438,7 @@ while True:
         """Should stop all running services."""
         for i in range(3):
             config = ServiceConfig(
-                run=f"{sys.executable} -c \"import time; time.sleep(60)\"",
+                run=f'{sys.executable} -c "import time; time.sleep(60)"',
             )
             process_manager.start_service(f"test-{i}", config)
 
@@ -456,7 +460,7 @@ while True:
             crashed.append(exit_code)
 
         config = ServiceConfig(
-            run=f"{sys.executable} -c \"import sys; sys.exit(1)\"",
+            run=f'{sys.executable} -c "import sys; sys.exit(1)"',
         )
 
         process_manager.start_service("test", config, on_crash=on_crash)
@@ -475,7 +479,7 @@ while True:
             ready_called.append(True)
 
         config = ServiceConfig(
-            run=f"{sys.executable} -c \"import time; time.sleep(60)\"",
+            run=f'{sys.executable} -c "import time; time.sleep(60)"',
             ready="delay:0.1",
         )
 
@@ -497,7 +501,7 @@ while True:
         (work_dir / "marker.txt").write_text("test")
 
         config = ServiceConfig(
-            run=f"{sys.executable} -u -c \"import os; print(os.getcwd()); import time; time.sleep(60)\"",
+            run=f'{sys.executable} -u -c "import os; print(os.getcwd()); import time; time.sleep(60)"',
             cwd="workdir",
         )
 
@@ -514,7 +518,7 @@ while True:
     def test_already_running_raises(self, process_manager: ProcessManager):
         """Should raise error when starting already running service."""
         config = ServiceConfig(
-            run=f"{sys.executable} -c \"import time; time.sleep(60)\"",
+            run=f'{sys.executable} -c "import time; time.sleep(60)"',
         )
 
         process_manager.start_service("test", config)
@@ -629,9 +633,7 @@ class TestCliDryRunInstall:
         from haniel.config import HanielConfig, InstallConfig
 
         config = HanielConfig(
-            install=InstallConfig(
-                requirements={"python": ">=3.10", "node": ">=18.0"}
-            )
+            install=InstallConfig(requirements={"python": ">=3.10", "node": ">=18.0"})
         )
 
         # Should not raise
@@ -642,11 +644,7 @@ class TestCliDryRunInstall:
         from haniel.cli import print_dry_run_install
         from haniel.config import HanielConfig, InstallConfig
 
-        config = HanielConfig(
-            install=InstallConfig(
-                directories=["./logs", "./data"]
-            )
-        )
+        config = HanielConfig(install=InstallConfig(directories=["./logs", "./data"]))
 
         # Should not raise
         print_dry_run_install(config)
@@ -659,8 +657,7 @@ class TestCliDryRunInstall:
         config = HanielConfig(
             repos={
                 "myrepo": RepoConfig(
-                    url="https://github.com/test/test.git",
-                    path="./repos/myrepo"
+                    url="https://github.com/test/test.git", path="./repos/myrepo"
                 )
             }
         )
@@ -677,7 +674,7 @@ class TestCliDryRunInstall:
             install=InstallConfig(
                 environments={
                     "myenv": EnvironmentConfig(type="python", path="./.venv"),
-                    "nodeenv": EnvironmentConfig(type="npm", path="./node_modules")
+                    "nodeenv": EnvironmentConfig(type="npm", path="./node_modules"),
                 }
             )
         )
@@ -694,8 +691,7 @@ class TestCliDryRunInstall:
             install=InstallConfig(
                 configs={
                     "myconfig": ConfigFileConfig(
-                        path="./config.yaml",
-                        content="key: value"
+                        path="./config.yaml", content="key: value"
                     )
                 }
             )
@@ -707,7 +703,12 @@ class TestCliDryRunInstall:
     def test_print_dry_run_install_interactive_configs(self):
         """Test dry-run install shows interactive config files."""
         from haniel.cli import print_dry_run_install
-        from haniel.config import HanielConfig, InstallConfig, ConfigFileConfig, ConfigKeyConfig
+        from haniel.config import (
+            HanielConfig,
+            InstallConfig,
+            ConfigFileConfig,
+            ConfigKeyConfig,
+        )
 
         config = HanielConfig(
             install=InstallConfig(
@@ -716,8 +717,8 @@ class TestCliDryRunInstall:
                         path="./.env",
                         keys=[
                             ConfigKeyConfig(key="API_KEY", prompt="Enter API key"),
-                            ConfigKeyConfig(key="DEBUG", default="false")
-                        ]
+                            ConfigKeyConfig(key="DEBUG", default="false"),
+                        ],
                     )
                 }
             )
@@ -733,10 +734,7 @@ class TestCliDryRunInstall:
 
         config = HanielConfig(
             install=InstallConfig(
-                service=ServiceDefinitionConfig(
-                    name="myservice",
-                    display="My Service"
-                )
+                service=ServiceDefinitionConfig(name="myservice", display="My Service")
             )
         )
 
@@ -767,12 +765,11 @@ class TestCliDryRunRun:
                 "repo1": RepoConfig(
                     url="https://github.com/test/test1.git",
                     path="./repos/test1",
-                    branch="main"
+                    branch="main",
                 ),
                 "repo2": RepoConfig(
-                    url="https://github.com/test/test2.git",
-                    path="./repos/test2"
-                )
+                    url="https://github.com/test/test2.git", path="./repos/test2"
+                ),
             }
         )
 
@@ -788,7 +785,7 @@ class TestCliDryRunRun:
             services={
                 "db": ServiceConfig(run="start-db"),
                 "api": ServiceConfig(run="start-api", after=["db"]),
-                "worker": ServiceConfig(run="start-worker", after=["db", "api"])
+                "worker": ServiceConfig(run="start-worker", after=["db", "api"]),
             }
         )
 
@@ -803,7 +800,7 @@ class TestCliDryRunRun:
         config = HanielConfig(
             services={
                 "enabled": ServiceConfig(run="start-enabled"),
-                "disabled": ServiceConfig(run="start-disabled", enabled=False)
+                "disabled": ServiceConfig(run="start-disabled", enabled=False),
             }
         )
 

@@ -1,7 +1,6 @@
 """Tests for haniel webhook notifications."""
 
 import json
-from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -270,7 +269,9 @@ class TestWebhookNotifier:
             message="Test message",
         )
 
-        with patch("haniel.integrations.webhook.aiohttp.ClientSession") as mock_session_class:
+        with patch(
+            "haniel.integrations.webhook.aiohttp.ClientSession"
+        ) as mock_session_class:
             mock_session = MagicMock()
             mock_session.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session.__aexit__ = AsyncMock(return_value=None)
@@ -304,7 +305,9 @@ class TestWebhookNotifier:
             message="Test message",
         )
 
-        with patch("haniel.integrations.webhook.aiohttp.ClientSession") as mock_session_class:
+        with patch(
+            "haniel.integrations.webhook.aiohttp.ClientSession"
+        ) as mock_session_class:
             mock_session = MagicMock()
             mock_session.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session.__aexit__ = AsyncMock(return_value=None)
@@ -331,7 +334,9 @@ class TestWebhookNotifier:
             message="Test message",
         )
 
-        with patch("haniel.integrations.webhook.aiohttp.ClientSession") as mock_session_class:
+        with patch(
+            "haniel.integrations.webhook.aiohttp.ClientSession"
+        ) as mock_session_class:
             mock_session = MagicMock()
             mock_session.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session.__aexit__ = AsyncMock(return_value=None)
@@ -395,9 +400,7 @@ class TestHelperMethods:
         """Test helper for circuit breaker event."""
         from haniel.integrations.webhook import create_circuit_breaker_message
 
-        msg = create_circuit_breaker_message(
-            "my-service", failure_count=5, window=300
-        )
+        msg = create_circuit_breaker_message("my-service", failure_count=5, window=300)
         assert msg.event_type == EventType.CIRCUIT_BREAKER
         assert msg.details["failure_count"] == 5
         assert msg.details["window"] == 300

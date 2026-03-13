@@ -9,10 +9,8 @@ during normal operation with ServiceRunner.
 """
 
 import asyncio
-import json
 import logging
 import threading
-from pathlib import Path
 from typing import Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -90,11 +88,13 @@ class InstallMcpServer:
             async def handle_list_tools():
                 tools = []
                 for t in self.list_tools():
-                    tools.append(Tool(
-                        name=t["name"],
-                        description=t.get("description"),
-                        inputSchema=t.get("inputSchema", {}),
-                    ))
+                    tools.append(
+                        Tool(
+                            name=t["name"],
+                            description=t.get("description"),
+                            inputSchema=t.get("inputSchema", {}),
+                        )
+                    )
                 return tools
 
             # Register tool call handler
@@ -180,6 +180,7 @@ class InstallMcpServer:
 
         # Wait a moment for the server to start
         import time
+
         time.sleep(0.5)
 
         logger.info("Install MCP server started in background thread")
@@ -208,7 +209,4 @@ class InstallMcpServer:
         Returns:
             True if the server is running
         """
-        return (
-            self._server_thread is not None
-            and self._server_thread.is_alive()
-        )
+        return self._server_thread is not None and self._server_thread.is_alive()
