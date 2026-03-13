@@ -32,7 +32,7 @@ mcp:
 
 repos:
   haniel:
-    url: https://github.com/eiaserinnys/Haniel.git
+    url: https://github.com/eiaserinnys/haniel.git
     branch: main
     path: ./.self
 
