@@ -36,7 +36,7 @@ Whether it's a Slack bot, an MCP server, or a web dashboard, haniel treats every
 Open PowerShell **as Administrator** (right-click → "Run as Administrator") and run:
 
 ```powershell
-irm https://raw.githubusercontent.com/eiaserinnys/Haniel/main/install-haniel.ps1 | iex
+irm https://raw.githubusercontent.com/eiaserinnys/haniel/main/install-haniel.ps1 | iex
 ```
 
 The bootstrap script handles everything:
@@ -79,7 +79,7 @@ poll_interval: 300
 
 repos:
   haniel:
-    url: https://github.com/eiaserinnys/Haniel.git
+    url: https://github.com/eiaserinnys/haniel.git
     branch: main
     path: ./.self
 
@@ -153,8 +153,8 @@ haniel status haniel.yaml
 ## Development
 
 ```bash
-git clone https://github.com/eiaserinnys/Haniel.git
-cd Haniel
+git clone https://github.com/eiaserinnys/haniel.git
+cd haniel
 pip install -e ".[dev]"
 pytest
 ```

@@ -45,9 +45,9 @@ dev = [
 haniel = "haniel.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/eiaserinnys/Haniel"
-Repository = "https://github.com/eiaserinnys/Haniel"
-Issues = "https://github.com/eiaserinnys/Haniel/issues"
+Homepage = "https://github.com/eiaserinnys/haniel"
+Repository = "https://github.com/eiaserinnys/haniel"
+Issues = "https://github.com/eiaserinnys/haniel/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/haniel"]

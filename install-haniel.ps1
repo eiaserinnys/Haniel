@@ -5,7 +5,7 @@
 .DESCRIPTION
     Bootstraps haniel on a fresh Windows machine with a single command:
 
-        irm https://raw.githubusercontent.com/eiaserinnys/Haniel/main/install-haniel.ps1 | iex
+        irm https://raw.githubusercontent.com/eiaserinnys/haniel/main/install-haniel.ps1 | iex
 
     The script handles prerequisite installation (Git, Python, WinSW),
     clones the haniel repository into .self/, downloads a haniel.yaml
@@ -15,7 +15,7 @@
 
 .EXAMPLE
     # One-liner (downloads and runs)
-    irm https://raw.githubusercontent.com/eiaserinnys/Haniel/main/install-haniel.ps1 | iex
+    irm https://raw.githubusercontent.com/eiaserinnys/haniel/main/install-haniel.ps1 | iex
 
 .EXAMPLE
     # Direct execution with parameters
@@ -309,7 +309,7 @@ function Main {
         }
 
         Write-Info "Cloning haniel to $selfDir..."
-        & git clone https://github.com/eiaserinnys/Haniel.git $selfDir 2>&1 | ForEach-Object { Write-Info $_ }
+        & git clone https://github.com/eiaserinnys/haniel.git $selfDir 2>&1 | ForEach-Object { Write-Info $_ }
         if ($LASTEXITCODE -ne 0) {
             Write-Fail "Failed to clone haniel repository"
             exit 1
