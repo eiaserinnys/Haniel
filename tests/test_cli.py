@@ -1,6 +1,7 @@
 """Tests for haniel CLI commands."""
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
@@ -56,7 +57,8 @@ class TestInstallCommand:
         assert result.exit_code != 0
         assert "not found" in result.output.lower() or "error" in result.output.lower()
 
-    def test_install_with_valid_config(self, cli_runner: CliRunner, tmp_config):
+    @patch("shutil.which", return_value="/usr/bin/claude")
+    def test_install_with_valid_config(self, mock_which, cli_runner: CliRunner, tmp_config):
         """install with valid config should succeed (skeleton)."""
         result = cli_runner.invoke(main, ["install", str(tmp_config)])
         # Skeleton just acknowledges the command
