@@ -156,13 +156,14 @@ class MechanicalInstaller:
                 )
                 version = result.stdout.strip().lstrip("v")
                 passes, msg = self._check_version(version, str(requirements["node"]))
+                error_hint = "" if passes else " Install newer version via: winget install OpenJS.NodeJS.LTS (or re-run install-haniel.ps1)"
                 results.append(
                     {
                         "name": "node",
                         "installed": passes,
                         "version": version,
                         "required": str(requirements["node"]),
-                        "message": msg,
+                        "message": msg + error_hint,
                     }
                 )
             except Exception as e:
@@ -170,7 +171,7 @@ class MechanicalInstaller:
                     {
                         "name": "node",
                         "installed": False,
-                        "error": str(e),
+                        "error": f"Node.js not found. Install via: winget install OpenJS.NodeJS.LTS (or re-run install-haniel.ps1). Detail: {e}",
                     }
                 )
 

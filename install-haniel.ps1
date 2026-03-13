@@ -7,7 +7,7 @@
 
         irm https://raw.githubusercontent.com/eiaserinnys/haniel/main/install-haniel.ps1 | iex
 
-    The script handles prerequisite installation (Git, Python, WinSW),
+    The script handles prerequisite installation (Git, Python, Node.js, WinSW),
     clones the haniel repository into .self/, downloads a haniel.yaml
     config, and delegates all environment setup to `haniel install`.
 
@@ -23,7 +23,7 @@
 
 .NOTES
     Requires PowerShell 5.1+.
-    Requires winget for automatic Git/Python installation.
+    Requires winget for automatic Git/Python/Node.js installation.
     Administrator privileges required for service registration and PATH modification.
 #>
 
@@ -39,7 +39,10 @@ param(
     [switch]$SkipGitCheck,
 
     [Parameter(HelpMessage = "Skip Python installation check")]
-    [switch]$SkipPythonCheck
+    [switch]$SkipPythonCheck,
+
+    [Parameter(HelpMessage = "Skip Node.js installation check")]
+    [switch]$SkipNodeCheck
 )
 
 $ErrorActionPreference = "Stop"
@@ -148,6 +151,36 @@ function Install-Python {
     Write-Success "Python installed"
 }
 
+function Test-Node {
+    try {
+        $version = & node --version 2>&1
+        if ($version -match "v(\d+)\.(\d+)\.(\d+)") {
+            $major = [int]$Matches[1]
+            if ($major -ge 18) {
+                Write-Success "Node.js $version found"
+                return $true
+            } else {
+                Write-Warn "Node.js version too old: $version (need v18+)"
+                return $false
+            }
+        }
+    } catch { }
+    Write-Warn "Node.js not found in PATH"
+    return $false
+}
+
+function Install-Node {
+    Write-Info "Installing Node.js LTS via winget..."
+    & winget install --id OpenJS.NodeJS.LTS -e --source winget --accept-source-agreements --accept-package-agreements 2>&1 | ForEach-Object { Write-Info $_ }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "Failed to install Node.js via winget"
+        Write-Info "Please install Node.js manually from https://nodejs.org"
+        exit 1
+    }
+    Update-SessionPath
+    Write-Success "Node.js installed"
+}
+
 # WinSW constants
 $script:WINSW_VERSION = "v2.12.0"
 $script:WINSW_URL = "https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe"
@@ -207,7 +240,7 @@ function Main {
     # --------------------------------------------------------
     # Step 0: Git
     # --------------------------------------------------------
-    Write-Step "0/6" "Git"
+    Write-Step "0/7" "Git"
 
     if (-not $SkipGitCheck) {
         if (-not (Test-Git)) {
@@ -233,7 +266,7 @@ function Main {
     # --------------------------------------------------------
     # Step 1: Python
     # --------------------------------------------------------
-    Write-Step "1/6" "Python"
+    Write-Step "1/7" "Python"
 
     if (-not $SkipPythonCheck) {
         if (-not (Test-Python)) {
@@ -257,9 +290,35 @@ function Main {
     }
 
     # --------------------------------------------------------
-    # Step 2: Install path + create root
+    # Step 2: Node.js
     # --------------------------------------------------------
-    Write-Step "2/6" "Install Directory"
+    Write-Step "2/7" "Node.js"
+
+    if (-not $SkipNodeCheck) {
+        if (-not (Test-Node)) {
+            $answer = Read-Host "  Install Node.js LTS via winget? (Y/n)"
+            if ($answer -ne "n" -and $answer -ne "N") {
+                Install-Node
+                if (-not (Test-Node)) {
+                    Write-Fail "Node.js still not available after installation."
+                    Write-Info "Please restart your terminal and try again."
+                    exit 1
+                }
+            }
+            else {
+                Write-Fail "Node.js v18+ is required. Please install it and try again."
+                exit 1
+            }
+        }
+    }
+    else {
+        Write-Info "Skipping Node.js check"
+    }
+
+    # --------------------------------------------------------
+    # Step 3: Install path + create root
+    # --------------------------------------------------------
+    Write-Step "3/7" "Install Directory"
 
     if ([string]::IsNullOrWhiteSpace($InstallPath)) {
         $defaultPath = "C:\Services\Haniel"
@@ -274,9 +333,9 @@ function Main {
     Write-Success "Root directory: $InstallPath"
 
     # --------------------------------------------------------
-    # Step 3: Clone haniel into .self/ + install
+    # Step 4: Clone haniel into .self/ + install
     # --------------------------------------------------------
-    Write-Step "3/6" "Clone Haniel"
+    Write-Step "4/7" "Clone Haniel"
 
     # WinSW (needs InstallPath set first)
     $binDir = Join-Path $InstallPath "bin"
@@ -342,9 +401,9 @@ function Main {
     Write-Success "haniel installed"
 
     # --------------------------------------------------------
-    # Step 4: Download haniel.yaml to root
+    # Step 5: Download haniel.yaml to root
     # --------------------------------------------------------
-    Write-Step "4/6" "Configuration"
+    Write-Step "5/7" "Configuration"
 
     $configPath = Join-Path $InstallPath "haniel.yaml"
 
@@ -395,9 +454,9 @@ function Main {
     Write-Success "Config ready at $configPath"
 
     # --------------------------------------------------------
-    # Step 5: haniel install
+    # Step 6: haniel install
     # --------------------------------------------------------
-    Write-Step "5/6" "Running haniel install"
+    Write-Step "6/7" "Running haniel install"
 
     Write-Info "Working directory: $InstallPath"
     Write-Info "Command: $hanielExe install haniel.yaml"
@@ -421,9 +480,9 @@ function Main {
     }
 
     # --------------------------------------------------------
-    # Step 6: Start service
+    # Step 7: Start service
     # --------------------------------------------------------
-    Write-Step "6/6" "Starting Service"
+    Write-Step "7/7" "Starting Service"
 
     # Read service name from install.service.name in YAML
     # Fall back to "haniel" if we can't parse it
