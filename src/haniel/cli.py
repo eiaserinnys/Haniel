@@ -18,7 +18,7 @@ import click
 from pydantic import ValidationError as PydanticValidationError
 
 from haniel import __version__, EXIT_SELF_UPDATE
-from haniel.config import load_config, HanielConfig, validate_config, ValidationError
+from haniel.config import load_config, HanielConfig, validate_config
 
 
 def validate_config_file(ctx: click.Context, param: click.Parameter, value: str | None) -> Path | None:
