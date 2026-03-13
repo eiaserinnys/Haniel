@@ -388,30 +388,44 @@ function Main {
 
     if ($downloadConfig) {
         if ([string]::IsNullOrWhiteSpace($ConfigUrl)) {
-            $ConfigUrl = Read-Host "  Config file URL (e.g. https://raw.githubusercontent.com/.../haniel.yaml)"
+            $ConfigUrl = Read-Host "  Config source — HTTPS URL or local file path"
             if ([string]::IsNullOrWhiteSpace($ConfigUrl)) {
-                Write-Fail "Config URL is required."
+                Write-Fail "Config source is required."
                 exit 1
             }
         }
 
-        if ($ConfigUrl -notmatch '^https://') {
-            Write-Fail "Config URL must use HTTPS."
-            exit 1
+        if ($ConfigUrl -match '^https://') {
+            # Remote URL — download
+            Write-Info "Downloading $ConfigUrl..."
+            try {
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                Invoke-WebRequest -Uri $ConfigUrl -OutFile $configPath -UseBasicParsing
+            }
+            catch {
+                Write-Fail "Failed to download config: $($_.Exception.Message)"
+                exit 1
+            }
         }
-
-        Write-Info "Downloading $ConfigUrl..."
-        try {
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            Invoke-WebRequest -Uri $ConfigUrl -OutFile $configPath -UseBasicParsing
+        elseif (Test-Path $ConfigUrl) {
+            # Local file — copy
+            Write-Info "Copying from $ConfigUrl..."
+            try {
+                Copy-Item -Path $ConfigUrl -Destination $configPath -Force
+            }
+            catch {
+                Write-Fail "Failed to copy config: $($_.Exception.Message)"
+                exit 1
+            }
         }
-        catch {
-            Write-Fail "Failed to download config: $($_.Exception.Message)"
+        else {
+            Write-Fail "Config source not found: $ConfigUrl"
+            Write-Info "Provide an HTTPS URL or a valid local file path."
             exit 1
         }
 
         if (-not (Test-Path $configPath)) {
-            Write-Fail "Config file download failed."
+            Write-Fail "Config file not available at $configPath"
             exit 1
         }
     }
