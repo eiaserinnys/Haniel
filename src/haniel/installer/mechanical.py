@@ -156,7 +156,11 @@ class MechanicalInstaller:
                 )
                 version = result.stdout.strip().lstrip("v")
                 passes, msg = self._check_version(version, str(requirements["node"]))
-                error_hint = "" if passes else " Install newer version via: winget install OpenJS.NodeJS.LTS (or re-run install-haniel.ps1)"
+                error_hint = (
+                    ""
+                    if passes
+                    else " Install newer version via: winget install OpenJS.NodeJS.LTS (or re-run install-haniel.ps1)"
+                )
                 results.append(
                     {
                         "name": "node",
@@ -358,7 +362,9 @@ class MechanicalInstaller:
                     if req_path.exists():
                         # pyproject.toml requires editable install, not -r
                         if req_path.name in ("pyproject.toml", "setup.py", "setup.cfg"):
-                            logger.info(f"Installing editable package from {req_path.parent}")
+                            logger.info(
+                                f"Installing editable package from {req_path.parent}"
+                            )
                             cmd = [str(pip_path), "install", "-e", str(req_path.parent)]
                         else:
                             logger.info(f"Installing requirements from {req_path}")
