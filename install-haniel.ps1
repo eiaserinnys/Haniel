@@ -45,6 +45,16 @@ param(
 $ErrorActionPreference = "Stop"
 
 # ============================================================
+# Logging — all output goes to console AND log file
+# ============================================================
+$script:LogFile = Join-Path ([System.IO.Path]::GetTempPath()) "haniel-install.log"
+"" | Out-File -FilePath $script:LogFile -Encoding utf8
+
+function Write-Log($text) {
+    $text | Out-File -FilePath $script:LogFile -Append -Encoding utf8
+}
+
+# ============================================================
 # Output helpers
 # ============================================================
 
@@ -52,24 +62,29 @@ function Write-Header($text) {
     Write-Host ""
     Write-Host "=== $text ===" -ForegroundColor Cyan
     Write-Host ""
+    Write-Log "=== $text ==="
 }
 
 function Write-Step($step, $text) {
     Write-Host ""
     Write-Host "[$step] $text" -ForegroundColor Cyan
     Write-Host ""
+    Write-Log "[$step] $text"
 }
 
 function Write-Success($text) {
     Write-Host "  [OK] $text" -ForegroundColor Green
+    Write-Log "  [OK] $text"
 }
 
 function Write-Warn($text) {
     Write-Host "  [!] $text" -ForegroundColor Yellow
+    Write-Log "  [!] $text"
 }
 
 function Write-Fail($text) {
     Write-Host "  [X] $text" -ForegroundColor Red
+    Write-Log "  [X] $text"
 }
 
 function Invoke-NativeCommand {
@@ -98,6 +113,15 @@ function Invoke-NativeCommand {
 
 function Write-Info($text) {
     Write-Host "      $text" -ForegroundColor Gray
+    Write-Log "      $text"
+}
+
+function Exit-WithLog($code) {
+    Write-Host ""
+    Write-Host "  Log saved to: $script:LogFile" -ForegroundColor Yellow
+    Write-Host "  Press any key to exit..." -ForegroundColor Gray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    exit $code
 }
 
 function Update-SessionPath {
@@ -133,7 +157,7 @@ function Install-Git {
     if ($LASTEXITCODE -ne 0) {
         Write-Fail "Failed to install Git via winget"
         Write-Info "Please install Git manually from https://git-scm.com"
-        exit 1
+        Exit-WithLog 1
     }
     Update-SessionPath
     Write-Success "Git installed"
@@ -166,7 +190,7 @@ function Install-Python {
     if ($LASTEXITCODE -ne 0) {
         Write-Fail "Failed to install Python via winget"
         Write-Info "Please install Python manually from https://python.org"
-        exit 1
+        Exit-WithLog 1
     }
     Update-SessionPath
     Write-Success "Python installed"
@@ -225,7 +249,7 @@ function Main {
         Write-Fail "Administrator privileges required."
         Write-Info "Service registration and PATH modification need elevated permissions."
         Write-Info "Right-click PowerShell -> 'Run as Administrator' and try again."
-        exit 1
+        Exit-WithLog 1
     }
 
     # --------------------------------------------------------
@@ -241,12 +265,12 @@ function Main {
                 if (-not (Test-Git)) {
                     Write-Fail "Git still not available after installation."
                     Write-Info "Please restart your terminal and try again."
-                    exit 1
+                    Exit-WithLog 1
                 }
             }
             else {
                 Write-Fail "Git is required. Please install it and try again."
-                exit 1
+                Exit-WithLog 1
             }
         }
     }
@@ -267,12 +291,12 @@ function Main {
                 if (-not (Test-Python)) {
                     Write-Fail "Python still not available after installation."
                     Write-Info "Please restart your terminal and try again."
-                    exit 1
+                    Exit-WithLog 1
                 }
             }
             else {
                 Write-Fail "Python 3.11+ is required. Please install it and try again."
-                exit 1
+                Exit-WithLog 1
             }
         }
     }
@@ -308,7 +332,7 @@ function Main {
     if (-not $winsw) {
         Write-Fail "WinSW is required for Windows service registration."
         Write-Info "You can download it manually from https://github.com/winsw/winsw/releases"
-        exit 1
+        Exit-WithLog 1
     }
 
     $selfDir = Join-Path $InstallPath ".self"
@@ -327,7 +351,7 @@ function Main {
             if ($contents.Count -gt 0) {
                 Write-Fail "Directory $selfDir exists and is not empty."
                 Write-Info "Please remove it or choose a different install path."
-                exit 1
+                Exit-WithLog 1
             }
             Remove-Item -Path $selfDir -Force -Recurse
         }
@@ -336,7 +360,7 @@ function Main {
         Invoke-NativeCommand { git clone https://github.com/eiaserinnys/haniel.git $selfDir }
         if ($LASTEXITCODE -ne 0) {
             Write-Fail "Failed to clone haniel repository"
-            exit 1
+            Exit-WithLog 1
         }
     }
 
@@ -352,7 +376,7 @@ function Main {
         & python -m venv $venvPath
         if ($LASTEXITCODE -ne 0) {
             Write-Fail "Failed to create virtual environment"
-            exit 1
+            Exit-WithLog 1
         }
     }
 
@@ -360,7 +384,7 @@ function Main {
     Invoke-NativeCommand { & $pipExe install -e $selfDir }
     if ($LASTEXITCODE -ne 0) {
         Write-Fail "Failed to install haniel"
-        exit 1
+        Exit-WithLog 1
     }
 
     Write-Success "haniel installed"
@@ -391,7 +415,7 @@ function Main {
             $ConfigUrl = Read-Host "  Config source — HTTPS URL or local file path"
             if ([string]::IsNullOrWhiteSpace($ConfigUrl)) {
                 Write-Fail "Config source is required."
-                exit 1
+                Exit-WithLog 1
             }
         }
 
@@ -404,7 +428,7 @@ function Main {
             }
             catch {
                 Write-Fail "Failed to download config: $($_.Exception.Message)"
-                exit 1
+                Exit-WithLog 1
             }
         }
         elseif (Test-Path $ConfigUrl) {
@@ -415,18 +439,18 @@ function Main {
             }
             catch {
                 Write-Fail "Failed to copy config: $($_.Exception.Message)"
-                exit 1
+                Exit-WithLog 1
             }
         }
         else {
             Write-Fail "Config source not found: $ConfigUrl"
             Write-Info "Provide an HTTPS URL or a valid local file path."
-            exit 1
+            Exit-WithLog 1
         }
 
         if (-not (Test-Path $configPath)) {
             Write-Fail "Config file not available at $configPath"
-            exit 1
+            Exit-WithLog 1
         }
     }
 
@@ -455,7 +479,7 @@ function Main {
         Write-Info "Check the output above for details."
         Write-Info "You can re-run: $hanielExe install haniel.yaml"
         Write-Info "  (from directory: $InstallPath)"
-        exit 1
+        Exit-WithLog 1
     }
 
     # --------------------------------------------------------
@@ -514,4 +538,21 @@ function Main {
 }
 
 # Run
-Main
+Write-Log "Install started at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+Write-Log "Log file: $script:LogFile"
+
+try {
+    Main
+}
+catch {
+    Write-Host ""
+    Write-Fail "Unexpected error: $($_.Exception.Message)"
+    Write-Log "EXCEPTION: $($_.Exception.Message)"
+    Write-Log "STACK: $($_.ScriptStackTrace)"
+    Write-Host ""
+    Write-Host "  Full log saved to: $script:LogFile" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Press any key to exit..." -ForegroundColor Gray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    exit 1
+}
