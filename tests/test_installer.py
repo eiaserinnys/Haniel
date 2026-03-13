@@ -1215,6 +1215,99 @@ class TestMechanicalInstallerExtended:
             assert cc_result is not None
             assert cc_result["installed"] is True
 
+    @patch("subprocess.run")
+    def test_check_requirements_node_not_installed(self, mock_run, sample_config):
+        """Test node check when node is not installed."""
+        from haniel.installer.mechanical import MechanicalInstaller
+        from haniel.installer.state import InstallState
+
+        def side_effect(cmd, **kwargs):
+            if cmd == ["python", "--version"]:
+                mock = MagicMock()
+                mock.stdout = "Python 3.13.0\n"
+                return mock
+            raise FileNotFoundError("node not found")
+
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState()
+            installer = MechanicalInstaller(sample_config, config_dir, state)
+
+            results = installer.check_requirements()
+            node_result = next((r for r in results if r["name"] == "node"), None)
+
+            assert node_result is not None
+            assert node_result["installed"] is False
+            assert "winget install OpenJS.NodeJS.LTS" in node_result["error"]
+            assert "install-haniel.ps1" in node_result["error"]
+
+    @patch("subprocess.run")
+    def test_check_requirements_node_version_too_old(self, mock_run, sample_config):
+        """Test node check when version is below requirement."""
+        from haniel.installer.mechanical import MechanicalInstaller
+        from haniel.installer.state import InstallState
+
+        def side_effect(cmd, **kwargs):
+            if cmd == ["node", "--version"]:
+                mock = MagicMock()
+                mock.stdout = "v16.20.0\n"
+                return mock
+            elif cmd == ["python", "--version"]:
+                mock = MagicMock()
+                mock.stdout = "Python 3.13.0\n"
+                return mock
+            return MagicMock(stdout="", returncode=0)
+
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState()
+            installer = MechanicalInstaller(sample_config, config_dir, state)
+
+            results = installer.check_requirements()
+            node_result = next((r for r in results if r["name"] == "node"), None)
+
+            assert node_result is not None
+            assert node_result["installed"] is False
+            assert "does not meet" in node_result["message"]
+            assert "winget install OpenJS.NodeJS.LTS" in node_result["message"]
+            assert "install-haniel.ps1" in node_result["message"]
+
+    @patch("subprocess.run")
+    def test_check_requirements_node_passes(self, mock_run, sample_config):
+        """Test node check when version meets requirement."""
+        from haniel.installer.mechanical import MechanicalInstaller
+        from haniel.installer.state import InstallState
+
+        def side_effect(cmd, **kwargs):
+            if cmd == ["node", "--version"]:
+                mock = MagicMock()
+                mock.stdout = "v20.11.0\n"
+                return mock
+            elif cmd == ["python", "--version"]:
+                mock = MagicMock()
+                mock.stdout = "Python 3.13.0\n"
+                return mock
+            return MagicMock(stdout="", returncode=0)
+
+        mock_run.side_effect = side_effect
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState()
+            installer = MechanicalInstaller(sample_config, config_dir, state)
+
+            results = installer.check_requirements()
+            node_result = next((r for r in results if r["name"] == "node"), None)
+
+            assert node_result is not None
+            assert node_result["installed"] is True
+            assert "meets" in node_result["message"]
+            assert "winget" not in node_result["message"]
+
     def test_create_static_configs_with_root(self, sample_config):
         """Test static config with {root} substitution."""
         from haniel.installer.mechanical import MechanicalInstaller
