@@ -12,7 +12,6 @@ Tests cover:
 
 import socket
 import subprocess
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -118,9 +117,7 @@ class TestWindowsHandler:
         # Should not call terminate since CTRL_BREAK succeeded
         mock_process.terminate.assert_not_called()
 
-    def test_terminate_process_skips_terminated(
-        self, mock_windll, terminated_process
-    ):
+    def test_terminate_process_skips_terminated(self, mock_windll, terminated_process):
         """Should skip already terminated process."""
         from haniel.platform.windows import WindowsHandler
 
@@ -361,9 +358,7 @@ class TestWindowsSubprocessKwargs:
 class TestWindowsEdgeCases:
     """Tests for edge cases and error handling."""
 
-    def test_terminate_process_os_error_on_terminate(
-        self, mock_windll, mock_process
-    ):
+    def test_terminate_process_os_error_on_terminate(self, mock_windll, mock_process):
         """Should handle OSError on terminate()."""
         from haniel.platform.windows import WindowsHandler
 

@@ -103,11 +103,13 @@ def check_circular_dependencies(config: HanielConfig) -> list[ValidationError]:
             cycle = dfs(service_name, [])
             if cycle:
                 cycle_str = " -> ".join(cycle)
-                errors.append(ValidationError(
-                    message=f"Circular dependency detected: {cycle_str}",
-                    severity="error",
-                    location=f"services.{service_name}"
-                ))
+                errors.append(
+                    ValidationError(
+                        message=f"Circular dependency detected: {cycle_str}",
+                        severity="error",
+                        location=f"services.{service_name}",
+                    )
+                )
                 # Reset state for potentially finding more cycles
                 for name in graph:
                     if state[name] == 1:
@@ -146,11 +148,13 @@ def check_port_conflicts(config: HanielConfig) -> list[ValidationError]:
     for port, services in port_users.items():
         if len(services) > 1:
             services_str = ", ".join(services)
-            errors.append(ValidationError(
-                message=f"Port {port} is used by multiple services: {services_str}",
-                severity="error",
-                location=f"services (port {port})"
-            ))
+            errors.append(
+                ValidationError(
+                    message=f"Port {port} is used by multiple services: {services_str}",
+                    severity="error",
+                    location=f"services (port {port})",
+                )
+            )
 
     return errors
 
@@ -181,11 +185,13 @@ def check_duplicate_paths(config: HanielConfig) -> list[ValidationError]:
     for path, repos in path_users.items():
         if len(repos) > 1:
             repos_str = ", ".join(repos)
-            errors.append(ValidationError(
-                message=f"Duplicate repository path '{path}' used by: {repos_str}",
-                severity="error",
-                location=f"repos ({repos_str})"
-            ))
+            errors.append(
+                ValidationError(
+                    message=f"Duplicate repository path '{path}' used by: {repos_str}",
+                    severity="error",
+                    location=f"repos ({repos_str})",
+                )
+            )
 
     return errors
 
@@ -212,26 +218,32 @@ def check_missing_references(config: HanielConfig) -> list[ValidationError]:
         # Check after references
         for dep in service.after:
             if dep not in service_names:
-                errors.append(ValidationError(
-                    message=f"Service '{name}' references non-existent service '{dep}' in 'after'",
-                    severity="error",
-                    location=f"services.{name}.after"
-                ))
+                errors.append(
+                    ValidationError(
+                        message=f"Service '{name}' references non-existent service '{dep}' in 'after'",
+                        severity="error",
+                        location=f"services.{name}.after",
+                    )
+                )
 
         # Check repo references
         if service.repo and service.repo not in repo_names:
-            errors.append(ValidationError(
-                message=f"Service '{name}' references non-existent repo '{service.repo}'",
-                severity="error",
-                location=f"services.{name}.repo"
-            ))
+            errors.append(
+                ValidationError(
+                    message=f"Service '{name}' references non-existent repo '{service.repo}'",
+                    severity="error",
+                    location=f"services.{name}.repo",
+                )
+            )
 
     # Check self-update repo reference
     if config.self_update and config.self_update.repo not in repo_names:
-        errors.append(ValidationError(
-            message=f"Self-update references non-existent repo '{config.self_update.repo}'",
-            severity="error",
-            location="self.repo"
-        ))
+        errors.append(
+            ValidationError(
+                message=f"Self-update references non-existent repo '{config.self_update.repo}'",
+                severity="error",
+                location="self.repo",
+            )
+        )
 
     return errors

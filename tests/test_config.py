@@ -3,7 +3,6 @@
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
 from haniel.config import (
     HanielConfig,
@@ -11,9 +10,6 @@ from haniel.config import (
     ServiceConfig,
     ShutdownConfig,
     BackoffConfig,
-    WebhookConfig,
-    McpConfig,
-    InstallConfig,
     load_config,
 )
 
@@ -143,12 +139,7 @@ class TestServiceConfigNormalization:
         config_data = {
             "poll_interval": 60,
             "repos": {},
-            "services": {
-                "svc": {
-                    "run": "echo hello",
-                    "after": "other-service"
-                }
-            }
+            "services": {"svc": {"run": "echo hello", "after": "other-service"}},
         }
         config = HanielConfig.model_validate(config_data)
         assert config.services["svc"].after == ["other-service"]
@@ -158,12 +149,7 @@ class TestServiceConfigNormalization:
         config_data = {
             "poll_interval": 60,
             "repos": {},
-            "services": {
-                "svc": {
-                    "run": "echo hello",
-                    "after": ["svc-a", "svc-b"]
-                }
-            }
+            "services": {"svc": {"run": "echo hello", "after": ["svc-a", "svc-b"]}},
         }
         config = HanielConfig.model_validate(config_data)
         assert config.services["svc"].after == ["svc-a", "svc-b"]
@@ -173,9 +159,7 @@ class TestServiceConfigNormalization:
         config_data = {
             "poll_interval": 60,
             "repos": {},
-            "services": {
-                "svc": {"run": "echo hello"}
-            }
+            "services": {"svc": {"run": "echo hello"}},
         }
         config = HanielConfig.model_validate(config_data)
         assert config.services["svc"].enabled is True

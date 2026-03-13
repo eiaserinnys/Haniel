@@ -130,8 +130,7 @@ class LogCapture:
         """
         with self._lock:
             self._pattern_callbacks = [
-                (p, c) for p, c in self._pattern_callbacks
-                if p.pattern != pattern
+                (p, c) for p, c in self._pattern_callbacks if p.pattern != pattern
             ]
 
     def get_recent_lines(self, n: int | None = None) -> list[str]:

@@ -14,10 +14,9 @@ import shlex
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
 
 from ..config import (
     BackoffConfig,
@@ -27,7 +26,7 @@ from ..config import (
     ShutdownConfig,
 )
 from .git import fetch_repo, pull_repo, get_head, GitError
-from .health import HealthManager, ServiceState
+from .health import HealthManager
 from .process import ProcessManager
 
 
@@ -173,7 +172,9 @@ class DependencyGraph:
         return result
 
 
-def topological_sort(services: dict[str, ServiceConfig], reverse: bool = False) -> list[str]:
+def topological_sort(
+    services: dict[str, ServiceConfig], reverse: bool = False
+) -> list[str]:
     """Standalone topological sort function.
 
     Args:
@@ -799,7 +800,8 @@ class ServiceRunner:
 
         with self._restart_lock:
             ready = [
-                name for name, restart_time in self._pending_restarts.items()
+                name
+                for name, restart_time in self._pending_restarts.items()
                 if restart_time <= now
             ]
 
@@ -836,7 +838,9 @@ class ServiceRunner:
                 "path": str(state.config.path),
                 "branch": state.config.branch,
                 "last_head": head_short,
-                "last_fetch": state.last_fetch.isoformat() if state.last_fetch else None,
+                "last_fetch": state.last_fetch.isoformat()
+                if state.last_fetch
+                else None,
                 "fetch_error": state.fetch_error,
             }
 
@@ -844,8 +848,12 @@ class ServiceRunner:
         with self._state_lock:
             result = {
                 "running": self._state.running,
-                "start_time": self._state.start_time.isoformat() if self._state.start_time else None,
-                "last_poll": self._state.last_poll.isoformat() if self._state.last_poll else None,
+                "start_time": self._state.start_time.isoformat()
+                if self._state.start_time
+                else None,
+                "last_poll": self._state.last_poll.isoformat()
+                if self._state.last_poll
+                else None,
                 "poll_count": self._state.poll_count,
                 "poll_interval": self.poll_interval,
                 "services": service_status,

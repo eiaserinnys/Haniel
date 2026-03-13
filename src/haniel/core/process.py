@@ -12,7 +12,6 @@ as specified in the configuration.
 """
 
 import os
-import re
 import shlex
 import subprocess
 import threading
@@ -24,7 +23,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
-from ..config import ServiceConfig, ServiceShutdownConfig, ShutdownConfig
+from ..config import ServiceConfig, ShutdownConfig
 from .health import HealthManager, ServiceState
 from .logs import LogCapture, LogManager, StreamReader
 from ..platform import get_platform_handler

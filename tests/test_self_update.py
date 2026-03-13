@@ -72,20 +72,22 @@ class TestSelfUpdateConfig:
 
     def test_haniel_config_with_self_update(self):
         """self_update should be parsed from 'self' key via alias."""
-        config = HanielConfig.model_validate({
-            "repos": {
-                "haniel": {
-                    "url": "git@github.com:test/haniel.git",
-                    "branch": "main",
-                    "path": "./.projects/haniel",
-                }
-            },
-            "services": {},
-            "self": {
-                "repo": "haniel",
-                "auto_update": False,
-            },
-        })
+        config = HanielConfig.model_validate(
+            {
+                "repos": {
+                    "haniel": {
+                        "url": "git@github.com:test/haniel.git",
+                        "branch": "main",
+                        "path": "./.projects/haniel",
+                    }
+                },
+                "services": {},
+                "self": {
+                    "repo": "haniel",
+                    "auto_update": False,
+                },
+            }
+        )
         assert config.self_update is not None
         assert config.self_update.repo == "haniel"
         assert config.self_update.auto_update is False
@@ -122,12 +124,16 @@ class TestRunnerSelfUpdate:
             if webhooks
             else None
         )
-        return HanielConfig.model_validate({
-            "repos": {n: r.model_dump() for n, r in repos.items()},
-            "services": {n: s.model_dump() for n, s in services.items()},
-            "self": {"repo": "haniel", "auto_update": auto_update},
-            "webhooks": [w.model_dump() for w in webhook_list] if webhook_list else None,
-        })
+        return HanielConfig.model_validate(
+            {
+                "repos": {n: r.model_dump() for n, r in repos.items()},
+                "services": {n: s.model_dump() for n, s in services.items()},
+                "self": {"repo": "haniel", "auto_update": auto_update},
+                "webhooks": [w.model_dump() for w in webhook_list]
+                if webhook_list
+                else None,
+            }
+        )
 
     def _make_runner(self, config):
         from haniel.core.runner import ServiceRunner
@@ -270,28 +276,32 @@ class TestSelfUpdateValidation:
     def test_valid_self_repo_reference(self):
         from haniel.config.validators import check_missing_references
 
-        config = HanielConfig.model_validate({
-            "repos": {
-                "haniel": {
-                    "url": "git@github.com:test/haniel.git",
-                    "branch": "main",
-                    "path": "./.projects/haniel",
-                }
-            },
-            "services": {},
-            "self": {"repo": "haniel"},
-        })
+        config = HanielConfig.model_validate(
+            {
+                "repos": {
+                    "haniel": {
+                        "url": "git@github.com:test/haniel.git",
+                        "branch": "main",
+                        "path": "./.projects/haniel",
+                    }
+                },
+                "services": {},
+                "self": {"repo": "haniel"},
+            }
+        )
         errors = check_missing_references(config)
         assert len(errors) == 0
 
     def test_invalid_self_repo_reference(self):
         from haniel.config.validators import check_missing_references
 
-        config = HanielConfig.model_validate({
-            "repos": {},
-            "services": {},
-            "self": {"repo": "nonexistent"},
-        })
+        config = HanielConfig.model_validate(
+            {
+                "repos": {},
+                "services": {},
+                "self": {"repo": "nonexistent"},
+            }
+        )
         errors = check_missing_references(config)
         assert len(errors) == 1
         assert "self.repo" in errors[0].location
@@ -309,17 +319,19 @@ class TestWrapperModeInstaller:
         from haniel.config import ServiceDefinitionConfig
         from haniel.installer.finalize import Finalizer
 
-        config = HanielConfig.model_validate({
-            "repos": {
-                "haniel": {
-                    "url": "git@github.com:test/haniel.git",
-                    "branch": "main",
-                    "path": "./.projects/haniel",
-                }
-            },
-            "services": {},
-            "self": {"repo": "haniel"},
-        })
+        config = HanielConfig.model_validate(
+            {
+                "repos": {
+                    "haniel": {
+                        "url": "git@github.com:test/haniel.git",
+                        "branch": "main",
+                        "path": "./.projects/haniel",
+                    }
+                },
+                "services": {},
+                "self": {"repo": "haniel"},
+            }
+        )
 
         finalizer = Finalizer(
             config=config,
@@ -330,7 +342,10 @@ class TestWrapperModeInstaller:
 
         service_cfg = ServiceDefinitionConfig(name="haniel")
 
-        with patch("shutil.which", return_value="C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"):
+        with patch(
+            "shutil.which",
+            return_value="C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        ):
             xml = finalizer._generate_winsw_xml(service_cfg, "C:\\haniel")
 
         assert "powershell" in xml.lower()
@@ -366,18 +381,20 @@ class TestWrapperModeInstaller:
 
         from haniel.installer.finalize import Finalizer
 
-        config = HanielConfig.model_validate({
-            "repos": {
-                "haniel": {
-                    "url": "git@github.com:test/haniel.git",
-                    "branch": "main",
-                    "path": "./.projects/haniel",
-                }
-            },
-            "services": {},
-            "self": {"repo": "haniel"},
-            "webhooks": [{"url": "https://hooks.example.com/test"}],
-        })
+        config = HanielConfig.model_validate(
+            {
+                "repos": {
+                    "haniel": {
+                        "url": "git@github.com:test/haniel.git",
+                        "branch": "main",
+                        "path": "./.projects/haniel",
+                    }
+                },
+                "services": {},
+                "self": {"repo": "haniel"},
+                "webhooks": [{"url": "https://hooks.example.com/test"}],
+            }
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             finalizer = Finalizer(

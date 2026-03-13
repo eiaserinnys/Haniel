@@ -13,7 +13,6 @@ import asyncio
 import json
 import logging
 import threading
-from pathlib import Path
 from typing import Any, TYPE_CHECKING, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -281,10 +280,7 @@ class HanielMcpServer:
         if service not in services:
             return json.dumps({"error": f"Service not found: {service}"})
 
-        return json.dumps({
-            "service": service,
-            **services[service]
-        }, indent=2)
+        return json.dumps({"service": service, **services[service]}, indent=2)
 
     async def _get_repos_status(self) -> str:
         """Get status of all repositories."""
@@ -332,9 +328,7 @@ class HanielMcpServer:
                 )
 
             # Start the service
-            await loop.run_in_executor(
-                None, self.runner._start_service, service
-            )
+            await loop.run_in_executor(None, self.runner._start_service, service)
             return f"Success: Service '{service}' restarted"
         except Exception as e:
             logger.error(f"Failed to restart {service}: {e}")
@@ -380,9 +374,7 @@ class HanielMcpServer:
             return f"Warning: Service '{service}' is already running"
 
         try:
-            await loop.run_in_executor(
-                None, self.runner._start_service, service
-            )
+            await loop.run_in_executor(None, self.runner._start_service, service)
             return f"Success: Service '{service}' started"
         except Exception as e:
             logger.error(f"Failed to start {service}: {e}")
@@ -423,9 +415,7 @@ class HanielMcpServer:
                     )
 
             # Pull the repo
-            success = await loop.run_in_executor(
-                None, self.runner._pull_repo, repo
-            )
+            success = await loop.run_in_executor(None, self.runner._pull_repo, repo)
             if not success:
                 return json.dumps({"error": f"Failed to pull repository '{repo}'"})
 
@@ -436,9 +426,7 @@ class HanielMcpServer:
             startup_order = [s for s in startup_order if s in affected]
 
             for service in startup_order:
-                await loop.run_in_executor(
-                    None, self.runner._start_service, service
-                )
+                await loop.run_in_executor(None, self.runner._start_service, service)
 
             return f"Success: Repository '{repo}' pulled, {len(affected)} service(s) restarted"
         except Exception as e:
@@ -511,12 +499,14 @@ class HanielMcpServer:
             async def handle_list_resources():
                 resources = []
                 for r in self.list_resources():
-                    resources.append(Resource(
-                        uri=r["uri"],
-                        name=r["name"],
-                        description=r.get("description"),
-                        mimeType=r.get("mimeType"),
-                    ))
+                    resources.append(
+                        Resource(
+                            uri=r["uri"],
+                            name=r["name"],
+                            description=r.get("description"),
+                            mimeType=r.get("mimeType"),
+                        )
+                    )
                 return resources
 
             # Register resource read handler
@@ -530,11 +520,13 @@ class HanielMcpServer:
             async def handle_list_tools():
                 tools = []
                 for t in self.list_tools():
-                    tools.append(Tool(
-                        name=t["name"],
-                        description=t.get("description"),
-                        inputSchema=t.get("inputSchema", {}),
-                    ))
+                    tools.append(
+                        Tool(
+                            name=t["name"],
+                            description=t.get("description"),
+                            inputSchema=t.get("inputSchema", {}),
+                        )
+                    )
                 return tools
 
             # Register tool call handler

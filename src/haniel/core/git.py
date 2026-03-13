@@ -199,9 +199,7 @@ def get_head(path: Path) -> str:
         result = _run_git(["rev-parse", "HEAD"], cwd=path)
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
-        raise GitError(
-            f"Failed to get HEAD for {path}: {e.stderr.strip()}"
-        ) from e
+        raise GitError(f"Failed to get HEAD for {path}: {e.stderr.strip()}") from e
 
 
 def get_remote_head(path: Path, branch: str, remote: str = "origin") -> str:
@@ -232,7 +230,9 @@ def get_remote_head(path: Path, branch: str, remote: str = "origin") -> str:
         ) from e
 
 
-def clone_repo(url: str, branch: str, path: Path, timeout: int = DEFAULT_GIT_TIMEOUT) -> None:
+def clone_repo(
+    url: str, branch: str, path: Path, timeout: int = DEFAULT_GIT_TIMEOUT
+) -> None:
     """Clone a repository to the specified path.
 
     Args:
@@ -265,7 +265,7 @@ def clone_repo(url: str, branch: str, path: Path, timeout: int = DEFAULT_GIT_TIM
         ) from e
     except subprocess.CalledProcessError as e:
         raise GitCloneError(
-            f"Failed to clone repository",
+            "Failed to clone repository",
             url=url,
             stderr=e.stderr.strip() if e.stderr else None,
             returncode=e.returncode,
