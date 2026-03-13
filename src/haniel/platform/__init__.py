@@ -85,9 +85,11 @@ def get_platform_handler() -> PlatformHandler:
     """
     if sys.platform == "win32":
         from .windows import WindowsHandler
+
         return WindowsHandler()
     else:
         from .posix import PosixHandler
+
         return PosixHandler()
 
 

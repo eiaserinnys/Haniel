@@ -35,11 +35,15 @@ def git_repo(tmp_path: Path) -> Path:
     subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@example.com"],
-        cwd=repo_path, check=True, capture_output=True
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Test User"],
-        cwd=repo_path, check=True, capture_output=True
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
     )
 
     # Create initial commit
@@ -47,7 +51,9 @@ def git_repo(tmp_path: Path) -> Path:
     subprocess.run(["git", "add", "."], cwd=repo_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "commit", "-m", "Initial commit"],
-        cwd=repo_path, check=True, capture_output=True
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
     )
 
     return repo_path
@@ -59,13 +65,16 @@ def bare_remote(tmp_path: Path, git_repo: Path) -> Path:
     bare_path = tmp_path / "remote.git"
     subprocess.run(
         ["git", "clone", "--bare", str(git_repo), str(bare_path)],
-        check=True, capture_output=True
+        check=True,
+        capture_output=True,
     )
 
     # Add the bare repo as remote to the original
     subprocess.run(
         ["git", "remote", "add", "origin", str(bare_path)],
-        cwd=git_repo, check=True, capture_output=True
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
     )
 
     return bare_path
@@ -99,8 +108,7 @@ class TestGetRemoteHead:
         """Should return the remote branch's HEAD commit hash."""
         # First fetch to make sure remote refs exist
         subprocess.run(
-            ["git", "fetch", "origin"],
-            cwd=git_repo, check=True, capture_output=True
+            ["git", "fetch", "origin"], cwd=git_repo, check=True, capture_output=True
         )
 
         remote_head = get_remote_head(git_repo, "master")
@@ -133,22 +141,32 @@ class TestCloneRepo:
         assert (clone_path / ".git").is_dir()
         assert (clone_path / "README.md").exists()
 
-    def test_clones_specific_branch(self, git_repo: Path, bare_remote: Path, tmp_path: Path):
+    def test_clones_specific_branch(
+        self, git_repo: Path, bare_remote: Path, tmp_path: Path
+    ):
         """Should clone a specific branch."""
         # Create a new branch in the repo and push to bare
         subprocess.run(
             ["git", "checkout", "-b", "feature"],
-            cwd=git_repo, check=True, capture_output=True
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
         )
         (git_repo / "feature.txt").write_text("feature content")
-        subprocess.run(["git", "add", "."], cwd=git_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=git_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Add feature"],
-            cwd=git_repo, check=True, capture_output=True
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
         )
         subprocess.run(
             ["git", "push", "origin", "feature"],
-            cwd=git_repo, check=True, capture_output=True
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
         )
 
         # Clone the feature branch
@@ -188,7 +206,9 @@ class TestCloneRepo:
         clone_path = tmp_path / "creds-clone"
 
         with pytest.raises(ValueError) as exc_info:
-            clone_repo("https://user:password@github.com/org/repo.git", "main", clone_path)
+            clone_repo(
+                "https://user:password@github.com/org/repo.git", "main", clone_path
+            )
 
         assert "embedded credentials" in str(exc_info.value)
 
@@ -204,14 +224,20 @@ class TestFetchRepo:
 
         # Make a new commit in the original repo and push
         (git_repo / "new-file.txt").write_text("new content")
-        subprocess.run(["git", "add", "."], cwd=git_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=git_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Add new file"],
-            cwd=git_repo, check=True, capture_output=True
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
         )
         subprocess.run(
             ["git", "push", "origin", "master"],
-            cwd=git_repo, check=True, capture_output=True
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
         )
 
         # Fetch in the clone
@@ -219,7 +245,9 @@ class TestFetchRepo:
 
         assert has_updates is True
 
-    def test_returns_false_when_no_changes(self, git_repo: Path, bare_remote: Path, tmp_path: Path):
+    def test_returns_false_when_no_changes(
+        self, git_repo: Path, bare_remote: Path, tmp_path: Path
+    ):
         """Should return False when there are no new commits."""
         # Clone the repo
         clone_path = tmp_path / "clone"
@@ -247,14 +275,20 @@ class TestPullRepo:
 
         # Make a new commit in the original repo and push
         (git_repo / "pulled-file.txt").write_text("pulled content")
-        subprocess.run(["git", "add", "."], cwd=git_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=git_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Add pulled file"],
-            cwd=git_repo, check=True, capture_output=True
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
         )
         subprocess.run(
             ["git", "push", "origin", "master"],
-            cwd=git_repo, check=True, capture_output=True
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
         )
 
         # Pull in the clone
@@ -280,14 +314,20 @@ class TestHasChanges:
 
         # Make a new commit in the original repo and push
         (git_repo / "change.txt").write_text("change")
-        subprocess.run(["git", "add", "."], cwd=git_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=git_repo, check=True, capture_output=True
+        )
         subprocess.run(
             ["git", "commit", "-m", "Add change"],
-            cwd=git_repo, check=True, capture_output=True
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
         )
         subprocess.run(
             ["git", "push", "origin", "master"],
-            cwd=git_repo, check=True, capture_output=True
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
         )
 
         # Fetch first to get remote refs
@@ -298,7 +338,9 @@ class TestHasChanges:
 
         assert result is True
 
-    def test_no_changes_when_up_to_date(self, git_repo: Path, bare_remote: Path, tmp_path: Path):
+    def test_no_changes_when_up_to_date(
+        self, git_repo: Path, bare_remote: Path, tmp_path: Path
+    ):
         """Should return False when local matches remote."""
         # Clone the repo
         clone_path = tmp_path / "clone"
@@ -307,8 +349,7 @@ class TestHasChanges:
         # Check for changes (none expected)
         # Need to fetch first to have remote refs
         subprocess.run(
-            ["git", "fetch", "origin"],
-            cwd=clone_path, check=True, capture_output=True
+            ["git", "fetch", "origin"], cwd=clone_path, check=True, capture_output=True
         )
 
         result = has_changes(clone_path, "master")
@@ -336,7 +377,7 @@ class TestGitErrorClasses:
         error = GitCloneError(
             "Failed to clone",
             url="git@example.com:repo.git",
-            stderr="Permission denied"
+            stderr="Permission denied",
         )
         error_str = str(error)
         assert "Failed to clone" in error_str
@@ -344,10 +385,9 @@ class TestGitErrorClasses:
     def test_git_fetch_error_str(self):
         """GitFetchError should include path and stderr in string."""
         from pathlib import Path
+
         error = GitFetchError(
-            "Failed to fetch",
-            path=Path("/tmp/repo"),
-            stderr="Network unreachable"
+            "Failed to fetch", path=Path("/tmp/repo"), stderr="Network unreachable"
         )
         error_str = str(error)
         assert "Failed to fetch" in error_str
@@ -357,10 +397,9 @@ class TestGitErrorClasses:
     def test_git_pull_error_str(self):
         """GitPullError should include path and stderr in string."""
         from pathlib import Path
+
         error = GitPullError(
-            "Failed to pull",
-            path=Path("/tmp/repo"),
-            stderr="Merge conflict"
+            "Failed to pull", path=Path("/tmp/repo"), stderr="Merge conflict"
         )
         error_str = str(error)
         assert "Failed to pull" in error_str

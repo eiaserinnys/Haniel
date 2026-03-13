@@ -64,9 +64,7 @@ class InstallState(BaseModel):
     started_at: str | None = Field(
         default=None, description="When installation started"
     )
-    updated_at: str | None = Field(
-        default=None, description="Last update time"
-    )
+    updated_at: str | None = Field(default=None, description="Last update time")
 
     def save(self, path: Path) -> None:
         """Save state to a JSON file.
@@ -224,9 +222,7 @@ class InstallState(BaseModel):
             "phase": self.phase.value,
             "completed_steps": len(self.completed_steps),
             "failed_steps": len(self.failed_steps),
-            "configs_filled": sum(
-                len(v) for v in self.config_values.values()
-            ),
+            "configs_filled": sum(len(v) for v in self.config_values.values()),
             "started_at": self.started_at,
             "updated_at": self.updated_at,
         }

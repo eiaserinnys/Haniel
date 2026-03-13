@@ -10,13 +10,20 @@ Controls the flow between installation phases:
 haniel doesn't care what each phase does - it just coordinates the flow.
 """
 
+from __future__ import annotations
+
 import logging
 import shutil
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from ..config import HanielConfig
 from .state import InstallState, InstallPhase
+
+if TYPE_CHECKING:
+    from .finalize import Finalizer
+    from .interactive import InteractiveInstaller
+    from .mechanical import MechanicalInstaller
 
 logger = logging.getLogger(__name__)
 
@@ -115,9 +122,7 @@ class InstallOrchestrator:
         # Check Claude Code (required for Phase 2)
         if not self.check_claude_code():
             logger.error("Claude Code is required but not found")
-            logger.error(
-                "Please install it: npm install -g @anthropic-ai/claude-code"
-            )
+            logger.error("Please install it: npm install -g @anthropic-ai/claude-code")
             return False
 
         self.state.mark_complete("claude-code-check")
@@ -347,7 +352,9 @@ class InstallOrchestrator:
                         self.save_state()
                         return {"success": True, "result": r}
                     else:
-                        self.state.mark_failed(step_name, r.get("error", "Not installed"))
+                        self.state.mark_failed(
+                            step_name, r.get("error", "Not installed")
+                        )
                         self.save_state()
                         return {"success": False, "error": r.get("error")}
             return {"success": False, "error": f"Unknown requirement: {req_name}"}

@@ -6,11 +6,10 @@ Tests the MCP server that provides Claude Code integration:
 - Tools: restart, stop, start, pull, enable, reload
 """
 
-import asyncio
 import json
 import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import MagicMock, patch
 
 from haniel.config import HanielConfig, McpConfig, ServiceConfig, RepoConfig
 from haniel.core.health import ServiceState
@@ -84,7 +83,10 @@ class TestHanielMcpServer:
         runner.process_manager.is_running = MagicMock(return_value=True)
         runner.process_manager.log_manager = MagicMock()
         runner.process_manager.log_manager.get_log_tail = MagicMock(
-            return_value=["[14:00:00] [stdout] Server started", "[14:00:01] [stdout] Ready"]
+            return_value=[
+                "[14:00:00] [stdout] Server started",
+                "[14:00:01] [stdout] Ready",
+            ]
         )
 
         # Mock service methods
@@ -103,6 +105,7 @@ class TestHanielMcpServer:
     def mcp_server(self, mock_runner):
         """Create HanielMcpServer instance."""
         from haniel.integrations.mcp_server import HanielMcpServer
+
         return HanielMcpServer(mock_runner)
 
     def test_server_creation(self, mcp_server, mock_runner):
@@ -166,6 +169,7 @@ class TestMcpResources:
     def mcp_server(self, mock_runner):
         """Create HanielMcpServer instance."""
         from haniel.integrations.mcp_server import HanielMcpServer
+
         return HanielMcpServer(mock_runner)
 
     @pytest.mark.asyncio
@@ -226,7 +230,9 @@ class TestMcpResources:
         """Test reading logs with default line count."""
         result = await mcp_server.read_resource("haniel://logs/web")
         assert result is not None
-        mock_runner.process_manager.log_manager.get_log_tail.assert_called_with("web", 50)
+        mock_runner.process_manager.log_manager.get_log_tail.assert_called_with(
+            "web", 50
+        )
 
 
 class TestMcpTools:
@@ -284,6 +290,7 @@ class TestMcpTools:
     def mcp_server(self, mock_runner):
         """Create HanielMcpServer instance."""
         from haniel.integrations.mcp_server import HanielMcpServer
+
         return HanielMcpServer(mock_runner)
 
     @pytest.mark.asyncio
@@ -297,7 +304,11 @@ class TestMcpTools:
     @pytest.mark.asyncio
     async def test_restart_unknown_service(self, mcp_server, mock_runner):
         """Test restart with unknown service."""
-        mock_runner.get_status.return_value = {"running": True, "services": {}, "repos": {}}
+        mock_runner.get_status.return_value = {
+            "running": True,
+            "services": {},
+            "repos": {},
+        }
         result = await mcp_server.call_tool("haniel_restart", {"service": "unknown"})
         assert "error" in result.lower() or "not found" in result.lower()
 
@@ -333,7 +344,11 @@ class TestMcpTools:
     @pytest.mark.asyncio
     async def test_pull_unknown_repo(self, mcp_server, mock_runner):
         """Test pull with unknown repo."""
-        mock_runner.get_status.return_value = {"running": True, "services": {}, "repos": {}}
+        mock_runner.get_status.return_value = {
+            "running": True,
+            "services": {},
+            "repos": {},
+        }
         result = await mcp_server.call_tool("haniel_pull", {"repo": "unknown"})
         assert "error" in result.lower() or "not found" in result.lower()
 
@@ -378,6 +393,7 @@ class TestMcpServerIntegration:
     def mcp_server(self, mock_runner):
         """Create HanielMcpServer instance."""
         from haniel.integrations.mcp_server import HanielMcpServer
+
         return HanielMcpServer(mock_runner)
 
     def test_list_resources(self, mcp_server):
@@ -447,6 +463,7 @@ class TestMcpServerExtended:
     def mcp_server(self, mock_runner):
         """Create HanielMcpServer instance."""
         from haniel.integrations.mcp_server import HanielMcpServer
+
         return HanielMcpServer(mock_runner)
 
     @pytest.mark.asyncio
@@ -466,14 +483,16 @@ class TestMcpServerExtended:
     @pytest.mark.asyncio
     async def test_logs_invalid_lines_param(self, mcp_server, mock_runner):
         """Test reading logs with invalid lines parameter."""
-        result = await mcp_server.read_resource("haniel://logs/web?lines=invalid")
+        await mcp_server.read_resource("haniel://logs/web?lines=invalid")
         # Should default to 50
-        mock_runner.process_manager.log_manager.get_log_tail.assert_called_with("web", 50)
+        mock_runner.process_manager.log_manager.get_log_tail.assert_called_with(
+            "web", 50
+        )
 
     @pytest.mark.asyncio
     async def test_logs_bounded_lines(self, mcp_server, mock_runner):
         """Test that lines parameter is bounded."""
-        result = await mcp_server.read_resource("haniel://logs/web?lines=100000")
+        await mcp_server.read_resource("haniel://logs/web?lines=100000")
         # Should be capped at MAX_LOG_LINES (10000)
         call_args = mock_runner.process_manager.log_manager.get_log_tail.call_args
         assert call_args[0][1] <= 10000
@@ -623,6 +642,7 @@ class TestMcpServerLifecycle:
     def mcp_server(self, mock_runner):
         """Create HanielMcpServer instance."""
         from haniel.integrations.mcp_server import HanielMcpServer
+
         return HanielMcpServer(mock_runner)
 
     @pytest.mark.asyncio

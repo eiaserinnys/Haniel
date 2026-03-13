@@ -10,6 +10,8 @@ haniel doesn't care what Claude Code does - it just provides tools
 and waits for finalize signal.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import shutil
@@ -17,7 +19,10 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from .install_mcp_server import InstallMcpServer
 
 from ..config import HanielConfig
 from .state import InstallState, InstallPhase
@@ -99,12 +104,14 @@ class InteractiveInstaller:
                             missing_keys.append(key_cfg.key)
 
                     if missing_keys:
-                        pending_configs.append({
-                            "name": name,
-                            "path": cfg.path,
-                            "missing_keys": missing_keys,
-                            "filled_keys": filled_keys,
-                        })
+                        pending_configs.append(
+                            {
+                                "name": name,
+                                "path": cfg.path,
+                                "missing_keys": missing_keys,
+                                "filled_keys": filled_keys,
+                            }
+                        )
 
         return {
             "phase": self.state.phase.value,
@@ -234,9 +241,7 @@ class InteractiveInstaller:
         # for the MCP interface
         from .orchestrator import InstallOrchestrator
 
-        orchestrator = InstallOrchestrator(
-            self.config, self.config_dir, self.state
-        )
+        orchestrator = InstallOrchestrator(self.config, self.config_dir, self.state)
         return orchestrator.retry_step(step_name)
 
     def finalize_install(self) -> dict[str, Any]:
@@ -339,11 +344,7 @@ haniel MCP 도구를 사용하여:
 
         # Create MCP config for the install session
         mcp_config = {
-            "mcpServers": {
-                "haniel": {
-                    "url": f"http://localhost:{mcp_port}/sse"
-                }
-            }
+            "mcpServers": {"haniel": {"url": f"http://localhost:{mcp_port}/sse"}}
         }
 
         mcp_config_path = self.config_dir / ".haniel-install-mcp.json"
@@ -369,8 +370,10 @@ haniel MCP 도구를 사용하여:
             # Use -p for prompt mode with the initial prompt
             cmd = [
                 claude_path,
-                "-p", prompt,
-                "--mcp-config", str(mcp_config_path),
+                "-p",
+                prompt,
+                "--mcp-config",
+                str(mcp_config_path),
             ]
 
             logger.info(f"Running: {' '.join(cmd[:3])}...")
@@ -557,9 +560,7 @@ haniel MCP 도구를 사용하여:
             },
         ]
 
-    async def call_mcp_tool(
-        self, name: str, arguments: dict[str, Any]
-    ) -> str:
+    async def call_mcp_tool(self, name: str, arguments: dict[str, Any]) -> str:
         """Handle MCP tool calls for install mode.
 
         Args:

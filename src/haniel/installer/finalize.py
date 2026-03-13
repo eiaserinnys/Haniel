@@ -80,9 +80,7 @@ class Finalizer:
 
                     # Check if value is set
                     if key_cfg.key not in self.state.config_values.get(name, {}):
-                        logger.warning(
-                            f"Missing required config: {name}.{key_cfg.key}"
-                        )
+                        logger.warning(f"Missing required config: {name}.{key_cfg.key}")
                         return False
 
         return True
@@ -195,7 +193,9 @@ class Finalizer:
         else:
             self._log_service_instructions(service_cfg)
 
-    def _generate_winsw_xml(self, service_cfg: ServiceDefinitionConfig, working_dir: str) -> str:
+    def _generate_winsw_xml(
+        self, service_cfg: ServiceDefinitionConfig, working_dir: str
+    ) -> str:
         """Generate WinSW XML configuration.
 
         When self-update is configured, the service runs haniel-runner.ps1
@@ -248,32 +248,40 @@ class Finalizer:
         if service_cfg.display:
             lines.append(f"  <name>{xml_escape(service_cfg.display)}</name>")
 
-        lines.append(f"  <workingdirectory>{xml_escape(working_dir)}</workingdirectory>")
+        lines.append(
+            f"  <workingdirectory>{xml_escape(working_dir)}</workingdirectory>"
+        )
 
         # Environment variables
         if service_cfg.environment:
             for k, v in service_cfg.environment.items():
                 resolved = v.replace("{root}", str(self.config_dir))
-                lines.append(f'  <env name={xml_quoteattr(k)} value={xml_quoteattr(resolved)}/>')
+                lines.append(
+                    f"  <env name={xml_quoteattr(k)} value={xml_quoteattr(resolved)}/>"
+                )
 
         # Logging with roll-by-size
-        lines.extend([
-            '  <log mode="roll">',
-            "    <sizeThreshold>10240</sizeThreshold>",
-            "    <keepFiles>8</keepFiles>",
-            "    <logpath>%BASE%\\logs</logpath>",
-            "  </log>",
-        ])
+        lines.extend(
+            [
+                '  <log mode="roll">',
+                "    <sizeThreshold>10240</sizeThreshold>",
+                "    <keepFiles>8</keepFiles>",
+                "    <logpath>%BASE%\\logs</logpath>",
+                "  </log>",
+            ]
+        )
 
         # Graceful shutdown timeout and failure recovery
-        lines.extend([
-            "  <stoptimeout>15 sec</stoptimeout>",
-            '  <onfailure action="restart" delay="10 sec"/>',
-            '  <onfailure action="restart" delay="30 sec"/>',
-            '  <onfailure action="none"/>',
-            "  <startmode>Automatic</startmode>",
-            "</service>",
-        ])
+        lines.extend(
+            [
+                "  <stoptimeout>15 sec</stoptimeout>",
+                '  <onfailure action="restart" delay="10 sec"/>',
+                '  <onfailure action="restart" delay="30 sec"/>',
+                '  <onfailure action="none"/>',
+                "  <startmode>Automatic</startmode>",
+                "</service>",
+            ]
+        )
 
         return "\n".join(lines) + "\n"
 
@@ -393,7 +401,7 @@ class Finalizer:
         logger.info("")
         logger.info("To run manually:")
         logger.info(f"  cd {working_dir}")
-        logger.info(f"  haniel run haniel.yaml")
+        logger.info("  haniel run haniel.yaml")
         logger.info("")
         # Resolve environment variables
         env_lines = ""
@@ -427,7 +435,7 @@ WantedBy=multi-user.target
         )
         logger.info("")
         logger.info("Then run:")
-        logger.info(f"  sudo systemctl daemon-reload")
+        logger.info("  sudo systemctl daemon-reload")
         logger.info(f"  sudo systemctl enable {service_name}")
         logger.info(f"  sudo systemctl start {service_name}")
 
@@ -449,10 +457,12 @@ WantedBy=multi-user.target
             for name, cfg in self.config.install.configs.items():
                 config_path = self._resolve_path(cfg.path)
                 if config_path.exists():
-                    summary["generated_files"].append({
-                        "name": name,
-                        "path": str(config_path),
-                    })
+                    summary["generated_files"].append(
+                        {
+                            "name": name,
+                            "path": str(config_path),
+                        }
+                    )
 
         # Service info
         if self.config.install and self.config.install.service:

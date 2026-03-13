@@ -94,36 +94,36 @@ mcp:
   port: 3200
 
 repos:
-  seosoyoung:
-    url: git@github.com:org/seosoyoung.git
+  my-app:
+    url: git@github.com:org/my-app.git
     branch: main
-    path: ./.projects/seosoyoung
+    path: ./.projects/my-app
 
-  soulstream:
-    url: git@github.com:org/soulstream.git
+  my-server:
+    url: git@github.com:org/my-server.git
     branch: main
-    path: ./.projects/soulstream
+    path: ./.projects/my-server
 
-  eb-lore:
-    url: git@github.com:org/eb_lore.git
+  my-data:
+    url: git@github.com:org/my-data.git
     branch: main
-    path: ./.projects/eb_lore
+    path: ./.projects/my-data
 
 services:
-  mcp-seosoyoung:
-    run: ./runtime/mcp_venv/Scripts/python.exe -X utf8 -m seosoyoung.mcp --transport=sse --port=3104
+  mcp-server:
+    run: ./runtime/mcp_venv/Scripts/python.exe -X utf8 -m myapp.mcp --transport=sse --port=3104
     cwd: ./workspace
-    repo: seosoyoung
+    repo: my-app
     ready: port:3104
     restart_delay: 3
     hooks:
       post_pull: ./runtime/mcp_venv/Scripts/pip.exe install -r ./runtime/mcp_requirements.txt
 
   bot:
-    run: ./runtime/venv/Scripts/python.exe -X utf8 -m seosoyoung.slackbot
+    run: ./runtime/venv/Scripts/python.exe -X utf8 -m myapp.bot
     cwd: ./workspace
-    repo: seosoyoung
-    after: mcp-seosoyoung
+    repo: my-app
+    after: mcp-server
     shutdown:
       signal: SIGTERM
       timeout: 15
@@ -166,11 +166,11 @@ install:
       requirements:
         - ./runtime/mcp_requirements.txt
 
-    soulstream-venv:
+    server-venv:
       type: python-venv
-      path: ./soulstream_runtime/venv
+      path: ./server_runtime/venv
       requirements:
-        - ./soulstream_runtime/requirements.txt
+        - ./server_runtime/requirements.txt
 
     runtime-node:
       type: npm
@@ -220,7 +220,7 @@ install:
       content: |
         {
           "mcpServers": {
-            "seosoyoung-mcp": {
+            "my-mcp": {
               "url": "http://localhost:3104/sse"
             },
             "haniel": {
@@ -554,12 +554,12 @@ If `ready` is absent and the service is referenced by `after`, `delay:3` is used
 
 ```yaml
 # Single dependency
-after: mcp-seosoyoung
+after: mcp-server
 
 # Multiple dependencies (all must be ready)
 after:
-  - mcp-seosoyoung
-  - mcp-slack
+  - mcp-server
+  - database
 ```
 
 Services without `after` start immediately in YAML order.
@@ -597,8 +597,8 @@ haniel captures each service's stdout/stderr and writes them to per-service log 
 
 ```
 {haniel.yaml location}/logs/
-+-- mcp-seosoyoung.log
-+-- mcp-slack.log
++-- mcp-server.log
++-- database.log
 +-- bot.log
 +-- ...
 ```
@@ -723,7 +723,7 @@ Example output:
 [dry-run] Phase 1: Mechanical installation
   - Requirements check: python >=3.11, node >=18, winsw, claude-code
   - Directory creation: ./runtime, ./runtime/logs, ./workspace, ...
-  - Repository clone: seosoyoung -> ./.projects/seosoyoung
+  - Repository clone: my-app -> ./.projects/my-app
   - Environments: main-venv (python-venv), runtime-node (npm)
   - Configs (static): workspace-mcp -> ./workspace/.mcp.json
 

@@ -13,7 +13,6 @@ haniel doesn't care what it's installing - it just executes the steps.
 
 import json
 import logging
-import os
 import platform
 import re
 import shutil
@@ -62,9 +61,7 @@ class MechanicalInstaller:
             return p
         return (self.config_dir / path).resolve()
 
-    def _check_version(
-        self, actual: str, required: str
-    ) -> tuple[bool, str]:
+    def _check_version(self, actual: str, required: str) -> tuple[bool, str]:
         """Check if a version meets the requirement.
 
         Args:
@@ -129,22 +126,24 @@ class MechanicalInstaller:
                     timeout=10,
                 )
                 version = result.stdout.strip().replace("Python ", "")
-                passes, msg = self._check_version(
-                    version, str(requirements["python"])
+                passes, msg = self._check_version(version, str(requirements["python"]))
+                results.append(
+                    {
+                        "name": "python",
+                        "installed": passes,
+                        "version": version,
+                        "required": str(requirements["python"]),
+                        "message": msg,
+                    }
                 )
-                results.append({
-                    "name": "python",
-                    "installed": passes,
-                    "version": version,
-                    "required": str(requirements["python"]),
-                    "message": msg,
-                })
             except Exception as e:
-                results.append({
-                    "name": "python",
-                    "installed": False,
-                    "error": str(e),
-                })
+                results.append(
+                    {
+                        "name": "python",
+                        "installed": False,
+                        "error": str(e),
+                    }
+                )
 
         # Check Node.js
         if "node" in requirements:
@@ -156,50 +155,60 @@ class MechanicalInstaller:
                     timeout=10,
                 )
                 version = result.stdout.strip().lstrip("v")
-                passes, msg = self._check_version(
-                    version, str(requirements["node"])
+                passes, msg = self._check_version(version, str(requirements["node"]))
+                results.append(
+                    {
+                        "name": "node",
+                        "installed": passes,
+                        "version": version,
+                        "required": str(requirements["node"]),
+                        "message": msg,
+                    }
                 )
-                results.append({
-                    "name": "node",
-                    "installed": passes,
-                    "version": version,
-                    "required": str(requirements["node"]),
-                    "message": msg,
-                })
             except Exception as e:
-                results.append({
-                    "name": "node",
-                    "installed": False,
-                    "error": str(e),
-                })
+                results.append(
+                    {
+                        "name": "node",
+                        "installed": False,
+                        "error": str(e),
+                    }
+                )
 
         # Check WinSW (Windows only)
         if "winsw" in requirements and requirements["winsw"]:
             if platform.system() == "Windows":
                 winsw_path = find_winsw(self.config_dir)
-                results.append({
-                    "name": "winsw",
-                    "installed": winsw_path is not None,
-                    "path": str(winsw_path) if winsw_path else None,
-                    "error": None if winsw_path else "WinSW not found in bin/ or PATH",
-                })
+                results.append(
+                    {
+                        "name": "winsw",
+                        "installed": winsw_path is not None,
+                        "path": str(winsw_path) if winsw_path else None,
+                        "error": None
+                        if winsw_path
+                        else "WinSW not found in bin/ or PATH",
+                    }
+                )
             else:
                 # WinSW is Windows-only, skip on other platforms
-                results.append({
-                    "name": "winsw",
-                    "installed": True,
-                    "message": "WinSW check skipped (not Windows)",
-                })
+                results.append(
+                    {
+                        "name": "winsw",
+                        "installed": True,
+                        "message": "WinSW check skipped (not Windows)",
+                    }
+                )
 
         # Check Claude Code
         if "claude-code" in requirements and requirements["claude-code"]:
             claude_path = shutil.which("claude")
-            results.append({
-                "name": "claude-code",
-                "installed": claude_path is not None,
-                "path": claude_path,
-                "error": None if claude_path else "Claude Code not found in PATH",
-            })
+            results.append(
+                {
+                    "name": "claude-code",
+                    "installed": claude_path is not None,
+                    "path": claude_path,
+                    "error": None if claude_path else "Claude Code not found in PATH",
+                }
+            )
 
         return results
 
@@ -441,7 +450,9 @@ class MechanicalInstaller:
                     if key_cfg.key not in self.state.config_values.get(name, {}):
                         if key_cfg.default:
                             # Use default value
-                            self.state.set_config_value(name, key_cfg.key, key_cfg.default)
+                            self.state.set_config_value(
+                                name, key_cfg.key, key_cfg.default
+                            )
                         else:
                             missing.append(key_cfg.key)
 

@@ -1,12 +1,8 @@
 """Tests for haniel log capture and management."""
 
-import tempfile
-import threading
 import time
 from io import StringIO
-from pathlib import Path
 
-import pytest
 
 from haniel.core.logs import LogCapture, LogManager, StreamReader
 
