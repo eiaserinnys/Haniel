@@ -177,16 +177,7 @@ class InstallOrchestrator:
                 self.state.mark_failed("repos", str(e))
             self.save_state()
 
-        # Create environments
-        if not self.state.is_step_complete("environments"):
-            logger.info("Creating environments...")
-            try:
-                self.mechanical.create_environments()
-            except Exception as e:
-                self.state.mark_failed("environments", str(e))
-            self.save_state()
-
-        # Create static configs
+        # Create static configs (before environments, so requirement files exist)
         if not self.state.is_step_complete("static-configs"):
             logger.info("Creating static configs...")
             try:
@@ -194,6 +185,15 @@ class InstallOrchestrator:
                 self.state.mark_complete("static-configs")
             except Exception as e:
                 self.state.mark_failed("static-configs", str(e))
+            self.save_state()
+
+        # Create environments
+        if not self.state.is_step_complete("environments"):
+            logger.info("Creating environments...")
+            try:
+                self.mechanical.create_environments()
+            except Exception as e:
+                self.state.mark_failed("environments", str(e))
             self.save_state()
 
         # Determine pending interactive configs

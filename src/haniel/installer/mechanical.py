@@ -355,12 +355,14 @@ class MechanicalInstaller:
                 for req_file in requirements:
                     req_path = self._resolve_path(req_file)
                     if req_path.exists():
-                        logger.info(f"Installing {req_path}")
-                        subprocess.run(
-                            [str(pip_path), "install", "-r", str(req_path)],
-                            check=True,
-                            timeout=300,
-                        )
+                        # pyproject.toml requires editable install, not -r
+                        if req_path.name in ("pyproject.toml", "setup.py", "setup.cfg"):
+                            logger.info(f"Installing editable package from {req_path.parent}")
+                            cmd = [str(pip_path), "install", "-e", str(req_path.parent)]
+                        else:
+                            logger.info(f"Installing requirements from {req_path}")
+                            cmd = [str(pip_path), "install", "-r", str(req_path)]
+                        subprocess.run(cmd, check=True, timeout=300)
                     else:
                         logger.warning(f"Requirements file not found: {req_path}")
 
