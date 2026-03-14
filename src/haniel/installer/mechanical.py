@@ -22,7 +22,9 @@ from typing import Any
 
 from ..config import HanielConfig
 from .state import InstallState
-from .utils import find_winsw
+import os
+
+from .utils import detect_tool_paths, find_winsw
 
 logger = logging.getLogger(__name__)
 
@@ -405,11 +407,14 @@ class MechanicalInstaller:
                 return True  # Not an error
 
             logger.info(f"Running npm install in {env_path}")
+            env = self._env_with_tool_paths(["node", "npm", "npx"])
             subprocess.run(
                 ["npm", "install"],
                 cwd=str(env_path),
                 check=True,
                 timeout=300,
+                env=env,
+                shell=True,
             )
             return True
         except subprocess.CalledProcessError as e:
@@ -438,11 +443,14 @@ class MechanicalInstaller:
                 return True  # Not an error
 
             logger.info(f"Running pnpm install in {env_path}")
+            env = self._env_with_tool_paths(["node", "pnpm", "npx"])
             subprocess.run(
                 ["pnpm", "install"],
                 cwd=str(env_path),
                 check=True,
                 timeout=300,
+                env=env,
+                shell=True,
             )
             return True
         except subprocess.CalledProcessError as e:
@@ -457,6 +465,18 @@ class MechanicalInstaller:
             logger.error(f"Error running pnpm install for {name}: {e}")
             self.state.mark_failed(f"environments:{name}", str(e))
             return False
+
+    def _env_with_tool_paths(self, commands: list[str]) -> dict[str, str]:
+        """Create env dict with tool paths injected into PATH.
+
+        Ensures tools like node, pnpm, npx are findable even when running
+        under an administrator PowerShell that lacks the user's PATH entries.
+        """
+        env = os.environ.copy()
+        tool_paths = detect_tool_paths(commands)
+        if tool_paths:
+            env["PATH"] = env.get("PATH", "") + ";" + ";".join(tool_paths)
+        return env
 
     def create_static_configs(self) -> None:
         """Create static config files (those with 'content' field)."""

@@ -44,3 +44,25 @@ def find_winsw(config_dir: Path) -> Path | None:
 
     logger.debug("  WinSW not found anywhere")
     return None
+
+
+def detect_tool_paths(commands: list[str]) -> list[str]:
+    """Detect directories containing specified executables.
+
+    Used to find Node.js, pnpm, npx etc. for PATH injection into
+    WinSW service environment and subprocess calls.
+
+    Args:
+        commands: List of command names to search for (e.g. ["node", "pnpm", "npx"])
+
+    Returns:
+        List of unique directory paths containing the found executables
+    """
+    paths: list[str] = []
+    for cmd in commands:
+        found = shutil.which(cmd)
+        if found:
+            parent = str(Path(found).resolve().parent)
+            if parent not in paths:
+                paths.append(parent)
+    return paths

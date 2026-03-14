@@ -372,6 +372,20 @@ function Main {
         Write-Info "Skipping Node.js check"
     }
 
+    # Ensure pnpm is available (needed for dashboard)
+    if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
+        Write-Info "Installing pnpm..."
+        Invoke-NativeCommand { npm install -g pnpm }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Failed to install pnpm. Dashboard setup may fail."
+        } else {
+            Update-SessionPath
+            Write-Success "pnpm installed"
+        }
+    } else {
+        Write-Info "pnpm already available"
+    }
+
     # --------------------------------------------------------
     # Step 3: Claude Code auth
     # --------------------------------------------------------
@@ -649,6 +663,22 @@ function Main {
     Write-Host "    Run manually   : $hanielExe run haniel.yaml" -ForegroundColor White
     Write-Host "    Validate       : $hanielExe validate haniel.yaml" -ForegroundColor White
     Write-Host ""
+
+    # Service endpoints (best-effort YAML parsing)
+    try {
+        $yamlRaw = Get-Content $configPath -Raw
+        $portMatches = [regex]::Matches($yamlRaw, '(?m)^\s{2}(\S+):\s*$[\s\S]*?ready:\s*port:(\d+)')
+        if ($portMatches.Count -gt 0) {
+            Write-Host "  Service endpoints:" -ForegroundColor Yellow
+            foreach ($m in $portMatches) {
+                Write-Host "    $($m.Groups[1].Value) : http://localhost:$($m.Groups[2].Value)" -ForegroundColor White
+            }
+            Write-Host ""
+        }
+    }
+    catch {
+        # YAML regex parsing failure — skip endpoint display (intentional)
+    }
 }
 
 # Run
