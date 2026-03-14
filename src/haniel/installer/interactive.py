@@ -326,24 +326,25 @@ JSON 외의 텍스트는 message 필드 안에 넣으세요.
         self._mcp_server.start_background()
 
         try:
-            return asyncio.run(
+            asyncio.run(
                 asyncio.wait_for(self._run_sdk_session(), timeout=CLAUDE_CODE_TIMEOUT)
             )
         except asyncio.TimeoutError:
             logger.error("Interactive session timed out")
-            return False
         except Exception as e:
-            if self._finalize_requested:
-                logger.warning(
-                    f"SDK session cleanup error (ignored, finalize already done): {e}"
-                )
-                return True
-            logger.error(f"SDK session failed: {e}")
-            return False
+            if not self._finalize_requested:
+                logger.error(f"SDK session failed: {e}")
+            else:
+                logger.warning(f"SDK cleanup error (ignored): {e}")
         finally:
-            if self._mcp_server:
-                self._mcp_server.stop_background()
-                self._mcp_server = None
+            try:
+                if self._mcp_server:
+                    self._mcp_server.stop_background()
+            except Exception as e:
+                logger.warning(f"MCP server cleanup error: {e}")
+            self._mcp_server = None
+
+        return self._finalize_requested
 
     async def _run_sdk_session(self) -> bool:
         """Run the SDK-based interactive conversation loop.
