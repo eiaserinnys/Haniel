@@ -10,6 +10,7 @@ haniel doesn't care what it runs. It polls, pulls, and restarts as configured.
 """
 
 import logging
+import os
 import shlex
 import subprocess
 import threading
@@ -359,13 +360,24 @@ class ServiceRunner:
         logger.info(f"Executing {hook_name} hook for {service_name}: {hook_cmd}")
 
         try:
+            # On Windows, use shell=True to support .cmd/.bat executables (pnpm,
+            # npx, etc.) and shell operators (&&, ||).  Pass the command as a
+            # string so CreateProcess / cmd.exe handle it natively.
+            if os.name == "nt":
+                run_cmd: str | list[str] = hook_cmd
+                shell = True
+            else:
+                run_cmd = shlex.split(hook_cmd)
+                shell = False
+
             subprocess.run(
-                shlex.split(hook_cmd),
+                run_cmd,
                 cwd=cwd,
                 check=True,
                 capture_output=True,
                 text=True,
                 timeout=300,  # 5 minute timeout for hooks
+                shell=shell,
             )
             logger.info(f"Hook {hook_name} for {service_name} completed successfully")
             return True
