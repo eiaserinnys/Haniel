@@ -333,6 +333,11 @@ JSON 외의 텍스트는 message 필드 안에 넣으세요.
             logger.error("Interactive session timed out")
             return False
         except Exception as e:
+            if self._finalize_requested:
+                logger.warning(
+                    f"SDK session cleanup error (ignored, finalize already done): {e}"
+                )
+                return True
             logger.error(f"SDK session failed: {e}")
             return False
         finally:
