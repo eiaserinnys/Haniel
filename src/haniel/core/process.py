@@ -13,6 +13,7 @@ as specified in the configuration.
 
 import os
 import shlex
+import shutil
 import subprocess
 import threading
 import time
@@ -174,6 +175,15 @@ class ProcessManager:
 
         # Get platform-specific subprocess kwargs
         popen_kwargs = self.platform.get_subprocess_kwargs()
+
+        # On Windows, use shell=True for .cmd/.bat commands (pnpm, npx, etc.)
+        # but not for direct .exe paths, where shell=True causes issues with
+        # ./ relative paths ("'.' is not recognized as a command").
+        if os.name == "nt":
+            first_token = config.run.split()[0] if config.run else ""
+            resolved = shutil.which(first_token)
+            if resolved and resolved.lower().endswith((".cmd", ".bat")):
+                popen_kwargs["shell"] = True
 
         # Start the process
         try:
