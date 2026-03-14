@@ -313,6 +313,11 @@ class MechanicalInstaller:
                 if not success:
                     all_success = False
 
+            elif env.type == "pnpm":
+                success = self._run_pnpm_install(name, env_path)
+                if not success:
+                    all_success = False
+
             else:
                 logger.warning(f"Unknown environment type: {env.type}")
                 self.state.mark_failed(
@@ -413,6 +418,43 @@ class MechanicalInstaller:
             return False
         except Exception as e:
             logger.error(f"Error running npm install for {name}: {e}")
+            self.state.mark_failed(f"environments:{name}", str(e))
+            return False
+
+    def _run_pnpm_install(self, name: str, env_path: Path) -> bool:
+        """Run pnpm install in a directory.
+
+        Args:
+            name: Environment name
+            env_path: Path containing package.json
+
+        Returns:
+            True if successful
+        """
+        try:
+            package_json = env_path / "package.json"
+            if not package_json.exists():
+                logger.warning(f"No package.json found at {env_path}")
+                return True  # Not an error
+
+            logger.info(f"Running pnpm install in {env_path}")
+            subprocess.run(
+                ["pnpm", "install"],
+                cwd=str(env_path),
+                check=True,
+                timeout=300,
+            )
+            return True
+        except subprocess.CalledProcessError as e:
+            logger.error(f"pnpm install failed for {name}: {e}")
+            self.state.mark_failed(f"environments:{name}", str(e))
+            return False
+        except FileNotFoundError:
+            logger.error(f"pnpm not found. Install it with: npm install -g pnpm")
+            self.state.mark_failed(f"environments:{name}", "pnpm not found in PATH")
+            return False
+        except Exception as e:
+            logger.error(f"Error running pnpm install for {name}: {e}")
             self.state.mark_failed(f"environments:{name}", str(e))
             return False
 
