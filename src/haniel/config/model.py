@@ -129,10 +129,13 @@ class ServiceConfig(BaseModel):
 class EnvironmentConfig(BaseModel):
     """Configuration for a runtime environment (venv, npm, etc.)."""
 
-    type: str = Field(..., description="Environment type: python-venv, npm")
+    type: str = Field(..., description="Environment type: python-venv, npm, pnpm")
     path: str = Field(..., description="Path to environment directory")
     requirements: list[str] | None = Field(
         default=None, description="Requirements files (for python-venv)"
+    )
+    build: str | None = Field(
+        default=None, description="Build command to run after install (e.g. 'pnpm run build')"
     )
 
 
