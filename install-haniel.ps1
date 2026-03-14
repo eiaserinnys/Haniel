@@ -254,6 +254,15 @@ function Install-WinSW {
             return $false
         }
 
+        # Wait briefly and re-verify — Windows Defender may quarantine the file
+        Start-Sleep -Seconds 2
+        if (-not (Test-Path $dest)) {
+            Write-Fail "WinSW was downloaded but immediately deleted (likely by antivirus)."
+            Write-Info "Add an exclusion for $binDir in Windows Security > Virus & threat protection > Exclusions"
+            Write-Info "Then re-run this installer."
+            return $false
+        }
+
         Write-Success "WinSW $script:WINSW_VERSION downloaded to $dest"
         return $true
     }
@@ -556,6 +565,15 @@ function Main {
     # Step 6: haniel install
     # --------------------------------------------------------
     Write-Step "7/8" "Running haniel install"
+
+    # Re-verify WinSW before running haniel install (antivirus may have deleted it)
+    $winsxCheck = Join-Path $InstallPath "bin\winsw.exe"
+    if (-not (Test-Path $winsxCheck)) {
+        Write-Warn "WinSW disappeared from $winsxCheck (antivirus may have quarantined it)"
+        Write-Info "Check Windows Security > Protection history for quarantined files"
+        Write-Info "Add exclusion: $InstallPath\bin"
+        Write-Info "Service registration will be skipped."
+    }
 
     Write-Info "Working directory: $InstallPath"
     Write-Info "Command: $hanielExe install haniel.yaml"
