@@ -20,7 +20,7 @@ from xml.sax.saxutils import escape as xml_escape, quoteattr as xml_quoteattr
 from ..config import HanielConfig
 from ..config.model import ServiceDefinitionConfig
 from .state import InstallState
-from .utils import find_winsw
+from .utils import detect_tool_paths, find_winsw
 
 logger = logging.getLogger(__name__)
 
@@ -193,25 +193,6 @@ class Finalizer:
         else:
             self._log_service_instructions(service_cfg)
 
-    def _detect_node_paths(self) -> list[str]:
-        """Detect Node.js and pnpm executable directories for PATH injection.
-
-        WinSW services run under the SYSTEM account which doesn't inherit
-        user PATH. This detects where node, pnpm, and npx are installed
-        so their directories can be added to the service's PATH.
-
-        Returns:
-            List of directory paths containing node/pnpm/npx executables
-        """
-        paths: list[str] = []
-        for cmd in ["node", "pnpm", "npx"]:
-            found = shutil.which(cmd)
-            if found:
-                parent = str(Path(found).resolve().parent)
-                if parent not in paths:
-                    paths.append(parent)
-        return paths
-
     def _generate_winsw_xml(
         self, service_cfg: ServiceDefinitionConfig, working_dir: str
     ) -> str:
@@ -288,7 +269,7 @@ class Finalizer:
 
         # Auto-detect Node.js/pnpm paths if PATH not explicitly set
         if not has_explicit_path:
-            node_paths = self._detect_node_paths()
+            node_paths = detect_tool_paths(["node", "pnpm", "npx"])
             if node_paths:
                 path_value = "%PATH%;" + ";".join(node_paths)
                 lines.append(

@@ -381,6 +381,15 @@ def install(
                 click.echo(f"Start with: sc start {summary['service']['name']}")
                 click.echo(f"Or manually: haniel run {config}")
 
+            # Show service endpoints
+            if haniel_config.services:
+                click.echo()
+                click.echo("Service endpoints:")
+                for name, svc in haniel_config.services.items():
+                    if svc.ready and svc.ready.startswith("port:"):
+                        port = svc.ready.split(":", 1)[1]
+                        click.echo(f"  {name}: http://localhost:{port}")
+
     except KeyboardInterrupt:
         click.echo()
         click.echo(
