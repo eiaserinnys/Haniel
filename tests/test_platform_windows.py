@@ -340,7 +340,7 @@ class TestWindowsSubprocessKwargs:
         kwargs = handler.get_subprocess_kwargs()
 
         expected_flags = CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB
-        assert kwargs == {"creationflags": expected_flags}
+        assert kwargs == {"creationflags": expected_flags, "shell": True}
 
     def test_constants(self, mock_windll):
         """Should have correct Windows constants."""
