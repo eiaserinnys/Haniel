@@ -132,6 +132,9 @@ class WindowsHandler(PlatformHandler):
         """
         return {
             "creationflags": CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB,
+            # shell=True is required on Windows to execute .cmd/.bat scripts
+            # (e.g. pnpm.cmd, npx.cmd). CreateProcess cannot run .cmd directly.
+            "shell": True,
         }
 
     def _create_job_object(self) -> int | None:
