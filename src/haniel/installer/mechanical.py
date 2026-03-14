@@ -312,11 +312,15 @@ class MechanicalInstaller:
 
             elif env.type == "npm":
                 success = self._run_npm_install(name, env_path)
+                if success and env.build:
+                    success = self._run_build(name, env_path, env.build)
                 if not success:
                     all_success = False
 
             elif env.type == "pnpm":
                 success = self._run_pnpm_install(name, env_path)
+                if success and env.build:
+                    success = self._run_build(name, env_path, env.build)
                 if not success:
                     all_success = False
 
@@ -464,6 +468,38 @@ class MechanicalInstaller:
         except Exception as e:
             logger.error(f"Error running pnpm install for {name}: {e}")
             self.state.mark_failed(f"environments:{name}", str(e))
+            return False
+
+    def _run_build(self, name: str, env_path: Path, build_cmd: str) -> bool:
+        """Run a build command in a directory.
+
+        Args:
+            name: Environment name
+            env_path: Working directory for the build
+            build_cmd: Build command string (e.g. "pnpm run build")
+
+        Returns:
+            True if successful
+        """
+        try:
+            logger.info(f"Running build for {name}: {build_cmd}")
+            env = self._env_with_tool_paths(["node", "pnpm", "npx"])
+            subprocess.run(
+                build_cmd,
+                cwd=str(env_path),
+                check=True,
+                timeout=300,
+                env=env,
+                shell=True,
+            )
+            return True
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Build failed for {name}: {e}")
+            self.state.mark_failed(f"environments:{name}:build", str(e))
+            return False
+        except Exception as e:
+            logger.error(f"Build error for {name}: {e}")
+            self.state.mark_failed(f"environments:{name}:build", str(e))
             return False
 
     def _env_with_tool_paths(self, commands: list[str]) -> dict[str, str]:
