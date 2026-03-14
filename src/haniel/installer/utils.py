@@ -4,8 +4,11 @@ Installer utility functions.
 Shared helpers used across installer phases.
 """
 
+import logging
 import shutil
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def find_winsw(config_dir: Path) -> Path | None:
@@ -23,8 +26,10 @@ def find_winsw(config_dir: Path) -> Path | None:
         Path to winsw.exe, or None if not found
     """
     current = config_dir.resolve()
+    logger.debug(f"Searching for WinSW starting from: {current}")
     for _ in range(5):
         candidate = current / "bin" / "winsw.exe"
+        logger.debug(f"  Checking: {candidate} (exists={candidate.exists()})")
         if candidate.exists():
             return candidate
         parent = current.parent
@@ -34,6 +39,8 @@ def find_winsw(config_dir: Path) -> Path | None:
 
     found = shutil.which("winsw")
     if found:
+        logger.debug(f"  Found in PATH: {found}")
         return Path(found)
 
+    logger.debug("  WinSW not found anywhere")
     return None
