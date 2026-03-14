@@ -344,7 +344,12 @@ haniel MCP 도구를 사용하여:
 
         # Create MCP config for the install session
         mcp_config = {
-            "mcpServers": {"haniel": {"url": f"http://localhost:{mcp_port}/sse"}}
+            "mcpServers": {
+                "haniel": {
+                    "type": "sse",
+                    "url": f"http://localhost:{mcp_port}/sse",
+                }
+            }
         }
 
         mcp_config_path = self.config_dir / ".haniel-install-mcp.json"
@@ -367,13 +372,15 @@ haniel MCP 도구를 사용하여:
             logger.info(f"MCP config: {mcp_config_path}")
 
             # Build the command
-            # Use -p for prompt mode with the initial prompt
+            # Use interactive mode with --system-prompt for context
+            # (-p is non-interactive, can't ask user for input)
             cmd = [
                 claude_path,
-                "-p",
+                "--system-prompt",
                 prompt,
                 "--mcp-config",
                 str(mcp_config_path),
+                "--strict-mcp-config",
             ]
 
             logger.info(f"Running: {' '.join(cmd[:3])}...")
