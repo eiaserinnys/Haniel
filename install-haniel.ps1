@@ -288,7 +288,7 @@ function Main {
     # --------------------------------------------------------
     # Step 0: Git
     # --------------------------------------------------------
-    Write-Step "0/7" "Git"
+    Write-Step "0/8" "Git"
 
     if (-not $SkipGitCheck) {
         if (-not (Test-Git)) {
@@ -314,7 +314,7 @@ function Main {
     # --------------------------------------------------------
     # Step 1: Python
     # --------------------------------------------------------
-    Write-Step "1/7" "Python"
+    Write-Step "1/8" "Python"
 
     if (-not $SkipPythonCheck) {
         if (-not (Test-Python)) {
@@ -340,7 +340,7 @@ function Main {
     # --------------------------------------------------------
     # Step 2: Node.js
     # --------------------------------------------------------
-    Write-Step "2/7" "Node.js"
+    Write-Step "2/8" "Node.js"
 
     if (-not $SkipNodeCheck) {
         if (-not (Test-Node)) {
@@ -364,9 +364,46 @@ function Main {
     }
 
     # --------------------------------------------------------
-    # Step 3: Install path + create root
+    # Step 3: Claude Code auth
     # --------------------------------------------------------
-    Write-Step "3/7" "Install Directory"
+    Write-Step "3/8" "Claude Code Auth"
+
+    $claudePath = Get-Command claude -ErrorAction SilentlyContinue
+    if ($claudePath) {
+        try {
+            $authJson = & claude auth status 2>&1 | ConvertFrom-Json
+            if ($authJson.loggedIn) {
+                Write-Success "Claude Code authenticated: $($authJson.email)"
+            }
+            else {
+                Write-Warn "Claude Code is not authenticated."
+                Write-Info "Running 'claude auth login'..."
+                & claude auth login
+                $authJson = & claude auth status 2>&1 | ConvertFrom-Json
+                if ($authJson.loggedIn) {
+                    Write-Success "Claude Code authenticated: $($authJson.email)"
+                }
+                else {
+                    Write-Fail "Claude Code authentication failed."
+                    Write-Info "Please run 'claude auth login' manually and try again."
+                    Exit-WithLog 1
+                }
+            }
+        }
+        catch {
+            Write-Warn "Could not check Claude Code auth status: $($_.Exception.Message)"
+            Write-Info "You can authenticate later with 'claude auth login'"
+        }
+    }
+    else {
+        Write-Warn "Claude Code not found in PATH. Interactive setup will be skipped."
+        Write-Info "Install Claude Code and run 'claude auth login' before using 'haniel install'"
+    }
+
+    # --------------------------------------------------------
+    # Step 4: Install path + create root
+    # --------------------------------------------------------
+    Write-Step "4/8" "Install Directory"
 
     if ([string]::IsNullOrWhiteSpace($InstallPath)) {
         $defaultPath = "C:\Services\Haniel"
@@ -383,7 +420,7 @@ function Main {
     # --------------------------------------------------------
     # Step 4: Clone haniel into .self/ + install
     # --------------------------------------------------------
-    Write-Step "4/7" "Clone Haniel"
+    Write-Step "5/8" "Clone Haniel"
 
     # WinSW (needs InstallPath set first)
     $binDir = Join-Path $InstallPath "bin"
@@ -451,7 +488,7 @@ function Main {
     # --------------------------------------------------------
     # Step 5: Download haniel.yaml to root
     # --------------------------------------------------------
-    Write-Step "5/7" "Configuration"
+    Write-Step "6/8" "Configuration"
 
     $configPath = Join-Path $InstallPath "haniel.yaml"
 
@@ -518,7 +555,7 @@ function Main {
     # --------------------------------------------------------
     # Step 6: haniel install
     # --------------------------------------------------------
-    Write-Step "6/7" "Running haniel install"
+    Write-Step "7/8" "Running haniel install"
 
     Write-Info "Working directory: $InstallPath"
     Write-Info "Command: $hanielExe install haniel.yaml"
@@ -544,7 +581,7 @@ function Main {
     # --------------------------------------------------------
     # Step 7: Start service
     # --------------------------------------------------------
-    Write-Step "7/7" "Starting Service"
+    Write-Step "8/8" "Starting Service"
 
     # Read service name from install.service.name in YAML
     # Fall back to "haniel" if we can't parse it

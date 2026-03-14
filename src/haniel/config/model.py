@@ -148,6 +148,9 @@ class ConfigKeyConfig(BaseModel):
         default=None, alias="validate", description="Validation command"
     )
     default: str | None = Field(default=None, description="Default value")
+    description: str | None = Field(
+        default=None, description="Human-readable description for AI-assisted setup"
+    )
 
 
 class ConfigFileConfig(BaseModel):
