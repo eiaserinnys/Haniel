@@ -1,0 +1,480 @@
+# seosoyoung 전체 서비스 배포 설정 (haniel)
+#
+# 설치:
+#   1. PowerShell(관리자) 실행
+#   2. irm https://raw.githubusercontent.com/eiaserinnys/Haniel/main/install-haniel.ps1 | iex
+#   3. config URL 입력:
+#      https://raw.githubusercontent.com/eiaserinnys/seosoyoung/main/haniel.yaml
+#
+# .env 분배 원칙:
+#   - 모든 서비스는 자기 CWD의 .env만 읽는다 (load_dotenv 또는 wrapper)
+#   - workspace/에는 .env가 없다 — workspace는 Claude Code 세션 전용
+#   - haniel.yaml의 install.configs가 모든 .env의 정본
+#   - 중복 키(예: SLACK_BOT_TOKEN이 bot과 mcp-seosoyoung에 모두)는
+#     haniel install 시 Claude Code가 한 번만 물어보고 양쪽에 기록
+#
+# 설치 후 디렉토리 구조:
+#   {root}/
+#   +-- haniel.yaml                         <- 이 파일 (모든 설정의 정본)
+#   +-- .self/                              <- haniel 자체 리포
+#   +-- workspace/                          <- Claude Code 세션 CWD (soulstream 경유)
+#   |   +-- .projects/                      <- 소스 코드 리포들
+#   |   |   +-- seosoyoung/                 <- 슬랙봇
+#   |   |   +-- soulstream/                 <- soulstream
+#   |   |   +-- eb_lore/                    <- 로어 + lore_mcp
+#   |   |   +-- eb_narrative/               <- 대사 데이터
+#   |   |   +-- eb_portal/                  <- 포탈
+#   |   +-- .local/                         <- 로컬 작업 데이터
+#   |   +-- .claude/                        <- Claude 규칙/스킬
+#   |   +-- plugins/                        <- 슬랙봇 플러그인 설정
+#   |   +-- .mcp.json                       <- MCP 연결 설정 (정적 생성)
+#   +-- services/                           <- 서비스별 CWD + .env
+#   |   +-- bot/                            <- 슬랙봇 메인
+#   |   +-- rescue/                         <- 비상 복구 봇
+#   |   +-- mcp-seosoyoung/                 <- 파일첨부/이미지생성 MCP
+#   |   +-- mcp-eb-lore/                    <- 로어 검색 MCP
+#   |   +-- mcp-slack/                      <- Slack 읽기전용 MCP
+#   |   +-- mcp-trello/                     <- Trello MCP
+#   |   +-- mcp-outline/                    <- Outline MCP
+#   +-- runtime/                            <- Python venv, 로그
+#   |   +-- venv/                           <- 메인 venv (bot, rescue)
+#   |   +-- mcp_venv/                       <- MCP venv
+#   |   +-- logs/
+#   +-- soulstream/                         <- soulstream 실행 환경
+#       +-- venv/
+#       +-- logs/
+#       +-- data/
+#       +-- .env
+
+poll_interval: 60
+
+shutdown:
+  timeout: 10
+  kill_timeout: 30
+
+backoff:
+  base_delay: 5
+  max_delay: 300
+  circuit_breaker: 5
+  circuit_window: 300
+
+webhooks:
+  - url: https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+    format: slack
+
+mcp:
+  enabled: true
+  transport: sse
+  port: 3200
+
+repos:
+  haniel:
+    url: https://github.com/eiaserinnys/Haniel.git
+    branch: main
+    path: ./.self
+
+  seosoyoung:
+    url: git@github.com:eiaserinnys/seosoyoung.git
+    branch: main
+    path: ./workspace/.projects/seosoyoung
+
+  soulstream:
+    url: https://github.com/eiaserinnys/soulstream.git
+    branch: main
+    path: ./workspace/.projects/soulstream
+
+  eb-lore:
+    url: https://github.com/eiaserinnys/eb_lore.git
+    branch: main
+    path: ./workspace/.projects/eb_lore
+
+  eb-narrative:
+    url: https://github.com/eiaserinnys/eb_narrative.git
+    branch: main
+    path: ./workspace/.projects/eb_narrative
+
+  eb-portal:
+    url: https://github.com/eiaserinnys/eb_portal.git
+    branch: main
+    path: ./workspace/.projects/eb_portal
+
+self:
+  repo: haniel
+  auto_update: false
+
+services:
+  # === MCP 서버 (의존성 없음, 병렬 시작) ===
+
+  mcp-seosoyoung:
+    run: ./runtime/mcp_venv/Scripts/python.exe -X utf8 -m seosoyoung.mcp --transport=sse --port=3104
+    cwd: ./services/mcp-seosoyoung
+    repo: seosoyoung
+    ready: port:3104
+    restart_delay: 3
+    hooks:
+      post_pull: ./runtime/mcp_venv/Scripts/pip.exe install -e ./workspace/.projects/seosoyoung
+
+  mcp-eb-lore:
+    run: ./runtime/mcp_venv/Scripts/python.exe -X utf8 -m lore_mcp --transport=sse --port=3108
+    cwd: ./services/mcp-eb-lore
+    repo: eb-lore
+    ready: port:3108
+    restart_delay: 3
+    hooks:
+      post_pull: ./runtime/mcp_venv/Scripts/pip.exe install -e ./workspace/.projects/eb_lore
+
+  mcp-slack:
+    run: powershell -ExecutionPolicy Bypass -File ./workspace/.projects/seosoyoung/scripts/run-with-env.ps1 "npx -y supergateway --stdio \"npx -y slack-mcp-server@latest\" --port 3101"
+    cwd: ./services/mcp-slack
+    ready: port:3101
+    restart_delay: 3
+
+  mcp-trello:
+    run: powershell -ExecutionPolicy Bypass -File ./workspace/.projects/seosoyoung/scripts/run-with-env.ps1 "npx -y supergateway --stdio \"npx -y @delorenj/mcp-server-trello\" --port 3102"
+    cwd: ./services/mcp-trello
+    ready: port:3102
+    restart_delay: 3
+
+  mcp-outline:
+    run: powershell -ExecutionPolicy Bypass -File ./workspace/.projects/seosoyoung/scripts/run-with-env.ps1 "npx -y supergateway --stdio \"npx -y mcp-server-outline\" --port 3103"
+    cwd: ./services/mcp-outline
+    ready: port:3103
+    restart_delay: 3
+
+  # === Soulstream ===
+  # soulstream이 Claude Code의 CWD를 workspace/로 지정
+
+  soulstream-server:
+    run: ./soulstream/venv/Scripts/python.exe -X utf8 -m uvicorn soul_server.main:app --host 127.0.0.1 --port 4105
+    cwd: ./soulstream
+    repo: soulstream
+    ready: port:4105
+    restart_delay: 3
+    shutdown:
+      method: http
+      endpoint: http://127.0.0.1:4105/shutdown
+      timeout: 60
+    hooks:
+      post_pull: ./soulstream/venv/Scripts/pip.exe install -e ./workspace/.projects/soulstream/soul-server
+
+  soulstream-dashboard:
+    run: npx tsx server/index.ts
+    cwd: ./workspace/.projects/soulstream/soul-dashboard
+    repo: soulstream
+    after: soulstream-server
+    ready: port:4109
+    restart_delay: 3
+    hooks:
+      post_pull: npm --prefix ./workspace/.projects/soulstream/soul-dashboard install && npm --prefix ./workspace/.projects/soulstream/soul-dashboard run build
+
+  # === 메인 봇 ===
+
+  bot:
+    run: ./runtime/venv/Scripts/python.exe -X utf8 -m seosoyoung.slackbot
+    cwd: ./services/bot
+    repo: seosoyoung
+    after:
+      - mcp-seosoyoung
+      - soulstream-server
+    ready: port:3106
+    shutdown:
+      method: http
+      endpoint: http://127.0.0.1:3106/shutdown
+      timeout: 15
+    hooks:
+      post_pull: ./runtime/venv/Scripts/pip.exe install -e ./workspace/.projects/seosoyoung
+
+  # === Rescue bot (독립, 비상 복구) ===
+  # WORKSPACE_DIR을 .env에서 읽어 Claude Code 로컬 실행 시 CWD로 전달
+
+  rescue-bot:
+    run: ./runtime/venv/Scripts/python.exe -X utf8 -m seosoyoung.rescue.main
+    cwd: ./services/rescue
+    repo: seosoyoung
+    shutdown:
+      method: http
+      endpoint: http://127.0.0.1:3107/shutdown
+      timeout: 10
+    restart_delay: 5
+
+install:
+  requirements:
+    python: ">=3.11"
+    node: ">=18"
+    winsw: true
+    claude-code: true
+
+  directories:
+    - ./.self/logs
+    # workspace (Claude Code 세션용)
+    - ./workspace
+    - ./workspace/.projects
+    - ./workspace/.local
+    - ./workspace/.local/artifacts
+    - ./workspace/.local/incoming
+    - ./workspace/.local/tmp
+    - ./workspace/.local/index
+    # runtime (venv, 로그)
+    - ./runtime
+    - ./runtime/logs
+    # 서비스별 디렉토리
+    - ./services/bot
+    - ./services/rescue
+    - ./services/mcp-seosoyoung
+    - ./services/mcp-eb-lore
+    - ./services/mcp-slack
+    - ./services/mcp-trello
+    - ./services/mcp-outline
+    # soulstream
+    - ./soulstream
+    - ./soulstream/logs
+    - ./soulstream/data
+
+  environments:
+    # packages 필드는 haniel에 추가 구현 필요 (pip install -e {path}).
+    # 없으면 초기 설치 후 첫 기동에서 ModuleNotFoundError 발생.
+    main-venv:
+      type: python-venv
+      path: ./runtime/venv
+      requirements:
+        - ./workspace/.projects/seosoyoung/requirements.txt
+      packages:                                             # TODO: haniel 기능 추가
+        - ./workspace/.projects/seosoyoung
+
+    mcp-venv:
+      type: python-venv
+      path: ./runtime/mcp_venv
+      requirements:
+        - ./workspace/.projects/seosoyoung/mcp_requirements.txt
+        - ./workspace/.projects/eb_lore/lore_mcp/requirements.txt
+      packages:                                             # TODO: haniel 기능 추가
+        - ./workspace/.projects/seosoyoung
+        - ./workspace/.projects/eb_lore
+
+    soulstream-venv:
+      type: python-venv
+      path: ./soulstream/venv
+      requirements: []
+      packages:                                             # TODO: haniel 기능 추가
+        - ./workspace/.projects/soulstream/soul-server
+
+    dashboard-node:
+      type: npm
+      path: ./workspace/.projects/soulstream/soul-dashboard
+
+  configs:
+    # === services/bot/.env ===
+    bot-env:
+      path: ./services/bot/.env
+      keys:
+        # Slack
+        - key: SLACK_BOT_TOKEN
+          prompt: "Slack Bot Token (xoxb-...)"
+          guide: "https://api.slack.com/apps → OAuth & Permissions → Bot User OAuth Token"
+        - key: SLACK_APP_TOKEN
+          prompt: "Slack App Token (xapp-...)"
+          guide: "https://api.slack.com/apps → Basic Information → App-Level Tokens"
+        # Soulstream 연결
+        - key: SEOSOYOUNG_SOUL_URL
+          default: "http://localhost:4105"
+        - key: SEOSOYOUNG_SOUL_TOKEN
+          prompt: "Soulstream API Bearer Token"
+          guide: "soulstream-env의 AUTH_BEARER_TOKEN과 동일한 값"
+        - key: CLAUDE_EXECUTION_MODE
+          default: "remote"
+        - key: CLAUDE_USE_SDK
+          default: "true"
+        # 봇 플러그인 API Keys
+        - key: RECALL_API_KEY
+          prompt: "Anthropic API Key (Recall 기능용)"
+          guide: "https://console.anthropic.com/settings/keys"
+        - key: RECALL_MODEL
+          default: "claude-sonnet-4-20250514"
+        - key: TRANSLATE_API_KEY
+          prompt: "Anthropic API Key (번역 기능용, Recall과 같은 키 가능)"
+        # 권한
+        - key: ALLOWED_USERS
+          prompt: "허용된 Slack User ID (쉼표 구분)"
+        - key: ADMIN_USERS
+          prompt: "관리자 Slack User ID (쉼표 구분)"
+        - key: MAX_CONCURRENT_SESSIONS
+          default: "3"
+        # 경로 (workspace는 더이상 CWD가 아니므로 절대경로 필요)
+        - key: WORKSPACE_DIR
+          default: "{root}/workspace"
+        - key: EB_NARRATIVE_PATH
+          default: "{root}/workspace/.projects/eb_narrative"
+        - key: GLOSSARY_PATH
+          default: "{root}/workspace/.projects/eb_lore/content/glossary.yaml"
+        - key: EB_INDEX_ROOT
+          default: "{root}/workspace/.local/index"
+        - key: LOG_PATH
+          default: "{root}/runtime/logs"
+        - key: SESSION_PATH
+          default: "{root}/services/bot/sessions"
+        - key: MEMORY_PATH
+          default: "{root}/services/bot/memory"
+        # Flags
+        - key: DEBUG
+          default: "false"
+
+    # === services/rescue/.env ===
+    rescue-env:
+      path: ./services/rescue/.env
+      keys:
+        - key: RESCUE_SLACK_BOT_TOKEN
+          prompt: "Rescue Bot Slack Token (xoxb-..., 메인 봇과 별도 App)"
+          guide: "긴급 복구용 별도 Slack App의 Bot Token"
+        - key: RESCUE_SLACK_APP_TOKEN
+          prompt: "Rescue Bot Slack App Token (xapp-...)"
+        - key: WORKSPACE_DIR
+          default: "{root}/workspace"
+        - key: CLAUDE_CLI_DIR
+          prompt: "Claude CLI 경로 (예: C:/Users/{user}/.claude)"
+          guide: "claude --version → where claude 로 확인"
+        - key: LOG_PATH
+          default: "{root}/runtime/logs"
+
+    # === services/mcp-seosoyoung/.env ===
+    mcp-seosoyoung-env:
+      path: ./services/mcp-seosoyoung/.env
+      keys:
+        - key: SLACK_BOT_TOKEN
+          prompt: "Slack Bot Token (bot-env와 동일)"
+        - key: GEMINI_API_KEY
+          prompt: "Gemini API Key (이미지 생성용)"
+          guide: "https://aistudio.google.com/apikey"
+        - key: GEMINI_MODEL
+          default: "gemini-2.0-flash-preview-image-generation"
+        - key: NPC_CLAUDE_API_KEY
+          prompt: "Anthropic API Key (NPC 대화용, 별도 키 권장)"
+        - key: R2_ACCESS_KEY_ID
+          prompt: "Cloudflare R2 Access Key ID"
+          guide: "Cloudflare Dashboard → R2 → Manage R2 API Tokens"
+        - key: R2_SECRET_ACCESS_KEY
+          prompt: "Cloudflare R2 Secret Access Key"
+        - key: WORKSPACE_DIR
+          default: "{root}/workspace"
+
+    # === services/mcp-eb-lore/.env ===
+    mcp-eb-lore-env:
+      path: ./services/mcp-eb-lore/.env
+      keys:
+        - key: WORKSPACE_DIR
+          default: "{root}/workspace"
+        - key: EB_LORE_PATH
+          default: "{root}/workspace/.projects/eb_lore"
+        - key: EB_NARRATIVE_PATH
+          default: "{root}/workspace/.projects/eb_narrative"
+        - key: EB_INDEX_ROOT
+          default: "{root}/workspace/.local/index"
+
+    # === services/mcp-slack/.env ===
+    mcp-slack-env:
+      path: ./services/mcp-slack/.env
+      keys:
+        - key: SLACK_TEAM_ID
+          prompt: "Slack Team(Workspace) ID (T로 시작)"
+          guide: "Slack 워크스페이스 설정 → About this workspace"
+        - key: SLACK_MCP_XOXC_TOKEN
+          prompt: "Slack MCP XOXC Token"
+          guide: "브라우저 DevTools → Application → Cookies → xoxc-... 값"
+        - key: SLACK_MCP_XOXD_TOKEN
+          prompt: "Slack MCP XOXD Token"
+          guide: "브라우저 DevTools → Application → Cookies → xoxd-... 값"
+
+    # === services/mcp-trello/.env ===
+    mcp-trello-env:
+      path: ./services/mcp-trello/.env
+      keys:
+        - key: TRELLO_API_KEY
+          prompt: "Trello API Key"
+          guide: "https://trello.com/power-ups/admin → API Key"
+        - key: TRELLO_TOKEN
+          prompt: "Trello Token"
+          guide: "Trello API Key 페이지에서 Token 생성"
+
+    # === services/mcp-outline/.env ===
+    mcp-outline-env:
+      path: ./services/mcp-outline/.env
+      keys:
+        - key: OUTLINE_API_KEY
+          prompt: "Outline API Key"
+          guide: "Outline → Settings → API → Create API Key"
+        - key: OUTLINE_API_URL
+          prompt: "Outline API URL (예: https://your-outline.example.com/api)"
+
+    # === soulstream/.env ===
+    soulstream-env:
+      path: ./soulstream/.env
+      keys:
+        - key: WORKSPACE_DIR
+          default: "{root}/workspace"
+        - key: AUTH_BEARER_TOKEN
+          prompt: "Soulstream API 인증 토큰"
+          guide: "python -c \"import secrets; print(secrets.token_urlsafe(32))\" 로 생성"
+        - key: HOST
+          default: "127.0.0.1"
+        - key: PORT
+          default: "4105"
+        - key: ENVIRONMENT
+          default: "production"
+        - key: MAX_CONCURRENT_SESSIONS
+          default: "5"
+        - key: SESSION_TIMEOUT_SECONDS
+          default: "3600"
+        - key: RUNNER_POOL_MAX_SIZE
+          default: "8"
+        - key: RUNNER_POOL_IDLE_TTL
+          default: "600"
+        - key: RUNNER_POOL_PRE_WARM
+          default: "2"
+        - key: RUNNER_POOL_MIN_GENERIC
+          default: "1"
+        - key: SERENDIPITY_ENABLED
+          default: "false"
+        - key: SERENDIPITY_URL
+          default: ""
+        - key: DASH_USER_NAME
+          prompt: "대시보드 표시 이름"
+        - key: DASH_USER_ID
+          prompt: "대시보드 사용자 ID"
+        - key: DASH_USER_PORTRAIT
+          default: ".local/portrait/user.png"
+        - key: DASH_ASSISTANT_NAME
+          default: "Assistant"
+        - key: DASH_ASSISTANT_ID
+          default: "assistant"
+        - key: DASH_ASSISTANT_PORTRAIT
+          default: ".local/portrait/assistant.png"
+
+    # === soul-dashboard/.env ===
+    dashboard-env:
+      path: ./workspace/.projects/soulstream/soul-dashboard/.env
+      keys:
+        - key: SOUL_API_URL
+          default: "http://localhost:4105"
+        - key: DASHBOARD_PORT
+          default: "4109"
+
+    # === .mcp.json (정적 생성) ===
+    workspace-mcp:
+      path: ./workspace/.mcp.json
+      content: |
+        {
+          "mcpServers": {
+            "seosoyoung-mcp": { "url": "http://localhost:3104/sse" },
+            "eb-lore": { "url": "http://localhost:3108/sse" },
+            "haniel": { "url": "http://localhost:3200/sse" },
+            "slack": { "url": "http://localhost:3101/sse" },
+            "trello": { "url": "http://localhost:3102/sse" },
+            "outline": { "url": "http://localhost:3103/sse" }
+          }
+        }
+
+  service:
+    name: seosoyoung
+    display: "Seosoyoung Slackbot (via Haniel)"
+    working_directory: "{root}"
+    environment:
+      PYTHONUTF8: "1"
