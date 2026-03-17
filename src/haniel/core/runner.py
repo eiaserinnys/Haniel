@@ -866,12 +866,8 @@ class ServiceRunner:
         dependency_graph = {}
         for name in self._enabled_services:
             dependency_graph[name] = {
-                "dependencies": sorted(
-                    self._dependency_graph._dependencies.get(name, set())
-                ),
-                "dependents": sorted(
-                    self._dependency_graph._dependents.get(name, set())
-                ),
+                "dependencies": sorted(self._dependency_graph.get_dependencies(name)),
+                "dependents": sorted(self._dependency_graph.get_dependents(name)),
             }
 
         # Repo states

@@ -66,6 +66,14 @@ class DashboardConfig(BaseModel):
         default=None,
         description="Port for dashboard server. None means share MCP port.",
     )
+    token: str | None = Field(
+        default=None,
+        description=(
+            "Bearer token for API/WebSocket access. "
+            "If set, all requests must include 'Authorization: Bearer <token>'. "
+            "If None, dashboard is accessible without authentication (warning logged)."
+        ),
+    )
 
 
 class McpConfig(BaseModel):
