@@ -13,6 +13,7 @@ from aiohttp import web
 
 from .api import create_api_routes
 from .ws import DashboardWebSocket
+from .static import setup_static
 
 if TYPE_CHECKING:
     from ..core.runner import ServiceRunner
@@ -79,6 +80,10 @@ def setup_dashboard(
     app.router.add_route("GET", "/ws", ws_handler.handle_ws)
 
     logger.info("Dashboard routes registered: %d API + WebSocket", len(api_routes))
+
+    # Serve built frontend (must come after API/WS routes)
+    setup_static(app)
+
     return ws_handler
 
 
