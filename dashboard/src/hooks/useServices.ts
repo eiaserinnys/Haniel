@@ -109,6 +109,22 @@ export function useServices() {
     }
   }, [])
 
+  const refreshStatus = useCallback(async () => {
+    try {
+      const s = await api.getStatus()
+      setStatus(s)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }, [])
+
+  const dismissSelfUpdate = useCallback(() => {
+    setStatus((prev) => {
+      if (!prev?.self_update) return prev
+      return { ...prev, self_update: { ...prev.self_update, pending: false } }
+    })
+  }, [])
+
   return {
     status,
     loading,
@@ -117,5 +133,7 @@ export function useServices() {
     controlService,
     pullRepo,
     approveSelfUpdate,
+    dismissSelfUpdate,
+    refreshStatus,
   }
 }

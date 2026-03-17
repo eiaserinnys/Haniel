@@ -5,7 +5,31 @@ import { Wifi, WifiOff, RefreshCw } from 'lucide-react'
 import { useServices } from '@/hooks/useServices'
 import { ServiceList } from '@/components/ServiceList'
 import { api } from '@/lib/api'
+import { useEffect, useState } from 'react'
 import './index.css'
+
+/** Returns seconds until the next poll based on last_poll + poll_interval. */
+function useNextPollCountdown(
+  lastPoll: string | null,
+  pollInterval: number,
+): number {
+  const [secs, setSecs] = useState(0)
+
+  useEffect(() => {
+    if (!lastPoll || pollInterval <= 0) return
+
+    const tick = () => {
+      const elapsed = (Date.now() - new Date(lastPoll).getTime()) / 1000
+      setSecs(Math.max(0, Math.ceil(pollInterval - elapsed)))
+    }
+
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [lastPoll, pollInterval])
+
+  return secs
+}
 
 export default function App() {
   const {
@@ -16,7 +40,14 @@ export default function App() {
     controlService,
     pullRepo,
     approveSelfUpdate,
+    dismissSelfUpdate,
+    refreshStatus,
   } = useServices()
+
+  const countdown = useNextPollCountdown(
+    status?.last_poll ?? null,
+    status?.poll_interval ?? 0,
+  )
 
   return (
     <div className="min-h-screen bg-zinc-900 text-zinc-100">
@@ -26,12 +57,20 @@ export default function App() {
           <span className="text-sm text-blue-300">
             A self-update is available for <strong>{status.self_update.repo}</strong>.
           </span>
-          <button
-            onClick={approveSelfUpdate}
-            className="text-sm bg-blue-600 hover:bg-blue-500 text-white px-3 py-1 rounded transition-colors"
-          >
-            Approve update
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={dismissSelfUpdate}
+              className="text-sm text-blue-400 hover:text-blue-200 px-2 py-1 transition-colors"
+            >
+              Dismiss
+            </button>
+            <button
+              onClick={approveSelfUpdate}
+              className="text-sm bg-blue-600 hover:bg-blue-500 text-white px-3 py-1 rounded transition-colors"
+            >
+              Approve update
+            </button>
+          </div>
         </div>
       )}
 
@@ -127,12 +166,25 @@ export default function App() {
 
             {/* Runner info footer */}
             <section className="text-xs text-zinc-600 border-t border-zinc-800 pt-4">
-              <div className="flex gap-6 flex-wrap">
+              <div className="flex gap-6 flex-wrap items-center">
                 <span>Poll count: {status.poll_count}</span>
-                <span>Poll interval: {status.poll_interval}s</span>
+                <span>Interval: {status.poll_interval}s</span>
                 {status.last_poll && (
-                  <span>Last poll: {new Date(status.last_poll).toLocaleTimeString()}</span>
+                  <>
+                    <span>Last poll: {new Date(status.last_poll).toLocaleTimeString()}</span>
+                    <span className={countdown <= 5 ? 'text-zinc-400' : ''}>
+                      Next in: {countdown}s
+                    </span>
+                  </>
                 )}
+                <button
+                  onClick={refreshStatus}
+                  title="Fetch status now"
+                  className="flex items-center gap-1 text-zinc-500 hover:text-zinc-300 transition-colors"
+                >
+                  <RefreshCw size={11} />
+                  Fetch now
+                </button>
                 {status.pending_restarts.length > 0 && (
                   <span className="text-yellow-500">
                     Pending restarts: {status.pending_restarts.join(', ')}
