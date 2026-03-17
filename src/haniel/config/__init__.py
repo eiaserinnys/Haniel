@@ -10,6 +10,7 @@ from .model import (
     BackoffConfig,
     ConfigFileConfig,
     ConfigKeyConfig,
+    DashboardConfig,
     EnvironmentConfig,
     HanielConfig,
     HooksConfig,
@@ -29,6 +30,7 @@ from .validators import ValidationError, validate_config
 __all__ = [
     # model
     "BackoffConfig",
+    "DashboardConfig",
     "ConfigFileConfig",
     "ConfigKeyConfig",
     "EnvironmentConfig",

@@ -26,7 +26,7 @@ from ..config import (
     ServiceConfig,
     ShutdownConfig,
 )
-from .git import fetch_repo, pull_repo, get_head, GitError
+from .git import fetch_repo, pull_repo, get_head, get_pending_changes, GitError
 from .health import HealthManager
 from .process import ProcessManager
 
@@ -198,6 +198,7 @@ class RepoState:
     last_head: str | None = None
     last_fetch: datetime | None = None
     fetch_error: str | None = None
+    pending_changes: dict | None = None  # {"commits": [...], "stat": "..."}
 
 
 @dataclass
@@ -609,6 +610,12 @@ class ServiceRunner:
                 if has_changes:
                     logger.info(f"Changes detected in repo: {name}")
                     changed.append(name)
+                    state.pending_changes = get_pending_changes(
+                        path=repo_path,
+                        branch=state.config.branch,
+                    )
+                else:
+                    state.pending_changes = None
 
             except GitError as e:
                 logger.error(f"Failed to fetch {name}: {e}")
@@ -829,17 +836,42 @@ class ServiceRunner:
         """Get current status of the runner.
 
         Returns:
-            Status dict with runner state, services, and repos
+            Status dict with runner state, services, repos, and dependency graph
         """
-        # Service states from health manager
+        # Service states from health manager — includes config for dashboard
         service_status = {}
-        for name in self._enabled_services:
+        for name, svc_config in self._enabled_services.items():
             health = self.health_manager.get_health(name)
             service_status[name] = {
                 "state": health.state.value,
                 "uptime": health.get_uptime(),
                 "restart_count": health.restart_count,
                 "consecutive_failures": health.consecutive_failures,
+                # Config info for dashboard
+                "config": {
+                    "run": svc_config.run,
+                    "cwd": svc_config.cwd,
+                    "repo": svc_config.repo,
+                    "after": svc_config.after,
+                    "ready": svc_config.ready,
+                    "enabled": svc_config.enabled,
+                },
+            }
+
+        # Pending restarts — snapshot under lock
+        with self._restart_lock:
+            pending_restarts = list(self._pending_restarts.keys())
+
+        # Dependency graph
+        dependency_graph = {}
+        for name in self._enabled_services:
+            dependency_graph[name] = {
+                "dependencies": sorted(
+                    self._dependency_graph._dependencies.get(name, set())
+                ),
+                "dependents": sorted(
+                    self._dependency_graph._dependents.get(name, set())
+                ),
             }
 
         # Repo states
@@ -854,6 +886,7 @@ class ServiceRunner:
                 if state.last_fetch
                 else None,
                 "fetch_error": state.fetch_error,
+                "pending_changes": state.pending_changes,
             }
 
         # Read runner state with lock for thread safety
@@ -869,6 +902,8 @@ class ServiceRunner:
                 "poll_count": self._state.poll_count,
                 "poll_interval": self.poll_interval,
                 "services": service_status,
+                "pending_restarts": pending_restarts,
+                "dependency_graph": dependency_graph,
                 "repos": repo_status,
             }
             if self._self_repo:
