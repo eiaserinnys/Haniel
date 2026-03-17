@@ -94,10 +94,9 @@ class DashboardWebSocket:
     def _schedule_broadcast(self, event: dict) -> None:
         """Thread-safe: schedule broadcast on the event loop."""
         if self._loop and not self._loop.is_closed():
+            # Default-capture event to avoid late-binding closure issue
             self._loop.call_soon_threadsafe(
-                lambda: asyncio.ensure_future(
-                    self._broadcast(event), loop=self._loop
-                )
+                lambda e=event: self._loop.create_task(self._broadcast(e))
             )
 
     async def _broadcast(self, event: dict) -> None:

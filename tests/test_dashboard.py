@@ -124,7 +124,8 @@ def dashboard_app(mock_runner):
     app = web.Application()
     loop = asyncio.new_event_loop()
     setup_dashboard(app, mock_runner, loop)
-    return app
+    yield app
+    loop.close()
 
 
 # ── REST API Tests ────────────────────────────────────────────────────────────

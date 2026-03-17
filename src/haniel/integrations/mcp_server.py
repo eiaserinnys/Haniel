@@ -543,14 +543,19 @@ class HanielMcpServer:
             app.router.add_route("GET", "/sse", sse.handle_sse)
             app.router.add_route("POST", "/sse", sse.handle_post_message)
 
-            # Attach dashboard routes if enabled
+            # Attach dashboard routes only when explicitly enabled in config
             dashboard_cfg = self.runner.config.dashboard
-            if dashboard_cfg is None or dashboard_cfg.enabled:
+            if dashboard_cfg is not None and dashboard_cfg.enabled:
                 try:
                     from ..dashboard import setup_dashboard
 
                     loop = asyncio.get_event_loop()
-                    setup_dashboard(app, self.runner, loop)
+                    setup_dashboard(
+                        app,
+                        self.runner,
+                        loop,
+                        token=dashboard_cfg.token,
+                    )
                     logger.info("Dashboard routes attached to MCP server")
                 except Exception as e:
                     logger.warning(f"Failed to set up dashboard: {e}")

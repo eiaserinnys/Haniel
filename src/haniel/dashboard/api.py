@@ -41,13 +41,6 @@ def create_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
     Returns:
         List of aiohttp RouteDef objects ready to be added to an app.router
     """
-    loop_ref: list[asyncio.AbstractEventLoop] = []
-
-    def get_loop() -> asyncio.AbstractEventLoop:
-        if not loop_ref:
-            loop_ref.append(asyncio.get_event_loop())
-        return loop_ref[0]
-
     def _get_service_names() -> set[str]:
         status = runner.get_status()
         return set(status.get("services", {}).keys())

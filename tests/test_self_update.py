@@ -153,8 +153,8 @@ class TestRunnerSelfUpdate:
         runner._self_update_requested = threading.Event()
         runner._pending_restarts = {}
         runner._dependency_graph = MagicMock()
-        runner._dependency_graph._dependencies = {}
-        runner._dependency_graph._dependents = {}
+        runner._dependency_graph.get_dependencies.return_value = []
+        runner._dependency_graph.get_dependents.return_value = []
 
         return runner
 
