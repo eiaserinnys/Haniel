@@ -283,6 +283,9 @@ class ServiceRunner:
         # MCP server (lazy initialized)
         self._mcp_server = None
 
+        # WebSocket handler (set by MCP server after dashboard setup)
+        self._ws_handler = None
+
         # Self-update (see ADR-0002)
         self._self_repo: str | None = (
             config.self_update.repo if config.self_update else None
@@ -614,6 +617,10 @@ class ServiceRunner:
                         path=repo_path,
                         branch=state.config.branch,
                     )
+                    if self._ws_handler is not None:
+                        self._ws_handler.broadcast_repo_change(
+                            name, state.pending_changes or {}
+                        )
                 else:
                     state.pending_changes = None
 
@@ -709,6 +716,9 @@ class ServiceRunner:
 
         logger.info("Self-update: changes detected, awaiting approval")
         self._notify_self_update_detected(auto=False)
+
+        if self._ws_handler is not None and self._self_repo:
+            self._ws_handler.broadcast_self_update_pending(self._self_repo)
 
     def approve_self_update(self) -> str:
         """Approve a pending self-update.

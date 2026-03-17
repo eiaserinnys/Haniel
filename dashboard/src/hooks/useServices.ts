@@ -1,0 +1,121 @@
+// useServices — WebSocket + service state management
+// Uses Phase 1 API types: RunnerStatus, WsEvent
+
+import { useState, useCallback } from 'react'
+import type {
+  RunnerStatus,
+  WsEvent,
+  WsStateChangeEvent,
+  WsRepoChangeEvent,
+} from '@/lib/types'
+import { api } from '@/lib/api'
+import { useWebSocket } from './useWebSocket'
+
+export function useServices() {
+  const [status, setStatus] = useState<RunnerStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleEvent = useCallback((event: WsEvent) => {
+    switch (event.type) {
+      case 'init': {
+        setStatus(event.status)
+        setLoading(false)
+        setError(null)
+        break
+      }
+      case 'state_change': {
+        const e = event as WsStateChangeEvent
+        setStatus((prev) => {
+          if (!prev) return prev
+          const svc = prev.services[e.service]
+          if (!svc) return prev
+          return {
+            ...prev,
+            services: {
+              ...prev.services,
+              [e.service]: { ...svc, state: e.new },
+            },
+          }
+        })
+        break
+      }
+      case 'repo_change': {
+        const e = event as WsRepoChangeEvent
+        setStatus((prev) => {
+          if (!prev) return prev
+          const repo = prev.repos[e.repo]
+          if (!repo) return prev
+          return {
+            ...prev,
+            repos: {
+              ...prev.repos,
+              [e.repo]: { ...repo, pending_changes: e.pending_changes },
+            },
+          }
+        })
+        break
+      }
+      case 'self_update_pending': {
+        setStatus((prev) => {
+          if (!prev) return prev
+          return {
+            ...prev,
+            self_update: prev.self_update
+              ? { ...prev.self_update, pending: true }
+              : { repo: event.repo, pending: true, auto_update: false },
+          }
+        })
+        break
+      }
+      case 'reload_complete': {
+        api.getStatus().then(setStatus).catch(() => null)
+        break
+      }
+    }
+  }, [])
+
+  const { connectionState } = useWebSocket({ onEvent: handleEvent })
+
+  const controlService = useCallback(
+    async (name: string, action: 'start' | 'stop' | 'restart' | 'enable') => {
+      try {
+        switch (action) {
+          case 'start':   await api.startService(name); break
+          case 'stop':    await api.stopService(name); break
+          case 'restart': await api.restartService(name); break
+          case 'enable':  await api.enableService(name); break
+        }
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e))
+      }
+    },
+    [],
+  )
+
+  const pullRepo = useCallback(async (name: string) => {
+    try {
+      await api.pullRepo(name)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }, [])
+
+  const approveSelfUpdate = useCallback(async () => {
+    try {
+      await api.approveSelfUpdate()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }, [])
+
+  return {
+    status,
+    loading,
+    error,
+    wsStatus: connectionState,
+    controlService,
+    pullRepo,
+    approveSelfUpdate,
+  }
+}

@@ -550,12 +550,13 @@ class HanielMcpServer:
                     from ..dashboard import setup_dashboard
 
                     loop = asyncio.get_event_loop()
-                    setup_dashboard(
+                    ws_handler = setup_dashboard(
                         app,
                         self.runner,
                         loop,
                         token=dashboard_cfg.token,
                     )
+                    self.runner._ws_handler = ws_handler
                     logger.info("Dashboard routes attached to MCP server")
                 except Exception as e:
                     logger.warning(f"Failed to set up dashboard: {e}")
