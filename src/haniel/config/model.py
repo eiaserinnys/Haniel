@@ -184,6 +184,20 @@ class ConfigFileConfig(BaseModel):
     content: str | None = Field(default=None, description="Static content for the file")
 
 
+class ServiceAccountConfig(BaseModel):
+    """Windows service account configuration (WinSW serviceaccount)."""
+
+    username: str = Field(
+        ...,
+        description="Account to run the service as (e.g. '.\\\\username' for local accounts)",
+    )
+    password: str | None = Field(default=None, description="Account password")
+    allow_service_logon: bool = Field(
+        default=True,
+        description="Grant 'Log on as a service' right to the account",
+    )
+
+
 class ServiceDefinitionConfig(BaseModel):
     """Configuration for system service registration (WinSW, systemd)."""
 
@@ -192,6 +206,10 @@ class ServiceDefinitionConfig(BaseModel):
     working_directory: str = Field(default="{root}", description="Working directory")
     environment: dict[str, str] | None = Field(
         default=None, description="Environment variables"
+    )
+    service_account: ServiceAccountConfig | None = Field(
+        default=None,
+        description="Run service as a specific user account (default: LocalSystem)",
     )
 
 
