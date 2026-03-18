@@ -389,9 +389,14 @@ class MechanicalInstaller:
             # and a previous failed install may have left a venv with outdated tools.
             # Use `python -m pip` instead of pip.exe — on Windows, pip.exe cannot
             # upgrade itself (the executable is locked while in use).
-            logger.info(f"Upgrading pip and setuptools in venv: {name}")
+            # Install/upgrade build tools before installing requirements.
+            # --no-build-isolation (used for editable installs below) means pip
+            # will use these tools directly from the venv instead of creating an
+            # isolated build environment. All common build backends must be present.
+            logger.info(f"Upgrading build tools in venv: {name}")
             subprocess.run(
-                [str(python_path), "-m", "pip", "install", "--upgrade", "pip", "setuptools"],
+                [str(python_path), "-m", "pip", "install", "--upgrade",
+                 "pip", "setuptools", "hatchling"],
                 check=True,
                 timeout=120,
             )
