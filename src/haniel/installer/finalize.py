@@ -288,6 +288,17 @@ class Finalizer:
             ]
         )
 
+        # Service account (default: LocalSystem)
+        if service_cfg.service_account:
+            sa = service_cfg.service_account
+            lines.append("  <serviceaccount>")
+            lines.append(f"    <username>{xml_escape(sa.username)}</username>")
+            if sa.password is not None:
+                lines.append(f"    <password>{xml_escape(sa.password)}</password>")
+            if sa.allow_service_logon:
+                lines.append("    <allowservicelogon>true</allowservicelogon>")
+            lines.append("  </serviceaccount>")
+
         # Graceful shutdown timeout and failure recovery
         lines.extend(
             [
