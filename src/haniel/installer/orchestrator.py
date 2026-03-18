@@ -158,6 +158,17 @@ class InstallOrchestrator:
                         )
             self.save_state()
 
+        # Clone repositories (before create_directories so git can create the target
+        # directory from a clean slate; create_directories uses mkdir exist_ok=True
+        # and thus safely adds subdirectories inside the cloned repo afterwards)
+        if not self.state.is_step_complete("repos"):
+            logger.info("Cloning repositories...")
+            try:
+                self.mechanical.clone_repos()
+            except Exception as e:
+                self.state.mark_failed("repos", str(e))
+            self.save_state()
+
         # Create directories
         if not self.state.is_step_complete("directories"):
             logger.info("Creating directories...")
@@ -166,15 +177,6 @@ class InstallOrchestrator:
                 # mark_complete is called inside create_directories
             except Exception as e:
                 self.state.mark_failed("directories", str(e))
-            self.save_state()
-
-        # Clone repositories
-        if not self.state.is_step_complete("repos"):
-            logger.info("Cloning repositories...")
-            try:
-                self.mechanical.clone_repos()
-            except Exception as e:
-                self.state.mark_failed("repos", str(e))
             self.save_state()
 
         # Create static configs (before environments, so requirement files exist)
