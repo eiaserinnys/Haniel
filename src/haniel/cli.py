@@ -463,6 +463,7 @@ def run(config: Path | None, foreground: bool, dry_run: bool, log_level: str) ->
     runner = ServiceRunner(
         config=haniel_config,
         config_dir=config_dir,
+        config_path=config.resolve(),
     )
 
     # Signal handlers for graceful shutdown
@@ -555,6 +556,7 @@ def status(config: Path | None, as_json: bool) -> None:
     runner = ServiceRunner(
         config=haniel_config,
         config_dir=config_dir,
+        config_path=config.resolve(),
     )
 
     status_data = runner.get_status()
