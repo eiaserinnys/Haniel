@@ -410,6 +410,10 @@ class ServiceRunner:
         if config.cwd:
             cwd = self.config_dir / config.cwd
 
+        # Substitute {root} placeholder with the absolute config directory path,
+        # mirroring the same pattern used in installer/mechanical.py _apply_config_template
+        hook_cmd = hook_cmd.replace("{root}", str(self.config_dir))
+
         logger.info(f"Executing {hook_name} hook for {service_name}: {hook_cmd}")
 
         try:

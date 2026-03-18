@@ -359,6 +359,17 @@ class MechanicalInstaller:
                     check=True,
                     timeout=60,
                 )
+                # Upgrade pip and setuptools before installing requirements
+                # Python 3.13's bundled setuptools may lack setuptools.backends.legacy:build
+                if platform.system() == "Windows":
+                    pip_bootstrap = env_path / "Scripts" / "pip.exe"
+                else:
+                    pip_bootstrap = env_path / "bin" / "pip"
+                subprocess.run(
+                    [str(pip_bootstrap), "install", "--upgrade", "pip", "setuptools"],
+                    check=True,
+                    timeout=120,
+                )
 
             # Install requirements if provided
             if requirements:
