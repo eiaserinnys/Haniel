@@ -396,7 +396,7 @@ class MechanicalInstaller:
             logger.info(f"Upgrading build tools in venv: {name}")
             subprocess.run(
                 [str(python_path), "-m", "pip", "install", "--upgrade",
-                 "pip", "setuptools", "hatchling"],
+                 "pip", "setuptools", "hatchling", "editables"],
                 check=True,
                 timeout=120,
             )
