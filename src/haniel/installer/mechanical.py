@@ -360,18 +360,22 @@ class MechanicalInstaller:
                     timeout=60,
                 )
 
-            # Determine pip path
+            # Determine python/pip paths
             if platform.system() == "Windows":
+                python_path = env_path / "Scripts" / "python.exe"
                 pip_path = env_path / "Scripts" / "pip.exe"
             else:
+                python_path = env_path / "bin" / "python"
                 pip_path = env_path / "bin" / "pip"
 
             # Always upgrade pip and setuptools before installing requirements.
             # Python 3.13's bundled setuptools may lack setuptools.backends.legacy:build,
             # and a previous failed install may have left a venv with outdated tools.
+            # Use `python -m pip` instead of pip.exe — on Windows, pip.exe cannot
+            # upgrade itself (the executable is locked while in use).
             logger.info(f"Upgrading pip and setuptools in venv: {name}")
             subprocess.run(
-                [str(pip_path), "install", "--upgrade", "pip", "setuptools"],
+                [str(python_path), "-m", "pip", "install", "--upgrade", "pip", "setuptools"],
                 check=True,
                 timeout=120,
             )
