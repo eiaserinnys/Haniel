@@ -7,9 +7,11 @@ import type { RunnerStatus } from '@/lib/types'
 interface ServiceListProps {
   status: RunnerStatus
   onControl: (name: string, action: 'start' | 'stop' | 'restart' | 'enable') => void
+  onEdit?: (name: string) => void
+  onDelete?: (name: string) => void
 }
 
-export function ServiceList({ status, onControl }: ServiceListProps) {
+export function ServiceList({ status, onControl, onEdit, onDelete }: ServiceListProps) {
   const entries = Object.entries(status.services).sort(([a], [b]) => a.localeCompare(b))
 
   if (entries.length === 0) {
@@ -23,7 +25,14 @@ export function ServiceList({ status, onControl }: ServiceListProps) {
   return (
     <div className="flex flex-col gap-3">
       {entries.map(([name, svc]) => (
-        <ServiceCard key={name} name={name} service={svc} onControl={onControl} />
+        <ServiceCard
+          key={name}
+          name={name}
+          service={svc}
+          onControl={onControl}
+          onEdit={onEdit}
+          onDelete={onDelete}
+        />
       ))}
     </div>
   )

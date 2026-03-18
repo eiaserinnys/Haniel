@@ -19,8 +19,6 @@ from urllib.parse import parse_qs, urlparse
 if TYPE_CHECKING:
     from ..core.runner import ServiceRunner
 
-from ..config import load_config
-
 logger = logging.getLogger(__name__)
 
 # Default values
@@ -451,13 +449,8 @@ class HanielMcpServer:
     async def _reload_config(self) -> str:
         """Reload configuration."""
         try:
-            config_path = self.runner.config_dir / "haniel.yaml"
-            new_config = load_config(config_path)
-
-            # Update config (processes continue running)
-            self.runner.config = new_config
-            self.runner.poll_interval = new_config.poll_interval
-
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self.runner.reload_config)
             return "Success: Configuration reloaded"
         except Exception as e:
             logger.error(f"Failed to reload config: {e}")

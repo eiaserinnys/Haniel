@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from aiohttp import web
 
 from .api import create_api_routes
+from .config_api import create_config_api_routes
 from .ws import DashboardWebSocket
 from .static import setup_static
 
@@ -76,10 +77,16 @@ def setup_dashboard(
     ws_handler.setup(loop)
 
     api_routes = create_api_routes(runner)
+    config_routes = create_config_api_routes(runner)
     app.router.add_routes(api_routes)
+    app.router.add_routes(config_routes)
     app.router.add_route("GET", "/ws", ws_handler.handle_ws)
 
-    logger.info("Dashboard routes registered: %d API + WebSocket", len(api_routes))
+    logger.info(
+        "Dashboard routes registered: %d API + %d config API + WebSocket",
+        len(api_routes),
+        len(config_routes),
+    )
 
     # Serve built frontend (must come after API/WS routes)
     setup_static(app)

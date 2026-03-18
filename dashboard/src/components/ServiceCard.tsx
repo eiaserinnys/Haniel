@@ -2,7 +2,7 @@
 // Uses Phase 1 API ServiceStatus shape: { state, uptime, restart_count, consecutive_failures, config }
 
 import { useState } from 'react'
-import { ChevronDown, ChevronRight, Play, Square, RotateCcw, Zap, Terminal } from 'lucide-react'
+import { ChevronDown, ChevronRight, Play, Square, RotateCcw, Zap, Terminal, Pencil, Trash2 } from 'lucide-react'
 import type { ServiceStatus } from '@/lib/types'
 import { StatusBadge } from './StatusBadge'
 import { LogViewer } from './LogViewer'
@@ -12,9 +12,11 @@ interface ServiceCardProps {
   name: string
   service: ServiceStatus
   onControl: (name: string, action: 'start' | 'stop' | 'restart' | 'enable') => void
+  onEdit?: (name: string) => void
+  onDelete?: (name: string) => void
 }
 
-export function ServiceCard({ name, service, onControl }: ServiceCardProps) {
+export function ServiceCard({ name, service, onControl, onEdit, onDelete }: ServiceCardProps) {
   const [expanded, setExpanded] = useState(false)
   const [showLogs, setShowLogs] = useState(false)
 
@@ -93,6 +95,22 @@ export function ServiceCard({ name, service, onControl }: ServiceCardProps) {
               showLogs && 'text-zinc-200',
             )}
           />
+          {onEdit && (
+            <ActionButton
+              icon={<Pencil size={14} />}
+              label="Edit"
+              onClick={() => onEdit(name)}
+              className="text-zinc-400 hover:text-zinc-300"
+            />
+          )}
+          {onDelete && (
+            <ActionButton
+              icon={<Trash2 size={14} />}
+              label="Delete"
+              onClick={() => onDelete(name)}
+              className="text-zinc-400 hover:text-red-400"
+            />
+          )}
         </div>
       </div>
 
