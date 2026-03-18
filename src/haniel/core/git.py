@@ -364,6 +364,48 @@ def pull_repo(path: Path, branch: str, remote: str = "origin") -> None:
         ) from e
 
 
+def get_pending_changes(
+    path: Path, branch: str, remote: str = "origin"
+) -> dict:
+    """Get details of pending changes between local and remote.
+
+    Returns commits and file summary for changes that exist on the remote
+    but have not been applied locally. Requires a prior fetch.
+
+    Args:
+        path: Path to the git repository
+        branch: Branch to check
+        remote: Remote name (default: origin)
+
+    Returns:
+        Dict with:
+            - commits: list of strings, each "hash subject" (one-line log)
+            - stat: diff stat summary string, or None if no changes
+    """
+    try:
+        log_result = _run_git(
+            ["log", "--oneline", f"HEAD..{remote}/{branch}"],
+            cwd=path,
+            check=False,
+        )
+        commits = [
+            line for line in log_result.stdout.strip().splitlines() if line
+        ]
+
+        if not commits:
+            return {"commits": [], "stat": None}
+
+        stat_result = _run_git(
+            ["diff", "--stat", f"HEAD..{remote}/{branch}"],
+            cwd=path,
+            check=False,
+        )
+        stat = stat_result.stdout.strip() or None
+        return {"commits": commits, "stat": stat}
+    except Exception:
+        return {"commits": [], "stat": None}
+
+
 def has_changes(path: Path, branch: str, remote: str = "origin") -> bool:
     """Check if there are changes between local and remote.
 

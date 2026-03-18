@@ -1031,3 +1031,117 @@ class TestServiceRunnerCallbacks:
 
         # Should not raise
         runner._on_service_crash("test", 1)
+
+
+# --- reload_config Tests ---
+
+
+class TestReloadConfig:
+    """Tests for ServiceRunner.reload_config()."""
+
+    def _write_yaml(self, path: Path, config: HanielConfig) -> None:
+        import yaml
+
+        data = config.model_dump(by_alias=True, exclude_none=True, mode="python")
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+    def test_raises_when_config_path_not_set(self, tmp_path: Path):
+        """reload_config() raises RuntimeError when config_path is None."""
+        config = HanielConfig(poll_interval=5, repos={}, services={})
+        runner = ServiceRunner(config, config_dir=tmp_path)  # no config_path
+        with pytest.raises(RuntimeError, match="config_path is not set"):
+            runner.reload_config()
+
+    def test_updates_poll_interval(self, tmp_path: Path):
+        """reload_config() picks up a changed poll_interval."""
+        config_file = tmp_path / "haniel.yaml"
+        original = HanielConfig(poll_interval=60, repos={}, services={})
+        self._write_yaml(config_file, original)
+
+        runner = ServiceRunner(original, config_dir=tmp_path, config_path=config_file)
+        assert runner.poll_interval == 60
+
+        updated = HanielConfig(poll_interval=30, repos={}, services={})
+        self._write_yaml(config_file, updated)
+
+        runner.reload_config()
+        assert runner.poll_interval == 30
+
+    def test_adds_new_service_to_enabled(self, tmp_path: Path):
+        """reload_config() includes a newly added service in _enabled_services."""
+        config_file = tmp_path / "haniel.yaml"
+        original = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={"web": ServiceConfig(run="python -m http.server")},
+        )
+        self._write_yaml(config_file, original)
+
+        runner = ServiceRunner(original, config_dir=tmp_path, config_path=config_file)
+        assert "worker" not in runner._enabled_services
+
+        updated = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={
+                "web": ServiceConfig(run="python -m http.server"),
+                "worker": ServiceConfig(run="python worker.py", after=["web"]),
+            },
+        )
+        self._write_yaml(config_file, updated)
+
+        runner.reload_config()
+        assert "worker" in runner._enabled_services
+
+    def test_removes_deleted_repo_from_states(self, tmp_path: Path):
+        """reload_config() removes a repo that was deleted from config."""
+        from haniel.config import RepoConfig
+
+        config_file = tmp_path / "haniel.yaml"
+        original = HanielConfig(
+            poll_interval=5,
+            repos={"main": RepoConfig(url="git@github.com:test/repo.git", path="./repo")},
+            services={},
+        )
+        self._write_yaml(config_file, original)
+
+        runner = ServiceRunner(original, config_dir=tmp_path, config_path=config_file)
+        assert "main" in runner._repo_states
+
+        updated = HanielConfig(poll_interval=5, repos={}, services={})
+        self._write_yaml(config_file, updated)
+
+        runner.reload_config()
+        assert "main" not in runner._repo_states
+
+    def test_preserves_repo_fetch_state(self, tmp_path: Path):
+        """reload_config() preserves last_head / last_fetch for surviving repos."""
+        from datetime import datetime
+        from haniel.config import RepoConfig
+
+        config_file = tmp_path / "haniel.yaml"
+        original = HanielConfig(
+            poll_interval=5,
+            repos={"main": RepoConfig(url="git@github.com:test/repo.git", path="./repo")},
+            services={},
+        )
+        self._write_yaml(config_file, original)
+
+        runner = ServiceRunner(original, config_dir=tmp_path, config_path=config_file)
+        # Simulate a fetch having occurred
+        runner._repo_states["main"].last_head = "abc12345"
+        runner._repo_states["main"].last_fetch = datetime(2026, 1, 1)
+
+        # Reload with same repo (branch changed)
+        updated = HanielConfig(
+            poll_interval=5,
+            repos={"main": RepoConfig(url="git@github.com:test/repo.git", path="./repo", branch="develop")},
+            services={},
+        )
+        self._write_yaml(config_file, updated)
+
+        runner.reload_config()
+
+        assert runner._repo_states["main"].last_head == "abc12345"
+        assert runner._repo_states["main"].config.branch == "develop"
