@@ -26,7 +26,7 @@ from ..config import (
     ServiceConfig,
     ShutdownConfig,
 )
-from .git import fetch_repo, pull_repo, get_head, GitError
+from .git import fetch_repo, pull_repo, get_head, get_pending_changes, GitError
 from .health import HealthManager
 from .process import ProcessManager
 
@@ -198,6 +198,7 @@ class RepoState:
     last_head: str | None = None
     last_fetch: datetime | None = None
     fetch_error: str | None = None
+    pending_changes: dict | None = None  # {"commits": [...], "stat": "..."}
 
 
 @dataclass
@@ -226,6 +227,7 @@ class ServiceRunner:
         config: HanielConfig,
         config_dir: Path,
         log_dir: Path | None = None,
+        config_path: Path | None = None,
     ):
         """Initialize the runner.
 
@@ -233,10 +235,14 @@ class ServiceRunner:
             config: Haniel configuration
             config_dir: Base directory for resolving relative paths
             log_dir: Directory for log files (default: config_dir/logs)
+            config_path: Absolute path to the haniel.yaml file. When set, the
+                dashboard config API can read/write the file and reload_config()
+                is operational. When None, config API returns 501.
         """
         self.config = config
         self.config_dir = config_dir
         self.log_dir = log_dir or config_dir / "logs"
+        self.config_path = config_path
 
         self.poll_interval = config.poll_interval
 
@@ -282,6 +288,9 @@ class ServiceRunner:
         # MCP server (lazy initialized)
         self._mcp_server = None
 
+        # WebSocket handler (set by MCP server after dashboard setup)
+        self._ws_handler = None
+
         # Self-update (see ADR-0002)
         self._self_repo: str | None = (
             config.self_update.repo if config.self_update else None
@@ -292,6 +301,50 @@ class ServiceRunner:
     def is_running(self) -> bool:
         """Check if the runner is active."""
         return self._state.running
+
+    def reload_config(self) -> None:
+        """Reload configuration from disk and apply changes.
+
+        Re-reads haniel.yaml, updates poll_interval, enabled services,
+        dependency graph, and repo states. Running processes are not stopped;
+        the new config takes effect on the next poll cycle.
+
+        Raises:
+            RuntimeError: If config_path was not provided at construction time.
+        """
+        from ..config import load_config
+
+        if not self.config_path:
+            raise RuntimeError(
+                "config_path is not set — cannot reload configuration"
+            )
+
+        new_config = load_config(self.config_path)
+        self.config = new_config
+        self.poll_interval = new_config.poll_interval
+
+        # Rebuild enabled-services index and dependency graph
+        self._enabled_services = {
+            name: svc for name, svc in new_config.services.items() if svc.enabled
+        }
+        self._dependency_graph = DependencyGraph(self._enabled_services)
+
+        # Merge repo states — preserve last_fetch / last_head for existing repos
+        existing: dict[str, RepoState] = dict(self._repo_states)
+        self._repo_states = {}
+        for name, repo_cfg in new_config.repos.items():
+            if name in existing:
+                existing[name].config = repo_cfg
+                self._repo_states[name] = existing[name]
+            else:
+                self._repo_states[name] = RepoState(name=name, config=repo_cfg)
+
+        # Update self-update repo reference
+        self._self_repo = (
+            new_config.self_update.repo if new_config.self_update else None
+        )
+
+        logger.info("Configuration reloaded from %s", self.config_path)
 
     def get_startup_order(self) -> list[str]:
         """Get the order in which services should start.
@@ -609,6 +662,16 @@ class ServiceRunner:
                 if has_changes:
                     logger.info(f"Changes detected in repo: {name}")
                     changed.append(name)
+                    state.pending_changes = get_pending_changes(
+                        path=repo_path,
+                        branch=state.config.branch,
+                    )
+                    if self._ws_handler is not None:
+                        self._ws_handler.broadcast_repo_change(
+                            name, state.pending_changes or {}
+                        )
+                else:
+                    state.pending_changes = None
 
             except GitError as e:
                 logger.error(f"Failed to fetch {name}: {e}")
@@ -702,6 +765,9 @@ class ServiceRunner:
 
         logger.info("Self-update: changes detected, awaiting approval")
         self._notify_self_update_detected(auto=False)
+
+        if self._ws_handler is not None and self._self_repo:
+            self._ws_handler.broadcast_self_update_pending(self._self_repo)
 
     def approve_self_update(self) -> str:
         """Approve a pending self-update.
@@ -829,17 +895,38 @@ class ServiceRunner:
         """Get current status of the runner.
 
         Returns:
-            Status dict with runner state, services, and repos
+            Status dict with runner state, services, repos, and dependency graph
         """
-        # Service states from health manager
+        # Service states from health manager — includes config for dashboard
         service_status = {}
-        for name in self._enabled_services:
+        for name, svc_config in self._enabled_services.items():
             health = self.health_manager.get_health(name)
             service_status[name] = {
                 "state": health.state.value,
                 "uptime": health.get_uptime(),
                 "restart_count": health.restart_count,
                 "consecutive_failures": health.consecutive_failures,
+                # Config info for dashboard
+                "config": {
+                    "run": svc_config.run,
+                    "cwd": svc_config.cwd,
+                    "repo": svc_config.repo,
+                    "after": svc_config.after,
+                    "ready": svc_config.ready,
+                    "enabled": svc_config.enabled,
+                },
+            }
+
+        # Pending restarts — snapshot under lock
+        with self._restart_lock:
+            pending_restarts = list(self._pending_restarts.keys())
+
+        # Dependency graph
+        dependency_graph = {}
+        for name in self._enabled_services:
+            dependency_graph[name] = {
+                "dependencies": sorted(self._dependency_graph.get_dependencies(name)),
+                "dependents": sorted(self._dependency_graph.get_dependents(name)),
             }
 
         # Repo states
@@ -854,6 +941,7 @@ class ServiceRunner:
                 if state.last_fetch
                 else None,
                 "fetch_error": state.fetch_error,
+                "pending_changes": state.pending_changes,
             }
 
         # Read runner state with lock for thread safety
@@ -869,6 +957,8 @@ class ServiceRunner:
                 "poll_count": self._state.poll_count,
                 "poll_interval": self.poll_interval,
                 "services": service_status,
+                "pending_restarts": pending_restarts,
+                "dependency_graph": dependency_graph,
                 "repos": repo_status,
             }
             if self._self_repo:
@@ -880,3 +970,4 @@ class ServiceRunner:
                     else False,
                 }
             return result
+

@@ -58,6 +58,24 @@ class WebhookConfig(BaseModel):
     )
 
 
+class DashboardConfig(BaseModel):
+    """Configuration for the built-in web dashboard."""
+
+    enabled: bool = Field(default=True, description="Whether dashboard is enabled")
+    port: int | None = Field(
+        default=None,
+        description="Port for dashboard server. None means share MCP port.",
+    )
+    token: str | None = Field(
+        default=None,
+        description=(
+            "Bearer token for API/WebSocket access. "
+            "If set, all requests must include 'Authorization: Bearer <token>'. "
+            "If None, dashboard is accessible without authentication (warning logged)."
+        ),
+    )
+
+
 class McpConfig(BaseModel):
     """Configuration for MCP server."""
 
@@ -229,6 +247,9 @@ class HanielConfig(BaseModel):
         default=None, description="Notification webhooks"
     )
     mcp: McpConfig | None = Field(default=None, description="MCP server configuration")
+    dashboard: DashboardConfig | None = Field(
+        default=None, description="Built-in web dashboard configuration"
+    )
     repos: dict[str, RepoConfig] = Field(
         default_factory=dict, description="Git repositories"
     )

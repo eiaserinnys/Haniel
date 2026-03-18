@@ -19,8 +19,6 @@ from urllib.parse import parse_qs, urlparse
 if TYPE_CHECKING:
     from ..core.runner import ServiceRunner
 
-from ..config import load_config
-
 logger = logging.getLogger(__name__)
 
 # Default values
@@ -451,13 +449,8 @@ class HanielMcpServer:
     async def _reload_config(self) -> str:
         """Reload configuration."""
         try:
-            config_path = self.runner.config_dir / "haniel.yaml"
-            new_config = load_config(config_path)
-
-            # Update config (processes continue running)
-            self.runner.config = new_config
-            self.runner.poll_interval = new_config.poll_interval
-
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self.runner.reload_config)
             return "Success: Configuration reloaded"
         except Exception as e:
             logger.error(f"Failed to reload config: {e}")
@@ -542,6 +535,24 @@ class HanielMcpServer:
             app = web.Application()
             app.router.add_route("GET", "/sse", sse.handle_sse)
             app.router.add_route("POST", "/sse", sse.handle_post_message)
+
+            # Attach dashboard routes only when explicitly enabled in config
+            dashboard_cfg = self.runner.config.dashboard
+            if dashboard_cfg is not None and dashboard_cfg.enabled:
+                try:
+                    from ..dashboard import setup_dashboard
+
+                    loop = asyncio.get_event_loop()
+                    ws_handler = setup_dashboard(
+                        app,
+                        self.runner,
+                        loop,
+                        token=dashboard_cfg.token,
+                    )
+                    self.runner._ws_handler = ws_handler
+                    logger.info("Dashboard routes attached to MCP server")
+                except Exception as e:
+                    logger.warning(f"Failed to set up dashboard: {e}")
 
             # Store for shutdown
             self._mcp_app = app
