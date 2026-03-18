@@ -1263,7 +1263,7 @@ class TestMechanicalInstallerExtended:
 
     @patch("subprocess.run")
     def test_clone_repos_already_exists(self, mock_run, sample_config):
-        """Test cloning when repo directory already exists as git repo."""
+        """Test that existing git repos get pulled instead of cloned."""
         from haniel.installer.mechanical import MechanicalInstaller
         from haniel.installer.state import InstallState
 
@@ -1277,10 +1277,16 @@ class TestMechanicalInstallerExtended:
             repo_path.mkdir(parents=True)
             (repo_path / ".git").mkdir()
 
+            # Simulate successful pull
+            mock_run.return_value = MagicMock(returncode=0, stdout="Already up to date.\n", stderr="")
+
             installer.clone_repos()
 
-            # Should not call git clone
-            mock_run.assert_not_called()
+            # Should call git pull --ff-only, not git clone
+            mock_run.assert_called_once()
+            call_args = mock_run.call_args[0][0]
+            assert call_args[:4] == ["git", "-C", str(repo_path), "pull"]
+            assert "--ff-only" in call_args
             assert "repos" in state.completed_steps
 
     @patch("subprocess.run")
