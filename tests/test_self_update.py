@@ -147,6 +147,7 @@ class TestRunnerSelfUpdate:
         runner._self_repo = config.self_update.repo if config.self_update else None
         runner._state = MagicMock()
         runner._state.self_update_pending = False
+        runner._ws_handler = None
         runner._state_lock = threading.Lock()
         runner._restart_lock = threading.Lock()
         runner._stop_event = threading.Event()
