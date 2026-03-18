@@ -362,10 +362,10 @@ class TestMcpTools:
     @pytest.mark.asyncio
     async def test_reload_config(self, mcp_server, mock_runner):
         """Test haniel_reload tool."""
-        with patch("haniel.integrations.mcp_server.load_config") as mock_load:
-            mock_load.return_value = mock_runner.config
-            result = await mcp_server.call_tool("haniel_reload", {})
-            assert "reloaded" in result.lower() or "success" in result.lower()
+        mock_runner.reload_config = MagicMock()
+        result = await mcp_server.call_tool("haniel_reload", {})
+        assert "reloaded" in result.lower() or "success" in result.lower()
+        mock_runner.reload_config.assert_called_once()
 
 
 class TestMcpServerIntegration:
@@ -591,11 +591,10 @@ class TestMcpServerExtended:
     @pytest.mark.asyncio
     async def test_reload_exception_handling(self, mcp_server, mock_runner):
         """Test reload with exception."""
-        with patch("haniel.integrations.mcp_server.load_config") as mock_load:
-            mock_load.side_effect = Exception("Load failed")
-            result = await mcp_server.call_tool("haniel_reload", {})
-            data = json.loads(result)
-            assert "error" in data
+        mock_runner.reload_config = MagicMock(side_effect=Exception("Load failed"))
+        result = await mcp_server.call_tool("haniel_reload", {})
+        data = json.loads(result)
+        assert "error" in data
 
     def test_enabled_property_no_mcp_config(self):
         """Test enabled property when MCP config is not set."""
