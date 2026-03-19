@@ -474,6 +474,9 @@ class ServiceRunner:
         logger.info(f"Starting service: {name}")
 
         try:
+            if not self.execute_hook(name, "pre_start"):
+                logger.error(f"pre_start hook failed for {name}, aborting start")
+                return False
             self.process_manager.start_service(
                 name=name,
                 config=config,

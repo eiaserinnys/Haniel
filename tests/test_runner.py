@@ -359,6 +359,74 @@ class TestHookExecution:
 
         assert result is True
 
+    @patch("haniel.core.process.ProcessManager.start_service")
+    @patch("subprocess.run")
+    def test_pre_start_hook_success_allows_start(
+        self, mock_run: MagicMock, mock_start: MagicMock, tmp_path: Path
+    ):
+        """pre_start 훅 exit 0 → 서비스 정상 기동."""
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={
+                "test-service": ServiceConfig(
+                    run="sleep 100",
+                    hooks=HooksConfig(pre_start="echo hi"),
+                ),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        result = runner._start_service("test-service")
+
+        mock_run.assert_called_once()
+        mock_start.assert_called_once()
+        assert result is True
+
+    @patch("haniel.core.process.ProcessManager.start_service")
+    @patch("subprocess.run")
+    def test_pre_start_hook_failure_aborts_start(
+        self, mock_run: MagicMock, mock_start: MagicMock, tmp_path: Path
+    ):
+        """pre_start 훅 exit 1 → _start_service() False 반환, process_manager 미호출."""
+        mock_run.side_effect = subprocess.CalledProcessError(1, "false")
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={
+                "test-service": ServiceConfig(
+                    run="sleep 100",
+                    hooks=HooksConfig(pre_start="false"),
+                ),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        result = runner._start_service("test-service")
+
+        mock_start.assert_not_called()
+        assert result is False
+
+    @patch("haniel.core.process.ProcessManager.start_service")
+    def test_no_pre_start_hook_starts_normally(
+        self, mock_start: MagicMock, tmp_path: Path
+    ):
+        """pre_start 훅 없을 때 → 서비스 정상 기동."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={
+                "test-service": ServiceConfig(run="sleep 100"),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        result = runner._start_service("test-service")
+
+        mock_start.assert_called_once()
+        assert result is True
+
 
 # --- Status Tests ---
 
