@@ -138,13 +138,6 @@ export function useServices() {
     }
   }, [])
 
-  const dismissSelfUpdate = useCallback(() => {
-    setStatus((prev) => {
-      if (!prev?.self_update) return prev
-      return { ...prev, self_update: { ...prev.self_update, pending: false } }
-    })
-  }, [])
-
   return {
     status,
     loading,
@@ -154,7 +147,6 @@ export function useServices() {
     pullRepo,
     pullingRepos,
     approveSelfUpdate,
-    dismissSelfUpdate,
     refreshStatus,
     updating,
   }

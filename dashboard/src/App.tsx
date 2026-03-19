@@ -1,17 +1,20 @@
 // Haniel Dashboard App
 // Uses Phase 1 API types: RunnerStatus, WsEvent
 
-import { Wifi, WifiOff, RefreshCw, Plus } from 'lucide-react'
+import { Wifi, WifiOff, RefreshCw, Plus, Pencil, Trash2 } from 'lucide-react'
 import { useServices } from '@/hooks/useServices'
-import { ServiceList } from '@/components/ServiceList'
+import { ServiceCard } from '@/components/ServiceCard'
+import { HanielSelfCard } from '@/components/HanielSelfCard'
+import { RepoServiceGroup } from '@/components/RepoServiceGroup'
 import { ServiceEditor } from '@/components/ServiceEditor'
 import { RepoEditor } from '@/components/RepoEditor'
 import { DependencyGraph } from '@/components/DependencyGraph'
 import { ChatPanel } from '@/components/ChatPanel'
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable'
 import { api } from '@/lib/api'
+import { groupServicesAndRepos } from '@/lib/groups'
 import type { ServiceConfig, ServiceConfigInput, RepoConfigInput } from '@/lib/types'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import './index.css'
 
 /** Returns seconds until the next poll based on last_poll + poll_interval. */
@@ -61,7 +64,6 @@ export default function App() {
     pullRepo,
     pullingRepos,
     approveSelfUpdate,
-    dismissSelfUpdate,
     refreshStatus,
     updating,
   } = useServices()
@@ -74,6 +76,13 @@ export default function App() {
   const [svcEditor, setSvcEditor] = useState<ServiceEditorState>({ open: false })
   const [repoEditor, setRepoEditor] = useState<RepoEditorState>({ open: false })
   const [crudError, setCrudError] = useState<string | null>(null)
+
+  // ── Group services by repo ────────────────────────────────────────────────
+
+  const groups = useMemo(
+    () => (status ? groupServicesAndRepos(status, status.self_update?.repo) : null),
+    [status],
+  )
 
   // ── Service CRUD handlers ──────────────────────────────────────────────────
 
@@ -153,29 +162,6 @@ export default function App() {
 
   return (
     <div className="h-screen flex flex-col bg-zinc-900 text-zinc-100">
-      {/* Self-update banner */}
-      {status?.self_update?.pending && (
-        <div className="bg-blue-900/40 border-b border-blue-700/50 px-4 py-2 flex items-center justify-between shrink-0">
-          <span className="text-sm text-blue-300">
-            A self-update is available for <strong>{status.self_update.repo}</strong>.
-          </span>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={dismissSelfUpdate}
-              className="text-sm text-blue-400 hover:text-blue-200 px-2 py-1 transition-colors"
-            >
-              Dismiss
-            </button>
-            <button
-              onClick={approveSelfUpdate}
-              className="text-sm bg-blue-600 hover:bg-blue-500 text-white px-3 py-1 rounded transition-colors"
-            >
-              Approve update
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* Header */}
       <header className="border-b border-zinc-800 px-4 py-3 flex items-center gap-3 shrink-0">
         <h1 className="font-semibold text-zinc-100 flex-1">Haniel Dashboard</h1>
@@ -192,7 +178,7 @@ export default function App() {
       {/* Main body: 2-panel split */}
       <ResizablePanelGroup orientation="horizontal" className="flex-1 overflow-hidden">
         <ResizablePanel defaultSize={60} minSize={20}>
-          <div className="h-full overflow-y-auto">
+          <div className="h-full overflow-y-auto select-none">
             <main className="max-w-4xl mx-auto px-4 py-6 space-y-6">
         {/* Error banner */}
         {(error || crudError) && (
@@ -207,8 +193,9 @@ export default function App() {
         )}
 
         {/* Services + Repos */}
-        {status && !loading && (
+        {status && groups && !loading && (
           <>
+            {/* SERVICES section */}
             <section>
               <div className="flex items-center justify-between mb-3">
                 <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">
@@ -222,70 +209,107 @@ export default function App() {
                   서비스 추가
                 </button>
               </div>
-              <ServiceList
-                status={status}
-                onControl={controlService}
-                onEdit={handleEditService}
-                onDelete={handleDeleteService}
-              />
+
+              <div className="flex flex-col gap-3">
+                {/* Haniel self card */}
+                {groups.selfRepo && status.self_update && (
+                  <HanielSelfCard
+                    repo={groups.selfRepo}
+                    selfUpdate={status.self_update}
+                    onApprove={approveSelfUpdate}
+                  />
+                )}
+
+                {/* Repo+service groups */}
+                {groups.repoGroups.map((group) => (
+                  <RepoServiceGroup
+                    key={group.repoName}
+                    group={group}
+                    onControl={controlService}
+                    onPull={pullRepo}
+                    isPulling={pullingRepos.has(group.repoName)}
+                    onEdit={handleEditService}
+                    onDelete={handleDeleteService}
+                  />
+                ))}
+
+                {/* Standalone services (no repo) */}
+                {groups.standaloneServices.map(({ name, service }) => (
+                  <ServiceCard
+                    key={name}
+                    name={name}
+                    service={service}
+                    onControl={controlService}
+                    onEdit={handleEditService}
+                    onDelete={handleDeleteService}
+                  />
+                ))}
+
+                {/* Empty state */}
+                {groups.repoGroups.length === 0 &&
+                  groups.standaloneServices.length === 0 &&
+                  !groups.selfRepo && (
+                  <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center text-zinc-500 text-sm">
+                    No services configured.
+                  </div>
+                )}
+              </div>
             </section>
 
-            {/* Repos */}
-            <section>
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">
-                  Repositories
-                </h2>
-                <button
-                  onClick={handleAddRepo}
-                  className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-200 transition-colors px-2 py-1 rounded hover:bg-zinc-800"
-                >
-                  <Plus size={12} />
-                  리포 추가
-                </button>
-              </div>
-              {Object.keys(status.repos).length === 0 ? (
-                <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center text-zinc-500 text-sm">
-                  No repositories configured.
+            {/* REPOSITORIES section (standalone repos only) */}
+            {groups.standaloneRepos.length > 0 && (
+              <section>
+                <div className="flex items-center justify-between mb-3">
+                  <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">
+                    Repositories
+                  </h2>
+                  <button
+                    onClick={handleAddRepo}
+                    className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-200 transition-colors px-2 py-1 rounded hover:bg-zinc-800"
+                  >
+                    <Plus size={12} />
+                    리포 추가
+                  </button>
                 </div>
-              ) : (
                 <div className="space-y-2">
-                  {Object.entries(status.repos).map(([name, repo]) => (
+                  {groups.standaloneRepos.map(({ repoName, repo }) => (
                     <div
-                      key={name}
+                      key={repoName}
                       className="rounded-lg border border-zinc-700 bg-zinc-800/50 px-4 py-3"
                     >
                       <div className="flex items-center justify-between">
                         <div>
-                          <span className="font-medium text-zinc-200">{name}</span>
+                          <span className="font-medium text-zinc-200">{repoName}</span>
                           <span className="ml-2 text-xs text-zinc-500">
                             {repo.branch} · {repo.last_head ?? '—'}
                           </span>
                         </div>
                         <div className="flex items-center gap-2">
-                          {pullingRepos.has(name) ? (
+                          {pullingRepos.has(repoName) ? (
                             <span className="text-xs text-blue-400/60 px-2 py-1 animate-pulse">
                               Pulling…
                             </span>
                           ) : repo.pending_changes && (
                             <button
-                              onClick={() => pullRepo(name)}
+                              onClick={() => pullRepo(repoName)}
                               className="text-xs bg-blue-600/20 text-blue-400 hover:bg-blue-600/40 px-2 py-1 rounded transition-colors"
                             >
                               Pull ({repo.pending_changes.commits.length} commits)
                             </button>
                           )}
                           <button
-                            onClick={() => handleEditRepo(name)}
-                            className="text-xs text-zinc-500 hover:text-zinc-300 px-2 py-1 transition-colors"
+                            onClick={() => handleEditRepo(repoName)}
+                            title="편집"
+                            className="p-1.5 rounded text-zinc-500 hover:text-zinc-300 transition-colors hover:bg-zinc-700/50"
                           >
-                            편집
+                            <Pencil size={14} />
                           </button>
                           <button
-                            onClick={() => handleDeleteRepo(name)}
-                            className="text-xs text-zinc-500 hover:text-red-400 px-2 py-1 transition-colors"
+                            onClick={() => handleDeleteRepo(repoName)}
+                            title="삭제"
+                            className="p-1.5 rounded text-zinc-500 hover:text-red-400 transition-colors hover:bg-zinc-700/50"
                           >
-                            삭제
+                            <Trash2 size={14} />
                           </button>
                         </div>
                       </div>
@@ -312,8 +336,8 @@ export default function App() {
                     </div>
                   ))}
                 </div>
-              )}
-            </section>
+              </section>
+            )}
 
             {/* Dependency Graph */}
             {status.dependency_graph && Object.keys(status.dependency_graph).length > 0 && (
