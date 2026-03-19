@@ -564,7 +564,7 @@ class HanielMcpServer:
                             # CLAUDE_CLI_DIR can be set in haniel.yaml service.environment.
                             cli_dir = os.environ.get("CLAUDE_CLI_DIR")
                             if cli_dir:
-                                for name in ("claude.cmd", "claude"):
+                                for name in ("claude.cmd", "claude.exe", "claude"):
                                     candidate = os.path.join(cli_dir, name)
                                     if os.path.exists(candidate):
                                         claude_path = candidate
