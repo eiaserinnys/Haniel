@@ -58,10 +58,18 @@ def setup_static(app: web.Application) -> None:
         )
         return
 
+    assets_dir = dist / "assets"
+    if not assets_dir.is_dir():
+        logger.warning(
+            "Dashboard dist/assets not found — run `pnpm build` in dashboard/. "
+            "Static serving is disabled."
+        )
+        return
+
     app["_dashboard_dist"] = dist
 
     # Serve static assets (JS, CSS, images, …)
-    app.router.add_static("/assets", dist / "assets", name="dashboard_assets")
+    app.router.add_static("/assets", assets_dir, name="dashboard_assets")
 
     # SPA fallback for all other paths (must come last)
     app.router.add_route("GET", "/{path_info:.*}", _spa_fallback)
