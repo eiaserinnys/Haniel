@@ -255,10 +255,8 @@ class ClaudeSessionManager:
         config = {
             "mcpServers": {
                 "haniel": {
-                    "transport": {
-                        "type": "http",
-                        "url": f"http://localhost:{mcp_port}/mcp/http",
-                    }
+                    "type": "http",
+                    "url": f"http://localhost:{mcp_port}/mcp/http",
                 }
             }
         }
