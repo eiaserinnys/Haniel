@@ -256,9 +256,8 @@ export default function App() {
               </div>
             </section>
 
-            {/* REPOSITORIES section (standalone repos only) */}
-            {groups.standaloneRepos.length > 0 && (
-              <section>
+            {/* REPOSITORIES section (standalone repos + add button) */}
+            <section>
                 <div className="flex items-center justify-between mb-3">
                   <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">
                     Repositories
@@ -271,73 +270,78 @@ export default function App() {
                     리포 추가
                   </button>
                 </div>
-                <div className="space-y-2">
-                  {groups.standaloneRepos.map(({ repoName, repo }) => (
-                    <div
-                      key={repoName}
-                      className="rounded-lg border border-zinc-700 bg-zinc-800/50 px-4 py-3"
-                    >
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <span className="font-medium text-zinc-200">{repoName}</span>
-                          <span className="ml-2 text-xs text-zinc-500">
-                            {repo.branch} · {repo.last_head ?? '—'}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          {pullingRepos.has(repoName) ? (
-                            <span className="text-xs text-blue-400/60 px-2 py-1 animate-pulse">
-                              Pulling…
+                {groups.standaloneRepos.length > 0 ? (
+                  <div className="space-y-2">
+                    {groups.standaloneRepos.map(({ repoName, repo }) => (
+                      <div
+                        key={repoName}
+                        className="rounded-lg border border-zinc-700 bg-zinc-800/50 px-4 py-3"
+                      >
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <span className="font-medium text-zinc-200">{repoName}</span>
+                            <span className="ml-2 text-xs text-zinc-500">
+                              {repo.branch} · {repo.last_head ?? '—'}
                             </span>
-                          ) : repo.pending_changes && (
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {pullingRepos.has(repoName) ? (
+                              <span className="text-xs text-blue-400/60 px-2 py-1 animate-pulse">
+                                Pulling…
+                              </span>
+                            ) : repo.pending_changes && (
+                              <button
+                                onClick={() => pullRepo(repoName)}
+                                className="text-xs bg-blue-600/20 text-blue-400 hover:bg-blue-600/40 px-2 py-1 rounded transition-colors"
+                              >
+                                Pull ({repo.pending_changes.commits.length} commits)
+                              </button>
+                            )}
                             <button
-                              onClick={() => pullRepo(repoName)}
-                              className="text-xs bg-blue-600/20 text-blue-400 hover:bg-blue-600/40 px-2 py-1 rounded transition-colors"
+                              onClick={() => handleEditRepo(repoName)}
+                              title="편집"
+                              className="p-1.5 rounded text-zinc-500 hover:text-zinc-300 transition-colors hover:bg-zinc-700/50"
                             >
-                              Pull ({repo.pending_changes.commits.length} commits)
+                              <Pencil size={14} />
                             </button>
-                          )}
-                          <button
-                            onClick={() => handleEditRepo(repoName)}
-                            title="편집"
-                            className="p-1.5 rounded text-zinc-500 hover:text-zinc-300 transition-colors hover:bg-zinc-700/50"
-                          >
-                            <Pencil size={14} />
-                          </button>
-                          <button
-                            onClick={() => handleDeleteRepo(repoName)}
-                            title="삭제"
-                            className="p-1.5 rounded text-zinc-500 hover:text-red-400 transition-colors hover:bg-zinc-700/50"
-                          >
-                            <Trash2 size={14} />
-                          </button>
+                            <button
+                              onClick={() => handleDeleteRepo(repoName)}
+                              title="삭제"
+                              className="p-1.5 rounded text-zinc-500 hover:text-red-400 transition-colors hover:bg-zinc-700/50"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                      {repo.fetch_error && (
-                        <div className="mt-1 text-xs text-red-400">
-                          Fetch error: {repo.fetch_error}
-                        </div>
-                      )}
-                      {repo.pending_changes && (
-                        <details className="mt-2 text-xs text-zinc-400">
-                          <summary className="cursor-pointer hover:text-zinc-300">
-                            {repo.pending_changes.commits.length} pending commits
-                          </summary>
-                          <pre className="mt-1 bg-zinc-900 rounded p-2 overflow-x-auto">
-                            {repo.pending_changes.commits.join('\n')}
-                          </pre>
-                          {repo.pending_changes.stat && (
+                        {repo.fetch_error && (
+                          <div className="mt-1 text-xs text-red-400">
+                            Fetch error: {repo.fetch_error}
+                          </div>
+                        )}
+                        {repo.pending_changes && (
+                          <details className="mt-2 text-xs text-zinc-400">
+                            <summary className="cursor-pointer hover:text-zinc-300">
+                              {repo.pending_changes.commits.length} pending commits
+                            </summary>
                             <pre className="mt-1 bg-zinc-900 rounded p-2 overflow-x-auto">
-                              {repo.pending_changes.stat}
+                              {repo.pending_changes.commits.join('\n')}
                             </pre>
-                          )}
-                        </details>
-                      )}
-                    </div>
-                  ))}
-                </div>
+                            {repo.pending_changes.stat && (
+                              <pre className="mt-1 bg-zinc-900 rounded p-2 overflow-x-auto">
+                                {repo.pending_changes.stat}
+                              </pre>
+                            )}
+                          </details>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center text-zinc-500 text-sm">
+                    No standalone repositories.
+                  </div>
+                )}
               </section>
-            )}
 
             {/* Dependency Graph */}
             {status.dependency_graph && Object.keys(status.dependency_graph).length > 0 && (

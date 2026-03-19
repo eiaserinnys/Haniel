@@ -5,7 +5,7 @@ import type { SelfUpdateStatus } from '@/lib/types'
 
 interface HanielSelfCardProps {
   repo: NamedRepo
-  selfUpdate: SelfUpdateStatus | null
+  selfUpdate: SelfUpdateStatus
   onApprove: () => void
 }
 

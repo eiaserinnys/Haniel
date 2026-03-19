@@ -43,6 +43,14 @@ export function groupServicesAndRepos(
   for (const [repoName, repo] of Object.entries(status.repos)) {
     if (selfRepoName && repoName === selfRepoName) {
       selfRepo = { repoName, repo }
+      // If services reference the self repo, show them as a normal group too
+      if (repoToServices.has(repoName)) {
+        repoGroups.push({
+          repoName,
+          repo,
+          services: repoToServices.get(repoName)!.sort((a, b) => a.name.localeCompare(b.name)),
+        })
+      }
     } else if (repoToServices.has(repoName)) {
       repoGroups.push({
         repoName,
