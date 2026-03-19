@@ -15,6 +15,7 @@ export function useServices() {
   const [status, setStatus] = useState<RunnerStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [updating, setUpdating] = useState(false)
 
   const handleEvent = useCallback((event: WsEvent) => {
     switch (event.type) {
@@ -122,6 +123,7 @@ export function useServices() {
   const approveSelfUpdate = useCallback(async () => {
     try {
       await api.approveSelfUpdate()
+      setUpdating(true)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     }
@@ -154,5 +156,6 @@ export function useServices() {
     approveSelfUpdate,
     dismissSelfUpdate,
     refreshStatus,
+    updating,
   }
 }

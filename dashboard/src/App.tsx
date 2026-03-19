@@ -63,6 +63,7 @@ export default function App() {
     approveSelfUpdate,
     dismissSelfUpdate,
     refreshStatus,
+    updating,
   } = useServices()
 
   const countdown = useNextPollCountdown(
@@ -388,6 +389,62 @@ export default function App() {
           onCancel={() => setRepoEditor({ open: false })}
         />
       )}
+
+      {/* Self-update overlay */}
+      {updating && <UpdateOverlay />}
+    </div>
+  )
+}
+
+const UPDATE_POLL_INTERVAL_MS = 2000
+const UPDATE_TIMEOUT_MS = 120_000
+
+function UpdateOverlay() {
+  const [timedOut, setTimedOut] = useState(false)
+
+  useEffect(() => {
+    const start = Date.now()
+    const id = setInterval(async () => {
+      if (Date.now() - start > UPDATE_TIMEOUT_MS) {
+        clearInterval(id)
+        setTimedOut(true)
+        return
+      }
+      try {
+        await api.getStatus()
+        clearInterval(id)
+        window.location.reload()
+      } catch {
+        // Server still down — retry on next tick
+      }
+    }, UPDATE_POLL_INTERVAL_MS)
+    return () => clearInterval(id)
+  }, [])
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+      <div className="relative bg-zinc-800 border border-zinc-700 rounded-xl px-8 py-6 flex flex-col items-center gap-4 shadow-2xl">
+        {timedOut ? (
+          <>
+            <WifiOff className="text-yellow-400" size={32} />
+            <div className="text-zinc-100 font-medium">서버 응답 없음</div>
+            <div className="text-zinc-400 text-sm">수동으로 새로고침해 주세요.</div>
+            <button
+              onClick={() => window.location.reload()}
+              className="text-sm bg-zinc-700 hover:bg-zinc-600 text-zinc-200 px-4 py-1.5 rounded transition-colors"
+            >
+              새로고침
+            </button>
+          </>
+        ) : (
+          <>
+            <RefreshCw className="animate-spin text-blue-400" size={32} />
+            <div className="text-zinc-100 font-medium">Updating…</div>
+            <div className="text-zinc-400 text-sm">서버가 재시작되면 자동으로 새로고침됩니다.</div>
+          </>
+        )}
+      </div>
     </div>
   )
 }
