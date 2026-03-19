@@ -10,10 +10,13 @@ through a standardized MCP interface.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import threading
+from collections.abc import AsyncIterator
 from typing import Any, TYPE_CHECKING, Optional
+
 from urllib.parse import parse_qs, urlparse
 
 if TYPE_CHECKING:
@@ -41,9 +44,7 @@ class HanielMcpServer:
             runner: ServiceRunner instance to expose via MCP
         """
         self.runner = runner
-        self._mcp_app: Optional[Any] = None
-        self._app_runner: Optional[Any] = None
-        self._stop_event: Optional[asyncio.Event] = None
+        self._server: Optional[Any] = None  # uvicorn.Server
         self._server_thread: Optional[threading.Thread] = None
 
     @property
@@ -469,7 +470,7 @@ class HanielMcpServer:
     async def start(self) -> None:
         """Start the MCP server.
 
-        This starts an SSE-based MCP server on the configured port.
+        This starts a Starlette + uvicorn server with MCP Streamable HTTP transport.
         """
         if not self.enabled:
             logger.info("MCP server is disabled")
@@ -477,12 +478,11 @@ class HanielMcpServer:
 
         try:
             from mcp.server import Server
-            from mcp.server.sse import SseServerTransport
+            from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
             from mcp.types import Resource, Tool, TextContent
-            from aiohttp import web
-
-            # Create stop event for graceful shutdown
-            self._stop_event = asyncio.Event()
+            from starlette.applications import Starlette
+            from starlette.routing import Mount
+            import uvicorn
 
             # Create MCP server
             mcp = Server("haniel")
@@ -528,33 +528,29 @@ class HanielMcpServer:
                 result = await self.call_tool(name, arguments)
                 return [TextContent(type="text", text=result)]
 
-            # Create SSE transport
-            sse = SseServerTransport("/sse")
+            # Create StreamableHTTP session manager
+            session_manager = StreamableHTTPSessionManager(
+                app=mcp,
+                json_response=True,
+                stateless=False,
+            )
 
-            # Create aiohttp app
-            app = web.Application()
-            # mcp >= 1.0 removed handle_sse (replaced with ASGI-based connect_sse).
-            # Fall back to dashboard-only mode if SSE transport is unavailable.
-            if hasattr(sse, "handle_sse"):
-                app.router.add_route("GET", "/sse", sse.handle_sse)
-                app.router.add_route("POST", "/sse", sse.handle_post_message)
-            else:
-                logger.warning(
-                    "MCP SSE transport unavailable (mcp >= 1.0 removed handle_sse). "
-                    "Starting in dashboard-only mode."
-                )
+            # Build routes
+            all_routes = [
+                Mount("/mcp", app=session_manager.handle_request),
+            ]
 
             # Attach dashboard routes only when explicitly enabled in config
             dashboard_cfg = self.runner.config.dashboard
+            ws_handler = None
+            middleware = []
             if dashboard_cfg is not None and dashboard_cfg.enabled:
                 try:
                     from ..dashboard import setup_dashboard
                     from ..core.claude_session import ClaudeSessionManager
 
-                    loop = asyncio.get_event_loop()
-
                     # Initialise Claude session manager (None if claude not in PATH)
-                    session_manager = None
+                    sm = None
                     try:
                         import os
                         import shutil
@@ -570,46 +566,55 @@ class HanielMcpServer:
                                         claude_path = candidate
                                         break
                         if claude_path is not None:
-                            session_manager = ClaudeSessionManager(self.runner, claude_path=claude_path)
+                            sm = ClaudeSessionManager(self.runner, claude_path=claude_path)
                         else:
                             logger.warning("claude CLI not found — chat panel disabled. "
                                            "Set CLAUDE_CLI_DIR in haniel.yaml service.environment.")
                     except Exception as sm_err:
                         logger.warning("Failed to initialise ClaudeSessionManager: %s", sm_err)
 
-                    ws_handler = setup_dashboard(
-                        app,
+                    dashboard_routes, dashboard_middleware, ws_handler = setup_dashboard(
                         self.runner,
-                        loop,
                         token=dashboard_cfg.token,
-                        claude_session_manager=session_manager,
+                        claude_session_manager=sm,
                     )
-                    self.runner._ws_handler = ws_handler
+                    all_routes.extend(dashboard_routes)
+                    middleware = dashboard_middleware
+
+                    if ws_handler:
+                        self.runner._ws_handler = ws_handler
                     logger.info("Dashboard routes attached to MCP server")
                 except Exception as e:
                     logger.warning(f"Failed to set up dashboard: {e}")
 
-            # Store for shutdown
-            self._mcp_app = app
+            # Create lifespan for session manager
+            @contextlib.asynccontextmanager
+            async def lifespan(app: Starlette) -> AsyncIterator[None]:
+                async with session_manager.run():
+                    # Set up WebSocket event loop binding after the event loop is running
+                    if ws_handler is not None:
+                        loop = asyncio.get_event_loop()
+                        ws_handler.setup(loop)
+                    yield
 
-            # Start server
-            runner = web.AppRunner(app)
-            await runner.setup()
-            self._app_runner = runner
+            # Create Starlette app
+            app = Starlette(
+                routes=all_routes,
+                middleware=middleware,
+                lifespan=lifespan,
+            )
 
-            site = web.TCPSite(runner, "0.0.0.0", self.port)
-            await site.start()
+            logger.info(f"MCP server starting on port {self.port}")
 
-            logger.info(f"MCP server started on port {self.port}")
-
-            # Wait until stop event is set
-            try:
-                await self._stop_event.wait()
-            except asyncio.CancelledError:
-                pass
-            finally:
-                await runner.cleanup()
-                logger.info("MCP server cleaned up")
+            # Start uvicorn server
+            config = uvicorn.Config(
+                app,
+                host="0.0.0.0",
+                port=self.port,
+                log_level="warning",
+            )
+            self._server = uvicorn.Server(config)
+            await self._server.serve()
 
         except ImportError as e:
             logger.warning(f"MCP dependencies not available: {e}")
@@ -619,15 +624,8 @@ class HanielMcpServer:
 
     async def stop(self) -> None:
         """Stop the MCP server."""
-        if self._stop_event:
-            self._stop_event.set()
-
-        if self._app_runner:
-            try:
-                await self._app_runner.cleanup()
-            except Exception as e:
-                logger.warning(f"Error cleaning up MCP server: {e}")
-            self._app_runner = None
+        if self._server:
+            self._server.should_exit = True
 
         logger.info("MCP server stopped")
 
@@ -636,23 +634,8 @@ class HanielMcpServer:
 
         Used when the ServiceRunner stops.
         """
-        if self._stop_event:
-            # Signal the async stop event from sync code
-            loop = None
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                pass
-
-            if loop and loop.is_running():
-                # Schedule stop on the running loop
-                loop.call_soon_threadsafe(self._stop_event.set)
-            else:
-                # Create new event loop for cleanup
-                try:
-                    asyncio.run(self.stop())
-                except Exception as e:
-                    logger.warning(f"Error stopping MCP server: {e}")
+        if self._server:
+            self._server.should_exit = True
 
         logger.info("MCP server stop requested")
 

@@ -2837,8 +2837,7 @@ class TestInstallMcpServerUnit:
 
         assert server.installer is mock_installer
         assert server.port == DEFAULT_INSTALL_MCP_PORT
-        assert server._app_runner is None
-        assert server._stop_event is None
+        assert server._server is None
         assert server._server_thread is None
         assert server._loop is None
 
@@ -2918,8 +2917,8 @@ class TestInstallMcpServerUnit:
         assert server.is_running() is True
 
     @pytest.mark.asyncio
-    async def test_stop_no_event(self):
-        """Test stop when no stop event exists."""
+    async def test_stop_no_server(self):
+        """Test stop when no server exists."""
         from haniel.installer.install_mcp_server import InstallMcpServer
 
         mock_installer = MagicMock()
@@ -2927,24 +2926,21 @@ class TestInstallMcpServerUnit:
 
         # Should not raise
         await server.stop()
-        assert server._app_runner is None
+        assert server._server is None
 
     @pytest.mark.asyncio
-    async def test_stop_with_runner_cleanup_error(self):
-        """Test stop handles runner cleanup error gracefully."""
+    async def test_stop_with_server(self):
+        """Test stop sets should_exit on uvicorn server."""
         from haniel.installer.install_mcp_server import InstallMcpServer
 
         mock_installer = MagicMock()
         server = InstallMcpServer(mock_installer)
 
-        mock_runner = MagicMock()
-        mock_runner.cleanup = AsyncMock(side_effect=Exception("Cleanup error"))
-        server._app_runner = mock_runner
-        server._stop_event = MagicMock()
+        mock_uvicorn_server = MagicMock()
+        server._server = mock_uvicorn_server
 
-        # Should not raise
         await server.stop()
-        assert server._app_runner is None
+        assert mock_uvicorn_server.should_exit is True
 
     def test_stop_background_no_event(self):
         """Test stop_background when no stop event exists."""
@@ -2963,20 +2959,21 @@ class TestInstallMcpServerUnit:
         mock_installer = MagicMock()
         server = InstallMcpServer(mock_installer)
 
-        # Set up mocks - thread starts alive then becomes dead after join
+        # Set up mocks
         mock_loop = MagicMock()
-        mock_event = MagicMock()
+        mock_loop.is_closed.return_value = False
+        mock_uvicorn_server = MagicMock()
         mock_thread = MagicMock()
         # First call (before join check) returns True, second call (after join) returns False
         mock_thread.is_alive.side_effect = [True, False]
 
         server._loop = mock_loop
-        server._stop_event = mock_event
+        server._server = mock_uvicorn_server
         server._server_thread = mock_thread
 
         server.stop_background()
 
-        mock_loop.call_soon_threadsafe.assert_called_once_with(mock_event.set)
+        mock_loop.call_soon_threadsafe.assert_called_once()
         mock_thread.join.assert_called_once_with(timeout=5.0)
 
     def test_stop_background_thread_timeout(self):
@@ -2988,12 +2985,13 @@ class TestInstallMcpServerUnit:
 
         # Set up mocks - thread stays alive after join
         mock_loop = MagicMock()
-        mock_event = MagicMock()
+        mock_loop.is_closed.return_value = False
+        mock_uvicorn_server = MagicMock()
         mock_thread = MagicMock()
         mock_thread.is_alive.return_value = True  # Thread doesn't stop
 
         server._loop = mock_loop
-        server._stop_event = mock_event
+        server._server = mock_uvicorn_server
         server._server_thread = mock_thread
 
         # Should log warning but not raise

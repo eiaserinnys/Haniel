@@ -4,12 +4,12 @@ WebSocket handler for the haniel dashboard chat panel.
 Provides a /ws/chat endpoint that bridges the browser chat UI with
 ClaudeSessionManager subprocess sessions.
 
-Client → Server message types:
+Client -> Server message types:
   {"type": "send_message", "session_id": "<uuid|null>", "text": "..."}
   {"type": "new_session"}
   {"type": "list_sessions"}
 
-Server → Client message types:
+Server -> Client message types:
   {"type": "session_start", "session_id": "<uuid>", "is_new": true/false}
   {"type": "text_delta", "delta": "..."}
   {"type": "message_end", "session_id": "<uuid>"}
@@ -20,7 +20,7 @@ Server → Client message types:
 import json
 import logging
 
-from aiohttp import web, WSMsgType
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from ..core.claude_session import ClaudeSessionManager
 
@@ -37,25 +37,23 @@ class ChatWebSocket:
     def __init__(self, session_manager: ClaudeSessionManager):
         self._manager = session_manager
 
-    async def handle_ws(self, request: web.Request) -> web.WebSocketResponse:
+    async def handle_ws(self, websocket: WebSocket) -> None:
         """Handle a WebSocket upgrade request at GET /ws/chat."""
-        ws = web.WebSocketResponse()
-        await ws.prepare(request)
+        await websocket.accept()
         logger.info("Chat WebSocket client connected")
 
         try:
-            async for msg in ws:
-                if msg.type == WSMsgType.TEXT:
-                    await self._handle_message(ws, msg.data)
-                elif msg.type == WSMsgType.ERROR:
-                    logger.warning("Chat WebSocket error: %s", ws.exception())
-                    break
+            while True:
+                raw = await websocket.receive_text()
+                await self._handle_message(websocket, raw)
+        except WebSocketDisconnect:
+            pass
+        except Exception as e:
+            logger.warning("Chat WebSocket error: %s", e)
         finally:
             logger.info("Chat WebSocket client disconnected")
 
-        return ws
-
-    async def _handle_message(self, ws: web.WebSocketResponse, raw: str) -> None:
+    async def _handle_message(self, ws: WebSocket, raw: str) -> None:
         try:
             msg = json.loads(raw)
         except json.JSONDecodeError:
@@ -83,14 +81,14 @@ class ChatWebSocket:
         else:
             await self._send(ws, {"type": "error", "error": f"unknown message type: {msg_type}"})
 
-    async def _handle_send_message(self, ws: web.WebSocketResponse, msg: dict) -> None:
+    async def _handle_send_message(self, ws: WebSocket, msg: dict) -> None:
         """Process a send_message request.
 
         Behaviour:
-        - session_id=null → use last session (or new session if none exists)
-        - session_id=<uuid> → resume that session
-        - text="" → session switch only; send session_start and return (no claude call)
-        - text=<non-empty> → stream message through claude subprocess
+        - session_id=null -> use last session (or new session if none exists)
+        - session_id=<uuid> -> resume that session
+        - text="" -> session switch only; send session_start and return (no claude call)
+        - text=<non-empty> -> stream message through claude subprocess
         """
         raw_session_id: str | None = msg.get("session_id")
         text: str = msg.get("text", "")
@@ -100,7 +98,7 @@ class ChatWebSocket:
             last = self._manager.get_last_session()
             if last:
                 raw_session_id = last["id"]
-            # else raw_session_id stays None → stream_message will create new session
+            # else raw_session_id stays None -> stream_message will create new session
 
         # Session switch (empty text): just send session_start, skip claude
         if text == "":
@@ -108,7 +106,7 @@ class ChatWebSocket:
                 session = self._manager.get_session(raw_session_id)
                 is_new = session is None
             else:
-                # No target session — create one so the client gets a usable ID
+                # No target session -- create one so the client gets a usable ID
                 raw_session_id = self._manager.create_session()
                 is_new = True
 
@@ -124,9 +122,8 @@ class ChatWebSocket:
             await self._send(ws, event)
 
     @staticmethod
-    async def _send(ws: web.WebSocketResponse, data: dict) -> None:
-        if not ws.closed:
-            try:
-                await ws.send_str(json.dumps(data))
-            except Exception as exc:
-                logger.debug("Failed to send WS message: %s", exc)
+    async def _send(ws: WebSocket, data: dict) -> None:
+        try:
+            await ws.send_text(json.dumps(data))
+        except Exception as exc:
+            logger.debug("Failed to send WS message: %s", exc)

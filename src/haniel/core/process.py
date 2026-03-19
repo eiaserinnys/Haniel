@@ -11,6 +11,7 @@ haniel doesn't care what it runs. It just starts, monitors, and stops processes
 as specified in the configuration.
 """
 
+import logging
 import os
 import shlex
 import shutil
@@ -23,6 +24,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 from ..config import ServiceConfig, ShutdownConfig
 from .health import HealthManager, ServiceState
@@ -195,6 +198,45 @@ class ProcessManager:
                 text=True,
                 **popen_kwargs,
             )
+        except PermissionError:
+            # CREATE_BREAKAWAY_FROM_JOB requires specific Job Object
+            # permissions. Retry without breakaway flag if denied.
+            if os.name == "nt" and "creationflags" in popen_kwargs:
+                from haniel.platform.windows import (
+                    CREATE_BREAKAWAY_FROM_JOB,
+                    CREATE_NEW_PROCESS_GROUP,
+                )
+                flags = popen_kwargs["creationflags"]
+                if flags & CREATE_BREAKAWAY_FROM_JOB:
+                    popen_kwargs["creationflags"] = flags & ~CREATE_BREAKAWAY_FROM_JOB
+                    logger.debug(
+                        "Retrying %s without CREATE_BREAKAWAY_FROM_JOB", name
+                    )
+                    try:
+                        process = subprocess.Popen(
+                            cmd,
+                            cwd=cwd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            **popen_kwargs,
+                        )
+                    except (OSError, subprocess.SubprocessError) as e:
+                        self.health_manager.record_crash(
+                            name, exit_code=None, reason=str(e)
+                        )
+                        raise RuntimeError(
+                            f"Failed to start service {name}: {e}"
+                        ) from e
+                else:
+                    self.health_manager.record_crash(
+                        name, exit_code=None, reason="PermissionError"
+                    )
+                    raise RuntimeError(
+                        f"Failed to start service {name}: PermissionError"
+                    )
+            else:
+                raise
         except (OSError, subprocess.SubprocessError) as e:
             self.health_manager.record_crash(name, exit_code=None, reason=str(e))
             raise RuntimeError(f"Failed to start service {name}: {e}") from e

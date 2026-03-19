@@ -3,17 +3,18 @@ Config management REST API for the haniel dashboard.
 
 Provides endpoints for reading and mutating haniel.yaml configuration
 at runtime. All mutating operations follow the pattern:
-  read → modify → semantic validate → backup → write → reload
+  read -> modify -> semantic validate -> backup -> write -> reload
 """
 
 import asyncio
-import json
 import logging
 import threading
 from typing import TYPE_CHECKING
 
-from aiohttp import web
 from pydantic import ValidationError
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 from ..config.model import HanielConfig, RepoConfig, ServiceConfig
 from ..config.validators import validate_config
@@ -29,16 +30,8 @@ logger = logging.getLogger(__name__)
 _write_lock = threading.Lock()
 
 
-def _json_response(data, status: int = 200) -> web.Response:
-    return web.Response(
-        text=json.dumps(data),
-        status=status,
-        content_type="application/json",
-    )
-
-
-def _error(message: str, status: int = 400) -> web.Response:
-    return _json_response({"error": message}, status=status)
+def _error(message: str, status: int = 400) -> JSONResponse:
+    return JSONResponse({"error": message}, status_code=status)
 
 
 def _config_to_response(config: HanielConfig) -> dict:
@@ -67,14 +60,14 @@ def _commit_config(config_path, config: HanielConfig, runner: "ServiceRunner") -
     runner.reload_config()
 
 
-def create_config_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
-    """Create aiohttp route definitions for the config management API.
+def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
+    """Create Starlette route definitions for the config management API.
 
     Args:
         runner: ServiceRunner instance whose config is exposed and mutated
 
     Returns:
-        List of aiohttp RouteDef objects ready to be added to an app.router
+        List of Starlette Route objects ready to be included in an app
     """
 
     def _get_config_path():
@@ -83,21 +76,21 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
 
     # ── GET /api/config ───────────────────────────────────────────────────────
 
-    async def get_config(request: web.Request) -> web.Response:
+    async def get_config(request: Request) -> JSONResponse:
         config_path = _get_config_path()
         if not config_path:
             return _error("config_path not set", status=501)
         try:
             loop = asyncio.get_running_loop()
             config = await loop.run_in_executor(None, read_config, config_path)
-            return _json_response(_config_to_response(config))
+            return JSONResponse(_config_to_response(config))
         except Exception as e:
             logger.error("Failed to read config: %s", e)
             return _error(str(e), status=500)
 
     # ── GET /api/config/services ──────────────────────────────────────────────
 
-    async def get_config_services(request: web.Request) -> web.Response:
+    async def get_config_services(request: Request) -> JSONResponse:
         config_path = _get_config_path()
         if not config_path:
             return _error("config_path not set", status=501)
@@ -105,14 +98,14 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
             loop = asyncio.get_running_loop()
             config = await loop.run_in_executor(None, read_config, config_path)
             data = _config_to_response(config)
-            return _json_response(data.get("services", {}))
+            return JSONResponse(data.get("services", {}))
         except Exception as e:
             logger.error("Failed to read config services: %s", e)
             return _error(str(e), status=500)
 
     # ── GET /api/config/repos ─────────────────────────────────────────────────
 
-    async def get_config_repos(request: web.Request) -> web.Response:
+    async def get_config_repos(request: Request) -> JSONResponse:
         config_path = _get_config_path()
         if not config_path:
             return _error("config_path not set", status=501)
@@ -120,19 +113,19 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
             loop = asyncio.get_running_loop()
             config = await loop.run_in_executor(None, read_config, config_path)
             data = _config_to_response(config)
-            return _json_response(data.get("repos", {}))
+            return JSONResponse(data.get("repos", {}))
         except Exception as e:
             logger.error("Failed to read config repos: %s", e)
             return _error(str(e), status=500)
 
     # ── PUT /api/config/services/{name} ───────────────────────────────────────
 
-    async def put_service(request: web.Request) -> web.Response:
+    async def put_service(request: Request) -> JSONResponse:
         config_path = _get_config_path()
         if not config_path:
             return _error("config_path not set", status=501)
 
-        name = request.match_info["name"]
+        name = request.path_params["name"]
         try:
             body = await request.json()
         except Exception:
@@ -162,7 +155,7 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
 
         try:
             await loop.run_in_executor(None, _do_put)
-            return _json_response({"ok": True})
+            return JSONResponse({"ok": True})
         except KeyError as e:
             return _error(str(e), status=404)
         except (ValueError, RuntimeError) as e:
@@ -173,7 +166,7 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
 
     # ── POST /api/config/services ─────────────────────────────────────────────
 
-    async def post_service(request: web.Request) -> web.Response:
+    async def post_service(request: Request) -> JSONResponse:
         config_path = _get_config_path()
         if not config_path:
             return _error("config_path not set", status=501)
@@ -212,7 +205,7 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
 
         try:
             await loop.run_in_executor(None, _do_post)
-            return _json_response({"ok": True})
+            return JSONResponse({"ok": True})
         except ValueError as e:
             return _error(str(e), status=400)
         except RuntimeError as e:
@@ -223,12 +216,12 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
 
     # ── DELETE /api/config/services/{name} ────────────────────────────────────
 
-    async def delete_service(request: web.Request) -> web.Response:
+    async def delete_service(request: Request) -> JSONResponse:
         config_path = _get_config_path()
         if not config_path:
             return _error("config_path not set", status=501)
 
-        name = request.match_info["name"]
+        name = request.path_params["name"]
         loop = asyncio.get_running_loop()
 
         def _do_delete():
@@ -263,7 +256,7 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
 
         try:
             await loop.run_in_executor(None, _do_delete)
-            return _json_response({"ok": True})
+            return JSONResponse({"ok": True})
         except KeyError as e:
             return _error(str(e), status=404)
         except ValueError as e:
@@ -276,12 +269,12 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
 
     # ── PUT /api/config/repos/{name} ──────────────────────────────────────────
 
-    async def put_repo(request: web.Request) -> web.Response:
+    async def put_repo(request: Request) -> JSONResponse:
         config_path = _get_config_path()
         if not config_path:
             return _error("config_path not set", status=501)
 
-        name = request.match_info["name"]
+        name = request.path_params["name"]
         try:
             body = await request.json()
         except Exception:
@@ -311,7 +304,7 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
 
         try:
             await loop.run_in_executor(None, _do_put)
-            return _json_response({"ok": True})
+            return JSONResponse({"ok": True})
         except KeyError as e:
             return _error(str(e), status=404)
         except (ValueError, RuntimeError) as e:
@@ -322,7 +315,7 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
 
     # ── POST /api/config/repos ────────────────────────────────────────────────
 
-    async def post_repo(request: web.Request) -> web.Response:
+    async def post_repo(request: Request) -> JSONResponse:
         config_path = _get_config_path()
         if not config_path:
             return _error("config_path not set", status=501)
@@ -361,7 +354,7 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
 
         try:
             await loop.run_in_executor(None, _do_post)
-            return _json_response({"ok": True})
+            return JSONResponse({"ok": True})
         except ValueError as e:
             return _error(str(e), status=400)
         except RuntimeError as e:
@@ -372,12 +365,12 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
 
     # ── DELETE /api/config/repos/{name} ───────────────────────────────────────
 
-    async def delete_repo(request: web.Request) -> web.Response:
+    async def delete_repo(request: Request) -> JSONResponse:
         config_path = _get_config_path()
         if not config_path:
             return _error("config_path not set", status=501)
 
-        name = request.match_info["name"]
+        name = request.path_params["name"]
         loop = asyncio.get_running_loop()
 
         def _do_delete():
@@ -408,7 +401,7 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
 
         try:
             await loop.run_in_executor(None, _do_delete)
-            return _json_response({"ok": True})
+            return JSONResponse({"ok": True})
         except KeyError as e:
             return _error(str(e), status=404)
         except ValueError as e:
@@ -420,13 +413,13 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
             return _error(str(e), status=500)
 
     return [
-        web.get("/api/config", get_config),
-        web.get("/api/config/services", get_config_services),
-        web.get("/api/config/repos", get_config_repos),
-        web.put("/api/config/services/{name}", put_service),
-        web.post("/api/config/services", post_service),
-        web.delete("/api/config/services/{name}", delete_service),
-        web.put("/api/config/repos/{name}", put_repo),
-        web.post("/api/config/repos", post_repo),
-        web.delete("/api/config/repos/{name}", delete_repo),
+        Route("/api/config", get_config, methods=["GET"]),
+        Route("/api/config/services", get_config_services, methods=["GET"]),
+        Route("/api/config/repos", get_config_repos, methods=["GET"]),
+        Route("/api/config/services/{name}", put_service, methods=["PUT"]),
+        Route("/api/config/services", post_service, methods=["POST"]),
+        Route("/api/config/services/{name}", delete_service, methods=["DELETE"]),
+        Route("/api/config/repos/{name}", put_repo, methods=["PUT"]),
+        Route("/api/config/repos", post_repo, methods=["POST"]),
+        Route("/api/config/repos/{name}", delete_repo, methods=["DELETE"]),
     ]

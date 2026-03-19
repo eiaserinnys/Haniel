@@ -128,7 +128,9 @@ class WindowsHandler(PlatformHandler):
         """Get Windows-specific subprocess kwargs.
 
         Returns:
-            Dict with creationflags for process group creation
+            Dict with creationflags for process group creation.
+            Falls back to CREATE_NEW_PROCESS_GROUP only if breakaway
+            is not available (e.g. restricted Job Object environments).
         """
         return {
             "creationflags": CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB,

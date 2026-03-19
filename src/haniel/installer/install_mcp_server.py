@@ -9,8 +9,10 @@ during normal operation with ServiceRunner.
 """
 
 import asyncio
+import contextlib
 import logging
 import threading
+from collections.abc import AsyncIterator
 from typing import Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -41,8 +43,7 @@ class InstallMcpServer:
         """
         self.installer = installer
         self.port = port
-        self._app_runner: Optional[Any] = None
-        self._stop_event: Optional[asyncio.Event] = None
+        self._server: Optional[Any] = None  # uvicorn.Server
         self._server_thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -69,16 +70,17 @@ class InstallMcpServer:
     async def start(self) -> None:
         """Start the MCP server.
 
-        This starts an SSE-based MCP server on the configured port.
+        This starts a Starlette + uvicorn server with MCP Streamable HTTP transport.
         """
         try:
             from mcp.server import Server
-            from mcp.server.sse import SseServerTransport
+            from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
             from mcp.types import Tool, TextContent
-            from aiohttp import web
-
-            # Create stop event for graceful shutdown
-            self._stop_event = asyncio.Event()
+            from starlette.applications import Starlette
+            from starlette.requests import Request
+            from starlette.responses import JSONResponse
+            from starlette.routing import Mount, Route
+            import uvicorn
 
             # Create MCP server
             mcp = Server("haniel-install")
@@ -103,38 +105,43 @@ class InstallMcpServer:
                 result = await self.call_tool(name, arguments)
                 return [TextContent(type="text", text=result)]
 
-            # Create SSE transport
-            sse = SseServerTransport("/sse")
-
-            # Create aiohttp app
-            app = web.Application()
-            app.router.add_route("GET", "/sse", sse.handle_sse)
-            app.router.add_route("POST", "/sse", sse.handle_post_message)
+            # Create StreamableHTTP session manager
+            session_manager = StreamableHTTPSessionManager(
+                app=mcp,
+                json_response=True,
+                stateless=False,
+            )
 
             # Add health check endpoint
-            async def health_handler(request):
-                return web.json_response({"status": "ok", "mode": "install"})
+            async def health_handler(request: Request) -> JSONResponse:
+                return JSONResponse({"status": "ok", "mode": "install"})
 
-            app.router.add_route("GET", "/health", health_handler)
+            # Create lifespan for session manager
+            @contextlib.asynccontextmanager
+            async def lifespan(app: Starlette) -> AsyncIterator[None]:
+                async with session_manager.run():
+                    yield
 
-            # Start server
-            runner = web.AppRunner(app)
-            await runner.setup()
-            self._app_runner = runner
+            # Create Starlette app
+            app = Starlette(
+                routes=[
+                    Mount("/mcp", app=session_manager.handle_request),
+                    Route("/health", health_handler, methods=["GET"]),
+                ],
+                lifespan=lifespan,
+            )
 
-            site = web.TCPSite(runner, "0.0.0.0", self.port)
-            await site.start()
+            logger.info(f"Install MCP server starting on port {self.port}")
 
-            logger.info(f"Install MCP server started on port {self.port}")
-
-            # Wait until stop event is set
-            try:
-                await self._stop_event.wait()
-            except asyncio.CancelledError:
-                pass
-            finally:
-                await runner.cleanup()
-                logger.info("Install MCP server cleaned up")
+            # Start uvicorn server
+            config = uvicorn.Config(
+                app,
+                host="0.0.0.0",
+                port=self.port,
+                log_level="warning",
+            )
+            self._server = uvicorn.Server(config)
+            await self._server.serve()
 
         except ImportError as e:
             logger.warning(f"MCP dependencies not available: {e}")
@@ -145,15 +152,8 @@ class InstallMcpServer:
 
     async def stop(self) -> None:
         """Stop the MCP server."""
-        if self._stop_event:
-            self._stop_event.set()
-
-        if self._app_runner:
-            try:
-                await self._app_runner.cleanup()
-            except Exception as e:
-                logger.warning(f"Error cleaning up install MCP server: {e}")
-            self._app_runner = None
+        if self._server:
+            self._server.should_exit = True
 
         logger.info("Install MCP server stopped")
 
@@ -191,9 +191,13 @@ class InstallMcpServer:
         Call this from the main thread to stop the server running
         in the background thread.
         """
-        if self._stop_event and self._loop:
-            # Signal the stop event from the main thread
-            self._loop.call_soon_threadsafe(self._stop_event.set)
+        if self._server:
+            if self._loop and not self._loop.is_closed():
+                self._loop.call_soon_threadsafe(
+                    lambda: setattr(self._server, 'should_exit', True)
+                )
+            else:
+                self._server.should_exit = True
 
             # Wait for thread to finish
             if self._server_thread and self._server_thread.is_alive():
