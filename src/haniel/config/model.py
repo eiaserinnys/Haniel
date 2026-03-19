@@ -100,6 +100,9 @@ class HooksConfig(BaseModel):
     post_pull: str | None = Field(
         default=None, description="Command to run after git pull"
     )
+    pre_start: str | None = Field(
+        default=None, description="Command to run before service start"
+    )
 
 
 class ServiceShutdownConfig(BaseModel):
@@ -132,6 +135,10 @@ class ServiceConfig(BaseModel):
     )
     enabled: bool = Field(default=True, description="Whether service is enabled")
     hooks: HooksConfig | None = Field(default=None, description="Lifecycle hooks")
+    reflect: bool = Field(
+        default=False,
+        description="Whether this service exposes a cogito /reflect endpoint",
+    )
 
     @field_validator("after", mode="before")
     @classmethod

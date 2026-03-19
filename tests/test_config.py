@@ -6,6 +6,7 @@ import pytest
 
 from haniel.config import (
     HanielConfig,
+    HooksConfig,
     RepoConfig,
     ServiceConfig,
     ShutdownConfig,
@@ -213,3 +214,53 @@ class TestInvalidYAML:
 
         with pytest.raises(Exception):  # yaml.YAMLError or similar
             load_config(invalid_yaml)
+
+
+class TestHooksConfigParsing:
+    """Test HooksConfig pre_start and ServiceConfig reflect field parsing."""
+
+    def test_hooks_pre_start_parsed(self, tmp_path: Path):
+        """hooks.pre_start 포함 시 HooksConfig.pre_start에 정상 반영."""
+        yaml_content = """
+poll_interval: 5
+repos: {}
+services:
+  test:
+    run: sleep 100
+    hooks:
+      pre_start: "echo hi"
+"""
+        config_file = tmp_path / "haniel.yaml"
+        config_file.write_text(yaml_content)
+        config = load_config(config_file)
+        assert config.services["test"].hooks is not None
+        assert config.services["test"].hooks.pre_start == "echo hi"
+
+    def test_service_reflect_true(self, tmp_path: Path):
+        """reflect: true 포함 시 ServiceConfig.reflect == True."""
+        yaml_content = """
+poll_interval: 5
+repos: {}
+services:
+  test:
+    run: sleep 100
+    reflect: true
+"""
+        config_file = tmp_path / "haniel.yaml"
+        config_file.write_text(yaml_content)
+        config = load_config(config_file)
+        assert config.services["test"].reflect is True
+
+    def test_service_reflect_defaults_false(self, tmp_path: Path):
+        """reflect 미포함 시 ServiceConfig.reflect == False."""
+        yaml_content = """
+poll_interval: 5
+repos: {}
+services:
+  test:
+    run: sleep 100
+"""
+        config_file = tmp_path / "haniel.yaml"
+        config_file.write_text(yaml_content)
+        config = load_config(config_file)
+        assert config.services["test"].reflect is False
