@@ -556,8 +556,20 @@ class HanielMcpServer:
                     # Initialise Claude session manager (None if claude not in PATH)
                     session_manager = None
                     try:
+                        import os
                         import shutil
-                        if shutil.which("claude") is not None:
+                        claude_path = shutil.which("claude")
+                        if claude_path is None:
+                            # Windows service may not have user PATH; check HOME/.local/bin
+                            home = os.environ.get("HOME", os.path.expanduser("~"))
+                            for candidate in (
+                                os.path.join(home, ".local", "bin", "claude.cmd"),
+                                os.path.join(home, ".local", "bin", "claude"),
+                            ):
+                                if os.path.exists(candidate):
+                                    claude_path = candidate
+                                    break
+                        if claude_path is not None:
                             session_manager = ClaudeSessionManager(self.runner)
                         else:
                             logger.warning("claude CLI not found in PATH — chat panel disabled")
