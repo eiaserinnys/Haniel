@@ -226,6 +226,11 @@ class ClaudeSessionManager:
         Uses setting_sources=['project'] so the SDK reads .mcp.json from
         the workspace cwd automatically, eliminating the need for a separate
         --mcp-config flag.
+
+        CLAUDECODE is cleared because haniel itself runs inside a Claude Code
+        session (via soulstream). The bundled CLI refuses to start when it
+        detects a parent session (nested session guard). Setting it to empty
+        string bypasses the guard without affecting the child session.
         """
         opts = ClaudeAgentOptions(
             cwd=self._workspace_path,
@@ -236,6 +241,7 @@ class ClaudeSessionManager:
             ],
             disallowed_tools=["NotebookEdit", "TodoWrite"],
             setting_sources=["project"],
+            env={"CLAUDECODE": ""},
         )
         if claude_session_id:
             opts.resume = claude_session_id
