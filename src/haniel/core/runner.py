@@ -291,6 +291,9 @@ class ServiceRunner:
         # WebSocket handler (set by MCP server after dashboard setup)
         self._ws_handler = None
 
+        # Track whether post_pull hooks have been run on first start
+        self._post_pull_executed = False
+
         # Self-update (see ADR-0002)
         self._self_repo: str | None = (
             config.self_update.repo if config.self_update else None
@@ -451,9 +454,20 @@ class ServiceRunner:
             return False
 
     def start_services(self) -> None:
-        """Start all enabled services in dependency order."""
+        """Start all enabled services in dependency order.
+
+        On first start, executes post_pull hooks for all services before
+        starting them. This ensures build steps (npm build, pip install -e, etc.)
+        run after initial clone, just as they would after a git pull update.
+        """
         startup_order = self.get_startup_order()
         logger.info(f"Starting services in order: {startup_order}")
+
+        # Run post_pull hooks on first start (initial install has same semantics as pull)
+        if not self._post_pull_executed:
+            self._post_pull_executed = True
+            for name in startup_order:
+                self.execute_hook(name, "post_pull")
 
         for name in startup_order:
             self._start_service(name)
