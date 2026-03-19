@@ -247,7 +247,8 @@ Connect from Claude Code with:
 
 ## Documentation
 
-- [Specifications](docs/specifications.md) — Full configuration reference and runtime behavior
+- [Configuration Reference](docs/configuration.md) — Every field in `haniel.yaml` explained
+- [Specifications](docs/specifications.md) — Architecture, runtime behavior, and installation flow
 - [ADR-0001: WinSW over NSSM](docs/adr/0001-winsw-over-nssm.md) — Windows service wrapper choice
 - [ADR-0002: Self-update architecture](docs/adr/0002-self-update-architecture.md) — Two-loop self-update mechanism
 - [ADR-0003: Directory structure](docs/adr/0003-directory-structure.md) — `.self/` + `.services/` layout
