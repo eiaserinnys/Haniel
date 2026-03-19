@@ -5,7 +5,6 @@ Manages session metadata persistence and SDK-based streaming
 via claude-agent-sdk (ClaudeSDKClient).
 """
 
-import asyncio
 import copy
 import json
 import logging
@@ -65,6 +64,10 @@ class ClaudeSessionManager:
             runner.config_dir / "workspace" / ".projects" / "haniel" / "workspace"
         )
         self._workspace_path.mkdir(parents=True, exist_ok=True)
+
+        # CLI stderr log directory (same as workspace for simplicity)
+        self._stderr_log_dir = self._workspace_path / "logs"
+        self._stderr_log_dir.mkdir(parents=True, exist_ok=True)
 
         self._load_sessions()
         self._write_mcp_config()
@@ -157,8 +160,14 @@ class ClaudeSessionManager:
 
         except Exception as exc:
             logger.exception("Error during SDK stream")
-            # SDK swallows stderr; run CLI directly to capture the real error
-            await self._log_cli_stderr()
+            # Read stderr log file for diagnostics (written by debug_stderr)
+            session_tag = claude_session_id or "new"
+            stderr_path = self._stderr_log_dir / f"cli_stderr_{session_tag}.log"
+            if stderr_path.exists():
+                stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
+                if stderr_text:
+                    # Log last 2000 chars to avoid flooding
+                    logger.error("CLI stderr output:\n%s", stderr_text[-2000:])
             yield {"type": "error", "error": str(exc)}
             # Clean up the client on error
             if client is not None:
@@ -229,7 +238,16 @@ class ClaudeSessionManager:
         Uses setting_sources=['project'] so the SDK reads .mcp.json from
         the workspace cwd automatically, eliminating the need for a separate
         --mcp-config flag.
+
+        stderr is captured to a per-session log file via debug_stderr +
+        extra_args={"debug-to-stderr": None}, matching the soulstream /
+        rescuebot pattern. This ensures CLI output is on disk before any
+        ProcessError is raised.
         """
+        session_tag = claude_session_id or "new"
+        stderr_path = self._stderr_log_dir / f"cli_stderr_{session_tag}.log"
+        stderr_file = open(stderr_path, "a", encoding="utf-8")
+
         opts = ClaudeAgentOptions(
             cwd=self._workspace_path,
             permission_mode="bypassPermissions",
@@ -239,7 +257,8 @@ class ClaudeSessionManager:
             ],
             disallowed_tools=["NotebookEdit", "TodoWrite"],
             setting_sources=["project"],
-            stderr=lambda line: logger.warning("claude stderr: %s", line),
+            extra_args={"debug-to-stderr": None},
+            debug_stderr=stderr_file,
         )
         if claude_session_id:
             opts.resume = claude_session_id
@@ -268,39 +287,6 @@ class ClaudeSessionManager:
         client = ClaudeSDKClient(opts)
         await client.connect()
         return client
-
-    async def _log_cli_stderr(self) -> None:
-        """Run the bundled CLI once to capture stderr for diagnostics.
-
-        The SDK swallows subprocess stderr unless a callback is provided,
-        and even then the callback may not fire before ProcessError is raised.
-        This method runs the CLI directly via asyncio.subprocess to reliably
-        capture stderr output for logging.
-        """
-        try:
-            from claude_agent_sdk._internal.transport.subprocess_cli import (
-                SubprocessCLITransport,
-            )
-            cli_path = SubprocessCLITransport._find_cli_path()
-        except Exception:
-            logger.warning("Could not locate bundled CLI for stderr capture")
-            return
-
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                str(cli_path), "-p", "test", "--output-format", "stream-json", "--verbose",
-                cwd=self._workspace_path,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=15)
-            stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
-            if stderr_text:
-                logger.error("CLI stderr diagnostic:\n%s", stderr_text)
-            else:
-                logger.warning("CLI exited with code %s but produced no stderr", proc.returncode)
-        except Exception as e:
-            logger.warning("Failed to capture CLI stderr: %s", e)
 
     def _write_mcp_config(self) -> None:
         """Write .mcp.json into the workspace directory.
