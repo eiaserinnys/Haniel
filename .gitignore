@@ -53,3 +53,6 @@ logs/
 .projects/
 .services/
 install.state
+
+# Runtime workspace for Claude Code sessions
+workspace/

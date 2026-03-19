@@ -1,11 +1,10 @@
 """
 Claude Code session manager for haniel dashboard chat panel.
 
-Manages session metadata persistence and subprocess-based streaming
-to the Claude CLI via `claude -p` / `claude --resume`.
+Manages session metadata persistence and SDK-based streaming
+via claude-agent-sdk (ClaudeSDKClient).
 """
 
-import asyncio
 import copy
 import json
 import logging
@@ -14,6 +13,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator, TYPE_CHECKING
 
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+from claude_agent_sdk.types import (
+    AssistantMessage,
+    ResultMessage,
+    SystemMessage,
+    TextBlock,
+)
+
 if TYPE_CHECKING:
     from .runner import ServiceRunner
 
@@ -21,36 +28,45 @@ logger = logging.getLogger(__name__)
 
 # Metadata file stored in runner.config_dir
 _SESSIONS_FILE = "chat_sessions.json"
-# MCP config written once at startup
-_MCP_CONFIG_FILE = "haniel_mcp_config.json"
 
 
 class ClaudeSessionManager:
-    """Manages Claude Code subprocess sessions for the dashboard chat panel.
+    """Manages Claude Code SDK sessions for the dashboard chat panel.
 
     Session metadata is persisted to disk at runner.config_dir/chat_sessions.json.
-    Each session maps a haniel UUID to a Claude CLI session ID (used with --resume).
+    Each session maps a haniel UUID to a Claude CLI session ID (used with resume).
+
+    The SDK client is kept alive per session so that MCP connections are
+    established only once, eliminating the ~5 s overhead of subprocess startup.
 
     Usage::
 
         manager = ClaudeSessionManager(runner)
         async for event in manager.stream_message(None, "hello"):
             # event: {"type": "text_delta", "delta": "..."}
-            #        {"type": "session_id", "session_id": "<uuid>", "claude_session_id": "..."}
-            #        {"type": "message_end"}
+            #        {"type": "session_start", "session_id": "<uuid>"}
+            #        {"type": "message_end", "session_id": "<uuid>"}
             #        {"type": "error", "error": "..."}
             ...
     """
 
-    def __init__(self, runner: "ServiceRunner", claude_path: str | None = None):
+    def __init__(self, runner: "ServiceRunner"):
         self.runner = runner
         self._sessions_path = runner.config_dir / _SESSIONS_FILE
-        self._mcp_config_path: Path | None = None
         self._data: dict = {"sessions": [], "last_session_id": None}
-        self._claude_exe = claude_path or "claude"
+        self._clients: dict[str, ClaudeSDKClient] = {}
+
+        # Workspace directory for Claude Code sessions.
+        # This is the cwd passed to ClaudeAgentOptions. The SDK reads
+        # .mcp.json from cwd when setting_sources=['project'].
+        # Path: {root}/workspace/.projects/haniel/workspace
+        self._workspace_path = (
+            runner.config_dir / "workspace" / ".projects" / "haniel" / "workspace"
+        )
+        self._workspace_path.mkdir(parents=True, exist_ok=True)
 
         self._load_sessions()
-        self._mcp_config_path = self._write_mcp_config()
+        self._write_mcp_config()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -64,18 +80,11 @@ class ClaudeSessionManager:
         Used by the chat panel's new_session command so the UUID returned
         to the client is immediately usable for subsequent send_message calls.
         """
-        session_id = str(uuid.uuid4())
-        session = {
-            "id": session_id,
-            "claude_session_id": None,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "last_active_at": datetime.now(timezone.utc).isoformat(),
-            "preview": None,
-        }
+        session = self._make_session()
         self._data["sessions"].append(session)
-        self._data["last_session_id"] = session_id
+        self._data["last_session_id"] = session["id"]
         self._save_sessions()
-        return session_id
+        return session["id"]
 
     def get_last_session(self) -> dict | None:
         """Return the most recently active session, or None."""
@@ -112,87 +121,68 @@ class ClaudeSessionManager:
 
         is_new = session is None
         if is_new:
-            session_id = str(uuid.uuid4())
-            session = {
-                "id": session_id,
-                "claude_session_id": None,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "last_active_at": datetime.now(timezone.utc).isoformat(),
-                "preview": None,
-            }
+            session = self._make_session()
+            session_id = session["id"]
             self._data["sessions"].append(session)
 
         self._data["last_session_id"] = session_id
 
         claude_session_id: str | None = session.get("claude_session_id")
-        cmd = self._build_command(claude_session_id, text)
 
         yield {"type": "session_start", "session_id": session_id, "is_new": is_new}
 
         last_text_parts: list[str] = []
         new_claude_session_id: str | None = None
+        client: ClaudeSDKClient | None = None
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                # Discard stderr to avoid filling the pipe buffer while we only
-                # consume stdout.  Error info comes through stdout stream-json.
-                stderr=asyncio.subprocess.DEVNULL,
-            )
+            client = await self._get_or_create_client(claude_session_id)
+            await client.query(text)
 
-            try:
-                assert proc.stdout is not None
-                async for raw_line in proc.stdout:
-                    line = raw_line.decode("utf-8", errors="replace").strip()
-                    if not line:
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+            async for msg in client.receive_response():
+                if isinstance(msg, SystemMessage):
+                    if not new_claude_session_id and msg.session_id:
+                        new_claude_session_id = msg.session_id
 
-                    event_type = event.get("type")
+                elif isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock):
+                            last_text_parts.append(block.text)
+                            yield {"type": "text_delta", "delta": block.text}
 
-                    # stream-json with --verbose emits:
-                    #   {"type": "assistant", "message": {"content": [{"type": "text", "text": "..."}]}}
-                    #   {"type": "result", "session_id": "...", "result": "..."}
-                    if event_type == "assistant":
-                        message = event.get("message", {})
-                        for block in message.get("content", []):
-                            if block.get("type") == "text":
-                                delta = block.get("text", "")
-                                last_text_parts.append(delta)
-                                yield {"type": "text_delta", "delta": delta}
+                elif isinstance(msg, ResultMessage):
+                    if msg.session_id:
+                        new_claude_session_id = msg.session_id
 
-                    elif event_type == "result":
-                        new_claude_session_id = event.get("session_id")
-
-                await proc.wait()
-            finally:
-                # Ensure subprocess is terminated if the generator is abandoned
-                # (e.g. WebSocket closed mid-stream).
-                if proc.returncode is None:
-                    try:
-                        proc.kill()
-                        await proc.wait()
-                    except Exception:
-                        pass
-
-            if proc.returncode != 0:
-                yield {
-                    "type": "error",
-                    "error": f"claude exited with code {proc.returncode}",
-                }
-                return
-
-        except FileNotFoundError:
-            yield {"type": "error", "error": "claude CLI not found in PATH"}
-            return
         except Exception as exc:
-            logger.exception("Unexpected error while running claude subprocess")
+            logger.exception("Error during SDK stream")
             yield {"type": "error", "error": str(exc)}
+            # Clean up the client on error
+            if client is not None:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+            # Remove stale client from cache
+            if claude_session_id and claude_session_id in self._clients:
+                del self._clients[claude_session_id]
             return
+
+        # Cache the client under the (possibly new) claude session ID.
+        # If the SDK didn't return a session_id (unlikely but possible),
+        # disconnect the client to prevent process leaks.
+        if client is not None:
+            if new_claude_session_id:
+                # Remove old key if it existed under a different ID
+                if claude_session_id and claude_session_id != new_claude_session_id:
+                    self._clients.pop(claude_session_id, None)
+                self._clients[new_claude_session_id] = client
+            elif claude_session_id not in self._clients:
+                # No session ID obtained and client isn't cached — disconnect
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
 
         # Persist session metadata after successful stream
         last_text = "".join(last_text_parts)
@@ -200,7 +190,29 @@ class ClaudeSessionManager:
 
         yield {"type": "message_end", "session_id": session_id}
 
+    async def shutdown(self) -> None:
+        """Disconnect all cached SDK clients. Called on server shutdown."""
+        for cid, client in self._clients.items():
+            try:
+                await client.disconnect()
+            except Exception:
+                logger.debug("Failed to disconnect client %s", cid)
+        self._clients.clear()
+        logger.info("All Claude SDK clients disconnected")
+
     # ── Internal helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _make_session() -> dict:
+        """Create a fresh session dict with a new UUID."""
+        now = datetime.now(timezone.utc).isoformat()
+        return {
+            "id": str(uuid.uuid4()),
+            "claude_session_id": None,
+            "created_at": now,
+            "last_active_at": now,
+            "preview": None,
+        }
 
     def _find_session(self, session_id: str) -> dict | None:
         for s in self._data["sessions"]:
@@ -208,54 +220,60 @@ class ClaudeSessionManager:
                 return s
         return None
 
-    def _build_command(
-        self,
-        claude_session_id: str | None,
-        text: str,
-    ) -> list[str]:
-        """Build the claude CLI command for a message.
+    def _build_options(self, claude_session_id: str | None) -> ClaudeAgentOptions:
+        """Build ClaudeAgentOptions for a session.
 
-        Four variants (mcp_active × has_session):
-          No session, MCP active:   ['claude', '-p', text, '--output-format', 'stream-json', '--mcp-config', path]
-          No session, MCP inactive: ['claude', '-p', text, '--output-format', 'stream-json']
-          With session, MCP active: ['claude', '--resume', id, '-p', text, '--output-format', 'stream-json', '--mcp-config', path]
-          With session, MCP inactive: ['claude', '--resume', id, '-p', text, '--output-format', 'stream-json']
+        Uses setting_sources=['project'] so the SDK reads .mcp.json from
+        the workspace cwd automatically, eliminating the need for a separate
+        --mcp-config flag.
         """
-        mcp_active = self._mcp_config_path is not None
-
+        opts = ClaudeAgentOptions(
+            cwd=self._workspace_path,
+            permission_mode="bypassPermissions",
+            allowed_tools=[
+                "Read", "Glob", "Grep", "Bash", "Edit", "Write",
+                "WebFetch", "WebSearch", "Task", "ToolSearch", "Skill",
+            ],
+            disallowed_tools=["NotebookEdit", "TodoWrite"],
+            setting_sources=["project"],
+        )
         if claude_session_id:
-            cmd = [
-                self._claude_exe,
-                "--resume",
-                claude_session_id,
-                "-p",
-                text,
-                "--output-format",
-                "stream-json",
-                "--verbose",
-            ]
-        else:
-            cmd = [
-                self._claude_exe,
-                "-p",
-                text,
-                "--output-format",
-                "stream-json",
-                "--verbose",
-            ]
+            opts.resume = claude_session_id
+        return opts
 
-        if mcp_active:
-            cmd += ["--mcp-config", str(self._mcp_config_path)]
+    async def _get_or_create_client(
+        self, claude_session_id: str | None
+    ) -> ClaudeSDKClient:
+        """Return a live SDK client, reusing a cached one if available.
 
-        return cmd
+        For an existing session whose client is still connected, the same
+        process is reused (no resume needed — the conversation context lives
+        in the running process). If the process died, a fresh client is
+        created with ``options.resume = session_id`` so the SDK spawns a new
+        process that resumes the conversation.
 
-    def _write_mcp_config(self) -> Path | None:
-        """Write MCP config file for claude subprocess, once at startup.
+        Instead of inspecting private SDK attributes to check liveness,
+        we optimistically return the cached client and let callers handle
+        exceptions from query()/receive_response() — at which point the
+        error handler in stream_message() will evict and reconnect.
+        """
+        if claude_session_id and claude_session_id in self._clients:
+            return self._clients[claude_session_id]
 
-        Returns None if runner.config.mcp is None (MCP disabled → no --mcp-config flag).
+        opts = self._build_options(claude_session_id)
+        client = ClaudeSDKClient(opts)
+        await client.connect()
+        return client
+
+    def _write_mcp_config(self) -> None:
+        """Write .mcp.json into the workspace directory.
+
+        The SDK with setting_sources=['project'] reads cwd/.mcp.json
+        automatically. Only the haniel MCP server entry is needed here;
+        the workspace-level .mcp.json (for soulstream sessions) is separate.
         """
         if self.runner.config.mcp is None:
-            return None
+            return
 
         mcp_port = self.runner.config.mcp.port
         config = {
@@ -266,10 +284,9 @@ class ClaudeSessionManager:
                 }
             }
         }
-        path = self.runner.config_dir / _MCP_CONFIG_FILE
+        path = self._workspace_path / ".mcp.json"
         path.write_text(json.dumps(config, indent=2), encoding="utf-8")
         logger.info("MCP config written to %s (port %d)", path, mcp_port)
-        return path
 
     def _load_sessions(self) -> None:
         """Load session metadata from disk, or initialise if missing."""

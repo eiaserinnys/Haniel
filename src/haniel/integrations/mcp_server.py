@@ -45,6 +45,7 @@ class HanielMcpServer:
         self._app_runner: Optional[Any] = None
         self._stop_event: Optional[asyncio.Event] = None
         self._server_thread: Optional[threading.Thread] = None
+        self._session_manager: Optional[Any] = None
 
     @property
     def port(self) -> int:
@@ -553,32 +554,12 @@ class HanielMcpServer:
 
                     loop = asyncio.get_event_loop()
 
-                    # Initialise Claude session manager (None if claude not in PATH)
+                    # Initialise Claude session manager.
+                    # The SDK bundles its own CLI, so no PATH detection needed.
                     session_manager = None
                     try:
-                        import os
-                        import shutil
-
-                        claude_path = shutil.which("claude")
-                        if claude_path is None:
-                            # Windows service PATH may not include user-local bin.
-                            # CLAUDE_CLI_DIR can be set in haniel.yaml service.environment.
-                            cli_dir = os.environ.get("CLAUDE_CLI_DIR")
-                            if cli_dir:
-                                for name in ("claude.cmd", "claude.exe", "claude"):
-                                    candidate = os.path.join(cli_dir, name)
-                                    if os.path.exists(candidate):
-                                        claude_path = candidate
-                                        break
-                        if claude_path is not None:
-                            session_manager = ClaudeSessionManager(
-                                self.runner, claude_path=claude_path
-                            )
-                        else:
-                            logger.warning(
-                                "claude CLI not found — chat panel disabled. "
-                                "Set CLAUDE_CLI_DIR in haniel.yaml service.environment."
-                            )
+                        session_manager = ClaudeSessionManager(self.runner)
+                        self._session_manager = session_manager
                     except Exception as sm_err:
                         logger.warning(
                             "Failed to initialise ClaudeSessionManager: %s", sm_err
@@ -626,6 +607,13 @@ class HanielMcpServer:
 
     async def stop(self) -> None:
         """Stop the MCP server."""
+        # Disconnect all cached Claude SDK clients first
+        if self._session_manager is not None:
+            try:
+                await self._session_manager.shutdown()
+            except Exception as e:
+                logger.warning(f"Error shutting down session manager: {e}")
+
         if self._stop_event:
             self._stop_event.set()
 
