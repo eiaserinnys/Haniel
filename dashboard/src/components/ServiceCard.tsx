@@ -14,9 +14,13 @@ interface ServiceCardProps {
   onControl: (name: string, action: 'start' | 'stop' | 'restart' | 'enable') => void
   onEdit?: (name: string) => void
   onDelete?: (name: string) => void
+  /** Hide the Repo detail row (used when rendered inside a RepoServiceGroup) */
+  hideRepo?: boolean
+  /** Remove outer card border (used when rendered inside a RepoServiceGroup) */
+  noBorder?: boolean
 }
 
-export function ServiceCard({ name, service, onControl, onEdit, onDelete }: ServiceCardProps) {
+export function ServiceCard({ name, service, onControl, onEdit, onDelete, hideRepo, noBorder }: ServiceCardProps) {
   const [expanded, setExpanded] = useState(false)
   const [showLogs, setShowLogs] = useState(false)
 
@@ -27,7 +31,10 @@ export function ServiceCard({ name, service, onControl, onEdit, onDelete }: Serv
   const canEnable = state === 'circuit_open'
 
   return (
-    <div className="rounded-lg border border-zinc-700 bg-zinc-800/50 overflow-hidden">
+    <div className={cn(
+      'overflow-hidden',
+      noBorder ? 'bg-zinc-800/50' : 'rounded-lg border border-zinc-700 bg-zinc-800/50',
+    )}>
       {/* Header row */}
       <div className="flex items-center gap-3 p-4">
         <button
@@ -116,13 +123,15 @@ export function ServiceCard({ name, service, onControl, onEdit, onDelete }: Serv
 
       {/* Expanded details */}
       {expanded && (
-        <div className="border-t border-zinc-700 px-4 py-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
-          <Detail label="Restarts" value={restart_count.toString()} />
-          <Detail label="Uptime"   value={formatUptime(uptime)} />
-          {config.cwd  && <Detail label="CWD"  value={config.cwd}  mono className="col-span-2" />}
-          {config.repo && <Detail label="Repo" value={config.repo} />}
+        <div className="border-t border-zinc-700 px-4 py-3 text-xs space-y-2">
+          <div className="flex gap-8">
+            <Detail label="Restarts" value={restart_count.toString()} />
+            <Detail label="Uptime"   value={formatUptime(uptime)} />
+            {config.cwd && <Detail label="CWD" value={config.cwd} mono />}
+          </div>
+          {!hideRepo && config.repo && <Detail label="Repo" value={config.repo} />}
           {config.after.length > 0 && (
-            <Detail label="Depends on" value={config.after.join(', ')} className="col-span-2" />
+            <Detail label="Depends on" value={config.after.join(', ')} />
           )}
         </div>
       )}
