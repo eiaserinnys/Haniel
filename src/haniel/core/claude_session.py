@@ -42,11 +42,12 @@ class ClaudeSessionManager:
             ...
     """
 
-    def __init__(self, runner: "ServiceRunner"):
+    def __init__(self, runner: "ServiceRunner", claude_path: str | None = None):
         self.runner = runner
         self._sessions_path = runner.config_dir / _SESSIONS_FILE
         self._mcp_config_path: Path | None = None
         self._data: dict = {"sessions": [], "last_session_id": None}
+        self._claude_exe = claude_path or "claude"
 
         self._load_sessions()
         self._mcp_config_path = self._write_mcp_config()
@@ -214,10 +215,10 @@ class ClaudeSessionManager:
         mcp_active = self._mcp_config_path is not None
 
         if claude_session_id:
-            cmd = ["claude", "--resume", claude_session_id, "-p", text,
+            cmd = [self._claude_exe, "--resume", claude_session_id, "-p", text,
                    "--output-format", "stream-json"]
         else:
-            cmd = ["claude", "-p", text, "--output-format", "stream-json"]
+            cmd = [self._claude_exe, "-p", text, "--output-format", "stream-json"]
 
         if mcp_active:
             cmd += ["--mcp-config", str(self._mcp_config_path)]
