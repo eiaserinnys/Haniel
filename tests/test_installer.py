@@ -23,6 +23,7 @@ from haniel.config import (
     EnvironmentConfig,
     ConfigFileConfig,
     ConfigKeyConfig,
+    ServiceAccountConfig,
     ServiceDefinitionConfig,
 )
 
@@ -1761,6 +1762,166 @@ class TestFinalizerExtended:
 
                 assert "Environment=PYTHONPATH=" in joined
                 assert "{root}" not in joined
+
+
+class TestServiceAccount:
+    """Tests for service_account support in WinSW XML generation."""
+
+    @pytest.fixture
+    def _make_finalizer(self):
+        """Factory for creating a Finalizer with given service config."""
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+
+        def _factory(service_cfg, tmpdir):
+            config = HanielConfig(
+                install=InstallConfig(service=service_cfg),
+            )
+            install_root = Path(tmpdir) / "Haniel"
+            config_dir = install_root / ".services" / "test"
+            config_dir.mkdir(parents=True)
+            bin_dir = install_root / "bin"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            (bin_dir / "winsw.exe").write_bytes(b"fake-winsw")
+            state = InstallState()
+            finalizer = Finalizer(config, config_dir, state)
+            return finalizer, config_dir
+
+        return _factory
+
+    def test_model_parses_service_account(self):
+        """ServiceAccountConfig is parsed from YAML-like dict."""
+        cfg = ServiceDefinitionConfig(
+            name="test",
+            service_account=ServiceAccountConfig(
+                username=".\\LG",
+                password="secret123",
+            ),
+        )
+        assert cfg.service_account is not None
+        assert cfg.service_account.username == ".\\LG"
+        assert cfg.service_account.password == "secret123"
+
+    def test_model_service_account_optional(self):
+        """service_account defaults to None."""
+        cfg = ServiceDefinitionConfig(name="test")
+        assert cfg.service_account is None
+
+    @patch("platform.system", return_value="Windows")
+    @patch("shutil.which", side_effect=lambda cmd: {
+        "python": r"C:\Python312\python.exe",
+    }.get(cmd))
+    @patch("subprocess.run", return_value=MagicMock(returncode=0, stderr=""))
+    def test_xml_includes_serviceaccount(
+        self, mock_run, mock_which, mock_system, _make_finalizer
+    ):
+        """WinSW XML includes <serviceaccount> when service_account is set."""
+        service_cfg = ServiceDefinitionConfig(
+            name="test-svc",
+            service_account=ServiceAccountConfig(
+                username=".\\TestUser",
+                password="pass!word",
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            finalizer, config_dir = _make_finalizer(service_cfg, tmpdir)
+            finalizer.register_service()
+
+            xml_path = config_dir / "test-svc.xml"
+            xml_content = xml_path.read_text(encoding="utf-8")
+
+            assert "<serviceaccount>" in xml_content
+            assert "<domain>.</domain>" in xml_content  # ".\\TestUser" -> domain="."
+            assert "<user>TestUser</user>" in xml_content  # ".\\TestUser" -> user="TestUser"
+            assert "<password>pass!word</password>" in xml_content
+            assert "<allowservicelogon>true</allowservicelogon>" in xml_content
+
+    @patch("platform.system", return_value="Windows")
+    @patch("shutil.which", side_effect=lambda cmd: {
+        "python": r"C:\Python312\python.exe",
+    }.get(cmd))
+    @patch("subprocess.run", return_value=MagicMock(returncode=0, stderr=""))
+    def test_xml_no_serviceaccount_when_none(
+        self, mock_run, mock_which, mock_system, _make_finalizer
+    ):
+        """WinSW XML omits <serviceaccount> when service_account is None."""
+        service_cfg = ServiceDefinitionConfig(name="test-svc")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            finalizer, config_dir = _make_finalizer(service_cfg, tmpdir)
+            finalizer.register_service()
+
+            xml_path = config_dir / "test-svc.xml"
+            xml_content = xml_path.read_text(encoding="utf-8")
+
+            assert "<serviceaccount>" not in xml_content
+
+    @pytest.mark.parametrize(
+        "raw_username,expected_domain,expected_user",
+        [
+            (".\\LG", ".", "LG"),
+            ("DOMAIN\\user", "DOMAIN", "user"),
+            ("plainuser", ".", "plainuser"),
+            (".\\김주복", ".", "김주복"),
+        ],
+    )
+    @patch("platform.system", return_value="Windows")
+    @patch("shutil.which", side_effect=lambda cmd: {
+        "python": r"C:\Python312\python.exe",
+    }.get(cmd))
+    @patch("subprocess.run", return_value=MagicMock(returncode=0, stderr=""))
+    def test_username_domain_parsing_in_xml(
+        self, mock_run, mock_which, mock_system,
+        raw_username, expected_domain, expected_user, _make_finalizer
+    ):
+        """Domain and username are correctly parsed and placed in WinSW XML."""
+        service_cfg = ServiceDefinitionConfig(
+            name="test-svc",
+            service_account=ServiceAccountConfig(
+                username=raw_username,
+                password="testpass",
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            finalizer, config_dir = _make_finalizer(service_cfg, tmpdir)
+            finalizer.register_service()
+
+            xml_path = config_dir / "test-svc.xml"
+            xml_content = xml_path.read_text(encoding="utf-8")
+
+            assert f"<domain>{expected_domain}</domain>" in xml_content
+            assert f"<user>{expected_user}</user>" in xml_content
+
+    @patch("platform.system", return_value="Windows")
+    @patch("shutil.which", side_effect=lambda cmd: {
+        "python": r"C:\Python312\python.exe",
+    }.get(cmd))
+    @patch("subprocess.run", return_value=MagicMock(returncode=0, stderr=""))
+    def test_xml_password_with_special_chars(
+        self, mock_run, mock_which, mock_system, _make_finalizer
+    ):
+        """Passwords with XML-special characters are properly escaped."""
+        service_cfg = ServiceDefinitionConfig(
+            name="test-svc",
+            service_account=ServiceAccountConfig(
+                username="user",
+                password='p<a>ss&"word',
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            finalizer, config_dir = _make_finalizer(service_cfg, tmpdir)
+            finalizer.register_service()
+
+            xml_path = config_dir / "test-svc.xml"
+            xml_content = xml_path.read_text(encoding="utf-8")
+
+            assert "<serviceaccount>" in xml_content
+            # XML-escaped special chars
+            assert "&lt;" in xml_content or "p<a>" not in xml_content
+            assert "&amp;" in xml_content
 
 
 class TestOrchestratorPhases:

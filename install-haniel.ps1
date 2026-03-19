@@ -576,9 +576,94 @@ function Main {
     Write-Success "Config ready at $configPath"
 
     # --------------------------------------------------------
-    # Step 6: haniel install
+    # Step 6: Service Account
     # --------------------------------------------------------
-    Write-Step "7/8" "Running haniel install"
+    Write-Step "7/9" "Service Account Verification"
+
+    # Auto-detect current Windows username
+    $ServiceUser = $env:USERNAME
+    $ServiceDomain = "."
+    Write-Info "Current user: $ServiceUser"
+
+    # P/Invoke for LogonUser API
+    Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public class HanielWin32 {
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool LogonUser(
+        string lpszUsername, string lpszDomain, string lpszPassword,
+        int dwLogonType, int dwLogonProvider, out IntPtr phToken);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr hObject);
+}
+'@
+
+    $maxAttempts = 5
+    $attempt = 0
+    $verified = $false
+    $plainPassword = $null
+
+    while (-not $verified -and $attempt -lt $maxAttempts) {
+        $attempt++
+        $remaining = $maxAttempts - $attempt
+        $securePassword = Read-Host "  Enter password for $ServiceUser ($remaining retries left)" -AsSecureString
+        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+        try {
+            $plainPassword = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+        } finally {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        }
+
+        $token = [IntPtr]::Zero
+        # LOGON32_LOGON_SERVICE = 5, LOGON32_PROVIDER_DEFAULT = 0
+        $result = [HanielWin32]::LogonUser($ServiceUser, $ServiceDomain, $plainPassword, 5, 0, [ref]$token)
+
+        if ($result) {
+            [HanielWin32]::CloseHandle($token) | Out-Null
+            $verified = $true
+            Write-Success "Password verified for $ServiceUser"
+        } else {
+            $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            Write-Warn "Login failed (error $errorCode). $remaining attempts remaining."
+        }
+    }
+
+    if (-not $verified) {
+        Write-Fail "Failed to verify password after $maxAttempts attempts."
+        Exit-WithLog 1
+    }
+
+    # Write service_account to haniel.yaml and clean up environment
+    $yamlRaw = Get-Content $configPath -Raw -Encoding UTF8
+
+    # Insert service_account under install.service (top-level "  service:" under "install:")
+    $accountBlock = "    service_account:`n      username: `".\$ServiceUser`"`n      password: `"$plainPassword`""
+
+    if ($yamlRaw -match '(?m)^    service_account:') {
+        # Replace existing service_account block (2 child lines: username, password)
+        $yamlRaw = $yamlRaw -replace '(?m)^    service_account:\r?\n      username:.*\r?\n      password:.*\r?\n?', "$accountBlock`n"
+    } else {
+        # Insert after "  service:" line (the one under "install:")
+        # Match the "  service:" that is at 2-space indent (install.service)
+        $yamlRaw = $yamlRaw -replace '(?m)(^  service:\r?\n)', "`$1$accountBlock`n"
+    }
+
+    # Remove HOME and GIT_CONFIG_GLOBAL from environment (user profile provides these)
+    $yamlRaw = $yamlRaw -replace '(?m)^\s+GIT_CONFIG_GLOBAL:.*\r?\n', ''
+    $yamlRaw = $yamlRaw -replace '(?m)^\s+HOME:.*\r?\n', ''
+    # Remove related comments
+    $yamlRaw = $yamlRaw -replace '(?m)^\s+# Windows.*user profile.*\r?\n', ''
+    $yamlRaw = $yamlRaw -replace '(?m)^\s+# git.*gitconfig.*\r?\n', ''
+
+    [System.IO.File]::WriteAllText($configPath, $yamlRaw, [System.Text.UTF8Encoding]::new($true))
+    Write-Success "Service account written to haniel.yaml"
+
+    # --------------------------------------------------------
+    # Step 7: haniel install
+    # --------------------------------------------------------
+    Write-Step "8/9" "Running haniel install"
 
     # Re-verify WinSW before running haniel install (antivirus may have deleted it)
     $winsxCheck = Join-Path $InstallPath "bin\winsw.exe"
@@ -613,7 +698,7 @@ function Main {
     # --------------------------------------------------------
     # Step 7: Start service
     # --------------------------------------------------------
-    Write-Step "8/8" "Starting Service"
+    Write-Step "9/9" "Starting Service"
 
     # Read service name from install.service.name in YAML
     # Fall back to "haniel" if we can't parse it

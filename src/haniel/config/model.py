@@ -192,7 +192,12 @@ class ConfigFileConfig(BaseModel):
 
 
 class ServiceAccountConfig(BaseModel):
-    """Windows service account configuration (WinSW serviceaccount)."""
+    """Windows service account credentials.
+
+    When set, the service runs under this user account instead of LocalSystem.
+    The user's profile is loaded automatically, so HOME / GIT_CONFIG_GLOBAL
+    do not need to be set manually in environment.
+    """
 
     username: str = Field(
         ...,
@@ -211,6 +216,10 @@ class ServiceDefinitionConfig(BaseModel):
     name: str = Field(..., description="Service name")
     display: str | None = Field(default=None, description="Display name")
     working_directory: str = Field(default="{root}", description="Working directory")
+    service_account: ServiceAccountConfig | None = Field(
+        default=None,
+        description="Windows service account (default: LocalSystem)",
+    )
     environment: dict[str, str] | None = Field(
         default=None, description="Environment variables"
     )

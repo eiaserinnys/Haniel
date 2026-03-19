@@ -288,11 +288,18 @@ class Finalizer:
             ]
         )
 
-        # Service account (default: LocalSystem)
+        # Service account — run as user instead of LocalSystem
         if service_cfg.service_account:
             sa = service_cfg.service_account
+            raw_username = sa.username
+            # Parse domain\user: ".\\LG" -> (".", "LG"), "DOMAIN\\user" -> ("DOMAIN", "user")
+            if "\\" in raw_username:
+                domain, username = raw_username.split("\\", 1)
+            else:
+                domain, username = ".", raw_username
             lines.append("  <serviceaccount>")
-            lines.append(f"    <username>{xml_escape(sa.username)}</username>")
+            lines.append(f"    <domain>{xml_escape(domain)}</domain>")
+            lines.append(f"    <user>{xml_escape(username)}</user>")
             if sa.password is not None:
                 lines.append(f"    <password>{xml_escape(sa.password)}</password>")
             if sa.allow_service_logon:
