@@ -18,6 +18,7 @@ from .static import setup_static
 
 if TYPE_CHECKING:
     from ..core.runner import ServiceRunner
+    from ..core.claude_session import ClaudeSessionManager
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ def setup_dashboard(
     runner: "ServiceRunner",
     loop: asyncio.AbstractEventLoop,
     token: str | None = None,
+    claude_session_manager: "ClaudeSessionManager | None" = None,
 ) -> DashboardWebSocket:
     """Register dashboard routes on an existing aiohttp Application.
 
@@ -82,11 +84,21 @@ def setup_dashboard(
     app.router.add_routes(config_routes)
     app.router.add_route("GET", "/ws", ws_handler.handle_ws)
 
-    logger.info(
-        "Dashboard routes registered: %d API + %d config API + WebSocket",
-        len(api_routes),
-        len(config_routes),
-    )
+    if claude_session_manager is not None:
+        from .chat_ws import ChatWebSocket
+        chat_ws_handler = ChatWebSocket(claude_session_manager)
+        app.router.add_route("GET", "/ws/chat", chat_ws_handler.handle_ws)
+        logger.info(
+            "Dashboard routes registered: %d API + %d config API + WebSocket + Chat WebSocket",
+            len(api_routes),
+            len(config_routes),
+        )
+    else:
+        logger.info(
+            "Dashboard routes registered: %d API + %d config API + WebSocket",
+            len(api_routes),
+            len(config_routes),
+        )
 
     # Serve built frontend (must come after API/WS routes)
     setup_static(app)

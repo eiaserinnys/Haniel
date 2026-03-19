@@ -549,13 +549,27 @@ class HanielMcpServer:
             if dashboard_cfg is not None and dashboard_cfg.enabled:
                 try:
                     from ..dashboard import setup_dashboard
+                    from ..core.claude_session import ClaudeSessionManager
 
                     loop = asyncio.get_event_loop()
+
+                    # Initialise Claude session manager (None if claude not in PATH)
+                    session_manager = None
+                    try:
+                        import shutil
+                        if shutil.which("claude") is not None:
+                            session_manager = ClaudeSessionManager(self.runner)
+                        else:
+                            logger.warning("claude CLI not found in PATH — chat panel disabled")
+                    except Exception as sm_err:
+                        logger.warning("Failed to initialise ClaudeSessionManager: %s", sm_err)
+
                     ws_handler = setup_dashboard(
                         app,
                         self.runner,
                         loop,
                         token=dashboard_cfg.token,
+                        claude_session_manager=session_manager,
                     )
                     self.runner._ws_handler = ws_handler
                     logger.info("Dashboard routes attached to MCP server")
