@@ -115,10 +115,12 @@ class Finalizer:
                 # Fall back to default
                 if value is None and key_cfg.default:
                     value = key_cfg.default
-                    # Substitute {root} placeholder
-                    value = value.replace("{root}", str(self.config_dir))
 
                 if value is not None:
+                    # Substitute {root} placeholder in all values, not just defaults.
+                    # Interactive phase may store default values (containing {root})
+                    # into state as-is.
+                    value = value.replace("{root}", str(self.config_dir))
                     values[key_cfg.key] = value
 
         # Generate file based on extension
