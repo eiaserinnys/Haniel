@@ -13,7 +13,7 @@ from enum import Enum
 from typing import Any
 from urllib.parse import urlparse
 
-import aiohttp
+import httpx
 
 from ..config import WebhookConfig
 
@@ -265,22 +265,22 @@ class WebhookNotifier:
         if not self.webhooks:
             return
 
-        async with aiohttp.ClientSession() as session:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             tasks = [
-                self._send_webhook(session, webhook, msg) for webhook in self.webhooks
+                self._send_webhook(client, webhook, msg) for webhook in self.webhooks
             ]
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _send_webhook(
         self,
-        session: aiohttp.ClientSession,
+        client: httpx.AsyncClient,
         webhook: dict[str, Any],
         msg: WebhookMessage,
     ) -> None:
         """Send a message to a single webhook.
 
         Args:
-            session: The aiohttp session
+            client: The httpx async client
             webhook: Webhook configuration (url, format)
             msg: The message to send
         """
@@ -294,16 +294,12 @@ class WebhookNotifier:
             else:
                 payload = format_json_message(msg)
 
-            async with session.post(
-                webhook["url"],
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as response:
-                if response.status >= 400:
-                    logger.warning(
-                        f"Webhook returned status {response.status}: {_mask_url(webhook['url'])}"
-                    )
-        except asyncio.TimeoutError:
+            response = await client.post(webhook["url"], json=payload)
+            if response.status_code >= 400:
+                logger.warning(
+                    f"Webhook returned status {response.status_code}: {_mask_url(webhook['url'])}"
+                )
+        except httpx.TimeoutException:
             logger.warning(f"Webhook timed out: {_mask_url(webhook['url'])}")
         except Exception as e:
             logger.warning(f"Webhook failed: {_mask_url(webhook['url'])} - {e}")

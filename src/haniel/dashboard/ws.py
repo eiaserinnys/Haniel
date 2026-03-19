@@ -11,11 +11,10 @@ Provides real-time events to dashboard clients:
 import asyncio
 import json
 import logging
-import weakref
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from aiohttp import web, WSMsgType
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 if TYPE_CHECKING:
     from ..core.runner import ServiceRunner
@@ -36,7 +35,7 @@ class DashboardWebSocket:
 
     def __init__(self, runner: "ServiceRunner"):
         self.runner = runner
-        self._clients: weakref.WeakSet[web.WebSocketResponse] = weakref.WeakSet()
+        self._clients: set[WebSocket] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
 
     def setup(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -104,27 +103,25 @@ class DashboardWebSocket:
         if not self._clients:
             return
         text = json.dumps(event)
-        dead: list[web.WebSocketResponse] = []
+        dead: list[WebSocket] = []
         for ws in list(self._clients):
             try:
-                if not ws.closed:
-                    await ws.send_str(text)
+                await ws.send_text(text)
             except Exception:
                 dead.append(ws)
         for ws in dead:
             self._clients.discard(ws)
 
-    async def handle_ws(self, request: web.Request) -> web.WebSocketResponse:
+    async def handle_ws(self, websocket: WebSocket) -> None:
         """Handle a WebSocket upgrade request at GET /ws."""
-        ws = web.WebSocketResponse()
-        await ws.prepare(request)
-        self._clients.add(ws)
+        await websocket.accept()
+        self._clients.add(websocket)
         logger.info("WebSocket client connected")
 
         # Send current full status as initial message
         try:
             status = self.runner.get_status()
-            await ws.send_str(
+            await websocket.send_text(
                 json.dumps(
                     {
                         "type": "init",
@@ -138,13 +135,12 @@ class DashboardWebSocket:
 
         # Keep connection alive, handle pings and closes
         try:
-            async for msg in ws:
-                if msg.type == WSMsgType.ERROR:
-                    logger.warning(f"WebSocket error: {ws.exception()}")
-                    break
-                # Client messages are accepted but not processed
+            while True:
+                await websocket.receive_text()
+        except WebSocketDisconnect:
+            pass
+        except Exception as e:
+            logger.warning(f"WebSocket error: {e}")
         finally:
-            self._clients.discard(ws)
+            self._clients.discard(websocket)
             logger.info("WebSocket client disconnected")
-
-        return ws

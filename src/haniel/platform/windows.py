@@ -134,7 +134,9 @@ class WindowsHandler(PlatformHandler):
         service wrappers) disallow breakaway, causing PermissionError.
 
         Returns:
-            Dict with creationflags for process group creation
+            Dict with creationflags for process group creation.
+            Falls back to CREATE_NEW_PROCESS_GROUP only if breakaway
+            is not available (e.g. restricted Job Object environments).
         """
         flags = CREATE_NEW_PROCESS_GROUP
         if self._breakaway_allowed is None:

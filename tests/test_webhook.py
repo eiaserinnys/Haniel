@@ -270,24 +270,22 @@ class TestWebhookNotifier:
         )
 
         with patch(
-            "haniel.integrations.webhook.aiohttp.ClientSession"
-        ) as mock_session_class:
-            mock_session = MagicMock()
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=None)
+            "haniel.integrations.webhook.httpx.AsyncClient"
+        ) as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
 
             mock_response = MagicMock()
-            mock_response.status = 200
-            mock_response.__aenter__ = AsyncMock(return_value=mock_response)
-            mock_response.__aexit__ = AsyncMock(return_value=None)
+            mock_response.status_code = 200
 
-            mock_session.post = MagicMock(return_value=mock_response)
-            mock_session_class.return_value = mock_session
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_client_class.return_value = mock_client
 
             await notifier.notify(msg)
 
             # Should have posted to both webhooks
-            assert mock_session.post.call_count == 2
+            assert mock_client.post.call_count == 2
 
     @pytest.mark.asyncio
     async def test_notify_handles_failure_gracefully(self):
@@ -306,15 +304,15 @@ class TestWebhookNotifier:
         )
 
         with patch(
-            "haniel.integrations.webhook.aiohttp.ClientSession"
-        ) as mock_session_class:
-            mock_session = MagicMock()
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=None)
+            "haniel.integrations.webhook.httpx.AsyncClient"
+        ) as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
 
             # Simulate failure
-            mock_session.post = MagicMock(side_effect=Exception("Network error"))
-            mock_session_class.return_value = mock_session
+            mock_client.post = AsyncMock(side_effect=Exception("Network error"))
+            mock_client_class.return_value = mock_client
 
             # Should not raise
             await notifier.notify(msg)
@@ -335,19 +333,17 @@ class TestWebhookNotifier:
         )
 
         with patch(
-            "haniel.integrations.webhook.aiohttp.ClientSession"
-        ) as mock_session_class:
-            mock_session = MagicMock()
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=None)
+            "haniel.integrations.webhook.httpx.AsyncClient"
+        ) as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
 
             mock_response = MagicMock()
-            mock_response.status = 200
-            mock_response.__aenter__ = AsyncMock(return_value=mock_response)
-            mock_response.__aexit__ = AsyncMock(return_value=None)
+            mock_response.status_code = 200
 
-            mock_session.post = MagicMock(return_value=mock_response)
-            mock_session_class.return_value = mock_session
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_client_class.return_value = mock_client
 
             # Use sync method
             notifier.notify_sync(msg)
