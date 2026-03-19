@@ -7,6 +7,8 @@ import { ServiceList } from '@/components/ServiceList'
 import { ServiceEditor } from '@/components/ServiceEditor'
 import { RepoEditor } from '@/components/RepoEditor'
 import { DependencyGraph } from '@/components/DependencyGraph'
+import { ChatPanel } from '@/components/ChatPanel'
+import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable'
 import { api } from '@/lib/api'
 import type { ServiceConfig, ServiceConfigInput, RepoConfigInput } from '@/lib/types'
 import { useEffect, useState } from 'react'
@@ -148,10 +150,10 @@ export default function App() {
   const availableServices = status ? Object.keys(status.services) : []
 
   return (
-    <div className="min-h-screen bg-zinc-900 text-zinc-100">
+    <div className="h-screen flex flex-col bg-zinc-900 text-zinc-100">
       {/* Self-update banner */}
       {status?.self_update?.pending && (
-        <div className="bg-blue-900/40 border-b border-blue-700/50 px-4 py-2 flex items-center justify-between">
+        <div className="bg-blue-900/40 border-b border-blue-700/50 px-4 py-2 flex items-center justify-between shrink-0">
           <span className="text-sm text-blue-300">
             A self-update is available for <strong>{status.self_update.repo}</strong>.
           </span>
@@ -173,7 +175,7 @@ export default function App() {
       )}
 
       {/* Header */}
-      <header className="border-b border-zinc-800 px-4 py-3 flex items-center gap-3">
+      <header className="border-b border-zinc-800 px-4 py-3 flex items-center gap-3 shrink-0">
         <h1 className="font-semibold text-zinc-100 flex-1">Haniel Dashboard</h1>
         <WsIndicator status={wsStatus} />
         <button
@@ -185,7 +187,11 @@ export default function App() {
         </button>
       </header>
 
-      <main className="max-w-4xl mx-auto px-4 py-6 space-y-6">
+      {/* Main body: 2-panel split */}
+      <ResizablePanelGroup direction="horizontal" className="flex-1 overflow-hidden">
+        <ResizablePanel defaultSize={60} minSize={20}>
+          <div className="h-full overflow-y-auto">
+            <main className="max-w-4xl mx-auto px-4 py-6 space-y-6">
         {/* Error banner */}
         {(error || crudError) && (
           <div className="bg-red-900/30 border border-red-700/50 rounded-lg px-4 py-2 text-sm text-red-300">
@@ -345,7 +351,16 @@ export default function App() {
             </section>
           </>
         )}
-      </main>
+            </main>
+          </div>
+        </ResizablePanel>
+
+        <ResizableHandle />
+
+        <ResizablePanel defaultSize={40} minSize={15}>
+          <ChatPanel />
+        </ResizablePanel>
+      </ResizablePanelGroup>
 
       {/* ServiceEditor dialog */}
       {svcEditor.open && (

@@ -1,5 +1,54 @@
 @import "tailwindcss";
 
+/* ── Chat panel CSS variables ───────────────────────────────────────────── */
+
+/* @theme inline: activate text-accent-blue etc. utility classes (Tailwind v4) */
+@theme inline {
+  --color-accent-blue: var(--node-user);
+  --color-accent-green: var(--node-response);
+  --color-accent-orange: var(--node-tool);
+  --color-accent-red: var(--node-error);
+  --color-muted-foreground: oklch(0.55 0 0);
+  --color-foreground: oklch(0.95 0 0);
+  --color-border: oklch(0.25 0 0);
+  --color-input: oklch(0.15 0 0);
+  --color-background: oklch(0.11 0 0);
+  --color-muted: oklch(0.2 0 0);
+}
+
+:root {
+  /* node colours (light mode) */
+  --node-user: #3b82f6;
+  --node-response: #10b981;
+  --node-tool: #f97316;
+  --node-intervention: #a855f7;
+  --node-error: #ef4444;
+  --node-system: #6b7280;
+}
+
+.dark {
+  --node-user: hsl(213, 70%, 50%);
+  --node-response: hsl(160, 60%, 40%);
+  --node-tool: hsl(25, 80%, 50%);
+  --node-intervention: hsl(270, 60%, 50%);
+  --node-error: hsl(0, 70%, 50%);
+  --node-system: hsl(220, 10%, 45%);
+}
+
+/* custom scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: oklch(0.3 0 0); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: oklch(0.4 0 0); }
+
+/* streaming cursor animation */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* ── Haniel base variables ────────────────────────────────────────────────── */
+
 :root {
   --background: 222 47% 11%;
   --foreground: 210 40% 98%;
