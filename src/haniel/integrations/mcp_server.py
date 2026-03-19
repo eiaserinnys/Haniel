@@ -570,7 +570,7 @@ class HanielMcpServer:
                                         claude_path = candidate
                                         break
                         if claude_path is not None:
-                            session_manager = ClaudeSessionManager(self.runner)
+                            session_manager = ClaudeSessionManager(self.runner, claude_path=claude_path)
                         else:
                             logger.warning("claude CLI not found — chat panel disabled. "
                                            "Set CLAUDE_CLI_DIR in haniel.yaml service.environment.")
