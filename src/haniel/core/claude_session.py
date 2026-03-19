@@ -216,9 +216,9 @@ class ClaudeSessionManager:
 
         if claude_session_id:
             cmd = [self._claude_exe, "--resume", claude_session_id, "-p", text,
-                   "--output-format", "stream-json"]
+                   "--output-format", "stream-json", "--verbose"]
         else:
-            cmd = [self._claude_exe, "-p", text, "--output-format", "stream-json"]
+            cmd = [self._claude_exe, "-p", text, "--output-format", "stream-json", "--verbose"]
 
         if mcp_active:
             cmd += ["--mcp-config", str(self._mcp_config_path)]
