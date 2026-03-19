@@ -58,11 +58,16 @@ class ClaudeSessionManager:
 
         # Workspace directory for Claude Code sessions.
         # This is the cwd passed to ClaudeAgentOptions. The SDK reads
-        # .mcp.json from cwd when setting_sources=['project'].
-        # Path: {root}/workspace/.projects/haniel/workspace
-        self._workspace_path = (
-            runner.config_dir / "workspace" / ".projects" / "haniel" / "workspace"
-        )
+        # .mcp.json from cwd *and walks up the directory tree*.
+        # IMPORTANT: Must NOT be a descendant of workspace/ because
+        # workspace/.mcp.json contains 11 MCP servers for soulstream sessions,
+        # which would be loaded into the dashboard chat CLI and cause startup
+        # failures (exit code 1).
+        # Path: {root}/.self/workspace — the haniel repo's runtime workspace.
+        # Source: .projects/haniel/workspace/ (rules, skills, .mcp.json)
+        # Deployed: .self/workspace/ via git pull
+        # .self/.gitignore lists workspace/ so it's runtime-only local data.
+        self._workspace_path = runner.config_dir / ".self" / "workspace"
         self._workspace_path.mkdir(parents=True, exist_ok=True)
 
         # CLI stderr log directory (same as workspace for simplicity)
