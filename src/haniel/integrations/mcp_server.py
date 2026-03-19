@@ -533,8 +533,16 @@ class HanielMcpServer:
 
             # Create aiohttp app
             app = web.Application()
-            app.router.add_route("GET", "/sse", sse.handle_sse)
-            app.router.add_route("POST", "/sse", sse.handle_post_message)
+            # mcp >= 1.0 removed handle_sse (replaced with ASGI-based connect_sse).
+            # Fall back to dashboard-only mode if SSE transport is unavailable.
+            if hasattr(sse, "handle_sse"):
+                app.router.add_route("GET", "/sse", sse.handle_sse)
+                app.router.add_route("POST", "/sse", sse.handle_post_message)
+            else:
+                logger.warning(
+                    "MCP SSE transport unavailable (mcp >= 1.0 removed handle_sse). "
+                    "Starting in dashboard-only mode."
+                )
 
             # Attach dashboard routes only when explicitly enabled in config
             dashboard_cfg = self.runner.config.dashboard
