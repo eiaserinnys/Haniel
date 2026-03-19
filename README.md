@@ -1,5 +1,7 @@
 # haniel
 
+[![CI](https://github.com/eiaserinnys/haniel/actions/workflows/test.yml/badge.svg)](https://github.com/eiaserinnys/haniel/actions/workflows/test.yml)
+
 Configuration-based, intentionally indifferent service runner.
 
 haniel monitors git repositories, pulls changes, and restarts processes.
@@ -9,11 +11,13 @@ Whether it's a Slack bot, an MCP server, or a web dashboard, haniel treats every
 
 - **Git polling**: Watches configured repositories for new commits
 - **Process management**: Starts, stops, and restarts services based on YAML config
-- **Lifecycle hooks**: Runs post-pull commands (dependency installs, builds, etc.)
+- **Lifecycle hooks**: Runs `pre_start` and `post_pull` commands (dependency installs, builds, etc.)
 - **Health monitoring**: Detects crashes and restarts with exponential backoff + circuit breaker
 - **Dependency ordering**: Starts services in the right order using `after` and `ready` conditions
-- **Webhook notifications**: Sends alerts on deployments, crashes, and failures
-- **MCP server**: Exposes status and control tools for Claude Code integration
+- **Webhook notifications**: Sends alerts on deployments, crashes, and failures (Slack, Discord, JSON)
+- **MCP server**: Exposes status and control tools for Claude Code integration via Streamable HTTP
+- **Web dashboard**: React-based management UI with real-time WebSocket updates and Claude Code chat panel
+- **Config API**: Runtime YAML configuration CRUD (add/update/remove services and repos without restart)
 - **Self-update**: Updates its own code via a two-loop architecture
 
 ## What haniel doesn't care about
@@ -108,8 +112,8 @@ haniel uses a two-loop design to solve the "surgeon can't operate on themselves"
 
 ```
 WinSW (Windows service)
-  └─ haniel-runner.ps1 (outer loop — survives updates)
-       └─ haniel run (inner loop — the actual service)
+  +-- haniel-runner.ps1 (outer loop -- survives updates)
+       +-- haniel run (inner loop -- the actual service)
 ```
 
 - **Inner loop** (`haniel run`): Monitors repos, manages services. When it detects changes to its own repo, it exits with code 10.
@@ -118,6 +122,58 @@ WinSW (Windows service)
 - **Other exit codes**: Crash — outer loop exits with the same code.
 
 See [ADR-0002](docs/adr/0002-self-update-architecture.md) for the full decision record.
+
+## Web dashboard
+
+haniel includes a built-in web dashboard for managing services through a browser.
+
+### Enabling the dashboard
+
+```yaml
+dashboard:
+  enabled: true
+  port: 3200       # Shares port with MCP server
+  token: "secret"  # Bearer token for API/WebSocket authentication
+```
+
+The dashboard is mounted on the same Starlette server as the MCP endpoint. No additional port is needed.
+
+### Features
+
+- **Service management**: Start, stop, restart, enable/disable services
+- **Repository status**: View repo state, trigger manual pulls
+- **Real-time updates**: WebSocket event stream (state changes, repo updates, self-update notifications)
+- **Config editor**: Add, update, remove services and repos at runtime (atomic write with backup)
+- **Dependency graph**: Visual display of service dependency relationships
+- **Log viewer**: Live service log output
+- **Claude Code chat**: Integrated chat panel powered by `claude-agent-sdk`
+- **Self-update control**: Approve pending updates from the browser
+
+### REST API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/status` | Overall haniel status |
+| GET | `/api/services` | All services with state |
+| POST | `/api/services/{name}/start` | Start a service |
+| POST | `/api/services/{name}/stop` | Stop a service |
+| POST | `/api/services/{name}/restart` | Restart a service |
+| POST | `/api/services/{name}/enable` | Toggle service enabled/disabled |
+| GET | `/api/services/{name}/logs` | Service log output |
+| GET | `/api/repos` | Repository statuses |
+| POST | `/api/repos/{name}/pull` | Trigger manual pull |
+| POST | `/api/self-update/approve` | Approve pending self-update |
+| POST | `/api/reload` | Reload haniel.yaml |
+| GET | `/api/config` | Full YAML config |
+| GET/PUT/POST/DELETE | `/api/config/services/{name}` | Service CRUD |
+| GET/PUT/POST/DELETE | `/api/config/repos/{name}` | Repository CRUD |
+
+All `/api/*` and `/ws` endpoints require `Authorization: Bearer <token>`.
+
+### WebSocket
+
+- `/ws` — Real-time event stream (`state_change`, `repo_change`, `self_update_pending`, `reload_complete`)
+- `/ws/chat` — Claude Code chat session bridge
 
 ## Managing multiple services
 
@@ -134,6 +190,21 @@ haniel validate haniel.yaml
 haniel status haniel.yaml
 ```
 
+## Configuration highlights
+
+Beyond the basics, haniel supports:
+
+| Feature | Config key | Description |
+|---------|-----------|-------------|
+| Auto-apply control | `services.*.auto_apply` | `false` to detect changes without auto-restarting; apply manually via dashboard |
+| Pre-start hooks | `services.*.hooks.pre_start` | Commands to run before service start (in addition to `post_pull`) |
+| Build step | `install.environments.*.build` | Post-install build command (e.g. `pnpm run build`) |
+| pnpm support | `install.environments.*.type: pnpm` | pnpm as environment type alongside `python-venv` and `npm` |
+| Service account | `install.service.service_account` | Run the Windows service under a specific user (`username`, `password`) |
+| Cogito reflect | `services.*.reflect` | Expose `/reflect` endpoint for service introspection |
+
+See [Specifications](docs/specifications.md) for the full configuration reference.
+
 ## Commands
 
 | Command | Description |
@@ -142,6 +213,37 @@ haniel status haniel.yaml
 | `haniel run <config>` | Start services and enter the poll loop |
 | `haniel status <config>` | Show service and repository status |
 | `haniel validate <config>` | Check configuration validity |
+
+## MCP integration
+
+haniel exposes its state and control interface through the Model Context Protocol.
+
+**Transport**: Streamable HTTP (default), SSE also supported via `mcp.transport` config.
+
+**Resources** (read-only):
+- `haniel://status` — Overall status
+- `haniel://repos` — Repository information
+- `haniel://services/{name}/logs` — Service logs
+
+**Tools** (control):
+- `haniel_start`, `haniel_stop`, `haniel_restart` — Service lifecycle
+- `haniel_pull` — Trigger repository pull
+- `haniel_enable` — Toggle service enabled/disabled
+- `haniel_reload` — Reload configuration
+- `haniel_approve_update` — Approve pending self-update
+
+Connect from Claude Code with:
+
+```json
+{
+  "mcpServers": {
+    "haniel": {
+      "type": "http",
+      "url": "http://localhost:3200/mcp/http"
+    }
+  }
+}
+```
 
 ## Documentation
 
@@ -157,6 +259,17 @@ git clone https://github.com/eiaserinnys/haniel.git
 cd haniel
 pip install -e ".[dev]"
 pytest
+```
+
+**Requirements**: Python 3.11+, `claude-agent-sdk` (bundled as a dependency for the dashboard chat panel).
+
+The dashboard frontend is a separate React app under `dashboard/`:
+
+```bash
+cd dashboard
+pnpm install
+pnpm run build    # Build static assets (served by haniel at runtime)
+pnpm run dev      # Dev server with hot reload
 ```
 
 ## License
