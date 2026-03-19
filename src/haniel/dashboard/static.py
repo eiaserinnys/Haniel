@@ -24,8 +24,9 @@ _API_PREFIXES = ("/api/", "/ws", "/sse")
 def _find_dist() -> Path | None:
     """Locate the Vite build output relative to this file."""
     # src/haniel/dashboard/static.py → project root / dashboard / dist
+    # .parent×3: dashboard/ → haniel/ → src/ → .self/
     here = Path(__file__).parent
-    candidate = here.parent.parent.parent.parent / "dashboard" / "dist"
+    candidate = here.parent.parent.parent / "dashboard" / "dist"
     if candidate.is_dir():
         return candidate
     return None
