@@ -236,6 +236,7 @@ class ClaudeSessionManager:
             ],
             disallowed_tools=["NotebookEdit", "TodoWrite"],
             setting_sources=["project"],
+            stderr=lambda line: logger.warning("claude stderr: %s", line),
         )
         if claude_session_id:
             opts.resume = claude_session_id
