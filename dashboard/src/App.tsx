@@ -59,6 +59,7 @@ export default function App() {
     wsStatus,
     controlService,
     pullRepo,
+    pullingRepos,
     approveSelfUpdate,
     dismissSelfUpdate,
     refreshStatus,
@@ -261,7 +262,11 @@ export default function App() {
                           </span>
                         </div>
                         <div className="flex items-center gap-2">
-                          {repo.pending_changes && (
+                          {pullingRepos.has(name) ? (
+                            <span className="text-xs text-blue-400/60 px-2 py-1 animate-pulse">
+                              Pulling…
+                            </span>
+                          ) : repo.pending_changes && (
                             <button
                               onClick={() => pullRepo(name)}
                               className="text-xs bg-blue-600/20 text-blue-400 hover:bg-blue-600/40 px-2 py-1 rounded transition-colors"

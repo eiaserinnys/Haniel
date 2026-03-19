@@ -35,11 +35,18 @@ export interface ServiceStatus {
   config: ServiceConfig
 }
 
+export interface PendingChanges {
+  commits: string[]
+  stat: string
+}
+
 export interface RepoStatus {
   url: string
   branch: string
   path: string
-  pending_changes: boolean
+  last_head: string | null
+  pending_changes: PendingChanges | null
+  fetch_error: string | null
 }
 
 export interface RepoConfigInput {
@@ -55,13 +62,18 @@ export interface SelfUpdateStatus {
 }
 
 export interface DependencyInfo {
-  services: Record<string, string[]>
+  dependencies: string[]
 }
 
 export interface RunnerStatus {
   services: Record<string, ServiceStatus>
   repos: Record<string, RepoStatus>
   self_update: SelfUpdateStatus | null
+  dependency_graph: Record<string, DependencyInfo> | null
+  poll_count: number
+  poll_interval: number
+  last_poll: string | null
+  pending_restarts: string[]
 }
 
 // WebSocket event types
@@ -81,7 +93,7 @@ export interface WsStateChangeEvent {
 export interface WsRepoChangeEvent {
   type: 'repo_change'
   repo: string
-  pending_changes: boolean
+  pending_changes: PendingChanges | null
 }
 
 export interface WsSelfUpdatePendingEvent {

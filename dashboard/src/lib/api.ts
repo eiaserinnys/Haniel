@@ -33,7 +33,7 @@ export const api = {
 
   deleteService: (name: string) => request(`/api/services/${name}`, { method: 'DELETE' }),
 
-  pullRepo: (name: string) => request(`/api/repos/${name}/pull`, { method: 'POST' }),
+  pullRepo: (name: string) => request<{ ok: boolean; repo: string; head: string | null }>(`/api/repos/${name}/pull`, { method: 'POST' }),
 
   createRepo: (name: string, config: RepoConfigInput) =>
     request(`/api/repos/${name}`, {
@@ -52,8 +52,12 @@ export const api = {
   deleteRepo: (name: string) => request(`/api/repos/${name}`, { method: 'DELETE' }),
 
   approveSelfUpdate: () => request('/api/self-update/approve', { method: 'POST' }),
+
+  getConfigRepos: () => request<Record<string, RepoConfigInput>>('/api/config/repos'),
+  reload: () => request('/api/config/reload', { method: 'POST' }),
 }
 
-export function getServiceLogs(name: string): Promise<string[]> {
-  return request<string[]>(`/api/services/${name}/logs`)
+export function getServiceLogs(name: string, count?: number): Promise<{ lines: string[] }> {
+  const params = count ? `?lines=${count}` : ''
+  return request<{ lines: string[] }>(`/api/services/${name}/logs${params}`)
 }

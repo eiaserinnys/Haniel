@@ -195,12 +195,17 @@ def create_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
             for svc in startup_order:
                 await loop.run_in_executor(None, runner._start_service, svc)
 
+            # Include updated head commit for immediate client-side state update
+            repo_state = runner._repo_states.get(name)
+            new_head = repo_state.last_head if repo_state else None
+
             return _json_response(
                 {
                     "ok": True,
                     "repo": name,
                     "action": "pull",
                     "restarted": startup_order,
+                    "head": new_head,
                 }
             )
         except Exception as e:

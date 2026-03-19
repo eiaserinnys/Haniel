@@ -886,6 +886,7 @@ class ServiceRunner:
                 branch=state.config.branch,
             )
             state.last_head = get_head(repo_path)
+            state.pending_changes = None
             head_short = state.last_head[:8] if state.last_head else "unknown"
             logger.info(f"Pulled {repo_name}, new HEAD: {head_short}")
             return True

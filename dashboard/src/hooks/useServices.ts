@@ -93,11 +93,29 @@ export function useServices() {
     [],
   )
 
+  const [pullingRepos, setPullingRepos] = useState<Set<string>>(new Set())
+
   const pullRepo = useCallback(async (name: string) => {
+    setPullingRepos(prev => new Set(prev).add(name))
     try {
-      await api.pullRepo(name)
+      const result = await api.pullRepo(name)
+      // 즉시 상태 갱신: pending_changes 제거 + head 업데이트
+      setStatus(prev => {
+        if (!prev) return prev
+        const repos = { ...prev.repos }
+        if (repos[name]) {
+          repos[name] = { ...repos[name], pending_changes: null, last_head: result.head ?? repos[name].last_head }
+        }
+        return { ...prev, repos }
+      })
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setPullingRepos(prev => {
+        const next = new Set(prev)
+        next.delete(name)
+        return next
+      })
     }
   }, [])
 
@@ -132,6 +150,7 @@ export function useServices() {
     wsStatus: connectionState,
     controlService,
     pullRepo,
+    pullingRepos,
     approveSelfUpdate,
     dismissSelfUpdate,
     refreshStatus,
