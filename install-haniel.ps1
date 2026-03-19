@@ -639,7 +639,8 @@ public class HanielWin32 {
     $yamlRaw = Get-Content $configPath -Raw -Encoding UTF8
 
     # Insert service_account under install.service (top-level "  service:" under "install:")
-    $accountBlock = "    service_account:`n      username: `".\$ServiceUser`"`n      password: `"$plainPassword`""
+    # YAML 작은따옴표 사용 — 큰따옴표에서는 \e 등이 YAML 이스케이프 시퀀스로 해석됨
+    $accountBlock = "    service_account:`n      username: '.\$ServiceUser'`n      password: '$plainPassword'"
 
     if ($yamlRaw -match '(?m)^    service_account:') {
         # Replace existing service_account block (2 child lines: username, password)
