@@ -1286,7 +1286,10 @@ class TestMechanicalInstallerExtended:
             # Should call git pull --ff-only, not git clone
             mock_run.assert_called_once()
             call_args = mock_run.call_args[0][0]
-            assert call_args[:4] == ["git", "-C", str(repo_path), "pull"]
+            # Use resolve() to normalize Windows short paths (e.g. RUNNER~1 vs runneradmin)
+            assert call_args[:2] == ["git", "-C"]
+            assert Path(call_args[2]).resolve() == repo_path.resolve()
+            assert call_args[3] == "pull"
             assert "--ff-only" in call_args
             assert "repos" in state.completed_steps
 

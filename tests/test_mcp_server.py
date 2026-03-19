@@ -9,7 +9,7 @@ Tests the MCP server that provides Claude Code integration:
 import json
 import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from haniel.config import HanielConfig, McpConfig, ServiceConfig, RepoConfig
 from haniel.core.health import ServiceState

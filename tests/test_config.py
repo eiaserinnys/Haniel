@@ -6,7 +6,6 @@ import pytest
 
 from haniel.config import (
     HanielConfig,
-    HooksConfig,
     RepoConfig,
     ServiceConfig,
     ShutdownConfig,

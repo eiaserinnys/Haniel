@@ -498,7 +498,7 @@ class MechanicalInstaller:
             self.state.mark_failed(f"environments:{name}", str(e))
             return False
         except FileNotFoundError:
-            logger.error(f"pnpm not found. Install it with: npm install -g pnpm")
+            logger.error("pnpm not found. Install it with: npm install -g pnpm")
             self.state.mark_failed(f"environments:{name}", "pnpm not found in PATH")
             return False
         except Exception as e:

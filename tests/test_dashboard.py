@@ -260,8 +260,6 @@ class TestDashboardWebSocket:
     @pytest.mark.asyncio
     async def test_state_change_broadcast(self, dashboard_app, mock_runner):
         """State change events are broadcast to connected WebSocket clients."""
-        from haniel.dashboard.ws import DashboardWebSocket
-
         # Get the ws_handler by rebuilding the app
         from haniel.dashboard import setup_dashboard
 

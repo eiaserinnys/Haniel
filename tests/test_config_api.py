@@ -16,14 +16,14 @@ Covers:
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from haniel.config import HanielConfig, McpConfig, RepoConfig, ServiceConfig
+from haniel.config import HanielConfig, RepoConfig, ServiceConfig
 from haniel.dashboard import setup_dashboard
 
 
