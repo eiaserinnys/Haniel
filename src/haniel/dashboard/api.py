@@ -180,6 +180,12 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
             if not success:
                 return _error(f"Failed to pull repository '{name}'")
 
+            # Execute post_pull hooks for affected services
+            for svc in affected:
+                await loop.run_in_executor(
+                    None, runner.execute_hook, svc, "post_pull"
+                )
+
             startup_order = await loop.run_in_executor(None, runner.get_startup_order)
             startup_order = [s for s in startup_order if s in affected]
             for svc in startup_order:

@@ -269,6 +269,11 @@ class SelfUpdateConfig(BaseModel):
 class HanielConfig(BaseModel):
     """Root configuration for haniel.yaml."""
 
+    auto_apply: bool = Field(
+        default=True,
+        description="If false, detected changes are shown in dashboard but not auto-applied. "
+        "Manual Update from dashboard is still possible.",
+    )
     poll_interval: int = Field(
         default=60, description="Seconds between git fetch polls"
     )

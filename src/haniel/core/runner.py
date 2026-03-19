@@ -11,6 +11,7 @@ haniel doesn't care what it runs. It polls, pulls, and restarts as configured.
 
 import logging
 import os
+import re
 import shlex
 import subprocess
 import threading
@@ -26,7 +27,14 @@ from ..config import (
     ServiceConfig,
     ShutdownConfig,
 )
-from .git import fetch_repo, pull_repo, get_head, get_pending_changes, GitError
+from .git import (
+    GitError,
+    fetch_repo,
+    get_head,
+    get_pending_changes,
+    get_remote_head,
+    pull_repo,
+)
 from .health import HealthManager
 from .process import ProcessManager
 
@@ -415,6 +423,13 @@ class ServiceRunner:
         # mirroring the same pattern used in installer/mechanical.py _apply_config_template
         hook_cmd = hook_cmd.replace("{root}", str(self.config_dir))
 
+        # On Windows, cmd.exe cannot parse "./path" — it treats "." as a command
+        # name and fails with "'.' is not recognized".  Resolve all "./" prefixes
+        # to the absolute config directory so cmd.exe receives a valid path.
+        if os.name == "nt":
+            config_prefix = str(self.config_dir).replace("\\", "/") + "/"
+            hook_cmd = re.sub(r"(?<![.\w])\./", config_prefix, hook_cmd)
+
         logger.info(f"Executing {hook_name} hook for {service_name}: {hook_cmd}")
 
         try:
@@ -658,6 +673,13 @@ class ServiceRunner:
     def _detect_changes(self) -> list[str]:
         """Detect changes in all repositories.
 
+        Uses a three-way comparison: last_head (haniel's last processed HEAD)
+        vs current_head (repo's actual HEAD, which may have been advanced by
+        an external process) vs remote_head (origin after fetch).
+
+        This ensures changes are detected even when an external process
+        (e.g. Claude Code session) pulls the repo directly.
+
         Returns:
             List of repo names that have changes
         """
@@ -671,15 +693,24 @@ class ServiceRunner:
                 continue
 
             try:
-                has_changes = fetch_repo(
+                # Fetch from remote (don't rely on return value)
+                fetch_repo(
                     path=repo_path,
                     branch=state.config.branch,
                 )
                 state.last_fetch = datetime.now()
                 state.fetch_error = None
 
-                if has_changes:
-                    logger.info(f"Changes detected in repo: {name}")
+                # Read current HEAD (may differ from last_head if externally pulled)
+                current_head = get_head(repo_path)
+
+                if current_head != state.last_head:
+                    # External pull or other process advanced HEAD
+                    last_short = state.last_head[:8] if state.last_head else "None"
+                    logger.info(
+                        f"Changes detected in repo: {name} "
+                        f"(last_head={last_short} → current={current_head[:8]})"
+                    )
                     changed.append(name)
                     state.pending_changes = get_pending_changes(
                         path=repo_path,
@@ -690,7 +721,26 @@ class ServiceRunner:
                             name, state.pending_changes or {}
                         )
                 else:
-                    state.pending_changes = None
+                    # current == last_head, check if remote has new commits
+                    remote_head = get_remote_head(
+                        repo_path, state.config.branch
+                    )
+                    if remote_head != current_head:
+                        logger.info(
+                            f"Remote changes available for repo: {name} "
+                            f"(current={current_head[:8]} → remote={remote_head[:8]})"
+                        )
+                        changed.append(name)
+                        state.pending_changes = get_pending_changes(
+                            path=repo_path,
+                            branch=state.config.branch,
+                        )
+                        if self._ws_handler is not None:
+                            self._ws_handler.broadcast_repo_change(
+                                name, state.pending_changes or {}
+                            )
+                    else:
+                        state.pending_changes = None
 
             except GitError as e:
                 logger.error(f"Failed to fetch {name}: {e}")
@@ -715,6 +765,11 @@ class ServiceRunner:
             changed_repos = [r for r in changed_repos if r != self._self_repo]
             if not changed_repos:
                 return
+
+        # auto_apply=false: detection only, skip stop→pull→restart
+        if not self.config.auto_apply:
+            logger.info("auto_apply=false, skipping apply for: %s", changed_repos)
+            return
 
         # Collect all affected services
         all_affected: set[str] = set()
