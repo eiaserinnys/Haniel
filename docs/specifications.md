@@ -29,7 +29,7 @@ haniel just executes commands.
 ### `haniel install` — Installation mode
 
 Builds the entire execution environment on a bare machine.
-haniel handles what it can mechanically (directories, git clone, venv, npm),
+haniel handles what it can mechanically (directories, git clone, venv, npm/pnpm),
 and **delegates to Claude Code** for anything requiring human conversation (secret collection, configuration choices).
 
 Installation flow:
@@ -45,8 +45,21 @@ After installation, services can be started with `haniel run`.
 
 ### `haniel run` — Runtime mode
 
-Uses only the `repos` and `services` sections of haniel.yaml.
-git poll → pull → restart processes. That's all.
+The main operational mode. Starts all services, enters the poll loop, and runs until shutdown.
+
+At startup:
+- Loads `haniel.yaml` (all sections: `repos`, `services`, `mcp`, `dashboard`, etc.)
+- Starts the MCP server (Streamable HTTP on port 3200 by default)
+- Mounts the web dashboard if `dashboard.enabled` is true (shares the MCP port)
+- Starts services in dependency order
+- Enters the poll loop
+
+At runtime:
+- git poll → change detection → apply (if `auto_apply` is true) or display in dashboard (if false)
+- Health monitoring with exponential backoff and circuit breaker
+- Config reload via MCP tool or dashboard API (no process restart needed)
+- Config CRUD via dashboard API (add/update/remove services and repos at runtime)
+
 Does not touch .env, .mcp.json, venv, etc.
 
 ### `haniel status` — Status query
@@ -67,9 +80,15 @@ Used for pre-run validation.
 
 ## Configuration file (`haniel.yaml`)
 
+> **Full field reference**: See [configuration.md](configuration.md) for every field, type, and default value.
+
+This section shows the overall structure and annotated examples.
+
 ### Full structure
 
 ```yaml
+auto_apply: true               # If false, changes shown in dashboard but not auto-applied
+
 poll_interval: 60
 
 shutdown:
@@ -90,51 +109,51 @@ webhooks:
 
 mcp:
   enabled: true
-  transport: sse
+  transport: streamable_http   # Default. Also supports: stdio
   port: 3200
+
+dashboard:
+  enabled: true
+  port: null                   # null = share MCP port
+  token: "your-secret-token"   # Bearer token for API/WebSocket auth
 
 repos:
   my-app:
     url: git@github.com:org/my-app.git
     branch: main
-    path: ./.projects/my-app
+    path: ./.services/my-app
 
-  my-server:
-    url: git@github.com:org/my-server.git
+  my-lib:
+    url: git@github.com:org/my-lib.git
     branch: main
-    path: ./.projects/my-server
-
-  my-data:
-    url: git@github.com:org/my-data.git
-    branch: main
-    path: ./.projects/my-data
+    path: ./.services/my-lib
 
 services:
   mcp-server:
-    run: ./runtime/mcp_venv/Scripts/python.exe -X utf8 -m myapp.mcp --transport=sse --port=3104
-    cwd: ./workspace
+    run: ./runtime/venv/Scripts/python.exe -m myapp.mcp --port=3104
+    cwd: ./.services/my-app
     repo: my-app
     ready: port:3104
     restart_delay: 3
+    reflect: true              # Expose cogito /reflect endpoint
     hooks:
-      post_pull: ./runtime/mcp_venv/Scripts/pip.exe install -r ./runtime/mcp_requirements.txt
+      post_pull: ./runtime/venv/Scripts/pip.exe install -r requirements.txt
+      pre_start: echo "checking prerequisites..."
 
   bot:
-    run: ./runtime/venv/Scripts/python.exe -X utf8 -m myapp.bot
-    cwd: ./workspace
+    run: ./runtime/venv/Scripts/python.exe -m myapp.bot
+    cwd: ./.services/my-app
     repo: my-app
     after: mcp-server
     shutdown:
       signal: SIGTERM
       timeout: 15
     hooks:
-      post_pull: ./runtime/venv/Scripts/pip.exe install -r ./runtime/requirements.txt
-
-  # ... (additional services omitted, full example below)
+      post_pull: ./runtime/venv/Scripts/pip.exe install -r requirements.txt
 
 self:
-  repo: haniel          # key from repos section
-  auto_update: false    # default: false (opt-in)
+  repo: haniel
+  auto_update: false
 
 install:
   requirements:
@@ -146,108 +165,41 @@ install:
   directories:
     - ./runtime
     - ./runtime/logs
-    - ./runtime/data
-    - ./workspace
-    - ./workspace/.local
-    - ./workspace/.local/artifacts
-    - ./workspace/.local/incoming
-    - ./workspace/.local/tmp
 
   environments:
     main-venv:
       type: python-venv
       path: ./runtime/venv
       requirements:
-        - ./runtime/requirements.txt
+        - ./requirements.txt
 
-    mcp-venv:
-      type: python-venv
-      path: ./runtime/mcp_venv
-      requirements:
-        - ./runtime/mcp_requirements.txt
-
-    server-venv:
-      type: python-venv
-      path: ./server_runtime/venv
-      requirements:
-        - ./server_runtime/requirements.txt
-
-    runtime-node:
-      type: npm
-      path: ./runtime
+    frontend:
+      type: pnpm
+      path: ./.services/dashboard
+      build: pnpm run build
 
   configs:
-    workspace-env:
-      path: ./workspace/.env
+    app-env:
+      path: ./.services/my-app/.env
       keys:
-        # Slack
         - key: SLACK_BOT_TOKEN
           prompt: "Slack Bot Token (xoxb-...)"
-        - key: SLACK_APP_TOKEN
-          prompt: "Slack App Token (xapp-...)"
-        - key: SLACK_MCP_XOXC_TOKEN
-          prompt: "Slack MCP XOXC Token"
-        - key: SLACK_MCP_XOXD_TOKEN
-          prompt: "Slack MCP XOXD Token"
-        - key: ALLOWED_USERS
-          prompt: "Allowed user IDs (comma-separated)"
-        - key: NOTIFY_CHANNEL
-          prompt: "Notification channel ID"
-        # API Keys
-        - key: GEMINI_API_KEY
-          prompt: "Gemini API Key"
-        - key: OUTLINE_API_KEY
-          prompt: "Outline API Key"
-        - key: OUTLINE_API_URL
-          prompt: "Outline API URL"
-        - key: TRELLO_API_KEY
-          prompt: "Trello API Key"
-        - key: TRELLO_TOKEN
-          prompt: "Trello Token"
-        # Paths
-        - key: LOG_PATH
-          default: "{root}/runtime/logs"
-        - key: SESSION_PATH
-          default: "{root}/runtime/sessions"
-        - key: MEMORY_PATH
-          default: "{root}/runtime/memory"
-        # Flags
+          guide: "https://api.slack.com/apps -> OAuth & Permissions"
         - key: DEBUG
           default: "false"
 
-    workspace-mcp:
-      path: ./workspace/.mcp.json
+    app-mcp:
+      path: ./.services/my-app/.mcp.json
       content: |
-        {
-          "mcpServers": {
-            "my-mcp": {
-              "url": "http://localhost:3104/sse"
-            },
-            "haniel": {
-              "url": "http://localhost:3200/sse"
-            },
-            "slack": {
-              "url": "http://localhost:3101/sse"
-            },
-            "trello": {
-              "url": "http://localhost:3102/sse"
-            },
-            "outline": {
-              "url": "http://localhost:3103/sse"
-            }
-          }
-        }
-
-    webhook-config:
-      path: ./runtime/data/watchdog_config.json
-      keys:
-        - key: slackWebhookUrl
-          prompt: "Slack Webhook URL (for notifications)"
+        { "mcpServers": { "haniel": { "url": "http://localhost:3200/mcp/http" } } }
 
   service:
     name: haniel
     display: "Haniel Service Runner"
     working_directory: "{root}"
+    service_account:
+      username: ".\\myuser"
+      allow_service_logon: true
     environment:
       PYTHONUTF8: "1"
 ```
@@ -263,7 +215,7 @@ The installation process has two types of work.
 - Directory creation
 - git clone
 - venv creation, pip install
-- npm install
+- npm/pnpm install + build commands
 - Static file generation (.mcp.json, etc.)
 - WinSW service registration
 
@@ -299,7 +251,7 @@ haniel install haniel.yaml
   |       Unmet items -> record for Phase 2, Claude Code will guide user
   |     Create directories
   |     Clone repos (where possible)
-  |     Set up environments (venv, npm)
+  |     Set up environments (venv, npm/pnpm, build)
   |     Generate static configs (content-based)
   |     |
   |     Compile results as JSON:
@@ -309,29 +261,23 @@ haniel install haniel.yaml
   |     Save state to install.state
   |
   +- Phase 2: Interactive installation (Claude Code delegation)
-  |     haniel starts itself as MCP server (install-only mode)
-  |     Launch Claude Code session:
-  |       claude -p --mcp-config haniel-install-mcp.json \
-  |         "Continue the haniel installation. (install state JSON passed)"
+  |     haniel starts an install-only MCP server on port mcp.port + 1 (default 3201)
+  |     Launch Claude Code session via claude-agent-sdk:
+  |       Passes install state + MCP config
   |     |
   |     Claude Code converses with user:
+  |       - Queries install state via haniel_install_status()
+  |       - Queries config details via haniel_get_config(name)
   |       - Guides resolution of failed steps
   |       - Collects secrets/config values
-  |       - Runs validation if validate field exists
-  |       - Passes values via haniel MCP tools:
-  |           haniel_set_config(file="workspace-env", key="SLACK_BOT_TOKEN", value="xoxb-...")
-  |           haniel_set_config(file="webhook-config", key="slackWebhookUrl", value="https://...")
-  |       - When all values are filled:
-  |           haniel_finalize_install()
   |     |
-  |     Claude Code session ends (auto-exit on finalize)
+  |     When Claude Code session ends, haniel proceeds to finalize
   |
   +- Phase 3: Finalization (haniel alone)
-  |     On finalize signal:
-  |       Generate config files from collected values
-  |       Register WinSW service
-  |       Stop MCP server (exit install mode)
-  |       Mark install.state as complete
+  |     Generate config files from collected values
+  |     Register WinSW service
+  |     Stop MCP server (exit install mode)
+  |     Mark install.state as complete
   |
   +- Done
       "Installation complete. Start the service with 'sc start haniel'."
@@ -339,7 +285,7 @@ haniel install haniel.yaml
 
 ### Install-only MCP tools
 
-MCP tools active only in install mode. Claude Code uses these to drive the installation.
+Two read-only MCP tools are exposed during install mode on port `mcp.port + 1`:
 
 ```
 haniel_install_status()
@@ -350,54 +296,19 @@ haniel_install_status()
       "failed": [{"step": "requirements", "detail": "winsw not found"}],
       "pending_configs": [
         {
-          "name": "workspace-env",
-          "path": "./workspace/.env",
-          "missing_keys": ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", ...],
-          "filled_keys": ["LOG_PATH", "DEBUG", ...]
+          "name": "app-env",
+          "path": "./.services/my-app/.env",
+          "missing_keys": ["SLACK_BOT_TOKEN"],
+          "filled_keys": ["DEBUG"]
         }
       ]
     }
 
-haniel_set_config(config_name, key, value)
-  -> Sets a value for a specific config key
-  -> Example: haniel_set_config("workspace-env", "SLACK_BOT_TOKEN", "xoxb-1234...")
-
 haniel_get_config(config_name)
-  -> Returns current state of a config (filled keys, missing keys)
-
-haniel_retry_step(step_name)
-  -> Retries a failed installation step
-  -> Example: haniel_retry_step("requirements") — after user installs winsw
-
-haniel_finalize_install()
-  -> Verifies all required values are filled
-  -> Generates config files, registers WinSW, exits install mode
-  -> Sends session termination signal to Claude Code
+  -> Returns current state of a specific config (filled keys, missing keys, descriptions)
 ```
 
-### Instructions passed to Claude Code
-
-When haniel invokes Claude Code, it passes these instructions as a prompt:
-
-```
-You are the haniel installation assistant.
-Converse with the user to collect configuration values needed to run services.
-
-Using haniel MCP tools:
-1. Check current status with haniel_install_status()
-2. If there are failed steps, guide the user through resolution
-3. For each missing_key:
-   - Explain the value's purpose and how to obtain it (reference the guide field)
-   - Ask the user for the value
-   - If a validate field exists, run the validation command and report the result
-   - On validation success, set the value with haniel_set_config()
-4. When all values are filled, call haniel_finalize_install()
-   A successful call automatically ends the session.
-
-Each config key has a prompt field hinting how to ask the user.
-Keys with a default should prompt "Use default {default}?"
-Keys with validate should be verified after input; re-prompt on failure.
-```
+Config value collection and finalization are handled by haniel directly, not via MCP tools.
 
 ### `requirements` — System requirements
 
@@ -421,7 +332,6 @@ install:
   directories:
     - ./runtime
     - ./runtime/logs
-    - ./workspace
 ```
 
 Creates missing directories. Skips existing ones.
@@ -433,10 +343,11 @@ Processed mechanically in Phase 1.
 install:
   environments:
     {name}:
-      type: python-venv | npm
+      type: python-venv | npm | pnpm
       path: {directory}
-      requirements:
+      requirements:              # For python-venv only
         - {requirements.txt path}
+      build: {command}           # Optional post-install build step
 ```
 
 Processed mechanically in Phase 1.
@@ -449,8 +360,8 @@ Two modes:
 **Static (`content`)** — Auto-generated in Phase 1:
 ```yaml
 configs:
-  workspace-mcp:
-    path: ./workspace/.mcp.json
+  app-mcp:
+    path: ./.services/my-app/.mcp.json
     content: |
       { "mcpServers": { ... } }
 ```
@@ -458,13 +369,14 @@ configs:
 **Interactive (`keys`)** — Collected by Claude Code in Phase 2:
 ```yaml
 configs:
-  workspace-env:
-    path: ./workspace/.env
+  app-env:
+    path: ./.services/my-app/.env
     keys:
       - key: SLACK_BOT_TOKEN
         prompt: "Slack Bot Token (xoxb-...)"
-        guide: "https://api.slack.com/apps -> select app -> OAuth & Permissions -> Bot User OAuth Token"
+        guide: "https://api.slack.com/apps -> OAuth & Permissions -> Bot User OAuth Token"
         validate: "curl -s -H 'Authorization: Bearer {value}' https://slack.com/api/auth.test | jq -e '.ok'"
+        description: "OAuth token for the Slack bot to send/receive messages"
       - key: LOG_PATH
         default: "{root}/runtime/logs"
 ```
@@ -473,6 +385,7 @@ configs:
 - `guide`: URL or instructions for obtaining/verifying the value. Claude Code presents this to the user
 - `validate`: Validation command. `{value}` is substituted with the input. Claude Code runs this and reports results
 - `default`: Default value. `{root}` is substituted with the absolute path of haniel.yaml's location
+- `description`: Human-readable description for AI-assisted setup
 
 If the file already exists, existing values are preserved; only new keys appear as missing_keys.
 
@@ -484,11 +397,16 @@ install:
     name: haniel
     display: "Haniel Service Runner"
     working_directory: "{root}"
+    service_account:
+      username: ".\\myuser"
+      password: "secret"
+      allow_service_logon: true
     environment:
       PYTHONUTF8: "1"
 ```
 
-Registered as a Windows service via WinSW in Phase 3 (finalize).
+- `service_account`: Run the Windows service under a specific user instead of LocalSystem. `allow_service_logon` grants the "Log on as a service" right automatically.
+- Registered as a Windows service via WinSW in Phase 3 (finalize).
 
 ## `repos` section
 
@@ -498,7 +416,7 @@ Defines repositories. Auto-cloned during install, auto-polled at runtime.
 repos:
   {name}:
     url: {git clone URL}           # Required. Clone and fetch target
-    branch: {branch name}          # Required. Branch to track
+    branch: {branch name}          # Default: main. Branch to track
     path: {local path}             # Required. Local path (relative to haniel.yaml)
 ```
 
@@ -511,6 +429,7 @@ repos:
 **Runtime poll:**
 1. `git fetch origin {branch}`
 2. If `local_head != remote_head`: changes detected
+3. `get_pending_changes()` retrieves commit list and diff stats for display in dashboard
 
 ## `services` section
 
@@ -531,8 +450,10 @@ services:
       method: http                 #   Optional. If http, send HTTP shutdown request
       endpoint: /shutdown          #   Used when method: http
     enabled: true                  # Optional. If false, skip (default: true)
+    reflect: false                 # Optional. Cogito /reflect endpoint (default: false)
     hooks:                         # Optional. Lifecycle hooks
       post_pull: {command}         #   Run after git pull
+      pre_start: {command}         #   Run before service start
 ```
 
 haniel just executes the `run` command.
@@ -569,10 +490,39 @@ Services without `after` start immediately in YAML order.
 ```yaml
 hooks:
   post_pull: {command}            # Run after git pull (builds, dependency installs, etc.)
+  pre_start: {command}            # Run before service start
 ```
 
 haniel doesn't care what hooks do.
 Non-zero exit codes trigger a webhook notification; service startup continues regardless.
+
+## Service health states
+
+Each service has one of seven states:
+
+```
+STOPPED ──start──> STARTING ──ready condition met──> READY
+                       |                                |
+                       +──no ready condition──> RUNNING |
+                                                        |
+CIRCUIT_OPEN <──threshold── CRASHED <──process dies──---+
+     |                         |
+     +──reset──> STOPPED       +──backoff──> STARTING (retry)
+```
+
+| State | Description |
+|-------|-------------|
+| `STOPPED` | Initial state. Also set after clean shutdown or circuit breaker reset |
+| `STARTING` | Process has been spawned, waiting for ready condition |
+| `READY` | Ready condition met. Resets failure count and backoff |
+| `RUNNING` | Running without a ready condition. Resets failure count and backoff |
+| `STOPPING` | Graceful shutdown in progress |
+| `CRASHED` | Process exited unexpectedly. Increments failure count, calculates backoff |
+| `CIRCUIT_OPEN` | Too many failures within the circuit window. Service will not auto-restart |
+
+**Backoff formula**: `base_delay * 2^(failures - 1)`, capped at `max_delay`.
+
+**Circuit breaker**: Trips when `>=circuit_breaker` failures occur within `circuit_window` seconds. Reset via `haniel_enable()` MCP tool or dashboard.
 
 ## Self-update
 
@@ -587,7 +537,7 @@ self:
 
 When changes are detected in the self-repo:
 - `auto_update: true` — Immediately shuts down services and exits with code 10
-- `auto_update: false` — Sends webhook, enters pending state, waits for `haniel_approve_update()` MCP tool call
+- `auto_update: false` — Sends webhook, enters pending state, waits for `haniel_approve_update()` MCP tool call or dashboard approval
 
 The wrapper script (`haniel-runner.ps1`) interprets exit code 10 as a signal to update and restart.
 
@@ -596,9 +546,8 @@ The wrapper script (`haniel-runner.ps1`) interprets exit code 10 as a signal to 
 haniel captures each service's stdout/stderr and writes them to per-service log files.
 
 ```
-{haniel.yaml location}/logs/
+{service cwd or haniel.yaml location}/logs/
 +-- mcp-server.log
-+-- database.log
 +-- bot.log
 +-- ...
 ```
@@ -606,7 +555,8 @@ haniel captures each service's stdout/stderr and writes them to per-service log 
 - Services may create their own log files separately
 - haniel only captures stdout/stderr
 - The `ready: log:{pattern}` feature uses this captured output
-- Log rotation is under consideration (external tool vs built-in)
+- In-memory buffer holds the last 1000 lines per service for fast API queries
+- Log rotation is not yet built-in; use external tools (e.g. `logrotate`) if needed
 
 ## Runtime behavior cycle
 
@@ -615,6 +565,8 @@ haniel captures each service's stdout/stderr and writes them to per-service log 
 ```
 haniel run
   +- Load haniel.yaml
+  +- Start MCP server (Streamable HTTP on mcp.port)
+  +- Mount dashboard (if dashboard.enabled)
   +- Check repos:
   |    Path exists? -> OK
   |    Path missing? -> git clone (recover from missed install)
@@ -622,6 +574,7 @@ haniel run
   +- Start services sequentially:
   |    In YAML order:
   |      enabled == false? -> skip
+  |      has hooks.pre_start? -> run pre_start command
   |      has after? -> wait for target service's ready condition
   |      Create process with run command
   |      Begin stdout/stderr capture
@@ -639,21 +592,27 @@ Every poll_interval:
   For each repo:
     git fetch origin {branch}
     Compare local_head vs remote_head
-    Changes detected? -> Add to change list
+    Changes detected? -> Add to change list, collect pending changes (commits, diff stats)
 
   [Phase 2: Apply changes]
   If repos have changes:
-    Compute list of dependent services
+    auto_apply == false?
+      -> Log detection, broadcast to dashboard via WebSocket
+      -> Wait for manual "Update" from dashboard or haniel_pull() MCP call
+      -> Skip Phase 2 steps below
 
-    a. Webhook: "Changes detected - {repo}: {commits}"
-    b. Graceful shutdown of dependent services in reverse order
-       SIGTERM -> timeout wait -> SIGKILL
-       If shutdown takes too long, webhook alert
-    c. Webhook: "Applying changes"
-    d. git pull
-    e. Run post_pull hook (if any)
-    f. Restart dependent services in forward order
-    g. Webhook: "Startup complete"
+    auto_apply == true? (default)
+      Compute list of dependent services
+      a. Webhook: "Changes detected - {repo}: {commits}"
+      b. Graceful shutdown of dependent services in reverse order
+         SIGTERM -> timeout wait -> SIGKILL
+         If shutdown takes too long, webhook alert
+      c. Webhook: "Applying changes"
+      d. git pull
+      e. Run post_pull hook (if any)
+      f. Run pre_start hook (if any)
+      g. Restart dependent services in forward order
+      h. Webhook: "Startup complete"
 
   [Phase 3: Health check]
   For each service:
@@ -662,11 +621,13 @@ Every poll_interval:
     Alive -> pass
     Dead ->
       Check circuit breaker:
-        >= circuit_breaker failures within circuit_window -> stop starting + webhook
+        >= circuit_breaker failures within circuit_window -> CIRCUIT_OPEN + webhook
         Otherwise -> backoff then restart + webhook
 ```
 
 ### Graceful shutdown
+
+On Windows, haniel uses CTRL_BREAK_EVENT (via `GenerateConsoleCtrlEvent`) as the graceful shutdown signal, since Unix SIGTERM is not available. Processes are created with `CREATE_NEW_PROCESS_GROUP` to enable this. Each process is assigned to a Windows Job Object for reliable child process cleanup.
 
 ```
 Service shutdown request:
@@ -674,28 +635,31 @@ Service shutdown request:
     -> Send HTTP request to shutdown.endpoint
     -> Wait for response
   Otherwise:
-    -> Send shutdown.signal (default: SIGTERM)
+    -> Send CTRL_BREAK_EVENT (Windows) or SIGTERM (Unix)
 
   Wait for shutdown.timeout
     +- Exited within timeout -> done
     +- Timeout exceeded ->
          Webhook: "Graceful shutdown failed, force killing"
-         SIGKILL until kill_timeout
+         TerminateJobObject (kills all child processes) or SIGKILL
+         Wait for kill_timeout
          +- Exited -> done
          +- Still alive -> Webhook: "Force kill failed, manual intervention required"
 ```
 
 ## MCP server
 
-haniel also runs as an MCP server, allowing Claude Code to query status and control services.
+haniel runs an MCP server using Streamable HTTP transport, allowing Claude Code to query status and control services.
+
+The MCP server and dashboard share the same Starlette application and port.
 
 ### Resources (read)
 
 ```
 haniel://status                    -> All service statuses
 haniel://status/{service}          -> Specific service status
-haniel://repos                     -> Repo statuses (HEAD, last fetch, etc.)
-haniel://logs/{service}?lines=50   -> Recent logs
+haniel://repos                     -> Repo statuses (HEAD, last fetch, pending changes)
+haniel://logs/{service}?lines=50   -> Recent logs (max 10000 lines)
 ```
 
 ### Tools (write)
@@ -710,6 +674,99 @@ haniel_reload()                    -> Reload haniel.yaml (keep processes, update
 haniel_approve_update()            -> Approve a pending self-update
 ```
 
+### Claude Code connection
+
+```json
+{
+  "mcpServers": {
+    "haniel": {
+      "type": "http",
+      "url": "http://localhost:3200/mcp/http"
+    }
+  }
+}
+```
+
+## Web dashboard
+
+haniel includes a React-based web dashboard for browser-based service management.
+
+### Architecture
+
+The dashboard frontend (React 19 + Vite + TypeScript) is pre-built and served as static files by the haniel backend. No separate Node.js server is needed at runtime.
+
+```
+Browser
+  +-- REST API (fetch)     -> /api/*       -> dashboard/api.py, config_api.py
+  +-- WebSocket            -> /ws          -> dashboard/ws.py (events)
+  +-- WebSocket            -> /ws/chat     -> dashboard/chat_ws.py (Claude Code)
+  +-- Static files         -> /*           -> dashboard/static.py (React SPA)
+```
+
+All `/api/*` and `/ws` requests require Bearer token authentication when `dashboard.token` is set.
+
+### REST API
+
+**Service management:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/status` | Overall haniel status |
+| GET | `/api/services` | All services with state |
+| POST | `/api/services/{name}/start` | Start a service |
+| POST | `/api/services/{name}/stop` | Stop a service |
+| POST | `/api/services/{name}/restart` | Restart a service |
+| POST | `/api/services/{name}/enable` | Reset circuit breaker |
+| GET | `/api/services/{name}/logs` | Service log output (?lines=N, max 1000) |
+| GET | `/api/repos` | Repository statuses |
+| POST | `/api/repos/{name}/pull` | Pull + restart dependent services |
+| POST | `/api/self-update/approve` | Approve pending self-update |
+| POST | `/api/reload` | Reload haniel.yaml |
+
+**Config CRUD** (runtime YAML modification):
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/config` | Full YAML config |
+| GET | `/api/config/services` | All service configs |
+| GET | `/api/config/repos` | All repo configs |
+| PUT | `/api/config/services/{name}` | Update service config |
+| POST | `/api/config/services` | Add new service (`{name, config}`) |
+| DELETE | `/api/config/services/{name}` | Remove service (dependency check) |
+| PUT | `/api/config/repos/{name}` | Update repo config |
+| POST | `/api/config/repos` | Add new repo (`{name, config}`) |
+| DELETE | `/api/config/repos/{name}` | Remove repo (reference check) |
+
+Config mutations follow an atomic pattern: acquire write lock → read current YAML → modify → validate → backup → write → reload config.
+
+### WebSocket events
+
+**`/ws`** — Real-time service/repo event stream:
+
+| Event type | Payload | Trigger |
+|------------|---------|---------|
+| `init` | Full status snapshot | Client connects |
+| `state_change` | service, old, new, timestamp | Service state transition |
+| `repo_change` | repo, pending_changes, timestamp | Repository change detected |
+| `self_update_pending` | repo, timestamp | Self-update waiting for approval |
+| `reload_complete` | timestamp | Config reload finished |
+
+**`/ws/chat`** — Claude Code chat session:
+
+Client → Server:
+- `{"type": "send_message", "session_id": "<uuid|null>", "text": "..."}` — Send message (null session_id = use last session)
+- `{"type": "new_session"}` — Create new session
+- `{"type": "list_sessions"}` — List all sessions
+
+Server → Client:
+- `{"type": "session_start", "session_id": "<uuid>", "is_new": true|false}` — Session opened
+- `{"type": "text_delta", "delta": "..."}` — Streaming text chunk
+- `{"type": "message_end", "session_id": "<uuid>"}` — Response complete
+- `{"type": "sessions_list", "sessions": [...]}` — Session list response
+- `{"type": "error", "error": "..."}` — Error
+
+The chat panel uses `claude-agent-sdk` to manage Claude Code sessions. Session metadata is persisted to `chat_sessions.json` for resume support. SDK clients are cached per session to avoid MCP reconnection overhead.
+
 ## Dry-run mode
 
 Preview the plan without executing:
@@ -722,15 +779,15 @@ Example output:
 ```
 [dry-run] Phase 1: Mechanical installation
   - Requirements check: python >=3.11, node >=18, winsw, claude-code
-  - Directory creation: ./runtime, ./runtime/logs, ./workspace, ...
-  - Repository clone: my-app -> ./.projects/my-app
-  - Environments: main-venv (python-venv), runtime-node (npm)
-  - Configs (static): workspace-mcp -> ./workspace/.mcp.json
+  - Directory creation: ./runtime, ./runtime/logs
+  - Repository clone: my-app -> ./.services/my-app
+  - Environments: main-venv (python-venv), frontend (pnpm + build)
+  - Configs (static): app-mcp -> ./.services/my-app/.mcp.json
 
 [dry-run] Phase 2: Interactive installation (Claude Code)
-  - Configs (interactive): workspace-env -> ./workspace/.env
-    - Collect: SLACK_BOT_TOKEN, SLACK_APP_TOKEN, ...
-    - Defaults: LOG_PATH, SESSION_PATH, DEBUG, ...
+  - Configs (interactive): app-env -> ./.services/my-app/.env
+    - Collect: SLACK_BOT_TOKEN
+    - Defaults: DEBUG
 
 [dry-run] Phase 3: Finalization
   - Register WinSW service: haniel
@@ -743,44 +800,62 @@ haniel/
 +-- src/
 |   +-- haniel/
 |       +-- __init__.py
-|       +-- __main__.py          # CLI entry point (install / run / status / validate)
-|       +-- config/              # YAML parsing, validation
-|       +-- installer/
-|       |   +-- __init__.py
-|       |   +-- orchestrator.py  # Phase 1-2-3 flow control
-|       |   +-- mechanical.py    # Phase 1: directories, clone, venv, npm
-|       |   +-- interactive.py   # Phase 2: Claude Code session management
-|       |   +-- finalize.py      # Phase 3: file generation, WinSW registration
+|       +-- __main__.py            # python -m haniel entry point
+|       +-- cli.py                 # Click CLI (install / run / status / validate)
+|       +-- config/
+|       |   +-- model.py           # Pydantic models for haniel.yaml
+|       |   +-- validators.py      # Semantic validation (cycles, port conflicts, etc.)
 |       +-- core/
-|       |   +-- runner.py        # Run mode: poll loop
-|       |   +-- process.py       # Process creation, monitoring, shutdown
-|       |   +-- git.py           # git fetch, pull, clone
-|       |   +-- health.py        # Health checks, circuit breaker
+|       |   +-- runner.py          # Poll loop, dependency graph, auto_apply logic
+|       |   +-- process.py         # Process creation, monitoring, ready conditions
+|       |   +-- git.py             # git clone, fetch, pull, pending changes
+|       |   +-- health.py          # Service states, backoff, circuit breaker
+|       |   +-- logs.py            # stdout/stderr capture, rolling buffer, pattern matching
+|       |   +-- claude_session.py  # Claude Code sessions for dashboard chat panel
+|       +-- dashboard/
+|       |   +-- __init__.py        # Route setup, Bearer token auth middleware
+|       |   +-- api.py             # REST API endpoints (status, services, repos)
+|       |   +-- config_api.py      # Config CRUD API (runtime YAML modification)
+|       |   +-- config_io.py       # YAML read/write/backup utilities
+|       |   +-- ws.py              # WebSocket event stream
+|       |   +-- chat_ws.py         # Claude Code chat WebSocket
+|       |   +-- static.py          # React SPA static file serving
+|       +-- installer/
+|       |   +-- orchestrator.py    # Phase 0-1-2-3 flow control
+|       |   +-- mechanical.py      # Phase 1: directories, clone, venv, npm/pnpm
+|       |   +-- interactive.py     # Phase 2: Claude Code session + install MCP tools
+|       |   +-- finalize.py        # Phase 3: file generation, WinSW registration
+|       |   +-- state.py           # Install state persistence (resume support)
+|       |   +-- install_mcp_server.py  # Install-only MCP server
+|       |   +-- utils.py           # Installer utilities
 |       +-- integrations/
-|       |   +-- webhook.py       # Slack/Discord/JSON notifications (Block Kit)
-|       |   +-- mcp_server.py    # MCP server (run + install modes)
+|       |   +-- mcp_server.py      # MCP Streamable HTTP server + dashboard mount
+|       |   +-- webhook.py         # Slack/Discord/JSON webhook notifications
 |       +-- platform/
-|           +-- __init__.py
-|           +-- windows.py       # Windows Job Object, SIGTERM emulation
-|           +-- posix.py         # Unix signal handling
-+-- tests/
+|           +-- __init__.py        # PlatformHandler ABC + factory
+|           +-- windows.py         # Job Object, CTRL_BREAK_EVENT, breakaway probing
+|           +-- posix.py           # Unix signal handling
++-- dashboard/                     # React frontend (separate build)
+|   +-- src/
+|   |   +-- App.tsx                # 2-panel layout (services | chat)
+|   |   +-- components/            # ServiceCard, RepoEditor, DependencyGraph, ChatPanel, etc.
+|   |   +-- hooks/                 # useServices, useWebSocket, useChatWebSocket
+|   |   +-- lib/api.ts             # REST API client
+|   +-- package.json               # React 19, Vite 8, TypeScript 5.9, Tailwind CSS 4
++-- tests/                         # pytest suite (config, runner, process, git, health, etc.)
 +-- docs/
-|   +-- specifications.md       # This document
+|   +-- specifications.md          # This document
+|   +-- configuration.md           # Full haniel.yaml field reference
 |   +-- adr/
 |       +-- 0001-winsw-over-nssm.md
 |       +-- 0002-self-update-architecture.md
-+-- haniel-runner.ps1            # PowerShell wrapper for self-update
-+-- pyproject.toml
-+-- haniel.example.yaml
+|       +-- 0003-directory-structure.md
++-- haniel-runner.ps1              # PowerShell wrapper for self-update
++-- haniel.yaml.example            # Full multi-service config example
++-- pyproject.toml                 # Python 3.11+, hatchling build
 ```
 
 ## Open items
 
-1. **requirements.txt source**: Whether runtime is a separate repo or included in the main repo affects environments config
-2. **Per-process dotenv loading**: If existing code relies on supervisor's environment variable inheritance, code changes are needed
-3. **Windows SIGTERM**: Replace with CTRL_BREAK_EVENT or HTTP shutdown endpoint
-4. **Log rotation**: Built-in vs external tool
-5. **Port number duplication**: Same port specified in both services' `run` and configs' `.mcp.json`
-6. **Claude Code invocation**: Exact CLI interface for `claude -p` prompt mode + `--mcp-config` combination
-7. **Install MCP vs run MCP**: Whether the same MCP server exposes different tools by mode, or separate servers
-8. **Multi-environment support**: Review if dev/staging/prod separation is needed in the future
+1. **Log rotation**: Not yet built-in. Relying on external tools for now.
+2. **Multi-environment support**: Review if dev/staging/prod separation is needed in the future.
