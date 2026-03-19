@@ -121,6 +121,21 @@ function Update-HanielRepo {
         Send-Webhook "pip install exception: $_" "warning"
     }
 
+    # pnpm install + build dashboard (if dashboard/ exists)
+    $DashboardPath = Join-Path $RepoPath "dashboard"
+    if (Test-Path $DashboardPath) {
+        try {
+            Write-Host "[haniel-runner] Building dashboard..."
+            & pnpm --dir $DashboardPath install 2>&1 | Out-Null
+            & pnpm --dir $DashboardPath build 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Send-Webhook "Dashboard build failed. Launching with previous build." "warning"
+            }
+        } catch {
+            Send-Webhook "Dashboard build exception: $_" "warning"
+        }
+    }
+
     return $true
 }
 
