@@ -329,7 +329,11 @@ class TestWindowsSubprocessKwargs:
     """Tests for subprocess kwargs."""
 
     def test_get_subprocess_kwargs(self, mock_windll):
-        """Should return correct kwargs for Windows."""
+        """Should return creationflags with CREATE_NEW_PROCESS_GROUP always set.
+
+        CREATE_BREAKAWAY_FROM_JOB is added only when the environment permits
+        (probed lazily). In test environments this may or may not be allowed.
+        """
         from haniel.platform.windows import (
             CREATE_BREAKAWAY_FROM_JOB,
             CREATE_NEW_PROCESS_GROUP,
@@ -339,8 +343,14 @@ class TestWindowsSubprocessKwargs:
         handler = WindowsHandler()
         kwargs = handler.get_subprocess_kwargs()
 
-        expected_flags = CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB
-        assert kwargs == {"creationflags": expected_flags}
+        flags = kwargs["creationflags"]
+        # CREATE_NEW_PROCESS_GROUP is always present
+        assert flags & CREATE_NEW_PROCESS_GROUP
+        # BREAKAWAY is conditionally present based on environment
+        assert flags in (
+            CREATE_NEW_PROCESS_GROUP,
+            CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB,
+        )
 
     def test_constants(self, mock_windll):
         """Should have correct Windows constants."""

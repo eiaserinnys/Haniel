@@ -31,6 +31,7 @@ class WindowsHandler(PlatformHandler):
     def __init__(self):
         """Initialize Windows handler with Job Object for process management."""
         self._job_handles: dict[int, int] = {}  # pid -> job handle
+        self._breakaway_allowed: bool | None = None  # lazy-probed
 
     def terminate_process(self, process: subprocess.Popen) -> None:
         """Send CTRL_BREAK_EVENT to the process.
@@ -127,12 +128,43 @@ class WindowsHandler(PlatformHandler):
     def get_subprocess_kwargs(self) -> dict:
         """Get Windows-specific subprocess kwargs.
 
+        Uses CREATE_NEW_PROCESS_GROUP so we can send CTRL_BREAK_EVENT for
+        graceful shutdown. CREATE_BREAKAWAY_FROM_JOB is added only if the
+        current environment permits it — some job objects (e.g. WinSW
+        service wrappers) disallow breakaway, causing PermissionError.
+
         Returns:
             Dict with creationflags for process group creation
         """
-        return {
-            "creationflags": CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB,
-        }
+        flags = CREATE_NEW_PROCESS_GROUP
+        if self._breakaway_allowed is None:
+            self._breakaway_allowed = self._probe_breakaway()
+        if self._breakaway_allowed:
+            flags |= CREATE_BREAKAWAY_FROM_JOB
+        return {"creationflags": flags}
+
+    @staticmethod
+    def _probe_breakaway() -> bool:
+        """Test whether CREATE_BREAKAWAY_FROM_JOB is permitted.
+
+        Spawns a trivial subprocess with the flag. If PermissionError
+        is raised, the current job object disallows breakaway.
+        """
+        import sys
+
+        try:
+            p = subprocess.Popen(
+                [sys.executable, "-c", "0"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB,
+            )
+            p.wait(timeout=5)
+            return True
+        except PermissionError:
+            return False
+        except Exception:
+            return False
 
     def _create_job_object(self) -> int | None:
         """Create a Windows Job Object.
