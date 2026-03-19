@@ -34,7 +34,9 @@ def _write_yaml(path: Path, config: HanielConfig) -> None:
     """Write a HanielConfig to a YAML file (by_alias=True)."""
     data = config.model_dump(by_alias=True, exclude_none=True, mode="python")
     with open(path, "w", encoding="utf-8") as f:
-        yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        yaml.dump(
+            data, f, default_flow_style=False, allow_unicode=True, sort_keys=False
+        )
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
@@ -149,7 +151,6 @@ def dashboard_app(mock_runner):
 
 
 class TestGetConfig:
-
     @pytest.mark.asyncio
     async def test_returns_200_with_full_config(self, dashboard_app, mock_runner):
         """GET /api/config returns 200 and JSON representation of config."""
@@ -163,9 +164,7 @@ class TestGetConfig:
             assert "main" in data["repos"]
 
     @pytest.mark.asyncio
-    async def test_returns_501_when_no_config_path(
-        self, dashboard_app, mock_runner
-    ):
+    async def test_returns_501_when_no_config_path(self, dashboard_app, mock_runner):
         """GET /api/config returns 501 when runner.config_path is None."""
         mock_runner.config_path = None
         async with TestClient(TestServer(dashboard_app)) as client:
@@ -177,7 +176,6 @@ class TestGetConfig:
 
 
 class TestGetConfigServices:
-
     @pytest.mark.asyncio
     async def test_returns_services_dict(self, dashboard_app, mock_runner):
         """GET /api/config/services returns the services section."""
@@ -189,9 +187,7 @@ class TestGetConfigServices:
             assert "worker" in data
 
     @pytest.mark.asyncio
-    async def test_returns_501_when_no_config_path(
-        self, dashboard_app, mock_runner
-    ):
+    async def test_returns_501_when_no_config_path(self, dashboard_app, mock_runner):
         mock_runner.config_path = None
         async with TestClient(TestServer(dashboard_app)) as client:
             resp = await client.get("/api/config/services")
@@ -202,7 +198,6 @@ class TestGetConfigServices:
 
 
 class TestGetConfigRepos:
-
     @pytest.mark.asyncio
     async def test_returns_repos_dict(self, dashboard_app, mock_runner):
         """GET /api/config/repos returns the repos section."""
@@ -213,9 +208,7 @@ class TestGetConfigRepos:
             assert "main" in data
 
     @pytest.mark.asyncio
-    async def test_returns_501_when_no_config_path(
-        self, dashboard_app, mock_runner
-    ):
+    async def test_returns_501_when_no_config_path(self, dashboard_app, mock_runner):
         mock_runner.config_path = None
         async with TestClient(TestServer(dashboard_app)) as client:
             resp = await client.get("/api/config/repos")
@@ -226,7 +219,6 @@ class TestGetConfigRepos:
 
 
 class TestPutService:
-
     @pytest.mark.asyncio
     async def test_updates_service_and_calls_reload(
         self, dashboard_app, mock_runner, config_file
@@ -260,9 +252,7 @@ class TestPutService:
             assert resp.status == 404
 
     @pytest.mark.asyncio
-    async def test_returns_400_on_validation_failure(
-        self, dashboard_app, mock_runner
-    ):
+    async def test_returns_400_on_validation_failure(self, dashboard_app, mock_runner):
         """PUT with missing required 'run' field returns 400."""
         payload = {"cwd": "./somewhere"}  # missing 'run'
         async with TestClient(TestServer(dashboard_app)) as client:
@@ -274,9 +264,7 @@ class TestPutService:
             assert resp.status == 400
 
     @pytest.mark.asyncio
-    async def test_returns_501_when_no_config_path(
-        self, dashboard_app, mock_runner
-    ):
+    async def test_returns_501_when_no_config_path(self, dashboard_app, mock_runner):
         mock_runner.config_path = None
         payload = {"run": "python app.py"}
         async with TestClient(TestServer(dashboard_app)) as client:
@@ -292,7 +280,6 @@ class TestPutService:
 
 
 class TestPostService:
-
     @pytest.mark.asyncio
     async def test_adds_service_and_calls_reload(
         self, dashboard_app, mock_runner, config_file
@@ -315,9 +302,7 @@ class TestPostService:
         mock_runner.reload_config.assert_called()
 
     @pytest.mark.asyncio
-    async def test_returns_400_on_duplicate_service(
-        self, dashboard_app, mock_runner
-    ):
+    async def test_returns_400_on_duplicate_service(self, dashboard_app, mock_runner):
         """POST for an already existing service name returns 400."""
         payload = {
             "name": "web",  # already exists
@@ -332,9 +317,7 @@ class TestPostService:
             assert resp.status == 400
 
     @pytest.mark.asyncio
-    async def test_returns_501_when_no_config_path(
-        self, dashboard_app, mock_runner
-    ):
+    async def test_returns_501_when_no_config_path(self, dashboard_app, mock_runner):
         mock_runner.config_path = None
         payload = {"name": "cache", "config": {"run": "redis-server"}}
         async with TestClient(TestServer(dashboard_app)) as client:
@@ -350,11 +333,8 @@ class TestPostService:
 
 
 class TestDeleteService:
-
     @pytest.mark.asyncio
-    async def test_removes_service(
-        self, dashboard_app, mock_runner, config_file
-    ):
+    async def test_removes_service(self, dashboard_app, mock_runner, config_file):
         """DELETE /api/config/services/{name} removes the service from YAML."""
         # 'worker' depends on 'web', so we delete 'worker' first
         async with TestClient(TestServer(dashboard_app)) as client:
@@ -366,9 +346,7 @@ class TestDeleteService:
         mock_runner.reload_config.assert_called()
 
     @pytest.mark.asyncio
-    async def test_returns_400_when_has_dependents(
-        self, dashboard_app, mock_runner
-    ):
+    async def test_returns_400_when_has_dependents(self, dashboard_app, mock_runner):
         """DELETE /api/config/services/web returns 400 because worker depends on it."""
         async with TestClient(TestServer(dashboard_app)) as client:
             resp = await client.delete("/api/config/services/web")
@@ -386,9 +364,7 @@ class TestDeleteService:
             assert resp.status == 404
 
     @pytest.mark.asyncio
-    async def test_returns_501_when_no_config_path(
-        self, dashboard_app, mock_runner
-    ):
+    async def test_returns_501_when_no_config_path(self, dashboard_app, mock_runner):
         mock_runner.config_path = None
         async with TestClient(TestServer(dashboard_app)) as client:
             resp = await client.delete("/api/config/services/worker")
@@ -399,7 +375,6 @@ class TestDeleteService:
 
 
 class TestPostRepo:
-
     @pytest.mark.asyncio
     async def test_adds_repo_and_calls_reload(
         self, dashboard_app, mock_runner, config_file
@@ -425,9 +400,7 @@ class TestPostRepo:
         mock_runner.reload_config.assert_called()
 
     @pytest.mark.asyncio
-    async def test_returns_400_on_duplicate_repo(
-        self, dashboard_app, mock_runner
-    ):
+    async def test_returns_400_on_duplicate_repo(self, dashboard_app, mock_runner):
         """POST for an already existing repo name returns 400."""
         payload = {
             "name": "main",  # already exists
@@ -445,9 +418,7 @@ class TestPostRepo:
             assert resp.status == 400
 
     @pytest.mark.asyncio
-    async def test_returns_501_when_no_config_path(
-        self, dashboard_app, mock_runner
-    ):
+    async def test_returns_501_when_no_config_path(self, dashboard_app, mock_runner):
         mock_runner.config_path = None
         payload = {
             "name": "extra",
@@ -466,7 +437,6 @@ class TestPostRepo:
 
 
 class TestDeleteRepo:
-
     @pytest.mark.asyncio
     async def test_returns_400_when_referenced_by_services(
         self, dashboard_app, mock_runner, config_file, tmp_path
@@ -479,9 +449,7 @@ class TestDeleteRepo:
                 "web": ServiceConfig(run="python app.py", repo="main"),
             },
             repos={
-                "main": RepoConfig(
-                    url="git@github.com:test/repo.git", path="./repo"
-                ),
+                "main": RepoConfig(url="git@github.com:test/repo.git", path="./repo"),
             },
         )
         _write_yaml(config_file, config_with_ref)
@@ -508,17 +476,13 @@ class TestDeleteRepo:
         mock_runner.reload_config.assert_called()
 
     @pytest.mark.asyncio
-    async def test_returns_404_for_nonexistent_repo(
-        self, dashboard_app, mock_runner
-    ):
+    async def test_returns_404_for_nonexistent_repo(self, dashboard_app, mock_runner):
         async with TestClient(TestServer(dashboard_app)) as client:
             resp = await client.delete("/api/config/repos/nonexistent")
             assert resp.status == 404
 
     @pytest.mark.asyncio
-    async def test_returns_501_when_no_config_path(
-        self, dashboard_app, mock_runner
-    ):
+    async def test_returns_501_when_no_config_path(self, dashboard_app, mock_runner):
         mock_runner.config_path = None
         async with TestClient(TestServer(dashboard_app)) as client:
             resp = await client.delete("/api/config/repos/main")
@@ -529,7 +493,6 @@ class TestDeleteRepo:
 
 
 class TestPutRepo:
-
     @pytest.mark.asyncio
     async def test_updates_repo_and_calls_reload(
         self, dashboard_app, mock_runner, config_file
@@ -553,9 +516,7 @@ class TestPutRepo:
         mock_runner.reload_config.assert_called()
 
     @pytest.mark.asyncio
-    async def test_returns_404_for_nonexistent_repo(
-        self, dashboard_app, mock_runner
-    ):
+    async def test_returns_404_for_nonexistent_repo(self, dashboard_app, mock_runner):
         payload = {
             "url": "git@github.com:x/y.git",
             "path": "./y",

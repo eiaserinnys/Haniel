@@ -1279,7 +1279,9 @@ class TestMechanicalInstallerExtended:
             (repo_path / ".git").mkdir()
 
             # Simulate successful pull
-            mock_run.return_value = MagicMock(returncode=0, stdout="Already up to date.\n", stderr="")
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="Already up to date.\n", stderr=""
+            )
 
             installer.clone_repos()
 
@@ -1811,9 +1813,12 @@ class TestServiceAccount:
         assert cfg.service_account is None
 
     @patch("platform.system", return_value="Windows")
-    @patch("shutil.which", side_effect=lambda cmd: {
-        "python": r"C:\Python312\python.exe",
-    }.get(cmd))
+    @patch(
+        "shutil.which",
+        side_effect=lambda cmd: {
+            "python": r"C:\Python312\python.exe",
+        }.get(cmd),
+    )
     @patch("subprocess.run", return_value=MagicMock(returncode=0, stderr=""))
     def test_xml_includes_serviceaccount(
         self, mock_run, mock_which, mock_system, _make_finalizer
@@ -1836,14 +1841,19 @@ class TestServiceAccount:
 
             assert "<serviceaccount>" in xml_content
             assert "<domain>.</domain>" in xml_content  # ".\\TestUser" -> domain="."
-            assert "<user>TestUser</user>" in xml_content  # ".\\TestUser" -> user="TestUser"
+            assert (
+                "<user>TestUser</user>" in xml_content
+            )  # ".\\TestUser" -> user="TestUser"
             assert "<password>pass!word</password>" in xml_content
             assert "<allowservicelogon>true</allowservicelogon>" in xml_content
 
     @patch("platform.system", return_value="Windows")
-    @patch("shutil.which", side_effect=lambda cmd: {
-        "python": r"C:\Python312\python.exe",
-    }.get(cmd))
+    @patch(
+        "shutil.which",
+        side_effect=lambda cmd: {
+            "python": r"C:\Python312\python.exe",
+        }.get(cmd),
+    )
     @patch("subprocess.run", return_value=MagicMock(returncode=0, stderr=""))
     def test_xml_no_serviceaccount_when_none(
         self, mock_run, mock_which, mock_system, _make_finalizer
@@ -1870,13 +1880,22 @@ class TestServiceAccount:
         ],
     )
     @patch("platform.system", return_value="Windows")
-    @patch("shutil.which", side_effect=lambda cmd: {
-        "python": r"C:\Python312\python.exe",
-    }.get(cmd))
+    @patch(
+        "shutil.which",
+        side_effect=lambda cmd: {
+            "python": r"C:\Python312\python.exe",
+        }.get(cmd),
+    )
     @patch("subprocess.run", return_value=MagicMock(returncode=0, stderr=""))
     def test_username_domain_parsing_in_xml(
-        self, mock_run, mock_which, mock_system,
-        raw_username, expected_domain, expected_user, _make_finalizer
+        self,
+        mock_run,
+        mock_which,
+        mock_system,
+        raw_username,
+        expected_domain,
+        expected_user,
+        _make_finalizer,
     ):
         """Domain and username are correctly parsed and placed in WinSW XML."""
         service_cfg = ServiceDefinitionConfig(
@@ -1898,9 +1917,12 @@ class TestServiceAccount:
             assert f"<user>{expected_user}</user>" in xml_content
 
     @patch("platform.system", return_value="Windows")
-    @patch("shutil.which", side_effect=lambda cmd: {
-        "python": r"C:\Python312\python.exe",
-    }.get(cmd))
+    @patch(
+        "shutil.which",
+        side_effect=lambda cmd: {
+            "python": r"C:\Python312\python.exe",
+        }.get(cmd),
+    )
     @patch("subprocess.run", return_value=MagicMock(returncode=0, stderr=""))
     def test_xml_password_with_special_chars(
         self, mock_run, mock_which, mock_system, _make_finalizer
@@ -2514,7 +2536,11 @@ class TestInteractiveInstallerSession:
             state = InstallState(phase=InstallPhase.MECHANICAL)
             installer = InteractiveInstaller(session_config, config_dir, state)
 
-            for tool_name in ["haniel_retry_step", "haniel_set_config", "haniel_finalize_install"]:
+            for tool_name in [
+                "haniel_retry_step",
+                "haniel_set_config",
+                "haniel_finalize_install",
+            ]:
                 result = await installer.call_mcp_tool(tool_name, {})
                 result_data = json.loads(result)
                 assert "error" in result_data

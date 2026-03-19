@@ -140,9 +140,7 @@ class DashboardWebSocket:
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.ERROR:
-                    logger.warning(
-                        f"WebSocket error: {ws.exception()}"
-                    )
+                    logger.warning(f"WebSocket error: {ws.exception()}")
                     break
                 # Client messages are accepted but not processed
         finally:

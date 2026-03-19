@@ -71,17 +71,22 @@ class ChatWebSocket:
         elif msg_type == "new_session":
             # Force a new session registered in the manager; no claude call.
             new_id = self._manager.create_session()
-            await self._send(ws, {
-                "type": "session_start",
-                "session_id": new_id,
-                "is_new": True,
-            })
+            await self._send(
+                ws,
+                {
+                    "type": "session_start",
+                    "session_id": new_id,
+                    "is_new": True,
+                },
+            )
 
         elif msg_type == "send_message":
             await self._handle_send_message(ws, msg)
 
         else:
-            await self._send(ws, {"type": "error", "error": f"unknown message type: {msg_type}"})
+            await self._send(
+                ws, {"type": "error", "error": f"unknown message type: {msg_type}"}
+            )
 
     async def _handle_send_message(self, ws: web.WebSocketResponse, msg: dict) -> None:
         """Process a send_message request.
@@ -112,11 +117,14 @@ class ChatWebSocket:
                 raw_session_id = self._manager.create_session()
                 is_new = True
 
-            await self._send(ws, {
-                "type": "session_start",
-                "session_id": raw_session_id,
-                "is_new": is_new,
-            })
+            await self._send(
+                ws,
+                {
+                    "type": "session_start",
+                    "session_id": raw_session_id,
+                    "is_new": is_new,
+                },
+            )
             return
 
         # Stream message through claude subprocess

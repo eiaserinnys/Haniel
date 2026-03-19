@@ -174,7 +174,10 @@ class ClaudeSessionManager:
                         pass
 
             if proc.returncode != 0:
-                yield {"type": "error", "error": f"claude exited with code {proc.returncode}"}
+                yield {
+                    "type": "error",
+                    "error": f"claude exited with code {proc.returncode}",
+                }
                 return
 
         except FileNotFoundError:
@@ -215,10 +218,25 @@ class ClaudeSessionManager:
         mcp_active = self._mcp_config_path is not None
 
         if claude_session_id:
-            cmd = [self._claude_exe, "--resume", claude_session_id, "-p", text,
-                   "--output-format", "stream-json", "--verbose"]
+            cmd = [
+                self._claude_exe,
+                "--resume",
+                claude_session_id,
+                "-p",
+                text,
+                "--output-format",
+                "stream-json",
+                "--verbose",
+            ]
         else:
-            cmd = [self._claude_exe, "-p", text, "--output-format", "stream-json", "--verbose"]
+            cmd = [
+                self._claude_exe,
+                "-p",
+                text,
+                "--output-format",
+                "stream-json",
+                "--verbose",
+            ]
 
         if mcp_active:
             cmd += ["--mcp-config", str(self._mcp_config_path)]
@@ -254,9 +272,17 @@ class ClaudeSessionManager:
         if self._sessions_path.exists():
             try:
                 self._data = json.loads(self._sessions_path.read_text(encoding="utf-8"))
-                logger.debug("Loaded %d sessions from %s", len(self._data.get("sessions", [])), self._sessions_path)
+                logger.debug(
+                    "Loaded %d sessions from %s",
+                    len(self._data.get("sessions", [])),
+                    self._sessions_path,
+                )
             except Exception as exc:
-                logger.warning("Failed to load sessions file (%s): %s — starting fresh", self._sessions_path, exc)
+                logger.warning(
+                    "Failed to load sessions file (%s): %s — starting fresh",
+                    self._sessions_path,
+                    exc,
+                )
                 self._data = {"sessions": [], "last_session_id": None}
         else:
             self._data = {"sessions": [], "last_session_id": None}

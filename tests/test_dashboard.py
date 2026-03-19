@@ -41,9 +41,7 @@ def mock_runner():
             "worker": ServiceConfig(run="python worker.py", after=["web"]),
         },
         repos={
-            "main": RepoConfig(
-                url="git@github.com:test/repo.git", path="./repo"
-            ),
+            "main": RepoConfig(url="git@github.com:test/repo.git", path="./repo"),
         },
     )
     runner.config_dir = Path("/tmp/test")
@@ -156,9 +154,7 @@ class TestDashboardApi:
             assert "worker" in data
 
     @pytest.mark.asyncio
-    async def test_service_stop_calls_process_manager(
-        self, dashboard_app, mock_runner
-    ):
+    async def test_service_stop_calls_process_manager(self, dashboard_app, mock_runner):
         """POST /api/services/{name}/stop calls process_manager.stop_service."""
         async with TestClient(TestServer(dashboard_app)) as client:
             resp = await client.post("/api/services/web/stop")
@@ -201,9 +197,7 @@ class TestDashboardApi:
         )
 
     @pytest.mark.asyncio
-    async def test_service_logs_invalid_lines_param(
-        self, dashboard_app, mock_runner
-    ):
+    async def test_service_logs_invalid_lines_param(self, dashboard_app, mock_runner):
         """GET /api/services/{name}/logs?lines=abc returns 400."""
         async with TestClient(TestServer(dashboard_app)) as client:
             resp = await client.get("/api/services/web/logs?lines=abc")

@@ -38,7 +38,7 @@ def _make_auth_middleware(token: str):
                 raise web.HTTPUnauthorized(
                     reason="Authorization: Bearer <token> required"
                 )
-            if auth_header[len("Bearer "):] != token:
+            if auth_header[len("Bearer ") :] != token:
                 raise web.HTTPForbidden(reason="Invalid token")
         return await handler(request)
 
@@ -86,6 +86,7 @@ def setup_dashboard(
 
     if claude_session_manager is not None:
         from .chat_ws import ChatWebSocket
+
         chat_ws_handler = ChatWebSocket(claude_session_manager)
         app.router.add_route("GET", "/ws/chat", chat_ws_handler.handle_ws)
         logger.info(

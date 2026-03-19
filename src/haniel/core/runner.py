@@ -318,9 +318,7 @@ class ServiceRunner:
         from ..config import load_config
 
         if not self.config_path:
-            raise RuntimeError(
-                "config_path is not set — cannot reload configuration"
-            )
+            raise RuntimeError("config_path is not set — cannot reload configuration")
 
         new_config = load_config(self.config_path)
         self.config = new_config
@@ -992,4 +990,3 @@ class ServiceRunner:
                     else False,
                 }
             return result
-

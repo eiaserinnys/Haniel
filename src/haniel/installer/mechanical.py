@@ -249,7 +249,9 @@ class MechanicalInstaller:
                 # Check if it's a valid git repo
                 git_dir = repo_path / ".git"
                 if git_dir.exists():
-                    logger.info(f"Repository already exists: {name} at {repo_path}, pulling latest")
+                    logger.info(
+                        f"Repository already exists: {name} at {repo_path}, pulling latest"
+                    )
                     try:
                         result = subprocess.run(
                             ["git", "-C", str(repo_path), "pull", "--ff-only"],
@@ -259,13 +261,21 @@ class MechanicalInstaller:
                         )
                         if result.returncode != 0:
                             error_msg = result.stderr.strip() or result.stdout.strip()
-                            logger.warning(f"git pull --ff-only failed for {name}: {error_msg}")
+                            logger.warning(
+                                f"git pull --ff-only failed for {name}: {error_msg}"
+                            )
                         else:
-                            logger.info(f"Pulled latest for {name}: {result.stdout.strip()}")
+                            logger.info(
+                                f"Pulled latest for {name}: {result.stdout.strip()}"
+                            )
                     except subprocess.TimeoutExpired:
-                        logger.warning(f"git pull timed out for {name}, continuing with existing code")
+                        logger.warning(
+                            f"git pull timed out for {name}, continuing with existing code"
+                        )
                     except Exception as e:
-                        logger.warning(f"git pull failed for {name}: {e}, continuing with existing code")
+                        logger.warning(
+                            f"git pull failed for {name}: {e}, continuing with existing code"
+                        )
                     continue
                 else:
                     logger.warning(
@@ -395,15 +405,23 @@ class MechanicalInstaller:
             # isolated build environment. All common build backends must be present.
             logger.info(f"Upgrading build tools in venv: {name}")
             subprocess.run(
-                [str(python_path), "-m", "pip", "install", "--upgrade",
-                 "pip", "setuptools", "hatchling", "editables"],
+                [
+                    str(python_path),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--upgrade",
+                    "pip",
+                    "setuptools",
+                    "hatchling",
+                    "editables",
+                ],
                 check=True,
                 timeout=120,
             )
 
             # Install requirements if provided
             if requirements:
-
                 for req_file in requirements:
                     req_path = self._resolve_path(req_file)
                     if req_path.exists():
@@ -412,7 +430,13 @@ class MechanicalInstaller:
                             logger.info(
                                 f"Installing editable package from {req_path.parent}"
                             )
-                            cmd = [str(pip_path), "install", "-e", str(req_path.parent), "--no-build-isolation"]
+                            cmd = [
+                                str(pip_path),
+                                "install",
+                                "-e",
+                                str(req_path.parent),
+                                "--no-build-isolation",
+                            ]
                         else:
                             logger.info(f"Installing requirements from {req_path}")
                             cmd = [str(pip_path), "install", "-r", str(req_path)]

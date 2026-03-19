@@ -364,9 +364,7 @@ def pull_repo(path: Path, branch: str, remote: str = "origin") -> None:
         ) from e
 
 
-def get_pending_changes(
-    path: Path, branch: str, remote: str = "origin"
-) -> dict:
+def get_pending_changes(path: Path, branch: str, remote: str = "origin") -> dict:
     """Get details of pending changes between local and remote.
 
     Returns commits and file summary for changes that exist on the remote
@@ -388,9 +386,7 @@ def get_pending_changes(
             cwd=path,
             check=False,
         )
-        commits = [
-            line for line in log_result.stdout.strip().splitlines() if line
-        ]
+        commits = [line for line in log_result.stdout.strip().splitlines() if line]
 
         if not commits:
             return {"commits": [], "stat": None}

@@ -160,7 +160,8 @@ class EnvironmentConfig(BaseModel):
         default=None, description="Requirements files (for python-venv)"
     )
     build: str | None = Field(
-        default=None, description="Build command to run after install (e.g. 'pnpm run build')"
+        default=None,
+        description="Build command to run after install (e.g. 'pnpm run build')",
     )
 
 

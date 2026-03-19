@@ -332,16 +332,10 @@ def install(
                     success = orchestrator.run_interactive_phase()
                     if success:
                         click.echo(
-                            click.style(
-                                "✓ Interactive phase complete", fg="green"
-                            )
+                            click.style("✓ Interactive phase complete", fg="green")
                         )
                     else:
-                        click.echo(
-                            click.style(
-                                "Interactive phase failed", fg="red"
-                            )
-                        )
+                        click.echo(click.style("Interactive phase failed", fg="red"))
                         click.echo("Run with --resume to retry.")
                         sys.exit(1)
                 else:

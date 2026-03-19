@@ -41,6 +41,7 @@ def create_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
     Returns:
         List of aiohttp RouteDef objects ready to be added to an app.router
     """
+
     def _get_service_names() -> set[str]:
         status = runner.get_status()
         return set(status.get("services", {}).keys())
@@ -92,9 +93,7 @@ def create_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
             return _error(f"Service not found: {name}", status=404)
         try:
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None, runner.process_manager.stop_service, name
-            )
+            await loop.run_in_executor(None, runner.process_manager.stop_service, name)
             return _json_response({"ok": True, "service": name, "action": "stop"})
         except Exception as e:
             logger.error(f"Failed to stop {name}: {e}")
@@ -170,9 +169,7 @@ def create_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
             affected = await loop.run_in_executor(
                 None, runner.get_affected_services, name
             )
-            shutdown_order = await loop.run_in_executor(
-                None, runner.get_shutdown_order
-            )
+            shutdown_order = await loop.run_in_executor(None, runner.get_shutdown_order)
             shutdown_order = [s for s in shutdown_order if s in affected]
 
             for svc in shutdown_order:
@@ -188,9 +185,7 @@ def create_api_routes(runner: "ServiceRunner") -> list[web.RouteDef]:
             if not success:
                 return _error(f"Failed to pull repository '{name}'")
 
-            startup_order = await loop.run_in_executor(
-                None, runner.get_startup_order
-            )
+            startup_order = await loop.run_in_executor(None, runner.get_startup_order)
             startup_order = [s for s in startup_order if s in affected]
             for svc in startup_order:
                 await loop.run_in_executor(None, runner._start_service, svc)

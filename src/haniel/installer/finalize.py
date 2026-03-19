@@ -274,9 +274,7 @@ class Finalizer:
             node_paths = detect_tool_paths(["node", "pnpm", "npx"])
             if node_paths:
                 path_value = "%PATH%;" + ";".join(node_paths)
-                lines.append(
-                    f"  <env name=\"PATH\" value={xml_quoteattr(path_value)}/>"
-                )
+                lines.append(f'  <env name="PATH" value={xml_quoteattr(path_value)}/>')
                 logger.info(f"Auto-detected Node.js paths for service: {node_paths}")
 
         # Logging with roll-by-size

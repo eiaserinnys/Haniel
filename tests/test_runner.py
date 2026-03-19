@@ -1112,7 +1112,9 @@ class TestReloadConfig:
 
         data = config.model_dump(by_alias=True, exclude_none=True, mode="python")
         with open(path, "w", encoding="utf-8") as f:
-            yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            yaml.dump(
+                data, f, default_flow_style=False, allow_unicode=True, sort_keys=False
+            )
 
     def test_raises_when_config_path_not_set(self, tmp_path: Path):
         """reload_config() raises RuntimeError when config_path is None."""
@@ -1169,7 +1171,9 @@ class TestReloadConfig:
         config_file = tmp_path / "haniel.yaml"
         original = HanielConfig(
             poll_interval=5,
-            repos={"main": RepoConfig(url="git@github.com:test/repo.git", path="./repo")},
+            repos={
+                "main": RepoConfig(url="git@github.com:test/repo.git", path="./repo")
+            },
             services={},
         )
         self._write_yaml(config_file, original)
@@ -1191,7 +1195,9 @@ class TestReloadConfig:
         config_file = tmp_path / "haniel.yaml"
         original = HanielConfig(
             poll_interval=5,
-            repos={"main": RepoConfig(url="git@github.com:test/repo.git", path="./repo")},
+            repos={
+                "main": RepoConfig(url="git@github.com:test/repo.git", path="./repo")
+            },
             services={},
         )
         self._write_yaml(config_file, original)
@@ -1204,7 +1210,11 @@ class TestReloadConfig:
         # Reload with same repo (branch changed)
         updated = HanielConfig(
             poll_interval=5,
-            repos={"main": RepoConfig(url="git@github.com:test/repo.git", path="./repo", branch="develop")},
+            repos={
+                "main": RepoConfig(
+                    url="git@github.com:test/repo.git", path="./repo", branch="develop"
+                )
+            },
             services={},
         )
         self._write_yaml(config_file, updated)

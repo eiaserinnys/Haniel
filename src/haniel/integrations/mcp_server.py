@@ -558,6 +558,7 @@ class HanielMcpServer:
                     try:
                         import os
                         import shutil
+
                         claude_path = shutil.which("claude")
                         if claude_path is None:
                             # Windows service PATH may not include user-local bin.
@@ -570,12 +571,18 @@ class HanielMcpServer:
                                         claude_path = candidate
                                         break
                         if claude_path is not None:
-                            session_manager = ClaudeSessionManager(self.runner, claude_path=claude_path)
+                            session_manager = ClaudeSessionManager(
+                                self.runner, claude_path=claude_path
+                            )
                         else:
-                            logger.warning("claude CLI not found — chat panel disabled. "
-                                           "Set CLAUDE_CLI_DIR in haniel.yaml service.environment.")
+                            logger.warning(
+                                "claude CLI not found — chat panel disabled. "
+                                "Set CLAUDE_CLI_DIR in haniel.yaml service.environment."
+                            )
                     except Exception as sm_err:
-                        logger.warning("Failed to initialise ClaudeSessionManager: %s", sm_err)
+                        logger.warning(
+                            "Failed to initialise ClaudeSessionManager: %s", sm_err
+                        )
 
                     ws_handler = setup_dashboard(
                         app,
