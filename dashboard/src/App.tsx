@@ -188,7 +188,7 @@ export default function App() {
       </header>
 
       {/* Main body: 2-panel split */}
-      <ResizablePanelGroup direction="horizontal" className="flex-1 overflow-hidden">
+      <ResizablePanelGroup orientation="horizontal" className="flex-1 overflow-hidden">
         <ResizablePanel defaultSize={60} minSize={20}>
           <div className="h-full overflow-y-auto">
             <main className="max-w-4xl mx-auto px-4 py-6 space-y-6">
