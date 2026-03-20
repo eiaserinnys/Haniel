@@ -64,6 +64,7 @@ export default function App() {
     pullRepo,
     pullingRepos,
     approveSelfUpdate,
+    selfRestart,
     refreshStatus,
     updating,
   } = useServices()
@@ -217,6 +218,7 @@ export default function App() {
                     repo={groups.selfRepo}
                     selfUpdate={status.self_update}
                     onApprove={approveSelfUpdate}
+                    onRestart={selfRestart}
                   />
                 )}
 

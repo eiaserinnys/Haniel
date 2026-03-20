@@ -1,5 +1,10 @@
-// HanielSelfCard — Self-update card for the haniel repo at top of SERVICES
+// HanielSelfCard — Self card with logs and restart controls
 
+import { useState } from 'react'
+import { Terminal, RotateCcw } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import { getSelfLogs } from '@/lib/api'
+import { LogViewer } from './LogViewer'
 import type { NamedRepo } from '@/lib/groups'
 import type { SelfUpdateStatus } from '@/lib/types'
 
@@ -7,11 +12,19 @@ interface HanielSelfCardProps {
   repo: NamedRepo
   selfUpdate: SelfUpdateStatus
   onApprove: () => void
+  onRestart: () => void
 }
 
-export function HanielSelfCard({ repo, selfUpdate, onApprove }: HanielSelfCardProps) {
+export function HanielSelfCard({ repo, selfUpdate, onApprove, onRestart }: HanielSelfCardProps) {
+  const [showLogs, setShowLogs] = useState(false)
   const pending = selfUpdate?.pending
   const { repoName, repo: repoStatus } = repo
+
+  const handleRestart = () => {
+    if (window.confirm('하니엘을 재시작하면 모든 서비스가 일시적으로 중단됩니다.\n정말 재시작하시겠습니까?')) {
+      onRestart()
+    }
+  }
 
   return (
     <div className="rounded-lg border border-blue-700/50 bg-zinc-800/50 overflow-hidden">
@@ -25,11 +38,26 @@ export function HanielSelfCard({ repo, selfUpdate, onApprove }: HanielSelfCardPr
             {repoStatus.branch} · {repoStatus.last_head?.slice(0, 8) ?? '—'}
           </span>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-1 shrink-0">
+          <ActionButton
+            icon={<Terminal size={14} />}
+            label="Logs"
+            onClick={() => setShowLogs((v) => !v)}
+            className={cn(
+              'text-zinc-400 hover:text-zinc-300',
+              showLogs && 'text-zinc-200',
+            )}
+          />
+          <ActionButton
+            icon={<RotateCcw size={14} />}
+            label="Restart haniel"
+            onClick={handleRestart}
+            className="text-yellow-400 hover:text-yellow-300"
+          />
           {pending && (
             <button
               onClick={onApprove}
-              className="text-xs bg-blue-600 hover:bg-blue-500 text-white px-3 py-1 rounded transition-colors"
+              className="text-xs bg-blue-600 hover:bg-blue-500 text-white px-3 py-1 rounded transition-colors ml-1"
             >
               Approve update
             </button>
@@ -60,6 +88,31 @@ export function HanielSelfCard({ repo, selfUpdate, onApprove }: HanielSelfCardPr
           </details>
         </div>
       )}
+
+      {showLogs && (
+        <div className="border-t border-blue-700/30">
+          <LogViewer serviceName="haniel" fetchFn={getSelfLogs} />
+        </div>
+      )}
     </div>
+  )
+}
+
+interface ActionButtonProps {
+  icon: React.ReactNode
+  label: string
+  onClick: () => void
+  className?: string
+}
+
+function ActionButton({ icon, label, onClick, className }: ActionButtonProps) {
+  return (
+    <button
+      title={label}
+      onClick={onClick}
+      className={cn('p-1.5 rounded transition-colors hover:bg-zinc-700/50', className)}
+    >
+      {icon}
+    </button>
   )
 }

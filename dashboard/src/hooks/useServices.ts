@@ -129,6 +129,14 @@ export function useServices() {
     }
   }, [])
 
+  const selfRestart = useCallback(async () => {
+    try {
+      await api.selfRestart()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }, [])
+
   const refreshStatus = useCallback(async () => {
     try {
       const s = await api.getStatus()
@@ -147,6 +155,7 @@ export function useServices() {
     pullRepo,
     pullingRepos,
     approveSelfUpdate,
+    selfRestart,
     refreshStatus,
     updating,
   }

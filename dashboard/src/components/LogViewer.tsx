@@ -3,12 +3,15 @@ import { RefreshCw } from "lucide-react";
 import { getServiceLogs } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
+type LogFetchFn = (name: string, count: number) => Promise<{ lines: string[] }>;
+
 interface LogViewerProps {
   serviceName: string;
   initialLines?: number;
+  fetchFn?: LogFetchFn;
 }
 
-export function LogViewer({ serviceName, initialLines = 100 }: LogViewerProps) {
+export function LogViewer({ serviceName, initialLines = 100, fetchFn = getServiceLogs }: LogViewerProps) {
   const [lines, setLines] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -19,7 +22,7 @@ export function LogViewer({ serviceName, initialLines = 100 }: LogViewerProps) {
     setLoading(true);
     setError(null);
     try {
-      const result = await getServiceLogs(serviceName, count);
+      const result = await fetchFn(serviceName, count);
       setLines(result.lines);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to fetch logs");
