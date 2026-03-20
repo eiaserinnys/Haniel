@@ -154,10 +154,13 @@ class ClaudeSessionManager:
 
                     event_type = event.get("type")
 
-                    if event_type == "text":
-                        delta = event.get("text", "")
-                        last_text_parts.append(delta)
-                        yield {"type": "text_delta", "delta": delta}
+                    if event_type == "assistant":
+                        # stream-json format: {"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}
+                        for block in (event.get("message") or {}).get("content") or []:
+                            if block.get("type") == "text":
+                                delta = block.get("text", "")
+                                last_text_parts.append(delta)
+                                yield {"type": "text_delta", "delta": delta}
 
                     elif event_type == "result":
                         new_claude_session_id = event.get("session_id")
