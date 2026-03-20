@@ -188,6 +188,14 @@ class HanielMcpServer:
                     "properties": {},
                 },
             },
+            {
+                "name": "haniel_self_restart",
+                "description": "Restart haniel itself (clean restart without git update)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
         ]
 
     async def read_resource(self, uri: str) -> str:
@@ -258,6 +266,8 @@ class HanielMcpServer:
             return await self._reload_config()
         elif name == "haniel_approve_update":
             return await self._approve_self_update()
+        elif name == "haniel_self_restart":
+            return await self._self_restart()
         else:
             return f"Error: Unknown tool '{name}'"
 
@@ -466,6 +476,16 @@ class HanielMcpServer:
         """
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, self.runner.approve_self_update)
+        return result
+
+    async def _self_restart(self) -> str:
+        """Restart haniel without performing a git update.
+
+        Delegates to runner.request_restart() which signals the main
+        thread to exit with code 11 for the wrapper script to handle.
+        """
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, self.runner.request_restart)
         return result
 
     async def start(self) -> None:

@@ -17,7 +17,7 @@ from pathlib import Path
 import click
 from pydantic import ValidationError as PydanticValidationError
 
-from haniel import __version__, EXIT_SELF_UPDATE
+from haniel import __version__, EXIT_SELF_UPDATE, EXIT_RESTART
 from haniel.config import load_config, HanielConfig, validate_config
 
 
@@ -452,8 +452,18 @@ def run(config: Path | None, foreground: bool, dry_run: bool, log_level: str) ->
     click.echo(f"Repositories: {len(haniel_config.repos)}")
     click.echo()
 
-    # Create runner
+    # Add file handler for haniel's own log
     config_dir = config.parent.resolve()
+    log_file = config_dir / "logs" / "haniel.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(str(log_file), encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    logging.getLogger().addHandler(file_handler)
+
+    # Create runner
     runner = ServiceRunner(
         config=haniel_config,
         config_dir=config_dir,
@@ -507,6 +517,11 @@ def run(config: Path | None, foreground: bool, dry_run: bool, log_level: str) ->
                 click.style("Exiting for self-update (exit code 10).", fg="yellow")
             )
             sys.exit(EXIT_SELF_UPDATE)
+        if runner.restart_requested:
+            click.echo(
+                click.style("Exiting for restart (exit code 11).", fg="yellow")
+            )
+            sys.exit(EXIT_RESTART)
         click.echo("Shutdown complete.")
 
 

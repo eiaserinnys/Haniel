@@ -11,6 +11,7 @@ __author__ = "Dorothy"
 # Exit codes (see ADR-0002)
 EXIT_CLEAN = 0
 EXIT_SELF_UPDATE = 10
+EXIT_RESTART = 11
 
 
 class SelfUpdateExit(SystemExit):

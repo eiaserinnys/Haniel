@@ -13,6 +13,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from ..core.logs import get_log_tail
+
 if TYPE_CHECKING:
     from ..core.runner import ServiceRunner
 
@@ -218,6 +220,32 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
         except Exception as e:
             return _error(str(e))
 
+    # ── GET /api/self/logs ────────────────────────────────────────────────────
+
+    async def self_logs(request: Request) -> JSONResponse:
+        try:
+            lines = int(request.query_params.get("lines", "100"))
+            lines = min(lines, MAX_LOG_LINES)
+        except ValueError:
+            return _error("lines must be an integer")
+
+        log_file = runner.config_dir / "logs" / "haniel.log"
+        try:
+            log_lines = get_log_tail(log_file, lines)
+            return JSONResponse({"service": "haniel", "lines": log_lines})
+        except Exception as e:
+            return _error(str(e))
+
+    # ── POST /api/self/restart ──────────────────────────────────────────────
+
+    async def self_restart(request: Request) -> JSONResponse:
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, runner.request_restart)
+            return JSONResponse({"ok": True, "message": result})
+        except Exception as e:
+            return _error(str(e))
+
     # ── POST /api/reload ──────────────────────────────────────────────────────
 
     async def reload(request: Request) -> JSONResponse:
@@ -240,6 +268,8 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
         Route("/api/services/{name}/logs", service_logs, methods=["GET"]),
         Route("/api/repos", get_repos, methods=["GET"]),
         Route("/api/repos/{name}/pull", repo_pull, methods=["POST"]),
+        Route("/api/self/logs", self_logs, methods=["GET"]),
+        Route("/api/self/restart", self_restart, methods=["POST"]),
         Route("/api/self-update/approve", self_update_approve, methods=["POST"]),
         Route("/api/reload", reload, methods=["POST"]),
     ]

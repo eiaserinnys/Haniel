@@ -307,6 +307,7 @@ class ServiceRunner:
             config.self_update.repo if config.self_update else None
         )
         self._self_update_requested = threading.Event()
+        self._restart_requested = threading.Event()
 
     @property
     def is_running(self) -> bool:
@@ -866,6 +867,25 @@ class ServiceRunner:
     def self_update_requested(self) -> bool:
         """Check if self-update exit has been requested."""
         return self._self_update_requested.is_set()
+
+    def request_restart(self) -> str:
+        """Request a clean restart without update.
+
+        Signals the main thread to exit with code 11, which tells the
+        wrapper script to restart without performing a git pull.
+
+        Returns:
+            Status message
+        """
+        logger.info("Restart requested, shutting down for restart")
+        self._restart_requested.set()
+        self.stop()
+        return "Restart initiated. Shutting down..."
+
+    @property
+    def restart_requested(self) -> bool:
+        """Check if restart exit has been requested."""
+        return self._restart_requested.is_set()
 
     def _notify_self_update(
         self,

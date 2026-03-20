@@ -148,10 +148,15 @@ if (-not (Test-Path $RepoPath)) {
 
 # Main loop
 $EXIT_SELF_UPDATE = 10
+$EXIT_RESTART = 11
+$skipUpdate = $false
 
 while ($true) {
-    Write-Host "[haniel-runner] Updating haniel repository..."
-    Update-HanielRepo | Out-Null
+    if (-not $skipUpdate) {
+        Write-Host "[haniel-runner] Updating haniel repository..."
+        Update-HanielRepo | Out-Null
+    }
+    $skipUpdate = $false
 
     Write-Host "[haniel-runner] Launching haniel..."
     & python -m haniel.cli run $ConfigPath
@@ -168,7 +173,14 @@ while ($true) {
         # Self-update approved — loop again to fetch + reinstall + restart
         Write-Host "[haniel-runner] Self-update requested. Looping..."
         Send-Webhook "Self-update initiated. Updating and restarting..." "info"
-        Start-Sleep -Seconds 5  # Prevent tight loops
+        Start-Sleep -Seconds 5
+    }
+    elseif ($exitCode -eq $EXIT_RESTART) {
+        # Restart requested — loop again without update
+        Write-Host "[haniel-runner] Restart requested. Skipping update..."
+        Send-Webhook "Restart initiated (no update)." "info"
+        $skipUpdate = $true
+        Start-Sleep -Seconds 3
     }
     else {
         # Crash or unexpected exit — let WinSW onfailure handle it
