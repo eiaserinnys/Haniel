@@ -36,9 +36,11 @@ haniel is a **single YAML file** + a process that your AI agent already knows ho
 
 ## How it works
 
-1. **You write `haniel.yaml`** — repos to poll, services to run, how they depend on each other
+1. **You write `haniel.yaml`** (or let Claude Code do it) — repos to poll, services to run, how they depend on each other
 2. **haniel runs as a service** — polls git, manages processes, restarts on crash
 3. **Claude Code connects via MCP** — every operation is a tool call, not a shell command
+
+> **For agents**: See [`haniel.yaml.example`](haniel.yaml.example) and [Configuration Reference](docs/configuration.md) for the full schema.
 
 ```yaml
 # haniel.yaml
