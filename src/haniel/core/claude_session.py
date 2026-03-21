@@ -180,8 +180,9 @@ class ClaudeSessionManager:
 
                 async for msg in client.receive_response():
                     if isinstance(msg, SystemMessage):
-                        if not new_claude_session_id and msg.session_id:
-                            new_claude_session_id = msg.session_id
+                        sid = msg.data.get("session_id") if hasattr(msg, "data") else None
+                        if not new_claude_session_id and sid:
+                            new_claude_session_id = sid
 
                     elif isinstance(msg, AssistantMessage):
                         for block in msg.content:
