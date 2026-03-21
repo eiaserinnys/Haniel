@@ -1,5 +1,9 @@
 # haniel
 
+<p align="center">
+  <img src="docs/haniel-intro.png" alt="haniel" width="720">
+</p>
+
 [![CI](https://github.com/eiaserinnys/haniel/actions/workflows/test.yml/badge.svg)](https://github.com/eiaserinnys/haniel/actions/workflows/test.yml)
 
 A service runner built for Claude Code.
