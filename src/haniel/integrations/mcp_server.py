@@ -76,6 +76,24 @@ class HanielMcpServer:
                 "mimeType": "application/json",
             },
             {
+                "uri": "haniel://config",
+                "name": "Configuration",
+                "description": "Full haniel.yaml configuration",
+                "mimeType": "application/json",
+            },
+            {
+                "uri": "haniel://config/services",
+                "name": "Service Configs",
+                "description": "All service configurations from haniel.yaml",
+                "mimeType": "application/json",
+            },
+            {
+                "uri": "haniel://config/repos",
+                "name": "Repo Configs",
+                "description": "All repository configurations from haniel.yaml",
+                "mimeType": "application/json",
+            },
+            {
                 "uri": "haniel://repos",
                 "name": "Repository Status",
                 "description": "Get status of all tracked repositories",
@@ -192,16 +210,22 @@ class HanielMcpServer:
                 },
             },
             {
-                "name": "haniel_approve_update",
-                "description": "Approve a pending haniel self-update. Shuts down all services and restarts with updated code.",
+                "name": "haniel_update",
+                "description": "Update a service (git pull + restart). For service='haniel', pulls haniel repo and restarts itself.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "service": {
+                            "type": "string",
+                            "description": "Name of the service to update. Use 'haniel' for self-update.",
+                        },
+                    },
+                    "required": ["service"],
                 },
             },
             {
-                "name": "haniel_self_restart",
-                "description": "Restart haniel itself (clean restart without git update)",
+                "name": "haniel_check_updates",
+                "description": "Check all repos (including haniel itself) for pending changes. Results are from last poll snapshot — may be up to poll_interval seconds stale.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -229,6 +253,76 @@ class HanielMcpServer:
                     "required": ["service"],
                 },
             },
+            {
+                "name": "haniel_update_service_config",
+                "description": "Update an existing service configuration in haniel.yaml. Validates, backs up, writes atomically, and reloads.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "service": {"type": "string", "description": "Service name"},
+                        "config": {"type": "object", "description": "Full service config object (run, cwd, repo, ready, etc.)"},
+                    },
+                    "required": ["service", "config"],
+                },
+            },
+            {
+                "name": "haniel_create_service_config",
+                "description": "Add a new service to haniel.yaml.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "New service name"},
+                        "config": {"type": "object", "description": "Service config object"},
+                    },
+                    "required": ["name", "config"],
+                },
+            },
+            {
+                "name": "haniel_delete_service_config",
+                "description": "Remove a service from haniel.yaml. Fails if other services depend on it.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "service": {"type": "string", "description": "Service name to delete"},
+                    },
+                    "required": ["service"],
+                },
+            },
+            {
+                "name": "haniel_update_repo_config",
+                "description": "Update an existing repo configuration in haniel.yaml.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo": {"type": "string", "description": "Repo name"},
+                        "config": {"type": "object", "description": "Full repo config object (url, branch, path, hooks)"},
+                    },
+                    "required": ["repo", "config"],
+                },
+            },
+            {
+                "name": "haniel_create_repo_config",
+                "description": "Add a new repo to haniel.yaml.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "New repo name"},
+                        "config": {"type": "object", "description": "Repo config object"},
+                    },
+                    "required": ["name", "config"],
+                },
+            },
+            {
+                "name": "haniel_delete_repo_config",
+                "description": "Remove a repo from haniel.yaml. Fails if services reference it.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo": {"type": "string", "description": "Repo name to delete"},
+                    },
+                    "required": ["repo"],
+                },
+            },
         ]
 
     async def read_resource(self, uri: str) -> str:
@@ -247,6 +341,14 @@ class HanielMcpServer:
 
         path = parsed.netloc + parsed.path
         query = parse_qs(parsed.query)
+
+        # haniel://config
+        if path == "config":
+            return await self._get_config()
+        if path == "config/services":
+            return await self._get_config_services()
+        if path == "config/repos":
+            return await self._get_config_repos()
 
         # haniel://status
         if path == "status":
@@ -286,9 +388,15 @@ class HanielMcpServer:
             Tool result as string
         """
         if name == "haniel_restart":
-            return await self._restart_service(arguments.get("service", ""))
+            service = arguments.get("service", "")
+            if service == "haniel":
+                return await self._self_restart()
+            return await self._restart_service(service)
         elif name == "haniel_stop":
-            return await self._stop_service(arguments.get("service", ""))
+            service = arguments.get("service", "")
+            if service == "haniel":
+                return "Error: Cannot stop haniel itself via MCP"
+            return await self._stop_service(service)
         elif name == "haniel_start":
             return await self._start_service(arguments.get("service", ""))
         elif name == "haniel_pull":
@@ -297,12 +405,24 @@ class HanielMcpServer:
             return await self._enable_service(arguments.get("service", ""))
         elif name == "haniel_reload":
             return await self._reload_config()
-        elif name == "haniel_approve_update":
-            return await self._approve_self_update()
-        elif name == "haniel_self_restart":
-            return await self._self_restart()
+        elif name == "haniel_update":
+            return await self._update_service(arguments)
+        elif name == "haniel_check_updates":
+            return await self._check_updates()
         elif name == "haniel_read_logs":
             return await self._read_logs_tool(arguments)
+        elif name == "haniel_update_service_config":
+            return await self._update_service_config(arguments)
+        elif name == "haniel_create_service_config":
+            return await self._create_service_config(arguments)
+        elif name == "haniel_delete_service_config":
+            return await self._delete_service_config(arguments)
+        elif name == "haniel_update_repo_config":
+            return await self._update_repo_config(arguments)
+        elif name == "haniel_create_repo_config":
+            return await self._create_repo_config(arguments)
+        elif name == "haniel_delete_repo_config":
+            return await self._delete_repo_config(arguments)
         else:
             return f"Error: Unknown tool '{name}'"
 
@@ -514,20 +634,305 @@ class HanielMcpServer:
             logger.error(f"Failed to reload config: {e}")
             return json.dumps({"error": f"Failed to reload configuration: {e}"})
 
-    async def _approve_self_update(self) -> str:
-        """Approve a pending self-update.
+    async def _update_service(self, arguments: dict[str, Any]) -> str:
+        """Update a service: pull its repo, then restart."""
+        service = arguments.get("service", "")
+        if service == "haniel":
+            return await self._self_update()
 
-        Delegates to runner.approve_self_update() which sets the signal,
-        then schedules deferred stop() so the MCP response reaches the client first.
-        """
+        # Find repo for this service
+        svc_names = self._get_service_names()
+        if service not in svc_names:
+            return f"Error: Service not found: {service}"
+
+        status = self.runner.get_status()
+        svc_info = status.get("services", {}).get(service, {})
+        repo_name = svc_info.get("config", {}).get("repo")
+        if not repo_name:
+            return f"Error: Service '{service}' has no associated repo"
+
+        # Pull
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, self.runner.approve_self_update)
-        if self.runner.self_update_requested:
-            async def _deferred_stop():
-                await asyncio.sleep(0.5)
-                await loop.run_in_executor(None, self.runner.stop)
-            asyncio.ensure_future(_deferred_stop())
-        return result
+        pull_ok = await loop.run_in_executor(None, self.runner._pull_repo, repo_name)
+        if not pull_ok:
+            return f"Error: Pull failed for repo '{repo_name}'"
+
+        # Restart
+        return await self._restart_service(service)
+
+    async def _self_update(self) -> str:
+        """Self-update: pull haniel repo, then deferred exit(10)."""
+        loop = asyncio.get_event_loop()
+
+        # Pull haniel's own repo first
+        self_repo = getattr(self.runner, "_self_repo", None)
+        if not self_repo:
+            return "Error: No self repo configured"
+
+        pull_ok = await loop.run_in_executor(None, self.runner._pull_repo, self_repo)
+        if not pull_ok:
+            return f"Error: Pull failed for haniel repo '{self_repo}'"
+
+        # Signal self-update and deferred stop
+        self.runner._self_update_requested.set()
+        async def _deferred_stop():
+            await asyncio.sleep(0.5)
+            await loop.run_in_executor(None, self.runner.stop)
+        asyncio.ensure_future(_deferred_stop())
+        return "Self-update: pull succeeded, restarting haniel..."
+
+    async def _check_updates(self) -> str:
+        """Check all repos for pending changes."""
+        status = self.runner.get_status()
+        repos = status.get("repos", {})
+        updates = {}
+        for name, repo in repos.items():
+            if repo.get("pending_changes"):
+                updates[name] = repo["pending_changes"]
+        return json.dumps({
+            "repos_with_updates": updates,
+            "total": len(updates),
+            "note": f"Snapshot from last poll (interval={status.get('poll_interval', '?')}s)",
+        }, indent=2, ensure_ascii=False)
+
+    # --- Config resource handlers ---
+
+    async def _get_config(self) -> str:
+        from ..dashboard.config_io import read_config
+        config = read_config(self.runner.config_path)
+        return json.dumps(config.model_dump(by_alias=True, mode="json"), indent=2, ensure_ascii=False)
+
+    async def _get_config_services(self) -> str:
+        from ..dashboard.config_io import read_config
+        config = read_config(self.runner.config_path)
+        data = config.model_dump(by_alias=True, mode="json")
+        return json.dumps(data.get("services", {}), indent=2, ensure_ascii=False)
+
+    async def _get_config_repos(self) -> str:
+        from ..dashboard.config_io import read_config
+        config = read_config(self.runner.config_path)
+        data = config.model_dump(by_alias=True, mode="json")
+        return json.dumps(data.get("repos", {}), indent=2, ensure_ascii=False)
+
+    # --- Config CRUD tool handlers ---
+
+    _config_lock = None  # Lazy-init threading.Lock
+
+    def _get_config_lock(self):
+        if self._config_lock is None:
+            import threading
+            self._config_lock = threading.Lock()
+        return self._config_lock
+
+    async def _update_service_config(self, arguments: dict[str, Any]) -> str:
+        from ..dashboard.config_io import read_config, write_config, backup_config, restore_config
+        from ..config.model import ServiceConfig
+        from ..config.validators import validate_config
+
+        service = arguments["service"]
+        config_data = arguments["config"]
+        config_path = self.runner.config_path
+        loop = asyncio.get_event_loop()
+
+        def _do():
+            new_svc = ServiceConfig.model_validate(config_data)
+            with self._get_config_lock():
+                config = read_config(config_path)
+                if service not in config.services:
+                    raise KeyError(f"Service not found: {service}")
+                config.services[service] = new_svc
+                errors = validate_config(config)
+                if errors:
+                    raise ValueError(str(errors[0]))
+                backup_config(config_path)
+                try:
+                    write_config(config_path, config)
+                except Exception:
+                    restore_config(config_path)
+                    raise
+                self.runner.reload_config()
+
+        try:
+            await loop.run_in_executor(None, _do)
+            return json.dumps({"ok": True})
+        except (KeyError, ValueError) as e:
+            return json.dumps({"error": str(e)})
+
+    async def _create_service_config(self, arguments: dict[str, Any]) -> str:
+        from ..dashboard.config_io import read_config, write_config, backup_config, restore_config
+        from ..config.model import ServiceConfig
+        from ..config.validators import validate_config
+
+        name = arguments["name"]
+        config_data = arguments["config"]
+        config_path = self.runner.config_path
+        loop = asyncio.get_event_loop()
+
+        def _do():
+            new_svc = ServiceConfig.model_validate(config_data)
+            with self._get_config_lock():
+                config = read_config(config_path)
+                if name in config.services:
+                    raise ValueError(f"Service already exists: {name}")
+                config.services[name] = new_svc
+                errors = validate_config(config)
+                if errors:
+                    raise ValueError(str(errors[0]))
+                backup_config(config_path)
+                try:
+                    write_config(config_path, config)
+                except Exception:
+                    restore_config(config_path)
+                    raise
+                self.runner.reload_config()
+
+        try:
+            await loop.run_in_executor(None, _do)
+            return json.dumps({"ok": True})
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
+
+    async def _delete_service_config(self, arguments: dict[str, Any]) -> str:
+        from ..dashboard.config_io import read_config, write_config, backup_config, restore_config
+        from ..config.validators import validate_config
+
+        service = arguments["service"]
+        config_path = self.runner.config_path
+        loop = asyncio.get_event_loop()
+
+        def _do():
+            with self._get_config_lock():
+                config = read_config(config_path)
+                if service not in config.services:
+                    raise KeyError(f"Service not found: {service}")
+                dependents = [
+                    n for n, s in config.services.items()
+                    if n != service and service in s.after
+                ]
+                if dependents:
+                    raise ValueError(f"Cannot delete: referenced by {dependents}")
+                del config.services[service]
+                errors = validate_config(config)
+                if errors:
+                    raise ValueError(str(errors[0]))
+                backup_config(config_path)
+                try:
+                    write_config(config_path, config)
+                except Exception:
+                    restore_config(config_path)
+                    raise
+                self.runner.reload_config()
+
+        try:
+            await loop.run_in_executor(None, _do)
+            return json.dumps({"ok": True})
+        except (KeyError, ValueError) as e:
+            return json.dumps({"error": str(e)})
+
+    async def _update_repo_config(self, arguments: dict[str, Any]) -> str:
+        from ..dashboard.config_io import read_config, write_config, backup_config, restore_config
+        from ..config.model import RepoConfig
+        from ..config.validators import validate_config
+
+        repo = arguments["repo"]
+        config_data = arguments["config"]
+        config_path = self.runner.config_path
+        loop = asyncio.get_event_loop()
+
+        def _do():
+            new_repo = RepoConfig.model_validate(config_data)
+            with self._get_config_lock():
+                config = read_config(config_path)
+                if repo not in config.repos:
+                    raise KeyError(f"Repo not found: {repo}")
+                config.repos[repo] = new_repo
+                errors = validate_config(config)
+                if errors:
+                    raise ValueError(str(errors[0]))
+                backup_config(config_path)
+                try:
+                    write_config(config_path, config)
+                except Exception:
+                    restore_config(config_path)
+                    raise
+                self.runner.reload_config()
+
+        try:
+            await loop.run_in_executor(None, _do)
+            return json.dumps({"ok": True})
+        except (KeyError, ValueError) as e:
+            return json.dumps({"error": str(e)})
+
+    async def _create_repo_config(self, arguments: dict[str, Any]) -> str:
+        from ..dashboard.config_io import read_config, write_config, backup_config, restore_config
+        from ..config.model import RepoConfig
+        from ..config.validators import validate_config
+
+        name = arguments["name"]
+        config_data = arguments["config"]
+        config_path = self.runner.config_path
+        loop = asyncio.get_event_loop()
+
+        def _do():
+            new_repo = RepoConfig.model_validate(config_data)
+            with self._get_config_lock():
+                config = read_config(config_path)
+                if name in config.repos:
+                    raise ValueError(f"Repo already exists: {name}")
+                config.repos[name] = new_repo
+                errors = validate_config(config)
+                if errors:
+                    raise ValueError(str(errors[0]))
+                backup_config(config_path)
+                try:
+                    write_config(config_path, config)
+                except Exception:
+                    restore_config(config_path)
+                    raise
+                self.runner.reload_config()
+
+        try:
+            await loop.run_in_executor(None, _do)
+            return json.dumps({"ok": True})
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
+
+    async def _delete_repo_config(self, arguments: dict[str, Any]) -> str:
+        from ..dashboard.config_io import read_config, write_config, backup_config, restore_config
+        from ..config.validators import validate_config
+
+        repo = arguments["repo"]
+        config_path = self.runner.config_path
+        loop = asyncio.get_event_loop()
+
+        def _do():
+            with self._get_config_lock():
+                config = read_config(config_path)
+                if repo not in config.repos:
+                    raise KeyError(f"Repo not found: {repo}")
+                using = [
+                    n for n, s in config.services.items()
+                    if s.repo == repo
+                ]
+                if using:
+                    raise ValueError(f"Cannot delete: used by services {using}")
+                del config.repos[repo]
+                errors = validate_config(config)
+                if errors:
+                    raise ValueError(str(errors[0]))
+                backup_config(config_path)
+                try:
+                    write_config(config_path, config)
+                except Exception:
+                    restore_config(config_path)
+                    raise
+                self.runner.reload_config()
+
+        try:
+            await loop.run_in_executor(None, _do)
+            return json.dumps({"ok": True})
+        except (KeyError, ValueError) as e:
+            return json.dumps({"error": str(e)})
 
     async def _self_restart(self) -> str:
         """Restart haniel without performing a git update.
