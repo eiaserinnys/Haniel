@@ -576,8 +576,8 @@ class HanielMcpServer:
 
             # Register resource read handler
             @mcp.read_resource()
-            async def handle_read_resource(uri: str):
-                content = await self.read_resource(uri)
+            async def handle_read_resource(uri):
+                content = await self.read_resource(str(uri))
                 return content
 
             # Register tool list handler
