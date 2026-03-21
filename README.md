@@ -1,11 +1,5 @@
 # haniel
 
-<p align="center">
-  <img src="docs/haniel-intro.png" alt="haniel" width="1000">
-</p>
-
-[![CI](https://github.com/eiaserinnys/haniel/actions/workflows/test.yml/badge.svg)](https://github.com/eiaserinnys/haniel/actions/workflows/test.yml)
-
 **A service runner that your AI agent can operate.**
 
 haniel manages processes, polls git repos, and exposes everything through [MCP](https://modelcontextprotocol.io/) —
@@ -16,6 +10,12 @@ You:    "Deploy the latest changes to api-server"
 Claude: haniel_pull(repo="api") → haniel_restart(service="api-server")
         ✅ Pulled 3 commits, api-server restarted successfully.
 ```
+
+<p align="center">
+  <img src="docs/haniel-intro.png" alt="haniel" width="1000">
+</p>
+
+[![CI](https://github.com/eiaserinnys/haniel/actions/workflows/test.yml/badge.svg)](https://github.com/eiaserinnys/haniel/actions/workflows/test.yml)
 
 ## The problem
 
