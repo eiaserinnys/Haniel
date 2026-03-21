@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { ChatMessage } from "@/hooks/useChatWebSocket";
+import { MarkdownContent } from "./MarkdownContent";
 
 interface ChatViewProps {
   messages: ChatMessage[];
@@ -12,9 +13,9 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
         <span className="text-[15px] font-bold text-accent-blue uppercase tracking-wide">
           USER
         </span>
-        <span className="text-[15px] text-foreground whitespace-pre-wrap break-words">
-          {msg.content}
-        </span>
+        <div className="text-[15px] text-foreground prose prose-sm prose-invert max-w-none break-words">
+          <MarkdownContent content={msg.content} />
+        </div>
       </div>
     </div>
   );
@@ -27,12 +28,16 @@ function AssistantMessage({ msg }: { msg: ChatMessage }) {
         <span className="text-[15px] font-bold text-accent-green uppercase tracking-wide">
           CLAUDE
         </span>
-        <span className="text-[15px] text-foreground whitespace-pre-wrap break-words">
-          {msg.content}
-          {msg.isStreaming && (
+        {msg.isStreaming ? (
+          <span className="text-[15px] text-foreground whitespace-pre-wrap break-words">
+            {msg.content}
             <span className="inline-block w-[2px] h-[1em] bg-current animate-pulse align-middle ml-0.5" />
-          )}
-        </span>
+          </span>
+        ) : (
+          <div className="text-[15px] text-foreground prose prose-sm prose-invert max-w-none break-words">
+            <MarkdownContent content={msg.content} />
+          </div>
+        )}
       </div>
     </div>
   );
