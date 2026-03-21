@@ -132,6 +132,26 @@ export function useChatWebSocket(): UseChatWebSocket {
         }
         return prev;
       });
+    } else if (type === "compact_start") {
+      const retry = msg.retry as number;
+      const maxRetries = msg.max_retries as number;
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "system",
+          content: `컨텍스트 컴팩션이 진행 중입니다... (${retry}/${maxRetries})`,
+        },
+      ]);
+    } else if (type === "compact_end") {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "system",
+          content: "컴팩션 완료, 응답을 이어갑니다.",
+        },
+      ]);
     } else if (type === "error") {
       const error = (msg.error as string) ?? "unknown error";
       setMessages((prev) => [

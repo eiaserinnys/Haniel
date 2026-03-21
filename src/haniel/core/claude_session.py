@@ -13,13 +13,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator, TYPE_CHECKING
 
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher, HookContext
 from claude_agent_sdk.types import (
     AssistantMessage,
+    HookJSONOutput,
     ResultMessage,
     SystemMessage,
     TextBlock,
 )
+
+MAX_COMPACT_RETRIES = 3
+COMPACT_RETRY_READ_TIMEOUT = 30  # seconds
 
 if TYPE_CHECKING:
     from .runner import ServiceRunner
@@ -138,13 +142,20 @@ class ClaudeSessionManager:
 
         claude_session_id: str | None = session.get("claude_session_id")
 
+        compact_events: list = []
+        compact_retry_count = 0
         last_text_parts: list[str] = []
         new_claude_session_id: str | None = None
         client: ClaudeSDKClient | None = None
         resumed: bool = False
+        stderr_files: list = []  # file handles to close in finally
 
         try:
-            client, resumed = await self._get_or_create_client(claude_session_id)
+            client, resumed, sf = await self._get_or_create_client(
+                claude_session_id, compact_events=compact_events
+            )
+            if sf:
+                stderr_files.append(sf)
 
             # Resume 실패로 새 세션이 생성된 경우, 기존 claude_session_id 초기화
             if claude_session_id and not resumed:
@@ -161,54 +172,95 @@ class ClaudeSessionManager:
 
             await client.query(text)
 
-            async for msg in client.receive_response():
-                if isinstance(msg, SystemMessage):
-                    if not new_claude_session_id and msg.session_id:
-                        new_claude_session_id = msg.session_id
+            # Compact retry loop: if auto-compact happens during receive_response(),
+            # the CLI may terminate after sending ResultMessage. We detect this via
+            # the PreCompact hook and retry with a resumed client.
+            while True:
+                compact_before = len(compact_events)
 
-                elif isinstance(msg, AssistantMessage):
-                    for block in msg.content:
-                        if isinstance(block, TextBlock):
-                            last_text_parts.append(block.text)
-                            yield {"type": "text_delta", "delta": block.text}
+                async for msg in client.receive_response():
+                    if isinstance(msg, SystemMessage):
+                        if not new_claude_session_id and msg.session_id:
+                            new_claude_session_id = msg.session_id
 
-                elif isinstance(msg, ResultMessage):
-                    if msg.session_id:
-                        new_claude_session_id = msg.session_id
+                    elif isinstance(msg, AssistantMessage):
+                        for block in msg.content:
+                            if isinstance(block, TextBlock):
+                                last_text_parts.append(block.text)
+                                yield {"type": "text_delta", "delta": block.text}
+
+                    elif isinstance(msg, ResultMessage):
+                        if msg.session_id:
+                            new_claude_session_id = msg.session_id
+
+                # Compact retry decision
+                compact_happened = len(compact_events) > compact_before
+                if compact_happened and compact_retry_count < MAX_COMPACT_RETRIES:
+                    compact_retry_count += 1
+                    yield {
+                        "type": "compact_start",
+                        "retry": compact_retry_count,
+                        "max_retries": MAX_COMPACT_RETRIES,
+                    }
+                    logger.info(
+                        "Compact retry %d/%d for session %s",
+                        compact_retry_count, MAX_COMPACT_RETRIES, session_id,
+                    )
+
+                    # Disconnect old client
+                    if client is not None:
+                        try:
+                            await client.disconnect()
+                        except Exception:
+                            pass
+
+                    # Resume with new client (no query — just receive_response)
+                    resume_id = new_claude_session_id or claude_session_id
+                    client, _, sf = await self._get_or_create_client(
+                        resume_id, compact_events=compact_events
+                    )
+                    if sf:
+                        stderr_files.append(sf)
+                    continue
+
+                break  # No compact or retry limit reached
+
+            # compact_end after successful retry completion
+            if compact_retry_count > 0:
+                yield {"type": "compact_end", "retries_used": compact_retry_count}
 
         except Exception as exc:
             logger.exception("Error during SDK stream")
-            # Read stderr log file for diagnostics (written by debug_stderr)
             session_tag = claude_session_id or "new"
             stderr_path = self._stderr_log_dir / f"cli_stderr_{session_tag}.log"
             if stderr_path.exists():
                 stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
                 if stderr_text:
-                    # Log last 2000 chars to avoid flooding
                     logger.error("CLI stderr output:\n%s", stderr_text[-2000:])
             yield {"type": "error", "error": str(exc)}
-            # Clean up the client on error
             if client is not None:
                 try:
                     await client.disconnect()
                 except Exception:
                     pass
-            # Remove stale client from cache
             if claude_session_id and claude_session_id in self._clients:
                 del self._clients[claude_session_id]
             return
 
+        finally:
+            for f in stderr_files:
+                try:
+                    f.close()
+                except Exception:
+                    pass
+
         # Cache the client under the (possibly new) claude session ID.
-        # If the SDK didn't return a session_id (unlikely but possible),
-        # disconnect the client to prevent process leaks.
         if client is not None:
             if new_claude_session_id:
-                # Remove old key if it existed under a different ID
                 if claude_session_id and claude_session_id != new_claude_session_id:
                     self._clients.pop(claude_session_id, None)
                 self._clients[new_claude_session_id] = client
             elif claude_session_id not in self._clients:
-                # No session ID obtained and client isn't cached — disconnect
                 try:
                     await client.disconnect()
                 except Exception:
@@ -250,7 +302,25 @@ class ClaudeSessionManager:
                 return s
         return None
 
-    def _build_options(self, claude_session_id: str | None) -> ClaudeAgentOptions:
+    def _build_compact_hook(self, compact_events: list) -> dict:
+        """Build a PreCompact hook that records compact events."""
+        async def on_pre_compact(
+            hook_input: dict,
+            tool_use_id: str | None,
+            context: HookContext,
+        ) -> HookJSONOutput:
+            trigger = hook_input.get("trigger", "auto")
+            logger.info(f"PreCompact hook triggered: {trigger}")
+            compact_events.append({"trigger": trigger})
+            return HookJSONOutput()
+
+        return {
+            "PreCompact": [HookMatcher(matcher=None, hooks=[on_pre_compact])]
+        }
+
+    def _build_options(
+        self, claude_session_id: str | None, compact_events: list | None = None
+    ) -> tuple[ClaudeAgentOptions, "IO[str]"]:
         """Build ClaudeAgentOptions for a session.
 
         Uses setting_sources=['project'] so the SDK reads .mcp.json from
@@ -266,6 +336,10 @@ class ClaudeSessionManager:
         stderr_path = self._stderr_log_dir / f"cli_stderr_{session_tag}.log"
         stderr_file = open(stderr_path, "a", encoding="utf-8")
 
+        hooks = None
+        if compact_events is not None:
+            hooks = self._build_compact_hook(compact_events)
+
         opts = ClaudeAgentOptions(
             cwd=self._workspace_path,
             permission_mode="bypassPermissions",
@@ -277,46 +351,46 @@ class ClaudeSessionManager:
             setting_sources=["project"],
             extra_args={"debug-to-stderr": None},
             debug_stderr=stderr_file,
+            hooks=hooks,
         )
         if claude_session_id:
             opts.resume = claude_session_id
-        return opts
+        return opts, stderr_file
 
     async def _get_or_create_client(
-        self, claude_session_id: str | None
-    ) -> tuple[ClaudeSDKClient, bool]:
+        self,
+        claude_session_id: str | None,
+        compact_events: list | None = None,
+    ) -> tuple[ClaudeSDKClient, bool, "IO[str] | None"]:
         """Return a live SDK client, reusing a cached one if available.
 
         Returns:
-            (client, resumed) — resumed is True if an existing session was
-            successfully resumed or a cached client was reused.
-
-        Resume fallback: if --resume fails (ProcessError), the stale
-        claude_session_id is cleared and a fresh session is created instead.
+            (client, resumed, stderr_file) — caller must close stderr_file.
+            stderr_file is None when returning a cached client.
         """
         if claude_session_id and claude_session_id in self._clients:
-            return self._clients[claude_session_id], True
+            return self._clients[claude_session_id], True, None
 
         # Try resume first
         if claude_session_id:
             try:
-                opts = self._build_options(claude_session_id)
+                opts, stderr_file = self._build_options(claude_session_id, compact_events)
                 client = ClaudeSDKClient(opts)
                 await client.connect()
-                return client, True
+                return client, True, stderr_file
             except Exception:
                 logger.warning(
                     "Resume failed for session %s, falling back to new session",
                     claude_session_id,
                 )
-                # Clean up stale cache entry
                 self._clients.pop(claude_session_id, None)
+                stderr_file.close()
 
         # New session (no resume)
-        opts = self._build_options(None)
+        opts, stderr_file = self._build_options(None, compact_events)
         client = ClaudeSDKClient(opts)
         await client.connect()
-        return client, False
+        return client, False, stderr_file
 
     def _write_mcp_config(self) -> None:
         """Write .mcp.json into the workspace directory.
