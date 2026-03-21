@@ -65,20 +65,14 @@ class HanielMcpServer:
     def list_resources(self) -> list[dict[str, Any]]:
         """List available MCP resources.
 
-        Returns:
-            List of resource definitions
+        Returns dynamically generated per-service URIs so callers can
+        discover available services without prior knowledge.
         """
-        return [
+        resources = [
             {
                 "uri": "haniel://status",
                 "name": "Overall Status",
                 "description": "Get overall status of haniel runner including all services and repos",
-                "mimeType": "application/json",
-            },
-            {
-                "uri": "haniel://status/{service}",
-                "name": "Service Status",
-                "description": "Get status of a specific service",
                 "mimeType": "application/json",
             },
             {
@@ -87,13 +81,30 @@ class HanielMcpServer:
                 "description": "Get status of all tracked repositories",
                 "mimeType": "application/json",
             },
-            {
-                "uri": "haniel://logs/{service}",
-                "name": "Service Logs",
-                "description": "Get recent logs for a service (use ?lines=N for count)",
-                "mimeType": "text/plain",
-            },
         ]
+
+        # Dynamic per-service resources
+        try:
+            status = self.runner.get_status()
+            service_names = sorted(status.get("services", {}).keys())
+        except Exception:
+            service_names = []
+
+        for name in service_names:
+            resources.append({
+                "uri": f"haniel://status/{name}",
+                "name": f"Service: {name}",
+                "description": f"Status of {name} service",
+                "mimeType": "application/json",
+            })
+            resources.append({
+                "uri": f"haniel://logs/{name}",
+                "name": f"Logs: {name}",
+                "description": f"Recent 50 lines of {name} logs",
+                "mimeType": "text/plain",
+            })
+
+        return resources
 
     def list_tools(self) -> list[dict[str, Any]]:
         """List available MCP tools.
@@ -196,6 +207,28 @@ class HanielMcpServer:
                     "properties": {},
                 },
             },
+            {
+                "name": "haniel_read_logs",
+                "description": "Read service logs with line count and optional grep filter",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "service": {
+                            "type": "string",
+                            "description": "Name of the service",
+                        },
+                        "lines": {
+                            "type": "integer",
+                            "description": "Number of lines to return (default 100, max 1000)",
+                        },
+                        "grep": {
+                            "type": "string",
+                            "description": "Filter lines containing this pattern (case-insensitive)",
+                        },
+                    },
+                    "required": ["service"],
+                },
+            },
         ]
 
     async def read_resource(self, uri: str) -> str:
@@ -268,6 +301,8 @@ class HanielMcpServer:
             return await self._approve_self_update()
         elif name == "haniel_self_restart":
             return await self._self_restart()
+        elif name == "haniel_read_logs":
+            return await self._read_logs_tool(arguments)
         else:
             return f"Error: Unknown tool '{name}'"
 
@@ -301,6 +336,17 @@ class HanielMcpServer:
         """Get recent logs for a service."""
         log_lines = self.runner.process_manager.log_manager.get_log_tail(service, lines)
         return "\n".join(log_lines)
+
+    async def _read_logs_tool(self, arguments: dict[str, Any]) -> str:
+        """Read service logs with line count and optional grep filter."""
+        service = arguments["service"]
+        lines = min(arguments.get("lines", 100), 1000)
+        grep_pattern = arguments.get("grep")
+
+        log_lines = self.runner.process_manager.log_manager.get_log_tail(service, lines)
+        if grep_pattern:
+            log_lines = [l for l in log_lines if grep_pattern.lower() in l.lower()]
+        return json.dumps({"service": service, "lines": log_lines, "count": len(log_lines)})
 
     # Tool handlers
 
