@@ -138,14 +138,27 @@ class ClaudeSessionManager:
 
         claude_session_id: str | None = session.get("claude_session_id")
 
-        yield {"type": "session_start", "session_id": session_id, "is_new": is_new}
-
         last_text_parts: list[str] = []
         new_claude_session_id: str | None = None
         client: ClaudeSDKClient | None = None
+        resumed: bool = False
 
         try:
-            client = await self._get_or_create_client(claude_session_id)
+            client, resumed = await self._get_or_create_client(claude_session_id)
+
+            # Resume 실패로 새 세션이 생성된 경우, 기존 claude_session_id 초기화
+            if claude_session_id and not resumed:
+                session["claude_session_id"] = None
+                claude_session_id = None
+                self._save_sessions()
+
+            yield {
+                "type": "session_start",
+                "session_id": session_id,
+                "is_new": is_new,
+                "resumed": resumed and not is_new,
+            }
+
             await client.query(text)
 
             async for msg in client.receive_response():
@@ -271,27 +284,39 @@ class ClaudeSessionManager:
 
     async def _get_or_create_client(
         self, claude_session_id: str | None
-    ) -> ClaudeSDKClient:
+    ) -> tuple[ClaudeSDKClient, bool]:
         """Return a live SDK client, reusing a cached one if available.
 
-        For an existing session whose client is still connected, the same
-        process is reused (no resume needed — the conversation context lives
-        in the running process). If the process died, a fresh client is
-        created with ``options.resume = session_id`` so the SDK spawns a new
-        process that resumes the conversation.
+        Returns:
+            (client, resumed) — resumed is True if an existing session was
+            successfully resumed or a cached client was reused.
 
-        Instead of inspecting private SDK attributes to check liveness,
-        we optimistically return the cached client and let callers handle
-        exceptions from query()/receive_response() — at which point the
-        error handler in stream_message() will evict and reconnect.
+        Resume fallback: if --resume fails (ProcessError), the stale
+        claude_session_id is cleared and a fresh session is created instead.
         """
         if claude_session_id and claude_session_id in self._clients:
-            return self._clients[claude_session_id]
+            return self._clients[claude_session_id], True
 
-        opts = self._build_options(claude_session_id)
+        # Try resume first
+        if claude_session_id:
+            try:
+                opts = self._build_options(claude_session_id)
+                client = ClaudeSDKClient(opts)
+                await client.connect()
+                return client, True
+            except Exception:
+                logger.warning(
+                    "Resume failed for session %s, falling back to new session",
+                    claude_session_id,
+                )
+                # Clean up stale cache entry
+                self._clients.pop(claude_session_id, None)
+
+        # New session (no resume)
+        opts = self._build_options(None)
         client = ClaudeSDKClient(opts)
         await client.connect()
-        return client
+        return client, False
 
     def _write_mcp_config(self) -> None:
         """Write .mcp.json into the workspace directory.

@@ -76,7 +76,31 @@ export function useChatWebSocket(): UseChatWebSocket {
       }
     } else if (type === "session_start") {
       const sessionId = msg.session_id as string;
+      const isNew = msg.is_new as boolean;
+      const resumed = msg.resumed as boolean;
       setActiveSessionId(sessionId);
+
+      // 세션 연결 알림
+      if (resumed) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            role: "system",
+            content: `세션 ${sessionId.slice(0, 8)}… 에 재연결되었습니다.`,
+          },
+        ]);
+      } else if (!isNew) {
+        // 기존 세션이지만 resume 실패 → 새 세션으로 대체
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            role: "system",
+            content: "이전 세션을 재개할 수 없어 새 세션이 생성되었습니다.",
+          },
+        ]);
+      }
     } else if (type === "text_delta") {
       const delta = (msg.delta as string) ?? "";
       setMessages((prev) => {
