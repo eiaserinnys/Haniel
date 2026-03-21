@@ -553,7 +553,7 @@ class HanielMcpServer:
             session_manager = StreamableHTTPSessionManager(
                 app=mcp,
                 json_response=True,
-                stateless=False,
+                stateless=True,
             )
 
             # Build routes
