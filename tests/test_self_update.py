@@ -187,16 +187,19 @@ class TestRunnerSelfUpdate:
         assert runner.self_update_requested is False
 
     def test_approve_self_update_signals_event(self):
-        """Approving a pending update should signal self_update_requested."""
+        """Approving a pending update should signal self_update_requested.
+
+        Note: approve_self_update() no longer calls stop() directly.
+        The caller (API/MCP handler) is responsible for scheduling stop()
+        after sending the response (see ADR comment in runner.py).
+        """
         config = self._make_config()
         runner = self._make_runner(config)
         runner._state.self_update_pending = True
-        runner.stop = MagicMock()
 
         result = runner.approve_self_update()
 
         assert runner.self_update_requested is True
-        runner.stop.assert_called_once()
         assert "approved" in result.lower()
 
     def test_approve_no_pending_returns_message(self):

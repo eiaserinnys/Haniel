@@ -49,10 +49,10 @@ repo is isolated in `.self/`, and managed services are cloned into `.services/`:
 |   +-- haniel-runner.ps1        # Wrapper script (lives in repo)
 |   +-- logs/                    # haniel's own operational logs
 +-- .services/
-    +-- some-service-a/          # git clone of soulstream
-    |   +-- logs/                # stdout/stderr logs for soulstream services
-    +-- some-service-b/          # git clone of seosoyoung
-        +-- logs/                # stdout/stderr logs for seosoyoung services
+    +-- some-service-a/          # git clone of service A
+    |   +-- logs/                # stdout/stderr logs for service A
+    +-- some-service-b/          # git clone of service B
+        +-- logs/                # stdout/stderr logs for service B
 ```
 
 ### Key conventions
@@ -91,7 +91,7 @@ $RootDir = $PWD.Path
 repos:
   haniel:
     path: ./.self                    # Self-update repo
-  soulstream:
+  my-service:
     path: ./.services/some-service-a # Managed service repo
 ```
 

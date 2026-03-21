@@ -1876,7 +1876,7 @@ class TestServiceAccount:
             (".\\LG", ".", "LG"),
             ("DOMAIN\\user", "DOMAIN", "user"),
             ("plainuser", ".", "plainuser"),
-            (".\\김주복", ".", "김주복"),
+            (".\\TestUser", ".", "TestUser"),
         ],
     )
     @patch("platform.system", return_value="Windows")

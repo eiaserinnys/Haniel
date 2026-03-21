@@ -399,12 +399,25 @@ class TestMcpServerIntegration:
     def test_list_resources(self, mcp_server):
         """Test listing available resources."""
         resources = mcp_server.list_resources()
-        assert len(resources) >= 3
         resource_uris = [r["uri"] for r in resources]
         assert "haniel://status" in resource_uris
         assert "haniel://repos" in resource_uris
-        # logs/{service} is a template, so check differently
-        assert any("logs" in uri for uri in resource_uris)
+        assert "haniel://config" in resource_uris
+
+    def test_list_resources_with_services(self, mock_runner):
+        """Test that per-service resources are generated dynamically."""
+        from haniel.integrations.mcp_server import HanielMcpServer
+
+        mock_runner.get_status.return_value = {
+            "running": True,
+            "services": {"web": {"state": "running"}},
+            "repos": {},
+        }
+        server = HanielMcpServer(mock_runner)
+        resources = server.list_resources()
+        resource_uris = [r["uri"] for r in resources]
+        assert "haniel://logs/web" in resource_uris
+        assert "haniel://status/web" in resource_uris
 
     def test_list_tools(self, mcp_server):
         """Test listing available tools."""

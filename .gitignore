@@ -55,4 +55,7 @@ logs/
 install.state
 
 # Runtime workspace for Claude Code sessions
-workspace/
+workspace/*
+!workspace/CLAUDE.md
+!workspace/.claude/
+!workspace/.claude/**

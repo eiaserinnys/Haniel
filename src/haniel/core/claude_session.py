@@ -63,8 +63,8 @@ class ClaudeSessionManager:
         # Workspace directory for Claude Code sessions.
         # This is the cwd passed to ClaudeAgentOptions. The SDK reads
         # .mcp.json from cwd *and walks up the directory tree*.
-        # IMPORTANT: Must NOT be a descendant of workspace/ because
-        # workspace/.mcp.json contains 11 MCP servers for soulstream sessions,
+        # IMPORTANT: Must NOT be a descendant of the haniel root because
+        # the root-level .mcp.json may contain MCP servers for other services,
         # which would be loaded into the dashboard chat CLI and cause startup
         # failures (exit code 1).
         # Path: {root}/.self/workspace — the haniel repo's runtime workspace.
@@ -329,8 +329,8 @@ class ClaudeSessionManager:
         --mcp-config flag.
 
         stderr is captured to a per-session log file via debug_stderr +
-        extra_args={"debug-to-stderr": None}, matching the soulstream /
-        rescuebot pattern. This ensures CLI output is on disk before any
+        extra_args={"debug-to-stderr": None}. This ensures CLI output
+        is captured on disk before any
         ProcessError is raised.
         """
         session_tag = claude_session_id or "new"
@@ -398,7 +398,7 @@ class ClaudeSessionManager:
 
         The SDK with setting_sources=['project'] reads cwd/.mcp.json
         automatically. Only the haniel MCP server entry is needed here;
-        the workspace-level .mcp.json (for soulstream sessions) is separate.
+        the root-level .mcp.json (for other services) is separate.
         """
         if self.runner.config.mcp is None:
             return

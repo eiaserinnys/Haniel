@@ -74,15 +74,15 @@ class TestDependencyGraph:
     def test_complex_dependencies(self):
         """More complex dependency graph."""
         services = {
-            "bot": ServiceConfig(run="cmd", after=["mcp-seosoyoung"]),
-            "mcp-seosoyoung": ServiceConfig(run="cmd"),
+            "bot": ServiceConfig(run="cmd", after=["mcp-app"]),
+            "mcp-app": ServiceConfig(run="cmd"),
             "mcp-slack": ServiceConfig(run="cmd"),
             "rescue-bot": ServiceConfig(run="cmd"),
         }
         graph = DependencyGraph(services)
         order = graph.topological_sort()
 
-        assert order.index("mcp-seosoyoung") < order.index("bot")
+        assert order.index("mcp-app") < order.index("bot")
         # mcp-slack and rescue-bot have no deps, can be anywhere
 
     def test_cyclic_dependency_detected(self):
@@ -764,10 +764,13 @@ class TestServiceRunnerPollCycle:
 
         assert changed == []
 
+    @patch("haniel.core.runner.get_pending_changes", return_value=None)
+    @patch("haniel.core.runner.get_remote_head", return_value="new5678")
     @patch("haniel.core.runner.fetch_repo")
     @patch("haniel.core.runner.get_head")
     def test_detect_changes_with_changes(
-        self, mock_head, mock_fetch, runner_with_mock_repo
+        self, mock_head, mock_fetch, mock_remote_head, mock_pending,
+        runner_with_mock_repo
     ):
         """Test detecting changes in repos."""
         mock_fetch.return_value = True  # Has changes

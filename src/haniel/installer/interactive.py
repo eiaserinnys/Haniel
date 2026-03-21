@@ -256,11 +256,8 @@ class InteractiveInstaller:
 
 ## 시스템 개요
 
-soulstream은 Claude Code 원격 실행 서비스입니다.
-- **soul-server**: FastAPI 백엔드. Claude Code 세션을 생성하고 관리하며, 러너 풀로 동시 세션을 처리합니다.
-- **soul-dashboard**: Express + React 웹 대시보드. soul-server에 연결하여 세션을 모니터링합니다.
-
-haniel은 이 서비스들의 프로세스 관리자이며, 지금 설치를 진행하고 있습니다.
+haniel은 설정 기반의 서비스 러너로, git 리포지토리를 모니터링하고 프로세스를 관리합니다.
+지금 haniel이 관리할 서비스들의 설치를 진행하고 있습니다.
 
 ## 현재 설치 상태
 {json.dumps(status, indent=2, ensure_ascii=False)}
