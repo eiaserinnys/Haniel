@@ -5,7 +5,6 @@ Provides REST API and WebSocket event stream for service management.
 Integrated into the Starlette server used by the MCP Streamable HTTP transport.
 """
 
-import asyncio
 import logging
 from typing import TYPE_CHECKING
 

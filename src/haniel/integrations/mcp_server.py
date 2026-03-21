@@ -465,7 +465,7 @@ class HanielMcpServer:
 
         log_lines = self.runner.process_manager.log_manager.get_log_tail(service, lines)
         if grep_pattern:
-            log_lines = [l for l in log_lines if grep_pattern.lower() in l.lower()]
+            log_lines = [line for line in log_lines if grep_pattern.lower() in line.lower()]
         return json.dumps({"service": service, "lines": log_lines, "count": len(log_lines)})
 
     # Tool handlers

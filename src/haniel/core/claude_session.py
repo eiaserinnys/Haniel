@@ -10,8 +10,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import AsyncGenerator, TYPE_CHECKING
+from typing import IO, AsyncGenerator, TYPE_CHECKING
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher, HookContext
 from claude_agent_sdk.types import (
@@ -321,7 +320,7 @@ class ClaudeSessionManager:
 
     def _build_options(
         self, claude_session_id: str | None, compact_events: list | None = None
-    ) -> tuple[ClaudeAgentOptions, "IO[str]"]:
+    ) -> tuple[ClaudeAgentOptions, IO[str]]:
         """Build ClaudeAgentOptions for a session.
 
         Uses setting_sources=['project'] so the SDK reads .mcp.json from
@@ -362,7 +361,7 @@ class ClaudeSessionManager:
         self,
         claude_session_id: str | None,
         compact_events: list | None = None,
-    ) -> tuple[ClaudeSDKClient, bool, "IO[str] | None"]:
+    ) -> tuple[ClaudeSDKClient, bool, IO[str] | None]:
         """Return a live SDK client, reusing a cached one if available.
 
         Returns:

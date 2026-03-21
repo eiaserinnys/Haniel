@@ -25,12 +25,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable
 
-logger = logging.getLogger(__name__)
-
 from ..config import ServiceConfig, ShutdownConfig
 from .health import HealthManager, ServiceState
 from .logs import LogCapture, LogManager, StreamReader
 from ..platform import get_platform_handler
+
+logger = logging.getLogger(__name__)
 
 
 class ReadyConditionType(Enum):
@@ -204,7 +204,6 @@ class ProcessManager:
             if os.name == "nt" and "creationflags" in popen_kwargs:
                 from haniel.platform.windows import (
                     CREATE_BREAKAWAY_FROM_JOB,
-                    CREATE_NEW_PROCESS_GROUP,
                 )
                 flags = popen_kwargs["creationflags"]
                 if flags & CREATE_BREAKAWAY_FROM_JOB:

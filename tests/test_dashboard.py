@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
-from starlette.routing import Route, WebSocketRoute
+
 
 from haniel.config import (
     DashboardConfig,
