@@ -194,7 +194,7 @@ class InstallMcpServer:
         if self._server:
             if self._loop and not self._loop.is_closed():
                 self._loop.call_soon_threadsafe(
-                    lambda: setattr(self._server, 'should_exit', True)
+                    lambda: setattr(self._server, "should_exit", True)
                 )
             else:
                 self._server.should_exit = True

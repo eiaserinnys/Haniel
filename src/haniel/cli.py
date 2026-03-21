@@ -457,10 +457,12 @@ def run(config: Path | None, foreground: bool, dry_run: bool, log_level: str) ->
     log_file = config_dir / "logs" / "haniel.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
     file_handler = logging.FileHandler(str(log_file), encoding="utf-8")
-    file_handler.setFormatter(logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    ))
+    file_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
     logging.getLogger().addHandler(file_handler)
 
     # Create runner
@@ -518,9 +520,7 @@ def run(config: Path | None, foreground: bool, dry_run: bool, log_level: str) ->
             )
             sys.exit(EXIT_SELF_UPDATE)
         if runner.restart_requested:
-            click.echo(
-                click.style("Exiting for restart (exit code 11).", fg="yellow")
-            )
+            click.echo(click.style("Exiting for restart (exit code 11).", fg="yellow"))
             sys.exit(EXIT_RESTART)
         click.echo("Shutdown complete.")
 

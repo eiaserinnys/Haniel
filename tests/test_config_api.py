@@ -151,7 +151,6 @@ def dashboard_app(mock_runner):
 
 
 class TestGetConfig:
-
     def test_returns_200_with_full_config(self, dashboard_app, mock_runner):
         """GET /api/config returns 200 and JSON representation of config."""
         client = TestClient(dashboard_app)
@@ -163,9 +162,7 @@ class TestGetConfig:
         assert "web" in data["services"]
         assert "main" in data["repos"]
 
-    def test_returns_501_when_no_config_path(
-        self, dashboard_app, mock_runner
-    ):
+    def test_returns_501_when_no_config_path(self, dashboard_app, mock_runner):
         """GET /api/config returns 501 when runner.config_path is None."""
         mock_runner.config_path = None
         client = TestClient(dashboard_app)
@@ -177,7 +174,6 @@ class TestGetConfig:
 
 
 class TestGetConfigServices:
-
     def test_returns_services_dict(self, dashboard_app, mock_runner):
         """GET /api/config/services returns the services section."""
         client = TestClient(dashboard_app)
@@ -187,9 +183,7 @@ class TestGetConfigServices:
         assert "web" in data
         assert "worker" in data
 
-    def test_returns_501_when_no_config_path(
-        self, dashboard_app, mock_runner
-    ):
+    def test_returns_501_when_no_config_path(self, dashboard_app, mock_runner):
         mock_runner.config_path = None
         client = TestClient(dashboard_app)
         resp = client.get("/api/config/services")
@@ -200,7 +194,6 @@ class TestGetConfigServices:
 
 
 class TestGetConfigRepos:
-
     def test_returns_repos_dict(self, dashboard_app, mock_runner):
         """GET /api/config/repos returns the repos section."""
         client = TestClient(dashboard_app)
@@ -209,9 +202,7 @@ class TestGetConfigRepos:
         data = resp.json()
         assert "main" in data
 
-    def test_returns_501_when_no_config_path(
-        self, dashboard_app, mock_runner
-    ):
+    def test_returns_501_when_no_config_path(self, dashboard_app, mock_runner):
         mock_runner.config_path = None
         client = TestClient(dashboard_app)
         resp = client.get("/api/config/repos")
@@ -222,7 +213,6 @@ class TestGetConfigRepos:
 
 
 class TestPutService:
-
     def test_updates_service_and_calls_reload(
         self, dashboard_app, mock_runner, config_file
     ):
@@ -239,9 +229,7 @@ class TestPutService:
 
         mock_runner.reload_config.assert_called()
 
-    def test_returns_404_for_nonexistent_service(
-        self, dashboard_app, mock_runner
-    ):
+    def test_returns_404_for_nonexistent_service(self, dashboard_app, mock_runner):
         """PUT /api/config/services/nonexistent returns 404."""
         payload = {"run": "python app.py"}
         client = TestClient(dashboard_app)
@@ -251,9 +239,7 @@ class TestPutService:
         )
         assert resp.status_code == 404
 
-    def test_returns_400_on_validation_failure(
-        self, dashboard_app, mock_runner
-    ):
+    def test_returns_400_on_validation_failure(self, dashboard_app, mock_runner):
         """PUT with missing required 'run' field returns 400."""
         payload = {"cwd": "./somewhere"}  # missing 'run'
         client = TestClient(dashboard_app)
@@ -263,9 +249,7 @@ class TestPutService:
         )
         assert resp.status_code == 400
 
-    def test_returns_501_when_no_config_path(
-        self, dashboard_app, mock_runner
-    ):
+    def test_returns_501_when_no_config_path(self, dashboard_app, mock_runner):
         mock_runner.config_path = None
         payload = {"run": "python app.py"}
         client = TestClient(dashboard_app)
@@ -280,7 +264,6 @@ class TestPutService:
 
 
 class TestPostService:
-
     def test_adds_service_and_calls_reload(
         self, dashboard_app, mock_runner, config_file
     ):
@@ -300,9 +283,7 @@ class TestPostService:
 
         mock_runner.reload_config.assert_called()
 
-    def test_returns_400_on_duplicate_service(
-        self, dashboard_app, mock_runner
-    ):
+    def test_returns_400_on_duplicate_service(self, dashboard_app, mock_runner):
         """POST for an already existing service name returns 400."""
         payload = {
             "name": "web",  # already exists
@@ -315,9 +296,7 @@ class TestPostService:
         )
         assert resp.status_code == 400
 
-    def test_returns_501_when_no_config_path(
-        self, dashboard_app, mock_runner
-    ):
+    def test_returns_501_when_no_config_path(self, dashboard_app, mock_runner):
         mock_runner.config_path = None
         payload = {"name": "cache", "config": {"run": "redis-server"}}
         client = TestClient(dashboard_app)
@@ -332,10 +311,7 @@ class TestPostService:
 
 
 class TestDeleteService:
-
-    def test_removes_service(
-        self, dashboard_app, mock_runner, config_file
-    ):
+    def test_removes_service(self, dashboard_app, mock_runner, config_file):
         """DELETE /api/config/services/{name} removes the service from YAML."""
         # 'worker' depends on 'web', so we delete 'worker' first
         client = TestClient(dashboard_app)
@@ -346,9 +322,7 @@ class TestDeleteService:
 
         mock_runner.reload_config.assert_called()
 
-    def test_returns_400_when_has_dependents(
-        self, dashboard_app, mock_runner
-    ):
+    def test_returns_400_when_has_dependents(self, dashboard_app, mock_runner):
         """DELETE /api/config/services/web returns 400 because worker depends on it."""
         client = TestClient(dashboard_app)
         resp = client.delete("/api/config/services/web")
@@ -357,16 +331,12 @@ class TestDeleteService:
         assert "error" in data
         assert "worker" in data["error"]
 
-    def test_returns_404_for_nonexistent_service(
-        self, dashboard_app, mock_runner
-    ):
+    def test_returns_404_for_nonexistent_service(self, dashboard_app, mock_runner):
         client = TestClient(dashboard_app)
         resp = client.delete("/api/config/services/nonexistent")
         assert resp.status_code == 404
 
-    def test_returns_501_when_no_config_path(
-        self, dashboard_app, mock_runner
-    ):
+    def test_returns_501_when_no_config_path(self, dashboard_app, mock_runner):
         mock_runner.config_path = None
         client = TestClient(dashboard_app)
         resp = client.delete("/api/config/services/worker")
@@ -377,10 +347,7 @@ class TestDeleteService:
 
 
 class TestPostRepo:
-
-    def test_adds_repo_and_calls_reload(
-        self, dashboard_app, mock_runner, config_file
-    ):
+    def test_adds_repo_and_calls_reload(self, dashboard_app, mock_runner, config_file):
         """POST /api/config/repos adds a new repo and calls reload_config."""
         payload = {
             "name": "extra",
@@ -400,9 +367,7 @@ class TestPostRepo:
 
         mock_runner.reload_config.assert_called()
 
-    def test_returns_400_on_duplicate_repo(
-        self, dashboard_app, mock_runner
-    ):
+    def test_returns_400_on_duplicate_repo(self, dashboard_app, mock_runner):
         """POST for an already existing repo name returns 400."""
         payload = {
             "name": "main",  # already exists
@@ -418,9 +383,7 @@ class TestPostRepo:
         )
         assert resp.status_code == 400
 
-    def test_returns_501_when_no_config_path(
-        self, dashboard_app, mock_runner
-    ):
+    def test_returns_501_when_no_config_path(self, dashboard_app, mock_runner):
         mock_runner.config_path = None
         payload = {
             "name": "extra",
@@ -438,7 +401,6 @@ class TestPostRepo:
 
 
 class TestDeleteRepo:
-
     def test_returns_400_when_referenced_by_services(
         self, dashboard_app, mock_runner, config_file, tmp_path
     ):
@@ -462,9 +424,7 @@ class TestDeleteRepo:
         assert "error" in data
         assert "web" in data["error"]
 
-    def test_removes_unreferenced_repo(
-        self, dashboard_app, mock_runner, config_file
-    ):
+    def test_removes_unreferenced_repo(self, dashboard_app, mock_runner, config_file):
         """DELETE /api/config/repos/main succeeds when no service references it."""
         # base_config has no service referencing 'main' repo
         client = TestClient(dashboard_app)
@@ -475,16 +435,12 @@ class TestDeleteRepo:
 
         mock_runner.reload_config.assert_called()
 
-    def test_returns_404_for_nonexistent_repo(
-        self, dashboard_app, mock_runner
-    ):
+    def test_returns_404_for_nonexistent_repo(self, dashboard_app, mock_runner):
         client = TestClient(dashboard_app)
         resp = client.delete("/api/config/repos/nonexistent")
         assert resp.status_code == 404
 
-    def test_returns_501_when_no_config_path(
-        self, dashboard_app, mock_runner
-    ):
+    def test_returns_501_when_no_config_path(self, dashboard_app, mock_runner):
         mock_runner.config_path = None
         client = TestClient(dashboard_app)
         resp = client.delete("/api/config/repos/main")
@@ -495,7 +451,6 @@ class TestDeleteRepo:
 
 
 class TestPutRepo:
-
     def test_updates_repo_and_calls_reload(
         self, dashboard_app, mock_runner, config_file
     ):
@@ -516,9 +471,7 @@ class TestPutRepo:
 
         mock_runner.reload_config.assert_called()
 
-    def test_returns_404_for_nonexistent_repo(
-        self, dashboard_app, mock_runner
-    ):
+    def test_returns_404_for_nonexistent_repo(self, dashboard_app, mock_runner):
         payload = {
             "url": "git@github.com:x/y.git",
             "path": "./y",

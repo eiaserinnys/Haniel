@@ -205,12 +205,11 @@ class ProcessManager:
                 from haniel.platform.windows import (
                     CREATE_BREAKAWAY_FROM_JOB,
                 )
+
                 flags = popen_kwargs["creationflags"]
                 if flags & CREATE_BREAKAWAY_FROM_JOB:
                     popen_kwargs["creationflags"] = flags & ~CREATE_BREAKAWAY_FROM_JOB
-                    logger.debug(
-                        "Retrying %s without CREATE_BREAKAWAY_FROM_JOB", name
-                    )
+                    logger.debug("Retrying %s without CREATE_BREAKAWAY_FROM_JOB", name)
                     try:
                         process = subprocess.Popen(
                             cmd,

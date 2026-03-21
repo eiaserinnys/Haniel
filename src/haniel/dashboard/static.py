@@ -62,7 +62,9 @@ def setup_static() -> list[Mount | Route]:
         return FileResponse(index)
 
     routes: list[Mount | Route] = [
-        Mount("/assets", StaticFiles(directory=str(assets_dir)), name="dashboard_assets"),
+        Mount(
+            "/assets", StaticFiles(directory=str(assets_dir)), name="dashboard_assets"
+        ),
         Route("/{path:path}", spa_fallback, methods=["GET"]),
     ]
 

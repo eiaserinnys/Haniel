@@ -109,18 +109,22 @@ class HanielMcpServer:
             service_names = []
 
         for name in service_names:
-            resources.append({
-                "uri": f"haniel://status/{name}",
-                "name": f"Service: {name}",
-                "description": f"Status of {name} service",
-                "mimeType": "application/json",
-            })
-            resources.append({
-                "uri": f"haniel://logs/{name}",
-                "name": f"Logs: {name}",
-                "description": f"Recent 50 lines of {name} logs",
-                "mimeType": "text/plain",
-            })
+            resources.append(
+                {
+                    "uri": f"haniel://status/{name}",
+                    "name": f"Service: {name}",
+                    "description": f"Status of {name} service",
+                    "mimeType": "application/json",
+                }
+            )
+            resources.append(
+                {
+                    "uri": f"haniel://logs/{name}",
+                    "name": f"Logs: {name}",
+                    "description": f"Recent 50 lines of {name} logs",
+                    "mimeType": "text/plain",
+                }
+            )
 
         return resources
 
@@ -260,7 +264,10 @@ class HanielMcpServer:
                     "type": "object",
                     "properties": {
                         "service": {"type": "string", "description": "Service name"},
-                        "config": {"type": "object", "description": "Full service config object (run, cwd, repo, ready, etc.)"},
+                        "config": {
+                            "type": "object",
+                            "description": "Full service config object (run, cwd, repo, ready, etc.)",
+                        },
                     },
                     "required": ["service", "config"],
                 },
@@ -272,7 +279,10 @@ class HanielMcpServer:
                     "type": "object",
                     "properties": {
                         "name": {"type": "string", "description": "New service name"},
-                        "config": {"type": "object", "description": "Service config object"},
+                        "config": {
+                            "type": "object",
+                            "description": "Service config object",
+                        },
                     },
                     "required": ["name", "config"],
                 },
@@ -283,7 +293,10 @@ class HanielMcpServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "service": {"type": "string", "description": "Service name to delete"},
+                        "service": {
+                            "type": "string",
+                            "description": "Service name to delete",
+                        },
                     },
                     "required": ["service"],
                 },
@@ -295,7 +308,10 @@ class HanielMcpServer:
                     "type": "object",
                     "properties": {
                         "repo": {"type": "string", "description": "Repo name"},
-                        "config": {"type": "object", "description": "Full repo config object (url, branch, path, hooks)"},
+                        "config": {
+                            "type": "object",
+                            "description": "Full repo config object (url, branch, path, hooks)",
+                        },
                     },
                     "required": ["repo", "config"],
                 },
@@ -307,7 +323,10 @@ class HanielMcpServer:
                     "type": "object",
                     "properties": {
                         "name": {"type": "string", "description": "New repo name"},
-                        "config": {"type": "object", "description": "Repo config object"},
+                        "config": {
+                            "type": "object",
+                            "description": "Repo config object",
+                        },
                     },
                     "required": ["name", "config"],
                 },
@@ -318,7 +337,10 @@ class HanielMcpServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "repo": {"type": "string", "description": "Repo name to delete"},
+                        "repo": {
+                            "type": "string",
+                            "description": "Repo name to delete",
+                        },
                     },
                     "required": ["repo"],
                 },
@@ -465,8 +487,12 @@ class HanielMcpServer:
 
         log_lines = self.runner.process_manager.log_manager.get_log_tail(service, lines)
         if grep_pattern:
-            log_lines = [line for line in log_lines if grep_pattern.lower() in line.lower()]
-        return json.dumps({"service": service, "lines": log_lines, "count": len(log_lines)})
+            log_lines = [
+                line for line in log_lines if grep_pattern.lower() in line.lower()
+            ]
+        return json.dumps(
+            {"service": service, "lines": log_lines, "count": len(log_lines)}
+        )
 
     # Tool handlers
 
@@ -675,9 +701,11 @@ class HanielMcpServer:
 
         # Signal self-update and deferred stop
         self.runner._self_update_requested.set()
+
         async def _deferred_stop():
             await asyncio.sleep(0.5)
             await loop.run_in_executor(None, self.runner.stop)
+
         asyncio.ensure_future(_deferred_stop())
         return "Self-update: pull succeeded, restarting haniel..."
 
@@ -689,27 +717,36 @@ class HanielMcpServer:
         for name, repo in repos.items():
             if repo.get("pending_changes"):
                 updates[name] = repo["pending_changes"]
-        return json.dumps({
-            "repos_with_updates": updates,
-            "total": len(updates),
-            "note": f"Snapshot from last poll (interval={status.get('poll_interval', '?')}s)",
-        }, indent=2, ensure_ascii=False)
+        return json.dumps(
+            {
+                "repos_with_updates": updates,
+                "total": len(updates),
+                "note": f"Snapshot from last poll (interval={status.get('poll_interval', '?')}s)",
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
 
     # --- Config resource handlers ---
 
     async def _get_config(self) -> str:
         from ..dashboard.config_io import read_config
+
         config = read_config(self.runner.config_path)
-        return json.dumps(config.model_dump(by_alias=True, mode="json"), indent=2, ensure_ascii=False)
+        return json.dumps(
+            config.model_dump(by_alias=True, mode="json"), indent=2, ensure_ascii=False
+        )
 
     async def _get_config_services(self) -> str:
         from ..dashboard.config_io import read_config
+
         config = read_config(self.runner.config_path)
         data = config.model_dump(by_alias=True, mode="json")
         return json.dumps(data.get("services", {}), indent=2, ensure_ascii=False)
 
     async def _get_config_repos(self) -> str:
         from ..dashboard.config_io import read_config
+
         config = read_config(self.runner.config_path)
         data = config.model_dump(by_alias=True, mode="json")
         return json.dumps(data.get("repos", {}), indent=2, ensure_ascii=False)
@@ -721,11 +758,17 @@ class HanielMcpServer:
     def _get_config_lock(self):
         if self._config_lock is None:
             import threading
+
             self._config_lock = threading.Lock()
         return self._config_lock
 
     async def _update_service_config(self, arguments: dict[str, Any]) -> str:
-        from ..dashboard.config_io import read_config, write_config, backup_config, restore_config
+        from ..dashboard.config_io import (
+            read_config,
+            write_config,
+            backup_config,
+            restore_config,
+        )
         from ..config.model import ServiceConfig
         from ..config.validators import validate_config
 
@@ -759,7 +802,12 @@ class HanielMcpServer:
             return json.dumps({"error": str(e)})
 
     async def _create_service_config(self, arguments: dict[str, Any]) -> str:
-        from ..dashboard.config_io import read_config, write_config, backup_config, restore_config
+        from ..dashboard.config_io import (
+            read_config,
+            write_config,
+            backup_config,
+            restore_config,
+        )
         from ..config.model import ServiceConfig
         from ..config.validators import validate_config
 
@@ -793,7 +841,12 @@ class HanielMcpServer:
             return json.dumps({"error": str(e)})
 
     async def _delete_service_config(self, arguments: dict[str, Any]) -> str:
-        from ..dashboard.config_io import read_config, write_config, backup_config, restore_config
+        from ..dashboard.config_io import (
+            read_config,
+            write_config,
+            backup_config,
+            restore_config,
+        )
         from ..config.validators import validate_config
 
         service = arguments["service"]
@@ -806,7 +859,8 @@ class HanielMcpServer:
                 if service not in config.services:
                     raise KeyError(f"Service not found: {service}")
                 dependents = [
-                    n for n, s in config.services.items()
+                    n
+                    for n, s in config.services.items()
                     if n != service and service in s.after
                 ]
                 if dependents:
@@ -830,7 +884,12 @@ class HanielMcpServer:
             return json.dumps({"error": str(e)})
 
     async def _update_repo_config(self, arguments: dict[str, Any]) -> str:
-        from ..dashboard.config_io import read_config, write_config, backup_config, restore_config
+        from ..dashboard.config_io import (
+            read_config,
+            write_config,
+            backup_config,
+            restore_config,
+        )
         from ..config.model import RepoConfig
         from ..config.validators import validate_config
 
@@ -864,7 +923,12 @@ class HanielMcpServer:
             return json.dumps({"error": str(e)})
 
     async def _create_repo_config(self, arguments: dict[str, Any]) -> str:
-        from ..dashboard.config_io import read_config, write_config, backup_config, restore_config
+        from ..dashboard.config_io import (
+            read_config,
+            write_config,
+            backup_config,
+            restore_config,
+        )
         from ..config.model import RepoConfig
         from ..config.validators import validate_config
 
@@ -898,7 +962,12 @@ class HanielMcpServer:
             return json.dumps({"error": str(e)})
 
     async def _delete_repo_config(self, arguments: dict[str, Any]) -> str:
-        from ..dashboard.config_io import read_config, write_config, backup_config, restore_config
+        from ..dashboard.config_io import (
+            read_config,
+            write_config,
+            backup_config,
+            restore_config,
+        )
         from ..config.validators import validate_config
 
         repo = arguments["repo"]
@@ -910,10 +979,7 @@ class HanielMcpServer:
                 config = read_config(config_path)
                 if repo not in config.repos:
                     raise KeyError(f"Repo not found: {repo}")
-                using = [
-                    n for n, s in config.services.items()
-                    if s.repo == repo
-                ]
+                using = [n for n, s in config.services.items() if s.repo == repo]
                 if using:
                     raise ValueError(f"Cannot delete: used by services {using}")
                 del config.repos[repo]
@@ -1037,10 +1103,12 @@ class HanielMcpServer:
                             "Failed to initialise ClaudeSessionManager: %s", sm_err
                         )
 
-                    dashboard_routes, dashboard_middleware, ws_handler = setup_dashboard(
-                        self.runner,
-                        token=dashboard_cfg.token,
-                        claude_session_manager=sm,
+                    dashboard_routes, dashboard_middleware, ws_handler = (
+                        setup_dashboard(
+                            self.runner,
+                            token=dashboard_cfg.token,
+                            claude_session_manager=sm,
+                        )
                     )
                     all_routes.extend(dashboard_routes)
                     middleware = dashboard_middleware

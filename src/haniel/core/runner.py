@@ -723,9 +723,7 @@ class ServiceRunner:
                         )
                 else:
                     # current == last_head, check if remote has new commits
-                    remote_head = get_remote_head(
-                        repo_path, state.config.branch
-                    )
+                    remote_head = get_remote_head(repo_path, state.config.branch)
                     if remote_head != current_head:
                         logger.info(
                             f"Remote changes available for repo: {name} "

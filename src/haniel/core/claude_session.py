@@ -12,7 +12,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import IO, AsyncGenerator, TYPE_CHECKING
 
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher, HookContext
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    HookMatcher,
+    HookContext,
+)
 from claude_agent_sdk.types import (
     AssistantMessage,
     HookJSONOutput,
@@ -179,7 +184,9 @@ class ClaudeSessionManager:
 
                 async for msg in client.receive_response():
                     if isinstance(msg, SystemMessage):
-                        sid = msg.data.get("session_id") if hasattr(msg, "data") else None
+                        sid = (
+                            msg.data.get("session_id") if hasattr(msg, "data") else None
+                        )
                         if not new_claude_session_id and sid:
                             new_claude_session_id = sid
 
@@ -204,7 +211,9 @@ class ClaudeSessionManager:
                     }
                     logger.info(
                         "Compact retry %d/%d for session %s",
-                        compact_retry_count, MAX_COMPACT_RETRIES, session_id,
+                        compact_retry_count,
+                        MAX_COMPACT_RETRIES,
+                        session_id,
                     )
 
                     # Disconnect old client
@@ -234,7 +243,9 @@ class ClaudeSessionManager:
             session_tag = claude_session_id or "new"
             stderr_path = self._stderr_log_dir / f"cli_stderr_{session_tag}.log"
             if stderr_path.exists():
-                stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
+                stderr_text = stderr_path.read_text(
+                    encoding="utf-8", errors="replace"
+                ).strip()
                 if stderr_text:
                     logger.error("CLI stderr output:\n%s", stderr_text[-2000:])
             yield {"type": "error", "error": str(exc)}
@@ -304,6 +315,7 @@ class ClaudeSessionManager:
 
     def _build_compact_hook(self, compact_events: list) -> dict:
         """Build a PreCompact hook that records compact events."""
+
         async def on_pre_compact(
             hook_input: dict,
             tool_use_id: str | None,
@@ -314,9 +326,7 @@ class ClaudeSessionManager:
             compact_events.append({"trigger": trigger})
             return HookJSONOutput()
 
-        return {
-            "PreCompact": [HookMatcher(matcher=None, hooks=[on_pre_compact])]
-        }
+        return {"PreCompact": [HookMatcher(matcher=None, hooks=[on_pre_compact])]}
 
     def _build_options(
         self, claude_session_id: str | None, compact_events: list | None = None
@@ -344,8 +354,17 @@ class ClaudeSessionManager:
             cwd=self._workspace_path,
             permission_mode="bypassPermissions",
             allowed_tools=[
-                "Read", "Glob", "Grep", "Bash", "Edit", "Write",
-                "WebFetch", "WebSearch", "Task", "ToolSearch", "Skill",
+                "Read",
+                "Glob",
+                "Grep",
+                "Bash",
+                "Edit",
+                "Write",
+                "WebFetch",
+                "WebSearch",
+                "Task",
+                "ToolSearch",
+                "Skill",
             ],
             disallowed_tools=["NotebookEdit", "TodoWrite"],
             setting_sources=["project"],
@@ -374,7 +393,9 @@ class ClaudeSessionManager:
         # Try resume first
         if claude_session_id:
             try:
-                opts, stderr_file = self._build_options(claude_session_id, compact_events)
+                opts, stderr_file = self._build_options(
+                    claude_session_id, compact_events
+                )
                 client = ClaudeSDKClient(opts)
                 await client.connect()
                 return client, True, stderr_file

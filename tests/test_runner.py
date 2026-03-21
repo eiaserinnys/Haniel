@@ -769,8 +769,12 @@ class TestServiceRunnerPollCycle:
     @patch("haniel.core.runner.fetch_repo")
     @patch("haniel.core.runner.get_head")
     def test_detect_changes_with_changes(
-        self, mock_head, mock_fetch, mock_remote_head, mock_pending,
-        runner_with_mock_repo
+        self,
+        mock_head,
+        mock_fetch,
+        mock_remote_head,
+        mock_pending,
+        runner_with_mock_repo,
     ):
         """Test detecting changes in repos."""
         mock_fetch.return_value = True  # Has changes

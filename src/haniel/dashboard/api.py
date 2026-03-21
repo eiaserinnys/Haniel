@@ -88,9 +88,7 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
             return _error(f"Service not found: {name}", status=404)
         try:
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None, runner.process_manager.stop_service, name
-            )
+            await loop.run_in_executor(None, runner.process_manager.stop_service, name)
             return JSONResponse({"ok": True, "service": name, "action": "stop"})
         except Exception as e:
             logger.error(f"Failed to stop {name}: {e}")
@@ -184,9 +182,7 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
 
             # Execute post_pull hooks for affected services
             for svc in affected:
-                await loop.run_in_executor(
-                    None, runner.execute_hook, svc, "post_pull"
-                )
+                await loop.run_in_executor(None, runner.execute_hook, svc, "post_pull")
 
             startup_order = await loop.run_in_executor(None, runner.get_startup_order)
             startup_order = [s for s in startup_order if s in affected]
@@ -217,9 +213,11 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, runner.approve_self_update)
             if runner.self_update_requested:
+
                 async def _deferred_stop():
                     await asyncio.sleep(0.5)
                     await loop.run_in_executor(None, runner.stop)
+
                 asyncio.ensure_future(_deferred_stop())
             return JSONResponse({"ok": True, "message": result})
         except Exception as e:

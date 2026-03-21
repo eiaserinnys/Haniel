@@ -154,9 +154,7 @@ class TestDashboardApi:
         assert "web" in data
         assert "worker" in data
 
-    def test_service_stop_calls_process_manager(
-        self, dashboard_app, mock_runner
-    ):
+    def test_service_stop_calls_process_manager(self, dashboard_app, mock_runner):
         """POST /api/services/{name}/stop calls process_manager.stop_service."""
         client = TestClient(dashboard_app)
         resp = client.post("/api/services/web/stop")
@@ -195,9 +193,7 @@ class TestDashboardApi:
             "web", 10
         )
 
-    def test_service_logs_invalid_lines_param(
-        self, dashboard_app, mock_runner
-    ):
+    def test_service_logs_invalid_lines_param(self, dashboard_app, mock_runner):
         """GET /api/services/{name}/logs?lines=abc returns 400."""
         client = TestClient(dashboard_app)
         resp = client.get("/api/services/web/logs?lines=abc")
@@ -260,7 +256,9 @@ class TestDashboardWebSocket:
 
         # Create a mock WebSocket
         mock_ws = MagicMock()
-        mock_ws.send_text = MagicMock(side_effect=lambda t: asyncio.coroutine(lambda: None)())
+        mock_ws.send_text = MagicMock(
+            side_effect=lambda t: asyncio.coroutine(lambda: None)()
+        )
 
         ws_handler._clients.add(mock_ws)
 

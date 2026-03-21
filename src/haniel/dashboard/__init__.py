@@ -43,7 +43,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     content="Authorization: Bearer <token> required",
                     status_code=401,
                 )
-            if auth_header[len("Bearer "):] != self._token:
+            if auth_header[len("Bearer ") :] != self._token:
                 return Response(
                     content="Invalid token",
                     status_code=403,
