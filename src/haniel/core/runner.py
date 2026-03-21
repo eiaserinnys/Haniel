@@ -847,8 +847,10 @@ class ServiceRunner:
     def approve_self_update(self) -> str:
         """Approve a pending self-update.
 
-        Called via MCP tool. Signals the main thread to exit with code 10,
-        which tells the wrapper script to perform the update.
+        Sets the self_update_requested signal but does NOT call stop().
+        The caller (API handler / MCP handler) is responsible for scheduling
+        stop() after sending the HTTP response, to avoid the race condition
+        where stop() kills the connection before the response reaches the client.
 
         Returns:
             Status message
@@ -860,7 +862,6 @@ class ServiceRunner:
         logger.info("Self-update approved, shutting down for update")
         self._notify_self_update_approved()
         self._self_update_requested.set()
-        self.stop()
         return "Self-update approved. Shutting down for update."
 
     @property

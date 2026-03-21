@@ -517,11 +517,16 @@ class HanielMcpServer:
     async def _approve_self_update(self) -> str:
         """Approve a pending self-update.
 
-        Delegates to runner.approve_self_update() which signals the main
-        thread to exit with code 10 for the wrapper script to handle.
+        Delegates to runner.approve_self_update() which sets the signal,
+        then schedules deferred stop() so the MCP response reaches the client first.
         """
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, self.runner.approve_self_update)
+        if self.runner.self_update_requested:
+            async def _deferred_stop():
+                await asyncio.sleep(0.5)
+                await loop.run_in_executor(None, self.runner.stop)
+            asyncio.ensure_future(_deferred_stop())
         return result
 
     async def _self_restart(self) -> str:
