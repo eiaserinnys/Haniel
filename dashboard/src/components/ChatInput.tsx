@@ -28,8 +28,12 @@ export function ChatInput({ onSend, disabled = false }: ChatInputProps) {
   const handleChange = () => {
     const ta = textareaRef.current;
     if (!ta) return;
-    ta.style.height = "auto";
-    ta.style.height = `${ta.scrollHeight}px`;
+    if (!ta.value) {
+      ta.style.height = "2rem";
+      return;
+    }
+    ta.style.height = "2rem";
+    ta.style.height = `${Math.max(32, ta.scrollHeight)}px`;
   };
 
   return (
