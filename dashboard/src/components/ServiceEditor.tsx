@@ -41,11 +41,11 @@ export function ServiceEditor({
 
   const handleSave = async () => {
     if (!run.trim()) {
-      setSaveError('run 명령어는 필수입니다.')
+      setSaveError('Run command is required.')
       return
     }
     if (!isEdit && !name.trim()) {
-      setSaveError('서비스 이름은 필수입니다.')
+      setSaveError('Service name is required.')
       return
     }
 
@@ -73,13 +73,13 @@ export function ServiceEditor({
       <DialogContent className="bg-zinc-900 border-zinc-700 text-zinc-100 max-w-lg">
         <DialogHeader>
           <DialogTitle className="text-zinc-100">
-            {isEdit ? `서비스 편집: ${editName}` : '새 서비스 추가'}
+            {isEdit ? `Edit Service: ${editName}` : 'Add New Service'}
           </DialogTitle>
         </DialogHeader>
 
         <div className="flex flex-col gap-4 py-2">
           {/* Name */}
-          <Field label="이름" required={!isEdit}>
+          <Field label="Name" required={!isEdit}>
             <input
               type="text"
               value={name}
@@ -91,7 +91,7 @@ export function ServiceEditor({
           </Field>
 
           {/* Run */}
-          <Field label="run 명령어" required>
+          <Field label="Run Command" required>
             <input
               type="text"
               value={run}
@@ -102,7 +102,7 @@ export function ServiceEditor({
           </Field>
 
           {/* CWD */}
-          <Field label="작업 디렉토리 (cwd)">
+          <Field label="Working Directory (cwd)">
             <input
               type="text"
               value={cwd}
@@ -113,13 +113,13 @@ export function ServiceEditor({
           </Field>
 
           {/* Repo */}
-          <Field label="연결 리포">
+          <Field label="Linked Repo">
             <select
               value={repo}
               onChange={(e) => setRepo(e.target.value)}
               className={selectClass}
             >
-              <option value="">없음</option>
+              <option value="">None</option>
               {availableRepos.map((r) => (
                 <option key={r} value={r}>{r}</option>
               ))}
@@ -127,7 +127,7 @@ export function ServiceEditor({
           </Field>
 
           {/* After */}
-          <Field label="의존 서비스 (after)" hint="쉼표로 구분">
+          <Field label="Dependencies (after)" hint="comma-separated">
             <input
               type="text"
               value={after}
@@ -138,7 +138,7 @@ export function ServiceEditor({
           </Field>
 
           {/* Ready */}
-          <Field label="준비 조건 (ready)" hint="port:3000 / delay:5 / log:started">
+          <Field label="Ready Condition" hint="port:3000 / delay:5 / log:started">
             <input
               type="text"
               value={ready}
@@ -156,7 +156,7 @@ export function ServiceEditor({
               onChange={(e) => setEnabled(e.target.checked)}
               className="w-4 h-4 rounded accent-blue-500"
             />
-            <span className="text-sm text-zinc-300">활성화 (enabled)</span>
+            <span className="text-sm text-zinc-300">Enabled</span>
           </label>
 
           {/* Error */}
@@ -173,14 +173,14 @@ export function ServiceEditor({
             disabled={saving}
             className="px-4 py-2 text-sm text-zinc-400 hover:text-zinc-200 transition-colors disabled:opacity-50"
           >
-            취소
+            Cancel
           </button>
           <button
             onClick={handleSave}
             disabled={saving}
             className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors disabled:opacity-50"
           >
-            {saving ? '저장 중…' : '저장'}
+            {saving ? 'Saving…' : 'Save'}
           </button>
         </DialogFooter>
       </DialogContent>

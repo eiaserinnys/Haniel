@@ -29,12 +29,12 @@ export function SessionListModal({
     <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
       <DialogContent className="max-w-md bg-background border-border">
         <DialogHeader>
-          <DialogTitle className="text-foreground">세션 목록</DialogTitle>
+          <DialogTitle className="text-foreground">Sessions</DialogTitle>
         </DialogHeader>
         <div className="flex flex-col gap-1 max-h-[60vh] overflow-y-auto">
           {sorted.length === 0 && (
             <p className="text-sm text-muted-foreground px-2 py-3">
-              세션이 없습니다.
+              No sessions found.
             </p>
           )}
           {sorted.map((session) => (

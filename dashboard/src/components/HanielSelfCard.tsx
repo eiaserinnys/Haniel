@@ -21,7 +21,7 @@ export function HanielSelfCard({ repo, selfUpdate, onApprove, onRestart }: Hanie
   const { repoName, repo: repoStatus } = repo
 
   const handleRestart = () => {
-    if (window.confirm('하니엘을 재시작하면 모든 서비스가 일시적으로 중단됩니다.\n정말 재시작하시겠습니까?')) {
+    if (window.confirm('Restarting Haniel will temporarily stop all services.\nAre you sure you want to restart?')) {
       onRestart()
     }
   }

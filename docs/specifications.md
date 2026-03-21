@@ -135,7 +135,7 @@ services:
     repo: my-app
     ready: port:3104
     restart_delay: 3
-    reflect: true              # Expose cogito /reflect endpoint
+    reflect: true              # Expose /reflect endpoint for introspection
     hooks:
       post_pull: ./runtime/venv/Scripts/pip.exe install -r requirements.txt
       pre_start: echo "checking prerequisites..."
@@ -450,7 +450,7 @@ services:
       method: http                 #   Optional. If http, send HTTP shutdown request
       endpoint: /shutdown          #   Used when method: http
     enabled: true                  # Optional. If false, skip (default: true)
-    reflect: false                 # Optional. Cogito /reflect endpoint (default: false)
+    reflect: false                 # Optional. Service introspection /reflect endpoint (default: false)
     hooks:                         # Optional. Lifecycle hooks
       post_pull: {command}         #   Run after git pull
       pre_start: {command}         #   Run before service start

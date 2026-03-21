@@ -518,7 +518,7 @@ class HanielMcpServer:
             return json.dumps({"error": f"Service not found: {service}"})
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             # Stop the service
             is_running = await loop.run_in_executor(
@@ -548,7 +548,7 @@ class HanielMcpServer:
             return json.dumps({"error": f"Service not found: {service}"})
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(
                 None, self.runner.process_manager.stop_service, service
             )
@@ -568,7 +568,7 @@ class HanielMcpServer:
         if service not in self._get_service_names():
             return json.dumps({"error": f"Service not found: {service}"})
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         is_running = await loop.run_in_executor(
             None, self.runner.process_manager.is_running, service
         )
@@ -594,7 +594,7 @@ class HanielMcpServer:
             return json.dumps({"error": f"Repository not found: {repo}"})
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             # Get affected services
             affected = await loop.run_in_executor(
@@ -641,7 +641,7 @@ class HanielMcpServer:
             return json.dumps({"error": "Service name is required"})
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(
                 None, self.runner.health_manager.reset_circuit, service
             )
@@ -653,7 +653,7 @@ class HanielMcpServer:
     async def _reload_config(self) -> str:
         """Reload configuration."""
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self.runner.reload_config)
             return "Success: Configuration reloaded"
         except Exception as e:
@@ -678,7 +678,7 @@ class HanielMcpServer:
             return f"Error: Service '{service}' has no associated repo"
 
         # Pull
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         pull_ok = await loop.run_in_executor(None, self.runner._pull_repo, repo_name)
         if not pull_ok:
             return f"Error: Pull failed for repo '{repo_name}'"
@@ -688,7 +688,7 @@ class HanielMcpServer:
 
     async def _self_update(self) -> str:
         """Self-update: pull haniel repo, then deferred exit(10)."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         # Pull haniel's own repo first
         self_repo = getattr(self.runner, "_self_repo", None)
@@ -775,7 +775,7 @@ class HanielMcpServer:
         service = arguments["service"]
         config_data = arguments["config"]
         config_path = self.runner.config_path
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _do():
             new_svc = ServiceConfig.model_validate(config_data)
@@ -814,7 +814,7 @@ class HanielMcpServer:
         name = arguments["name"]
         config_data = arguments["config"]
         config_path = self.runner.config_path
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _do():
             new_svc = ServiceConfig.model_validate(config_data)
@@ -851,7 +851,7 @@ class HanielMcpServer:
 
         service = arguments["service"]
         config_path = self.runner.config_path
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _do():
             with self._get_config_lock():
@@ -896,7 +896,7 @@ class HanielMcpServer:
         repo = arguments["repo"]
         config_data = arguments["config"]
         config_path = self.runner.config_path
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _do():
             new_repo = RepoConfig.model_validate(config_data)
@@ -935,7 +935,7 @@ class HanielMcpServer:
         name = arguments["name"]
         config_data = arguments["config"]
         config_path = self.runner.config_path
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _do():
             new_repo = RepoConfig.model_validate(config_data)
@@ -972,7 +972,7 @@ class HanielMcpServer:
 
         repo = arguments["repo"]
         config_path = self.runner.config_path
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _do():
             with self._get_config_lock():
@@ -1006,7 +1006,7 @@ class HanielMcpServer:
         Delegates to runner.request_restart() which signals the main
         thread to exit with code 11 for the wrapper script to handle.
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, self.runner.request_restart)
         return result
 
@@ -1125,7 +1125,7 @@ class HanielMcpServer:
                 async with session_manager.run():
                     # Set up WebSocket event loop binding after the event loop is running
                     if ws_handler is not None:
-                        loop = asyncio.get_event_loop()
+                        loop = asyncio.get_running_loop()
                         ws_handler.setup(loop)
                     yield
 

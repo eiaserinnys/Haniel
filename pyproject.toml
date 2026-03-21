@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [
-    { name = "Dorothy", email = "dorothy@example.com" }
+    { name = "Dorothy", email = "eiaserinnys@gmail.com" }
 ]
 keywords = ["service", "runner", "process", "supervisor", "git", "deployment"]
 classifiers = [

@@ -20,13 +20,13 @@ export function ChatPanel() {
             setSessionListOpen(true);
           }}
         >
-          세션 목록
+          Sessions
         </button>
         <button
           className="text-xs text-muted-foreground hover:text-foreground px-2 py-1 rounded hover:bg-muted transition-colors"
           onClick={() => chat.startNewSession()}
         >
-          새 세션
+          New Session
         </button>
       </div>
 

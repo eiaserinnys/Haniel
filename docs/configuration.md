@@ -195,7 +195,7 @@ services:
 | `shutdown` | object | — | Per-service shutdown override (same fields as global `shutdown`) |
 | `enabled` | bool | `true` | If `false`, service is skipped |
 | `hooks` | object | — | Lifecycle hooks |
-| `reflect` | bool | `false` | Whether this service exposes a cogito `/reflect` endpoint |
+| `reflect` | bool | `false` | Whether this service exposes a `/reflect` endpoint for service introspection |
 
 ### `ready` condition syntax
 

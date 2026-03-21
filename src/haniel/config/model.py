@@ -139,7 +139,7 @@ class ServiceConfig(BaseModel):
     hooks: HooksConfig | None = Field(default=None, description="Lifecycle hooks")
     reflect: bool = Field(
         default=False,
-        description="Whether this service exposes a cogito /reflect endpoint",
+        description="Whether this service exposes a /reflect endpoint for introspection",
     )
 
     @field_validator("after", mode="before")
@@ -219,10 +219,6 @@ class ServiceDefinitionConfig(BaseModel):
     name: str = Field(..., description="Service name")
     display: str | None = Field(default=None, description="Display name")
     working_directory: str = Field(default="{root}", description="Working directory")
-    service_account: ServiceAccountConfig | None = Field(
-        default=None,
-        description="Windows service account (default: LocalSystem)",
-    )
     environment: dict[str, str] | None = Field(
         default=None, description="Environment variables"
     )

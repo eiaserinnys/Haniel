@@ -100,7 +100,7 @@ export function useServices() {
     setPullingRepos(prev => new Set(prev).add(name))
     try {
       const result = await api.pullRepo(name)
-      // 즉시 상태 갱신: pending_changes 제거 + head 업데이트
+      // Immediate state update: clear pending_changes + update head
       setStatus(prev => {
         if (!prev) return prev
         const repos = { ...prev.repos }

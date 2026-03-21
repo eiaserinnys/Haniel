@@ -91,7 +91,7 @@ export function DependencyGraph({ graph }: DependencyGraphProps) {
   if (nodes.length === 0) {
     return (
       <p className="text-sm text-zinc-500 text-center py-4">
-        서비스가 없습니다.
+        No services found.
       </p>
     )
   }

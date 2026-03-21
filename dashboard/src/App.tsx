@@ -97,7 +97,7 @@ export default function App() {
   }
 
   const handleDeleteService = async (name: string) => {
-    if (!window.confirm(`서비스 "${name}"을 삭제하시겠습니까?`)) return
+    if (!window.confirm(`Are you sure you want to delete service "${name}"?`)) return
     try {
       await api.deleteService(name)
       setCrudError(null)
@@ -135,7 +135,7 @@ export default function App() {
   }
 
   const handleDeleteRepo = async (name: string) => {
-    if (!window.confirm(`리포 "${name}"을 삭제하시겠습니까?`)) return
+    if (!window.confirm(`Are you sure you want to delete repo "${name}"?`)) return
     try {
       await api.deleteRepo(name)
       setCrudError(null)
@@ -207,7 +207,7 @@ export default function App() {
                   className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-200 transition-colors px-2 py-1 rounded hover:bg-zinc-800"
                 >
                   <Plus size={12} />
-                  서비스 추가
+                  Add Service
                 </button>
               </div>
 
@@ -269,7 +269,7 @@ export default function App() {
                     className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-200 transition-colors px-2 py-1 rounded hover:bg-zinc-800"
                   >
                     <Plus size={12} />
-                    리포 추가
+                    Add Repo
                   </button>
                 </div>
                 {groups.standaloneRepos.length > 0 ? (
@@ -301,14 +301,14 @@ export default function App() {
                             )}
                             <button
                               onClick={() => handleEditRepo(repoName)}
-                              title="편집"
+                              title="Edit"
                               className="p-1.5 rounded text-zinc-500 hover:text-zinc-300 transition-colors hover:bg-zinc-700/50"
                             >
                               <Pencil size={14} />
                             </button>
                             <button
                               onClick={() => handleDeleteRepo(repoName)}
-                              title="삭제"
+                              title="Delete"
                               className="p-1.5 rounded text-zinc-500 hover:text-red-400 transition-colors hover:bg-zinc-700/50"
                             >
                               <Trash2 size={14} />
@@ -458,20 +458,20 @@ function UpdateOverlay() {
         {timedOut ? (
           <>
             <WifiOff className="text-yellow-400" size={32} />
-            <div className="text-zinc-100 font-medium">서버 응답 없음</div>
-            <div className="text-zinc-400 text-sm">수동으로 새로고침해 주세요.</div>
+            <div className="text-zinc-100 font-medium">Server not responding</div>
+            <div className="text-zinc-400 text-sm">Please refresh manually.</div>
             <button
               onClick={() => window.location.reload()}
               className="text-sm bg-zinc-700 hover:bg-zinc-600 text-zinc-200 px-4 py-1.5 rounded transition-colors"
             >
-              새로고침
+              Refresh
             </button>
           </>
         ) : (
           <>
             <RefreshCw className="animate-spin text-blue-400" size={32} />
             <div className="text-zinc-100 font-medium">Updating…</div>
-            <div className="text-zinc-400 text-sm">서버가 재시작되면 자동으로 새로고침됩니다.</div>
+            <div className="text-zinc-400 text-sm">Will auto-refresh when the server restarts.</div>
           </>
         )}
       </div>

@@ -48,14 +48,14 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
     # ── GET /api/status ──────────────────────────────────────────────────────
 
     async def get_status(request: Request) -> JSONResponse:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         status = await loop.run_in_executor(None, runner.get_status)
         return JSONResponse(status)
 
     # ── GET /api/services ────────────────────────────────────────────────────
 
     async def get_services(request: Request) -> JSONResponse:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         status = await loop.run_in_executor(None, runner.get_status)
         return JSONResponse(status["services"])
 
@@ -65,7 +65,7 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
         name = request.path_params["name"]
         if name not in _get_service_names():
             return _error(f"Service not found: {name}", status=404)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         is_running = await loop.run_in_executor(
             None, runner.process_manager.is_running, name
         )
@@ -87,7 +87,7 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
         if name not in _get_service_names():
             return _error(f"Service not found: {name}", status=404)
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, runner.process_manager.stop_service, name)
             return JSONResponse({"ok": True, "service": name, "action": "stop"})
         except Exception as e:
@@ -101,7 +101,7 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
         if name not in _get_service_names():
             return _error(f"Service not found: {name}", status=404)
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             is_running = await loop.run_in_executor(
                 None, runner.process_manager.is_running, name
             )
@@ -148,7 +148,7 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
     # ── GET /api/repos ────────────────────────────────────────────────────────
 
     async def get_repos(request: Request) -> JSONResponse:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         status = await loop.run_in_executor(None, runner.get_status)
         return JSONResponse(status["repos"])
 
@@ -159,7 +159,7 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
         if name not in _get_repo_names():
             return _error(f"Repository not found: {name}", status=404)
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             affected = await loop.run_in_executor(
                 None, runner.get_affected_services, name
@@ -210,7 +210,7 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
 
     async def self_update_approve(request: Request) -> JSONResponse:
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(None, runner.approve_self_update)
             if runner.self_update_requested:
 
@@ -243,7 +243,7 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
 
     async def self_restart(request: Request) -> JSONResponse:
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(None, runner.request_restart)
             return JSONResponse({"ok": True, "message": result})
         except Exception as e:
@@ -255,7 +255,7 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
         if not hasattr(runner, "reload_config"):
             return _error("reload_config not supported", status=501)
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, runner.reload_config)
             return JSONResponse({"ok": True, "action": "reload"})
         except Exception as e:

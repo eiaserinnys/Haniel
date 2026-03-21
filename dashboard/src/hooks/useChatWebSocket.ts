@@ -80,24 +80,24 @@ export function useChatWebSocket(): UseChatWebSocket {
       const resumed = msg.resumed as boolean;
       setActiveSessionId(sessionId);
 
-      // 세션 연결 알림
+      // Session connection notification
       if (resumed) {
         setMessages((prev) => [
           ...prev,
           {
             id: crypto.randomUUID(),
             role: "system",
-            content: `세션 ${sessionId.slice(0, 8)}… 에 재연결되었습니다.`,
+            content: `Reconnected to session ${sessionId.slice(0, 8)}…`,
           },
         ]);
       } else if (!isNew) {
-        // 기존 세션이지만 resume 실패 → 새 세션으로 대체
+        // Existing session but resume failed → replaced with new session
         setMessages((prev) => [
           ...prev,
           {
             id: crypto.randomUUID(),
             role: "system",
-            content: "이전 세션을 재개할 수 없어 새 세션이 생성되었습니다.",
+            content: "Could not resume previous session. A new session has been created.",
           },
         ]);
       }
@@ -140,7 +140,7 @@ export function useChatWebSocket(): UseChatWebSocket {
         {
           id: crypto.randomUUID(),
           role: "system",
-          content: `컨텍스트 컴팩션이 진행 중입니다... (${retry}/${maxRetries})`,
+          content: `Context compaction in progress... (${retry}/${maxRetries})`,
         },
       ]);
     } else if (type === "compact_end") {
@@ -149,7 +149,7 @@ export function useChatWebSocket(): UseChatWebSocket {
         {
           id: crypto.randomUUID(),
           role: "system",
-          content: "컴팩션 완료, 응답을 이어갑니다.",
+          content: "Compaction complete, resuming response.",
         },
       ]);
     } else if (type === "error") {

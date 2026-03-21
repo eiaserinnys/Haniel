@@ -34,15 +34,15 @@ export function RepoEditor({
 
   const handleSave = async () => {
     if (!url.trim()) {
-      setSaveError('URL은 필수입니다.')
+      setSaveError('URL is required.')
       return
     }
     if (!path.trim()) {
-      setSaveError('경로(path)는 필수입니다.')
+      setSaveError('Path is required.')
       return
     }
     if (!isEdit && !name.trim()) {
-      setSaveError('리포 이름은 필수입니다.')
+      setSaveError('Repo name is required.')
       return
     }
 
@@ -67,13 +67,13 @@ export function RepoEditor({
       <DialogContent className="bg-zinc-900 border-zinc-700 text-zinc-100 max-w-lg">
         <DialogHeader>
           <DialogTitle className="text-zinc-100">
-            {isEdit ? `리포 편집: ${editName}` : '새 리포 추가'}
+            {isEdit ? `Edit Repo: ${editName}` : 'Add New Repo'}
           </DialogTitle>
         </DialogHeader>
 
         <div className="flex flex-col gap-4 py-2">
           {/* Name */}
-          <Field label="이름" required={!isEdit}>
+          <Field label="Name" required={!isEdit}>
             <input
               type="text"
               value={name}
@@ -96,7 +96,7 @@ export function RepoEditor({
           </Field>
 
           {/* Branch */}
-          <Field label="브랜치">
+          <Field label="Branch">
             <input
               type="text"
               value={branch}
@@ -107,7 +107,7 @@ export function RepoEditor({
           </Field>
 
           {/* Path */}
-          <Field label="로컬 경로 (path)" required>
+          <Field label="Local Path" required>
             <input
               type="text"
               value={path}
@@ -131,14 +131,14 @@ export function RepoEditor({
             disabled={saving}
             className="px-4 py-2 text-sm text-zinc-400 hover:text-zinc-200 transition-colors disabled:opacity-50"
           >
-            취소
+            Cancel
           </button>
           <button
             onClick={handleSave}
             disabled={saving}
             className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors disabled:opacity-50"
           >
-            {saving ? '저장 중…' : '저장'}
+            {saving ? 'Saving…' : 'Save'}
           </button>
         </DialogFooter>
       </DialogContent>
