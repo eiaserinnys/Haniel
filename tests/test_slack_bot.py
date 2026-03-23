@@ -100,9 +100,17 @@ def mock_web_client():
 
 @pytest.fixture
 def slack_bot(mock_web_client):
-    """SlackBot with mocked WebClient."""
+    """SlackBot with mocked Bolt App, SocketModeHandler, and WebClient.
+
+    App(token=...) calls auth.test at construction time, so we patch it out to
+    avoid real network calls in unit tests.
+    """
     config = _make_slack_config()
-    bot = SlackBot(config)
+    with (
+        patch("haniel.integrations.slack_bot.App"),
+        patch("haniel.integrations.slack_bot.SocketModeHandler"),
+    ):
+        bot = SlackBot(config)
     bot._client = mock_web_client
     bot._dm_channel = "D_TEST_CHANNEL"
     return bot
@@ -154,19 +162,19 @@ def test_notify_pulling_auto_sets_pulling_ts(slack_bot, mock_web_client):
 
     posted_text = mock_web_client.chat_postMessage.call_args[1]["text"]
     assert "자동 배포" in posted_text
-    assert slack_bot._pending_ts.get("_pulling_my-repo") == "PULLING_TS"
+    assert slack_bot._pulling_ts.get("my-repo") == "PULLING_TS"
 
 
 def test_notify_done_success_posts_and_clears(slack_bot, mock_web_client):
     """notify_done(success=True) deletes the pulling DM and posts a success message."""
-    slack_bot._pending_ts["_pulling_my-repo"] = "PULLING_TS"
+    slack_bot._pulling_ts["my-repo"] = "PULLING_TS"
 
     slack_bot.notify_done("my-repo", success=True)
 
     mock_web_client.chat_delete.assert_called_once_with(
         channel="D_TEST_CHANNEL", ts="PULLING_TS"
     )
-    assert "_pulling_my-repo" not in slack_bot._pending_ts
+    assert "my-repo" not in slack_bot._pulling_ts
     posted = mock_web_client.chat_postMessage.call_args[1]
     assert "완료" in posted["text"]
 
@@ -208,15 +216,97 @@ def test_build_pending_blocks_truncates_commits(slack_bot):
 
 
 def test_start_opens_dm_channel(mock_web_client):
-    """start() opens a DM channel with notify_user."""
+    """start() opens a DM channel with notify_user and starts Socket Mode thread."""
     config = _make_slack_config(notify_user="U99999")
-    bot = SlackBot(config)
-    bot._client = mock_web_client
+    with (
+        patch("haniel.integrations.slack_bot.App"),
+        patch("haniel.integrations.slack_bot.SocketModeHandler") as MockHandler,
+    ):
+        mock_handler_instance = MagicMock()
+        MockHandler.return_value = mock_handler_instance
+        bot = SlackBot(config)
+        bot._client = mock_web_client
 
-    bot.start()
+        bot.start()
 
     mock_web_client.conversations_open.assert_called_once_with(users="U99999")
     assert bot._dm_channel == "D_TEST_CHANNEL"
+    # Socket Mode thread should have been started
+    assert bot._socket_thread is not None
+    assert bot._socket_thread.daemon is True
+
+
+# ── Phase 2: approve button interaction ──────────────────────────────────────
+
+
+def test_approve_action_spawns_thread():
+    """approve_update action handler acks and spawns a daemon thread for trigger_pull."""
+    config = _make_slack_config()
+    approve_called = threading.Event()
+    approved_repo = []
+
+    def fake_approve(repo_name):
+        approved_repo.append(repo_name)
+        approve_called.set()
+
+    with (
+        patch("haniel.integrations.slack_bot.App") as MockApp,
+        patch("haniel.integrations.slack_bot.SocketModeHandler"),
+    ):
+        mock_app_instance = MagicMock()
+        registered_handlers = {}
+
+        def mock_action(action_id):
+            def decorator(fn):
+                registered_handlers[action_id] = fn
+                return fn
+            return decorator
+
+        mock_app_instance.action = mock_action
+        MockApp.return_value = mock_app_instance
+
+        bot = SlackBot(config, approve_callback=fake_approve)
+
+    handler = registered_handlers.get("approve_update")
+    assert handler is not None, "approve_update handler not registered"
+
+    ack_mock = MagicMock()
+    action = {"value": "my-repo"}
+    handler(ack=ack_mock, body={}, action=action)
+
+    ack_mock.assert_called_once()
+    # Wait for the spawned thread to complete
+    assert approve_called.wait(timeout=2), "approve_callback was not called"
+    assert approved_repo == ["my-repo"]
+
+
+def test_approve_action_no_callback_does_not_raise():
+    """approve_update without approve_callback logs a warning and does nothing."""
+    config = _make_slack_config()
+
+    with (
+        patch("haniel.integrations.slack_bot.App") as MockApp,
+        patch("haniel.integrations.slack_bot.SocketModeHandler"),
+    ):
+        mock_app_instance = MagicMock()
+        registered_handlers = {}
+
+        def mock_action(action_id):
+            def decorator(fn):
+                registered_handlers[action_id] = fn
+                return fn
+            return decorator
+
+        mock_app_instance.action = mock_action
+        MockApp.return_value = mock_app_instance
+
+        bot = SlackBot(config, approve_callback=None)
+
+    handler = registered_handlers["approve_update"]
+    ack_mock = MagicMock()
+    # Should not raise even with no callback
+    handler(ack=ack_mock, body={}, action={"value": "repo"})
+    ack_mock.assert_called_once()
 
 
 # ── runner.trigger_pull() ─────────────────────────────────────────────────────
@@ -297,6 +387,19 @@ def test_trigger_pull_unknown_repo_raises(mock_runner):
     """trigger_pull raises ValueError for unknown repo names."""
     with pytest.raises(ValueError, match="Unknown repo"):
         mock_runner.trigger_pull("nonexistent-repo")
+
+
+def test_trigger_pull_ignores_duplicate_while_pulling(mock_runner):
+    """trigger_pull is a no-op if is_pulling is already True (duplicate approve guard)."""
+    mock_runner._repo_states["my-repo"].is_pulling = True
+    slack_bot = MagicMock()
+    mock_runner._slack_bot = slack_bot
+
+    with patch.object(mock_runner, "_pull_repo") as mock_pull:
+        mock_runner.trigger_pull("my-repo")
+
+    mock_pull.assert_not_called()
+    slack_bot.notify_pulling.assert_not_called()
 
 
 # ── _detect_changes notify_pending guard ────────────────────────────────────

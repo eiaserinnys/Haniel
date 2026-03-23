@@ -1,19 +1,23 @@
 """
 Integrated Slack bot for haniel.
 
-Phase 1: Sends DM notifications via WebClient (no interactive buttons yet).
-Phase 2: Adds Socket Mode + approve button interaction.
+Sends DM notifications and handles interactive approve button via Slack Socket Mode.
 
 The bot sends a DM to notify_user when:
-  - Remote changes are detected (pending approval)
+  - Remote changes are detected (pending approval) — with approve button
   - A pull is in progress
   - A pull succeeds or fails
+
+Socket Mode is used so no public URL is required.
+The approve button triggers trigger_pull() via approve_callback.
 """
 
 import logging
 import threading
 from typing import Any, Callable
 
+from slack_bolt import App
+from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
@@ -42,25 +46,76 @@ class SlackBot:
     ):
         self._config = config
         self._approve_callback = approve_callback
+
+        # Slack Bolt App + Socket Mode handler
+        self._app = App(token=config.bot_token)
+        self._handler = SocketModeHandler(self._app, config.app_token)
+        self._socket_thread: threading.Thread | None = None
+
+        # WebClient for direct API calls (chat.postMessage, etc.)
         self._client = WebClient(token=config.bot_token)
         self._dm_channel: str | None = None
-        # Maps repo_name -> ts of the last "pending" message (used to delete on update)
+        # Maps repo_name -> ts of the last "pending changes" DM (deleted on update)
         self._pending_ts: dict[str, str] = {}
+        # Maps repo_name -> ts of the "배포 시작" DM (deleted when done)
+        self._pulling_ts: dict[str, str] = {}
         self._lock = threading.Lock()
+
+        # Register action handler for the approve button
+        self._register_action_handlers()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def start(self) -> None:
-        """Initialize the bot (open DM channel, start Socket Mode in Phase 2)."""
+        """Initialize the bot (open DM channel, start Socket Mode in background thread)."""
         try:
             self._dm_channel = self._open_dm_channel()
-            logger.info("SlackBot started, DM channel: %s", self._dm_channel)
+            logger.info("SlackBot DM channel: %s", self._dm_channel)
         except SlackApiError as e:
-            logger.error("SlackBot failed to start: %s", e)
+            logger.error("SlackBot failed to open DM channel: %s", e)
+            # Continue — notifications are nice-to-have; don't abort runner startup
+
+        # SocketModeHandler.start() is blocking, so run in a daemon thread
+        self._socket_thread = threading.Thread(
+            target=self._handler.start,
+            daemon=True,
+            name="slack-socket-mode",
+        )
+        self._socket_thread.start()
+        logger.info("SlackBot Socket Mode started")
 
     def stop(self) -> None:
-        """Shut down the bot."""
-        pass  # Phase 2: stop SocketModeHandler here
+        """Shut down the bot (close Socket Mode connection)."""
+        try:
+            self._handler.close()
+        except Exception as e:
+            logger.warning("SlackBot stop error: %s", e)
+
+    def _register_action_handlers(self) -> None:
+        """Register Slack Bolt action handlers."""
+
+        @self._app.action("approve_update")
+        def handle_approve(ack, body, action):
+            """Handle approve button click.
+
+            Must ack() within 3 seconds, then spawn a separate thread for
+            trigger_pull (which can take minutes) to avoid blocking the Socket
+            Mode thread.
+            """
+            ack()
+            repo_name = action.get("value", "")
+            if not repo_name:
+                logger.warning("approve_update action missing repo value")
+                return
+            if not self._approve_callback:
+                logger.warning("approve_update received but no approve_callback set")
+                return
+            threading.Thread(
+                target=self._approve_callback,
+                args=(repo_name,),
+                daemon=True,
+                name=f"approve-{repo_name}",
+            ).start()
 
     # ── Notifications ─────────────────────────────────────────────────────────
 
@@ -118,8 +173,7 @@ class SlackBot:
         ts = self._post_blocks(blocks, text=f"[{repo_name}] {label}")
         if ts:
             with self._lock:
-                # Store as pulling_ts so notify_done can update it
-                self._pending_ts[f"_pulling_{repo_name}"] = ts
+                self._pulling_ts[repo_name] = ts
 
     def notify_done(
         self, repo_name: str, success: bool, error: str | None = None
@@ -129,7 +183,7 @@ class SlackBot:
             return
 
         with self._lock:
-            pulling_ts = self._pending_ts.pop(f"_pulling_{repo_name}", None)
+            pulling_ts = self._pulling_ts.pop(repo_name, None)
 
         if pulling_ts:
             self._delete_message(pulling_ts)

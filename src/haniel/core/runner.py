@@ -675,6 +675,9 @@ class ServiceRunner:
             raise ValueError(f"Unknown repo: {repo_name}")
 
         state = self._repo_states[repo_name]
+        if state.is_pulling:
+            logger.info("Already pulling %s, ignoring duplicate request", repo_name)
+            return
         state.is_pulling = True
 
         if self._ws_handler is not None:
