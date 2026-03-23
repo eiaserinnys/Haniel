@@ -268,6 +268,8 @@ class MechanicalInstaller:
                             logger.info(
                                 f"Pulled latest for {name}: {result.stdout.strip()}"
                             )
+                            if repo.hooks and repo.hooks.post_pull:
+                                self._run_repo_hook(name, "post_pull", repo.hooks.post_pull, repo_path)
                     except subprocess.TimeoutExpired:
                         logger.warning(
                             f"git pull timed out for {name}, continuing with existing code"
@@ -311,6 +313,8 @@ class MechanicalInstaller:
                     all_success = False
                 else:
                     logger.info(f"Successfully cloned {name}")
+                    if repo.hooks and repo.hooks.post_pull:
+                        self._run_repo_hook(name, "post_pull", repo.hooks.post_pull, repo_path)
             except subprocess.TimeoutExpired:
                 self.state.mark_failed(f"repos:{name}", "Clone timed out")
                 all_success = False
@@ -529,6 +533,27 @@ class MechanicalInstaller:
             logger.error(f"Error running pnpm install for {name}: {e}")
             self.state.mark_failed(f"environments:{name}", str(e))
             return False
+
+    def _run_repo_hook(self, name: str, hook_name: str, cmd: str, cwd: Path) -> None:
+        """Run a lifecycle hook for a repository."""
+        try:
+            logger.info(f"Running {hook_name} hook for repo {name}: {cmd}")
+            env = self._env_with_tool_paths(["node", "pnpm", "npm", "npx"])
+            subprocess.run(
+                cmd,
+                cwd=str(cwd),
+                check=True,
+                timeout=300,
+                env=env,
+                shell=True,
+            )
+            logger.info(f"{hook_name} hook succeeded for repo {name}")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"{hook_name} hook failed for repo {name}: {e}")
+            self.state.mark_failed(f"repos:{name}:{hook_name}", str(e))
+        except Exception as e:
+            logger.error(f"{hook_name} hook error for repo {name}: {e}")
+            self.state.mark_failed(f"repos:{name}:{hook_name}", str(e))
 
     def _run_build(self, name: str, env_path: Path, build_cmd: str) -> bool:
         """Run a build command in a directory.

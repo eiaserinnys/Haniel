@@ -752,12 +752,14 @@ class TestServiceRunnerPollCycle:
 
     @patch("haniel.core.runner.fetch_repo")
     @patch("haniel.core.runner.get_head")
+    @patch("haniel.core.runner.get_remote_head")
     def test_detect_changes_no_changes(
-        self, mock_head, mock_fetch, runner_with_mock_repo
+        self, mock_remote_head, mock_head, mock_fetch, runner_with_mock_repo
     ):
         """Test detecting no changes in repos."""
         mock_fetch.return_value = False  # No changes
         mock_head.return_value = "abc1234"
+        mock_remote_head.return_value = "abc1234"  # Remote == current, no new commits
 
         runner_with_mock_repo._init_repo_states()
         changed = runner_with_mock_repo._detect_changes()
@@ -765,20 +767,16 @@ class TestServiceRunnerPollCycle:
         assert changed == []
 
     @patch("haniel.core.runner.get_pending_changes", return_value=None)
-    @patch("haniel.core.runner.get_remote_head", return_value="new5678")
+    @patch("haniel.core.runner.get_remote_head")
     @patch("haniel.core.runner.fetch_repo")
     @patch("haniel.core.runner.get_head")
     def test_detect_changes_with_changes(
-        self,
-        mock_head,
-        mock_fetch,
-        mock_remote_head,
-        mock_pending,
-        runner_with_mock_repo,
+        self, mock_head, mock_fetch, mock_remote_head, mock_pending, runner_with_mock_repo
     ):
         """Test detecting changes in repos."""
-        mock_fetch.return_value = True  # Has changes
+        mock_fetch.return_value = True
         mock_head.return_value = "abc1234"
+        mock_remote_head.return_value = "def5678"  # Remote ahead of current
 
         runner_with_mock_repo._init_repo_states()
         changed = runner_with_mock_repo._detect_changes()

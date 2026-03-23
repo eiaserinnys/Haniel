@@ -88,14 +88,6 @@ class McpConfig(BaseModel):
     )
 
 
-class RepoConfig(BaseModel):
-    """Configuration for a git repository."""
-
-    url: str = Field(..., description="Git clone URL")
-    branch: str = Field(default="main", description="Branch to track")
-    path: str = Field(..., description="Local path for the repository")
-
-
 class HooksConfig(BaseModel):
     """Configuration for lifecycle hooks."""
 
@@ -105,6 +97,15 @@ class HooksConfig(BaseModel):
     pre_start: str | None = Field(
         default=None, description="Command to run before service start"
     )
+
+
+class RepoConfig(BaseModel):
+    """Configuration for a git repository."""
+
+    url: str = Field(..., description="Git clone URL")
+    branch: str = Field(default="main", description="Branch to track")
+    path: str = Field(..., description="Local path for the repository")
+    hooks: HooksConfig | None = Field(default=None, description="Lifecycle hooks")
 
 
 class ServiceShutdownConfig(BaseModel):
