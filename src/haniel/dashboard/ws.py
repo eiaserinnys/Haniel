@@ -73,6 +73,16 @@ class DashboardWebSocket:
         }
         self._schedule_broadcast(event)
 
+    def broadcast_repo_pulling(self, repo_name: str, is_pulling: bool) -> None:
+        """Broadcast that a repo pull is in progress (or finished)."""
+        event = {
+            "type": "repo_pulling",
+            "repo": repo_name,
+            "is_pulling": is_pulling,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        self._schedule_broadcast(event)
+
     def broadcast_self_update_pending(self, repo: str) -> None:
         """Broadcast that a self-update is waiting for approval."""
         event = {
