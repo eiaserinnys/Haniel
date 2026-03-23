@@ -6,7 +6,7 @@ Covers:
 - SlackBot.notify_pending (posts DM, replaces old message)
 - SlackBot.notify_pulling / notify_done
 - runner.trigger_pull() dispatches to SlackBot and ws_handler
-- _detect_changes calls notify_pending only on L726 branch, with is_pulling guard
+- _detect_changes calls notify_pending only on L726 branch, with pull lock guard
 - _apply_changes uses trigger_pull(auto=True)
 - api.py repo_pull delegates to trigger_pull
 """
@@ -346,6 +346,7 @@ def test_trigger_pull_calls_slack_notify(mock_runner):
     """trigger_pull notifies SlackBot of pulling and done states."""
     slack_bot = MagicMock()
     mock_runner._slack_bot = slack_bot
+    mock_runner._repo_states["my-repo"].pending_changes = {"commits": ["a"], "stat": ""}
 
     with patch.object(mock_runner, "_pull_repo", return_value=True):
         mock_runner.trigger_pull("my-repo", auto=False)
@@ -358,6 +359,7 @@ def test_trigger_pull_broadcasts_ws_pulling(mock_runner):
     """trigger_pull broadcasts repo_pulling True then False to ws_handler."""
     ws = MagicMock()
     mock_runner._ws_handler = ws
+    mock_runner._repo_states["my-repo"].pending_changes = {"commits": ["a"], "stat": ""}
 
     with patch.object(mock_runner, "_pull_repo", return_value=True):
         mock_runner.trigger_pull("my-repo")
@@ -368,16 +370,17 @@ def test_trigger_pull_broadcasts_ws_pulling(mock_runner):
     assert calls[1] == call("my-repo", False)
 
 
-def test_trigger_pull_clears_is_pulling_on_failure(mock_runner):
-    """trigger_pull clears is_pulling even when pull fails."""
+def test_trigger_pull_releases_lock_on_failure(mock_runner):
+    """trigger_pull releases the pull lock even when pull fails."""
     slack_bot = MagicMock()
     mock_runner._slack_bot = slack_bot
+    mock_runner._repo_states["my-repo"].pending_changes = {"commits": ["a"], "stat": ""}
 
     with patch.object(mock_runner, "_pull_repo", side_effect=RuntimeError("oops")):
         with pytest.raises(RuntimeError):
             mock_runner.trigger_pull("my-repo")
 
-    assert mock_runner._repo_states["my-repo"].is_pulling is False
+    assert not mock_runner._pull_locks["my-repo"].locked()
     slack_bot.notify_done.assert_called_once()
     _, kwargs = slack_bot.notify_done.call_args
     assert kwargs["success"] is False
@@ -390,8 +393,8 @@ def test_trigger_pull_unknown_repo_raises(mock_runner):
 
 
 def test_trigger_pull_ignores_duplicate_while_pulling(mock_runner):
-    """trigger_pull is a no-op if is_pulling is already True (duplicate approve guard)."""
-    mock_runner._repo_states["my-repo"].is_pulling = True
+    """trigger_pull is a no-op if pull lock is already held (duplicate approve guard)."""
+    mock_runner._pull_locks["my-repo"].acquire()  # simulate ongoing pull
     slack_bot = MagicMock()
     mock_runner._slack_bot = slack_bot
 
@@ -400,6 +403,23 @@ def test_trigger_pull_ignores_duplicate_while_pulling(mock_runner):
 
     mock_pull.assert_not_called()
     slack_bot.notify_pulling.assert_not_called()
+    # Clean up: release the lock we manually acquired
+    mock_runner._pull_locks["my-repo"].release()
+
+
+def test_trigger_pull_skips_when_no_pending_changes(mock_runner):
+    """trigger_pull skips pull when pending_changes is None (re-entry guard)."""
+    mock_runner._repo_states["my-repo"].pending_changes = None
+    slack_bot = MagicMock()
+    mock_runner._slack_bot = slack_bot
+
+    with patch.object(mock_runner, "_pull_repo") as mock_pull:
+        mock_runner.trigger_pull("my-repo")
+
+    mock_pull.assert_not_called()
+    slack_bot.notify_pulling.assert_not_called()
+    # Lock should have been released
+    assert not mock_runner._pull_locks["my-repo"].locked()
 
 
 # ── _detect_changes notify_pending guard ────────────────────────────────────
@@ -441,8 +461,8 @@ services: {}
     slack_bot.notify_pending.assert_called_once_with("my-repo", pending)
 
 
-def test_detect_changes_no_notify_when_is_pulling(tmp_path: Path):
-    """notify_pending is NOT called when is_pulling=True."""
+def test_detect_changes_no_notify_when_pulling(tmp_path: Path):
+    """notify_pending is NOT called when pull lock is held."""
     from haniel.config.model import load_config
     from haniel.core.runner import ServiceRunner
 
@@ -470,12 +490,14 @@ services: {}
     ):
         runner = ServiceRunner(load_config(config_file), config_dir=tmp_path)
         runner._repo_states["my-repo"].last_head = "CURRENT"
-        runner._repo_states["my-repo"].is_pulling = True  # pull in progress
+        runner._pull_locks["my-repo"].acquire()  # simulate pull in progress
         runner._slack_bot = slack_bot
 
         runner._detect_changes()
 
     slack_bot.notify_pending.assert_not_called()
+    # Clean up
+    runner._pull_locks["my-repo"].release()
 
 
 def test_detect_changes_no_notify_on_external_pull(tmp_path: Path):

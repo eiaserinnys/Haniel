@@ -128,9 +128,9 @@ class SlackBot:
         if not self._dm_channel:
             return
 
-        # Delete any previous pending message for this repo
+        # Pop previous ts atomically (read + delete in one lock acquisition)
         with self._lock:
-            old_ts = self._pending_ts.get(repo_name)
+            old_ts = self._pending_ts.pop(repo_name, None)
 
         if old_ts:
             self._delete_message(old_ts)

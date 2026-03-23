@@ -27,7 +27,6 @@ from ..config import (
     ServiceConfig,
     ShutdownConfig,
 )
-from ..integrations.slack_bot import SlackBot
 from .git import (
     GitError,
     fetch_repo,
@@ -39,6 +38,8 @@ from .git import (
 from .health import HealthManager
 from .process import ProcessManager
 
+if __import__("typing").TYPE_CHECKING:
+    from ..integrations.slack_bot import SlackBot
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +209,6 @@ class RepoState:
     last_fetch: datetime | None = None
     fetch_error: str | None = None
     pending_changes: dict | None = None  # {"commits": [...], "stat": "..."}
-    is_pulling: bool = False  # True while trigger_pull() is running
 
 
 @dataclass
@@ -302,7 +302,12 @@ class ServiceRunner:
         self._ws_handler = None
 
         # Slack bot (initialized in start() if configured)
-        self._slack_bot: SlackBot | None = None
+        self._slack_bot: "SlackBot | None" = None
+
+        # Per-repo pull locks: acquire(blocking=False) for atomic duplicate guard
+        self._pull_locks: dict[str, threading.Lock] = {
+            name: threading.Lock() for name in self._repo_states
+        }
 
         # Track whether post_pull hooks have been run on first start
         self._post_pull_executed = False
@@ -353,6 +358,12 @@ class ServiceRunner:
                 self._repo_states[name] = existing[name]
             else:
                 self._repo_states[name] = RepoState(name=name, config=repo_cfg)
+
+        # Sync pull locks — preserve existing locks, create new ones, drop removed
+        self._pull_locks = {
+            name: self._pull_locks.get(name, threading.Lock())
+            for name in self._repo_states
+        }
 
         # Update self-update repo reference
         self._self_repo = (
@@ -650,6 +661,16 @@ class ServiceRunner:
             return
 
         try:
+            from ..integrations.slack_bot import SlackBot
+        except ImportError:
+            logger.error(
+                "slack-bolt package is required for Slack integration. "
+                "Install it with: pip install slack-bolt"
+            )
+            self._slack_bot = None
+            return
+
+        try:
             self._slack_bot = SlackBot(
                 config=self.config.slack,
                 approve_callback=self.trigger_pull,
@@ -667,26 +688,34 @@ class ServiceRunner:
         - Slack "배포 승인" button (via approve_callback in Phase 2)
         - auto_apply=True (via _apply_changes)
 
+        Thread safety: uses per-repo Lock with acquire(blocking=False).
+        The lock itself serves as the pulling state — no separate bool flag.
+
         Args:
             repo_name: Repository to pull
             auto: True if triggered automatically (affects Slack message wording)
         """
-        if repo_name not in self._repo_states:
+        if repo_name not in self._pull_locks:
             raise ValueError(f"Unknown repo: {repo_name}")
 
-        state = self._repo_states[repo_name]
-        if state.is_pulling:
+        if not self._pull_locks[repo_name].acquire(blocking=False):
             logger.info("Already pulling %s, ignoring duplicate request", repo_name)
             return
-        state.is_pulling = True
-
-        if self._ws_handler is not None:
-            self._ws_handler.broadcast_repo_pulling(repo_name, True)
-
-        if self._slack_bot:
-            self._slack_bot.notify_pulling(repo_name, auto=auto)
 
         try:
+            state = self._repo_states[repo_name]
+
+            # Guard: skip if no pending changes (e.g. pull just completed, re-entry)
+            if not state.pending_changes:
+                logger.info("No pending changes for %s, skipping", repo_name)
+                return
+
+            if self._ws_handler is not None:
+                self._ws_handler.broadcast_repo_pulling(repo_name, True)
+
+            if self._slack_bot:
+                self._slack_bot.notify_pulling(repo_name, auto=auto)
+
             affected = self.get_affected_services(repo_name)
             shutdown_order = [s for s in self.get_shutdown_order() if s in affected]
             for svc in shutdown_order:
@@ -714,9 +743,10 @@ class ServiceRunner:
                 self._slack_bot.notify_done(repo_name, success=False, error=str(e))
             raise
         finally:
-            state.is_pulling = False
+            # Broadcast before release to preserve state propagation order
             if self._ws_handler is not None:
                 self._ws_handler.broadcast_repo_pulling(repo_name, False)
+            self._pull_locks[repo_name].release()
 
     def _init_repo_states(self) -> None:
         """Initialize repo states with current HEAD."""
@@ -803,6 +833,7 @@ class ServiceRunner:
                         f"(last_head={last_short} → current={current_head[:8]})"
                     )
                     changed.append(name)
+                    state.last_head = current_head
                     state.pending_changes = get_pending_changes(
                         path=repo_path,
                         branch=state.config.branch,
@@ -829,7 +860,7 @@ class ServiceRunner:
                                 name, state.pending_changes or {}
                             )
                         # Notify Slack only when remote has new commits (not already pulling)
-                        if self._slack_bot and state.pending_changes and not state.is_pulling:
+                        if self._slack_bot and state.pending_changes and not self._pull_locks[name].locked():
                             self._slack_bot.notify_pending(name, state.pending_changes)
                     else:
                         state.pending_changes = None
