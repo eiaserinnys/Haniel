@@ -27,6 +27,7 @@ from ..config import (
     ServiceConfig,
     ShutdownConfig,
 )
+from ..integrations.slack_bot import SlackBot
 from .git import (
     GitError,
     fetch_repo,
@@ -207,6 +208,7 @@ class RepoState:
     last_fetch: datetime | None = None
     fetch_error: str | None = None
     pending_changes: dict | None = None  # {"commits": [...], "stat": "..."}
+    is_pulling: bool = False  # True while trigger_pull() is running
 
 
 @dataclass
@@ -298,6 +300,9 @@ class ServiceRunner:
 
         # WebSocket handler (set by MCP server after dashboard setup)
         self._ws_handler = None
+
+        # Slack bot (initialized in start() if configured)
+        self._slack_bot: SlackBot | None = None
 
         # Track whether post_pull hooks have been run on first start
         self._post_pull_executed = False
@@ -577,6 +582,9 @@ class ServiceRunner:
         # Start MCP server if enabled
         self._start_mcp_server()
 
+        # Start Slack bot if configured
+        self._start_slack_bot()
+
         # Start services
         self.start_services()
 
@@ -596,6 +604,13 @@ class ServiceRunner:
         with self._state_lock:
             self._state.running = False
         self._stop_event.set()
+
+        # Stop Slack bot
+        if self._slack_bot:
+            try:
+                self._slack_bot.stop()
+            except Exception as e:
+                logger.warning("Error stopping Slack bot: %s", e)
 
         # Stop MCP server
         if self._mcp_server:
@@ -627,6 +642,81 @@ class ServiceRunner:
             logger.warning(f"MCP dependencies not available: {e}")
         except Exception as e:
             logger.error(f"Failed to start MCP server: {e}")
+
+    def _start_slack_bot(self) -> None:
+        """Start the Slack bot if configured and enabled."""
+        if not self.config.slack or not self.config.slack.enabled:
+            logger.info("Slack bot is disabled")
+            return
+
+        try:
+            self._slack_bot = SlackBot(
+                config=self.config.slack,
+                approve_callback=self.trigger_pull,
+            )
+            self._slack_bot.start()
+        except Exception as e:
+            logger.error("Failed to start Slack bot: %s", e)
+            self._slack_bot = None
+
+    def trigger_pull(self, repo_name: str, auto: bool = False) -> None:
+        """Pull changes for a repository and restart affected services.
+
+        This is the single code path used by all three triggers:
+        - Dashboard "Pull" button (via api.py run_in_executor)
+        - Slack "배포 승인" button (via approve_callback in Phase 2)
+        - auto_apply=True (via _apply_changes)
+
+        Args:
+            repo_name: Repository to pull
+            auto: True if triggered automatically (affects Slack message wording)
+        """
+        if repo_name not in self._repo_states:
+            raise ValueError(f"Unknown repo: {repo_name}")
+
+        state = self._repo_states[repo_name]
+        if state.is_pulling:
+            logger.info("Already pulling %s, ignoring duplicate request", repo_name)
+            return
+        state.is_pulling = True
+
+        if self._ws_handler is not None:
+            self._ws_handler.broadcast_repo_pulling(repo_name, True)
+
+        if self._slack_bot:
+            self._slack_bot.notify_pulling(repo_name, auto=auto)
+
+        try:
+            affected = self.get_affected_services(repo_name)
+            shutdown_order = [s for s in self.get_shutdown_order() if s in affected]
+            for svc in shutdown_order:
+                if self.process_manager.is_running(svc):
+                    logger.info("Stopping %s for pull", svc)
+                    self.process_manager.stop_service(svc)
+
+            success = self._pull_repo(repo_name)
+            if not success:
+                raise RuntimeError(f"git pull failed for {repo_name}")
+
+            for svc in affected:
+                self.execute_hook(svc, "post_pull")
+
+            startup_order = [s for s in self.get_startup_order() if s in affected]
+            for svc in startup_order:
+                logger.info("Restarting %s after pull", svc)
+                self._start_service(svc)
+
+            if self._slack_bot:
+                self._slack_bot.notify_done(repo_name, success=True)
+
+        except Exception as e:
+            if self._slack_bot:
+                self._slack_bot.notify_done(repo_name, success=False, error=str(e))
+            raise
+        finally:
+            state.is_pulling = False
+            if self._ws_handler is not None:
+                self._ws_handler.broadcast_repo_pulling(repo_name, False)
 
     def _init_repo_states(self) -> None:
         """Initialize repo states with current HEAD."""
@@ -738,6 +828,9 @@ class ServiceRunner:
                             self._ws_handler.broadcast_repo_change(
                                 name, state.pending_changes or {}
                             )
+                        # Notify Slack only when remote has new commits (not already pulling)
+                        if self._slack_bot and state.pending_changes and not state.is_pulling:
+                            self._slack_bot.notify_pending(name, state.pending_changes)
                     else:
                         state.pending_changes = None
 
@@ -783,28 +876,12 @@ class ServiceRunner:
 
         logger.info(f"Services affected by changes: {all_affected}")
 
-        # Get proper shutdown order for affected services
-        shutdown_order = [s for s in self.get_shutdown_order() if s in all_affected]
-
-        # Phase 2a: Shutdown affected services (reverse order)
-        for name in shutdown_order:
-            if self.process_manager.is_running(name):
-                logger.info(f"Stopping {name} for update")
-                self.process_manager.stop_service(name)
-
-        # Phase 2b: Pull changes
+        # Trigger pull for each changed repo via the unified method
         for repo in changed_repos:
-            self._pull_repo(repo)
-
-        # Phase 2c: Execute post_pull hooks
-        for name in all_affected:
-            self.execute_hook(name, "post_pull")
-
-        # Phase 2d: Restart affected services (forward order)
-        startup_order = [s for s in self.get_startup_order() if s in all_affected]
-        for name in startup_order:
-            logger.info(f"Restarting {name} after update")
-            self._start_service(name)
+            try:
+                self.trigger_pull(repo, auto=True)
+            except Exception as e:
+                logger.error("Auto-deploy failed for %s: %s", repo, e)
 
     def _initiate_self_update(self) -> None:
         """Handle detection of changes in haniel's own repo.

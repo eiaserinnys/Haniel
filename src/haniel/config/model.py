@@ -265,6 +265,21 @@ class SelfUpdateConfig(BaseModel):
     )
 
 
+class SlackBotConfig(BaseModel):
+    """Configuration for the integrated Slack bot."""
+
+    enabled: bool = Field(default=True, description="Whether to start the Slack bot")
+    bot_token: str = Field(
+        ..., description="Bot User OAuth Token (xoxb-...)"
+    )
+    app_token: str = Field(
+        ..., description="App-Level Token for Socket Mode (xapp-...)"
+    )
+    notify_user: str = Field(
+        ..., description="Slack User ID to send DMs to (U...)"
+    )
+
+
 class HanielConfig(BaseModel):
     """Root configuration for haniel.yaml."""
 
@@ -284,6 +299,9 @@ class HanielConfig(BaseModel):
     )
     webhooks: list[WebhookConfig] | None = Field(
         default=None, description="Notification webhooks"
+    )
+    slack: SlackBotConfig | None = Field(
+        default=None, description="Integrated Slack bot configuration"
     )
     mcp: McpConfig | None = Field(default=None, description="MCP server configuration")
     dashboard: DashboardConfig | None = Field(

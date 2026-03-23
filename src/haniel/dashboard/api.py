@@ -160,36 +160,8 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
             return _error(f"Repository not found: {name}", status=404)
         try:
             loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, runner.trigger_pull, name)
 
-            affected = await loop.run_in_executor(
-                None, runner.get_affected_services, name
-            )
-            shutdown_order = await loop.run_in_executor(None, runner.get_shutdown_order)
-            shutdown_order = [s for s in shutdown_order if s in affected]
-
-            for svc in shutdown_order:
-                is_running = await loop.run_in_executor(
-                    None, runner.process_manager.is_running, svc
-                )
-                if is_running:
-                    await loop.run_in_executor(
-                        None, runner.process_manager.stop_service, svc
-                    )
-
-            success = await loop.run_in_executor(None, runner._pull_repo, name)
-            if not success:
-                return _error(f"Failed to pull repository '{name}'")
-
-            # Execute post_pull hooks for affected services
-            for svc in affected:
-                await loop.run_in_executor(None, runner.execute_hook, svc, "post_pull")
-
-            startup_order = await loop.run_in_executor(None, runner.get_startup_order)
-            startup_order = [s for s in startup_order if s in affected]
-            for svc in startup_order:
-                await loop.run_in_executor(None, runner._start_service, svc)
-
-            # Include updated head commit for immediate client-side state update
             repo_state = runner._repo_states.get(name)
             new_head = repo_state.last_head if repo_state else None
 
@@ -198,7 +170,6 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
                     "ok": True,
                     "repo": name,
                     "action": "pull",
-                    "restarted": startup_order,
                     "head": new_head,
                 }
             )
