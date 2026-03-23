@@ -11,15 +11,23 @@ interface LogViewerProps {
   fetchFn?: LogFetchFn;
 }
 
+const POLL_INTERVAL_MS = 3000;
+
 export function LogViewer({ serviceName, initialLines = 100, fetchFn = getServiceLogs }: LogViewerProps) {
   const [lines, setLines] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lineCount, setLineCount] = useState(initialLines);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const isFirstLoad = useRef(true);
 
-  const fetchLogs = async (count: number) => {
-    setLoading(true);
+  const scrollToBottom = () => {
+    const el = containerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  };
+
+  const fetchLogs = async (count: number, silent = false) => {
+    if (!silent) setLoading(true);
     setError(null);
     try {
       const result = await fetchFn(serviceName, count);
@@ -27,18 +35,30 @@ export function LogViewer({ serviceName, initialLines = 100, fetchFn = getServic
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to fetch logs");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
+  // serviceName이 바뀌면 초기 로드
   useEffect(() => {
+    isFirstLoad.current = true;
     fetchLogs(lineCount);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serviceName]);
 
-  // Auto-scroll to bottom when lines update
+  // 폴링
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    const id = setInterval(() => fetchLogs(lineCount, true), POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serviceName, lineCount]);
+
+  // 로그 갱신 시 컨테이너 내부만 스크롤 (초기 로드 시만)
+  useEffect(() => {
+    if (lines.length > 0 && isFirstLoad.current) {
+      isFirstLoad.current = false;
+      scrollToBottom();
+    }
   }, [lines]);
 
   const handleLineCountChange = (count: number) => {
@@ -77,7 +97,7 @@ export function LogViewer({ serviceName, initialLines = 100, fetchFn = getServic
       </div>
 
       {/* Log content */}
-      <div className="max-h-80 overflow-y-auto bg-zinc-950 p-4 font-mono text-xs leading-relaxed">
+      <div ref={containerRef} className="max-h-80 overflow-y-auto bg-zinc-950 p-4 font-mono text-xs leading-relaxed">
         {error ? (
           <p className="text-red-400">{error}</p>
         ) : lines.length === 0 ? (
@@ -91,7 +111,6 @@ export function LogViewer({ serviceName, initialLines = 100, fetchFn = getServic
             ))}
           </>
         )}
-        <div ref={bottomRef} />
       </div>
     </div>
   );
