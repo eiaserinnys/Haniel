@@ -471,6 +471,8 @@ class SlackBot:
                     controller.stop_service(target)
                 elif command == "enable":
                     controller.enable_service(target)
+                # Refresh the App Home view after successful action
+                self._refresh_home_view(controller, client, user_id, logger)
             except Exception as e:
                 logger.error("svc_menu action failed: %s", e)
                 client.chat_postEphemeral(
@@ -485,6 +487,7 @@ class SlackBot:
             action = body["actions"][0]
             value = action["value"]
             command, target = value.split(":", 1)
+            user_id = body["user"]["id"]
             try:
                 if command == "update":
                     controller.approve_self_update()
@@ -495,14 +498,24 @@ class SlackBot:
                         daemon=True,
                         name=f"app-home-pull-{target}",
                     ).start()
+                # Refresh the App Home view after action
+                self._refresh_home_view(controller, client, user_id, logger)
             except Exception as e:
                 logger.error("update_repo action failed: %s", e)
-                user_id = body["user"]["id"]
                 client.chat_postEphemeral(
                     channel=user_id,
                     user=user_id,
                     text=f"❌ 업데이트 실패: {e}",
                 )
+
+    def _refresh_home_view(self, controller, client, user_id: str, logger) -> None:
+        """Refresh the App Home view after an action (best-effort)."""
+        try:
+            status = controller.get_status()
+            view = self._build_home_view(status)
+            client.views_publish(user_id=user_id, view=view)
+        except Exception as e:
+            logger.warning("Failed to refresh App Home view: %s", e)
 
     def _build_home_view(self, status: dict) -> dict[str, Any]:
         """Build the App Home view from runner status."""
