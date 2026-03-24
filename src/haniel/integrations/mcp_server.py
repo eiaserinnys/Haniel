@@ -585,7 +585,10 @@ class HanielMcpServer:
     async def _pull_repo(self, repo: str) -> str:
         """Pull a repository and restart dependent services.
 
-        Uses run_in_executor to avoid blocking the event loop.
+        Delegates to runner.trigger_pull(), which is the single canonical pull path
+        shared by all triggers (Dashboard, Slack button, auto_apply, MCP).
+        This ensures the is_pulling guard, Slack notifications, WebSocket broadcasts,
+        and post_pull hooks are all applied consistently.
         """
         if not repo:
             return json.dumps({"error": "Repository name is required"})
@@ -594,41 +597,16 @@ class HanielMcpServer:
             return json.dumps({"error": f"Repository not found: {repo}"})
 
         try:
-            loop = asyncio.get_running_loop()
+            # Pre-fetch affected service count for the return message.
+            # trigger_pull internally calls get_affected_services again, but
+            # a discrepancy only affects the count in the message, not behavior.
+            affected = await asyncio.to_thread(self.runner.get_affected_services, repo)
 
-            # Get affected services
-            affected = await loop.run_in_executor(
-                None, self.runner.get_affected_services, repo
-            )
-
-            # Stop affected services (reverse dependency order)
-            shutdown_order = await loop.run_in_executor(
-                None, self.runner.get_shutdown_order
-            )
-            shutdown_order = [s for s in shutdown_order if s in affected]
-
-            for service in shutdown_order:
-                is_running = await loop.run_in_executor(
-                    None, self.runner.process_manager.is_running, service
-                )
-                if is_running:
-                    await loop.run_in_executor(
-                        None, self.runner.process_manager.stop_service, service
-                    )
-
-            # Pull the repo
-            success = await loop.run_in_executor(None, self.runner._pull_repo, repo)
-            if not success:
-                return json.dumps({"error": f"Failed to pull repository '{repo}'"})
-
-            # Restart affected services (startup order)
-            startup_order = await loop.run_in_executor(
-                None, self.runner.get_startup_order
-            )
-            startup_order = [s for s in startup_order if s in affected]
-
-            for service in startup_order:
-                await loop.run_in_executor(None, self.runner._start_service, service)
+            # trigger_pull handles: is_pulling guard, Slack notify, WebSocket broadcast,
+            # service stop/start, and post_pull hooks.
+            # If is_pulling is already True, trigger_pull returns silently (no exception),
+            # so MCP returns a success message (duplicate-pull prevention is the intent).
+            await asyncio.to_thread(self.runner.trigger_pull, repo)
 
             return f"Success: Repository '{repo}' pulled, {len(affected)} service(s) restarted"
         except Exception as e:

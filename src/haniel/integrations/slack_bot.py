@@ -83,6 +83,7 @@ class SlackBot:
         )
         self._socket_thread.start()
         logger.info("SlackBot Socket Mode started")
+        self.notify_startup()
 
     def stop(self) -> None:
         """Shut down the bot (close Socket Mode connection)."""
@@ -116,6 +117,34 @@ class SlackBot:
                 daemon=True,
                 name=f"approve-{repo_name}",
             ).start()
+
+    # ── Lifecycle Notifications ────────────────────────────────────────────────
+
+    def notify_startup(self) -> None:
+        """Send a startup notification to the DM channel (best-effort)."""
+        if not self._dm_channel:
+            return
+        try:
+            self._client.chat_postMessage(
+                channel=self._dm_channel,
+                text="✅ Haniel이 시작됐습니다.",
+            )
+        except Exception as e:
+            # best-effort: startup notification failure must not abort runner startup
+            logger.warning("Failed to send startup notification: %s", e)
+
+    def notify_shutdown(self) -> None:
+        """Send a shutdown notification to the DM channel (best-effort)."""
+        if not self._dm_channel:
+            return
+        try:
+            self._client.chat_postMessage(
+                channel=self._dm_channel,
+                text="🔴 Haniel이 종료됩니다.",
+            )
+        except Exception as e:
+            # best-effort: shutdown notification failure must not abort runner shutdown
+            logger.warning("Failed to send shutdown notification: %s", e)
 
     # ── Notifications ─────────────────────────────────────────────────────────
 

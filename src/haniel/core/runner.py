@@ -607,6 +607,7 @@ class ServiceRunner:
 
         # Stop Slack bot
         if self._slack_bot:
+            self._slack_bot.notify_shutdown()  # best-effort, exceptions handled internally
             try:
                 self._slack_bot.stop()
             except Exception as e:

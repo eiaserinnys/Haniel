@@ -336,10 +336,21 @@ class TestMcpTools:
 
     @pytest.mark.asyncio
     async def test_pull_repo(self, mcp_server, mock_runner):
-        """Test haniel_pull tool."""
+        """Test haniel_pull tool delegates to runner.trigger_pull."""
         result = await mcp_server.call_tool("haniel_pull", {"repo": "main"})
         assert "pulled" in result.lower() or "success" in result.lower()
-        mock_runner._pull_repo.assert_called_with("main")
+        mock_runner.trigger_pull.assert_called_with("main")
+
+    @pytest.mark.asyncio
+    async def test_pull_repo_while_pulling(self, mcp_server, mock_runner):
+        """Test haniel_pull returns success even when is_pulling guard silently returns.
+
+        trigger_pull returns None (no exception) when is_pulling is True.
+        MCP should still return a success message in this case.
+        """
+        mock_runner.trigger_pull.return_value = None  # simulates is_pulling guard
+        result = await mcp_server.call_tool("haniel_pull", {"repo": "main"})
+        assert "success" in result.lower() or "pulled" in result.lower()
 
     @pytest.mark.asyncio
     async def test_pull_unknown_repo(self, mcp_server, mock_runner):
@@ -576,8 +587,8 @@ class TestMcpServerExtended:
 
     @pytest.mark.asyncio
     async def test_pull_failure(self, mcp_server, mock_runner):
-        """Test pull when pull fails."""
-        mock_runner._pull_repo.return_value = False
+        """Test pull when trigger_pull raises (git pull failed)."""
+        mock_runner.trigger_pull.side_effect = RuntimeError("git pull failed for main")
 
         result = await mcp_server.call_tool("haniel_pull", {"repo": "main"})
         data = json.loads(result)
@@ -585,8 +596,8 @@ class TestMcpServerExtended:
 
     @pytest.mark.asyncio
     async def test_pull_exception_handling(self, mcp_server, mock_runner):
-        """Test pull with exception."""
-        mock_runner._pull_repo.side_effect = Exception("Pull failed")
+        """Test pull with unexpected exception from trigger_pull."""
+        mock_runner.trigger_pull.side_effect = Exception("Pull failed")
 
         result = await mcp_server.call_tool("haniel_pull", {"repo": "main"})
         data = json.loads(result)
