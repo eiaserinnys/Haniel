@@ -205,7 +205,11 @@ class SlackBot:
                 self._pulling_ts[repo_name] = ts
 
     def notify_done(
-        self, repo_name: str, success: bool, error: str | None = None
+        self,
+        repo_name: str,
+        success: bool,
+        pending_changes: dict | None = None,
+        error: str | None = None,
     ) -> None:
         """Update the pulling DM to show success or failure."""
         if not self._dm_channel:
@@ -227,14 +231,44 @@ class SlackBot:
                     },
                 }
             ]
+            if pending_changes:
+                commits: list[str] = pending_changes.get("commits", [])
+                if commits:
+                    shown = commits[:10]
+                    commit_text = "\n".join(f"• {c}" for c in shown)
+                    if len(commits) > 10:
+                        commit_text += f"\n_...외 {len(commits) - 10}개_"
+                    commit_section_text = self._truncate_for_block(
+                        f"*배포된 커밋:*\n{commit_text}"
+                    )
+                    blocks.append(
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": commit_section_text},
+                        }
+                    )
+                stat: str = pending_changes.get("stat", "")
+                if stat:
+                    stat_text = self._truncate_stat_for_block(
+                        stat, prefix="*변경 통계:*\n```", suffix="```"
+                    )
+                    blocks.append(
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": stat_text},
+                        }
+                    )
             text = f"[{repo_name}] 배포 완료"
         else:
+            error_text = self._truncate_for_block(
+                f":x: *[{repo_name}] 배포 실패*\n```{error}```"
+            )
             blocks = [
                 {
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f":x: *[{repo_name}] 배포 실패*\n```{error}```",
+                        "text": error_text,
                     },
                 }
             ]
@@ -243,6 +277,25 @@ class SlackBot:
         self._post_blocks(blocks, text=text)
 
     # ── Block Kit helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _truncate_for_block(text: str, max_chars: int = 3000) -> str:
+        """Truncate text to fit within max_chars, appending ellipsis if needed."""
+        ellipsis = "\n...(생략)"
+        if len(text) > max_chars:
+            text = text[: max_chars - len(ellipsis)] + ellipsis
+        return text
+
+    @staticmethod
+    def _truncate_stat_for_block(
+        stat: str, prefix: str, suffix: str, max_chars: int = 3000
+    ) -> str:
+        """Wrap stat in prefix/suffix, truncating if the total exceeds max_chars."""
+        ellipsis = "\n...(생략)"
+        available = max_chars - len(prefix) - len(suffix)
+        if len(stat) > available:
+            stat = stat[: available - len(ellipsis)] + ellipsis
+        return prefix + stat + suffix
 
     def _build_pending_blocks(
         self, repo_name: str, pending_changes: dict
@@ -260,6 +313,8 @@ class SlackBot:
         else:
             commit_text = "_커밋 정보 없음_"
 
+        commit_section_text = self._truncate_for_block(f"*커밋 목록:*\n{commit_text}")
+
         blocks: list[dict[str, Any]] = [
             {
                 "type": "header",
@@ -273,16 +328,19 @@ class SlackBot:
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*커밋 목록:*\n{commit_text}",
+                    "text": commit_section_text,
                 },
             },
         ]
 
         if stat:
+            stat_text = self._truncate_stat_for_block(
+                stat, prefix="*변경 통계:*\n```", suffix="```"
+            )
             blocks.append(
                 {
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": f"*변경 통계:*\n```{stat}```"},
+                    "text": {"type": "mrkdwn", "text": stat_text},
                 }
             )
 

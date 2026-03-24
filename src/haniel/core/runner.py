@@ -703,6 +703,7 @@ class ServiceRunner:
             logger.info("Already pulling %s, ignoring duplicate request", repo_name)
             return
 
+        captured_changes: dict | None = None
         try:
             state = self._repo_states[repo_name]
 
@@ -710,6 +711,9 @@ class ServiceRunner:
             if not state.pending_changes:
                 logger.info("No pending changes for %s, skipping", repo_name)
                 return
+
+            # _pull_repo() clears state.pending_changes → capture before any ops
+            captured_changes = state.pending_changes
 
             if self._ws_handler is not None:
                 self._ws_handler.broadcast_repo_pulling(repo_name, True)
@@ -737,11 +741,15 @@ class ServiceRunner:
                 self._start_service(svc)
 
             if self._slack_bot:
-                self._slack_bot.notify_done(repo_name, success=True)
+                self._slack_bot.notify_done(
+                    repo_name, success=True, pending_changes=captured_changes
+                )
 
         except Exception as e:
             if self._slack_bot:
-                self._slack_bot.notify_done(repo_name, success=False, error=str(e))
+                self._slack_bot.notify_done(
+                    repo_name, success=False, pending_changes=captured_changes, error=str(e)
+                )
             raise
         finally:
             # Broadcast before release to preserve state propagation order
