@@ -2,6 +2,7 @@
 Integrated Slack bot for haniel.
 
 Sends DM notifications and handles interactive approve button via Slack Socket Mode.
+Optionally provides an App Home dashboard when an AppHomeController is injected.
 
 The bot sends a DM to notify_user when:
   - Remote changes are detected (pending approval) — with approve button
@@ -13,8 +14,9 @@ The approve button triggers trigger_pull() via approve_callback.
 """
 
 import logging
+import re
 import threading
-from typing import Any, Callable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -24,6 +26,38 @@ from slack_sdk.errors import SlackApiError
 from ..config.model import SlackBotConfig
 
 logger = logging.getLogger(__name__)
+
+# ── State icon mapping ───────────────────────────────────────────────────────
+
+STATE_ICONS: dict[str, str] = {
+    "running": "🟢",
+    "ready": "🟢",
+    "starting": "🟠",
+    "stopping": "🟠",
+    "crashed": "🔴",
+    "circuit_open": "🔴",
+    "stopped": "⚫",
+}
+
+
+# ── AppHomeController Protocol ───────────────────────────────────────────────
+
+@runtime_checkable
+class AppHomeController(Protocol):
+    """Duck-typed interface for the runner, used by App Home dashboard.
+
+    The runner implements these methods directly; no import of this protocol
+    is needed on the runner side.
+    """
+
+    def get_status(self) -> dict: ...
+    def restart_service(self, name: str) -> str: ...
+    def start_service(self, name: str) -> None: ...
+    def stop_service(self, name: str) -> None: ...
+    def enable_service(self, name: str) -> str: ...
+    def trigger_pull(self, repo: str) -> None: ...
+    def approve_self_update(self) -> str: ...
+    def request_restart(self) -> str: ...
 
 
 class SlackBot:
@@ -43,9 +77,11 @@ class SlackBot:
         self,
         config: SlackBotConfig,
         approve_callback: Callable[[str], None] | None = None,
+        app_home_controller: AppHomeController | None = None,
     ):
         self._config = config
         self._approve_callback = approve_callback
+        self._app_home_controller = app_home_controller
 
         # Slack Bolt App + Socket Mode handler
         self._app = App(token=config.bot_token)
@@ -63,6 +99,10 @@ class SlackBot:
 
         # Register action handler for the approve button
         self._register_action_handlers()
+
+        # Register App Home handlers if controller is available
+        if self._app_home_controller is not None:
+            self._register_app_home_handlers()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -397,3 +437,282 @@ class SlackBot:
             self._client.chat_delete(channel=self._dm_channel, ts=ts)
         except SlackApiError as e:
             logger.warning("SlackBot delete failed: %s", e)
+
+    # ── App Home dashboard ───────────────────────────────────────────────────
+
+    def _register_app_home_handlers(self) -> None:
+        """Register event and action handlers for the App Home dashboard."""
+        controller = self._app_home_controller
+
+        @self._app.event("app_home_opened")
+        def handle_app_home_opened(event, client, logger):
+            user_id = event["user"]
+            try:
+                status = controller.get_status()
+                view = self._build_home_view(status)
+            except Exception as e:
+                logger.error("Failed to build App Home view: %s", e)
+                view = self._build_error_view(str(e))
+            client.views_publish(user_id=user_id, view=view)
+
+        @self._app.action(re.compile(r"^svc_menu_"))
+        def handle_svc_menu(ack, body, client, logger):
+            ack()
+            action = body["actions"][0]
+            selected = action["selected_option"]["value"]
+            command, target = selected.split(":", 1)
+            user_id = body["user"]["id"]
+            try:
+                if command == "restart":
+                    controller.restart_service(target)
+                elif command == "start":
+                    controller.start_service(target)
+                elif command == "stop":
+                    controller.stop_service(target)
+                elif command == "enable":
+                    controller.enable_service(target)
+            except Exception as e:
+                logger.error("svc_menu action failed: %s", e)
+                client.chat_postEphemeral(
+                    channel=user_id,
+                    user=user_id,
+                    text=f"❌ 작업 실패: {e}",
+                )
+
+        @self._app.action(re.compile(r"^update_repo_"))
+        def handle_update_repo(ack, body, client, logger):
+            ack()
+            action = body["actions"][0]
+            value = action["value"]
+            command, target = value.split(":", 1)
+            try:
+                if command == "update":
+                    controller.approve_self_update()
+                else:
+                    threading.Thread(
+                        target=controller.trigger_pull,
+                        args=(target,),
+                        daemon=True,
+                        name=f"app-home-pull-{target}",
+                    ).start()
+            except Exception as e:
+                logger.error("update_repo action failed: %s", e)
+                user_id = body["user"]["id"]
+                client.chat_postEphemeral(
+                    channel=user_id,
+                    user=user_id,
+                    text=f"❌ 업데이트 실패: {e}",
+                )
+
+    def _build_home_view(self, status: dict) -> dict[str, Any]:
+        """Build the App Home view from runner status."""
+        blocks: list[dict[str, Any]] = []
+        blocks += self._build_header_blocks(status)
+        blocks += self._build_haniel_block(status)
+        blocks += self._build_service_blocks(status)
+        blocks += self._build_update_blocks(status)
+        return {"type": "home", "blocks": blocks}
+
+    def _build_error_view(self, error: str) -> dict[str, Any]:
+        """Build an error App Home view."""
+        return {
+            "type": "home",
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "⚠️ 하니엘 대시보드",
+                        "emoji": True,
+                    },
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"❌ 상태를 불러오지 못했습니다.\n```{error}```",
+                    },
+                },
+            ],
+        }
+
+    def _build_header_blocks(self, status: dict) -> list[dict[str, Any]]:
+        """Build the header section of the App Home view."""
+        return [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": "🏠 하니엘 서비스 대시보드",
+                    "emoji": True,
+                },
+            },
+        ]
+
+    def _build_haniel_block(self, status: dict) -> list[dict[str, Any]]:
+        """Build the Haniel service row (always first)."""
+        start_time = status.get("start_time", "")
+        icon = "🟢" if status.get("running") else "⚫"
+        text = f"{icon}  *haniel*"
+        if start_time:
+            text += f"  |  시작: `{start_time[:19]}`"
+
+        block: dict[str, Any] = {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": text},
+        }
+
+        options = self._build_overflow_options("haniel", "running" if status.get("running") else "stopped")
+        if options:
+            block["accessory"] = {
+                "type": "overflow",
+                "action_id": "svc_menu_haniel",
+                "options": options,
+            }
+
+        return [block]
+
+    def _build_service_blocks(self, status: dict) -> list[dict[str, Any]]:
+        """Build service rows for all managed services."""
+        blocks: list[dict[str, Any]] = []
+        services = status.get("services", {})
+
+        for name, info in sorted(services.items()):
+            state = info.get("state", "stopped")
+            icon = STATE_ICONS.get(state, "⚫")
+            config = info.get("config", {})
+            ready = config.get("ready", "")
+
+            text = f"{icon}  *{name}*"
+            if ready:
+                text += f"  |  `{ready}`"
+            uptime = info.get("uptime", 0)
+            if uptime and state in ("running", "ready"):
+                hours = int(uptime // 3600)
+                minutes = int((uptime % 3600) // 60)
+                text += f"  |  {hours}h {minutes}m"
+
+            block: dict[str, Any] = {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": text},
+            }
+
+            options = self._build_overflow_options(name, state)
+            if options:
+                block["accessory"] = {
+                    "type": "overflow",
+                    "action_id": f"svc_menu_{name}",
+                    "options": options,
+                }
+
+            blocks.append(block)
+
+        return blocks
+
+    def _build_overflow_options(
+        self, name: str, state: str
+    ) -> list[dict[str, Any]]:
+        """Build overflow menu options based on service state."""
+        options: list[dict[str, Any]] = []
+
+        if state in ("running", "ready", "starting", "stopping"):
+            options.append({
+                "text": {"type": "plain_text", "text": "🔄 재시작"},
+                "value": f"restart:{name}",
+            })
+            if name != "haniel":
+                options.append({
+                    "text": {"type": "plain_text", "text": "⏹️ 중지"},
+                    "value": f"stop:{name}",
+                })
+
+        if state in ("stopped", "crashed", "circuit_open"):
+            options.append({
+                "text": {"type": "plain_text", "text": "▶️ 시작"},
+                "value": f"start:{name}",
+            })
+
+        if state == "circuit_open":
+            options.append({
+                "text": {"type": "plain_text", "text": "🔓 서킷 리셋"},
+                "value": f"enable:{name}",
+            })
+
+        return options
+
+    def _build_update_blocks(self, status: dict) -> list[dict[str, Any]]:
+        """Build update section showing repos with pending changes."""
+        blocks: list[dict[str, Any]] = []
+        repos = status.get("repos", {})
+        self_update = status.get("self_update")
+
+        # Collect repos with pending changes
+        update_items: list[tuple[str, dict, bool]] = []  # (name, repo_info, is_self)
+
+        for repo_name, repo_info in repos.items():
+            pending = repo_info.get("pending_changes")
+            if not pending:
+                continue
+            is_self = (
+                self_update is not None
+                and self_update.get("repo") == repo_name
+                and self_update.get("pending")
+            )
+            update_items.append((repo_name, repo_info, is_self))
+
+        if not update_items:
+            return blocks
+
+        blocks.append({
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": "📦 업데이트 대기",
+                "emoji": True,
+            },
+        })
+
+        for repo_name, repo_info, is_self in update_items:
+            pending = repo_info["pending_changes"]
+            commits = pending.get("commits", [])
+            commit_summary = commits[0] if commits else ""
+            count = len(commits)
+            text = f"*{repo_name}*"
+            if count:
+                text += f"  |  {count}개 커밋"
+            if commit_summary:
+                text += f"\n`{commit_summary[:60]}`"
+
+            if is_self:
+                action_id = f"update_repo_{repo_name}"
+                value = f"update:{repo_name}"
+            else:
+                action_id = f"update_repo_{repo_name}"
+                value = f"pull:{repo_name}"
+
+            block: dict[str, Any] = {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": text},
+                "accessory": {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "🚀 업데이트" if is_self else "📥 배포",
+                        "emoji": True,
+                    },
+                    "action_id": action_id,
+                    "value": value,
+                    "confirm": {
+                        "title": {"type": "plain_text", "text": "확인"},
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*{repo_name}*을(를) {'업데이트' if is_self else '배포'}하시겠습니까?",
+                        },
+                        "confirm": {"type": "plain_text", "text": "실행"},
+                        "deny": {"type": "plain_text", "text": "취소"},
+                    },
+                },
+            }
+            blocks.append(block)
+
+        return blocks

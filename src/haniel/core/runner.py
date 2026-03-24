@@ -675,6 +675,7 @@ class ServiceRunner:
             self._slack_bot = SlackBot(
                 config=self.config.slack,
                 approve_callback=self.trigger_pull,
+                app_home_controller=self,
             )
             self._slack_bot.start()
         except Exception as e:
@@ -1014,6 +1015,42 @@ class ServiceRunner:
         self._restart_requested.set()
         self.stop()
         return "Restart initiated. Shutting down..."
+
+    # ── AppHomeController interface methods ──────────────────────────────────
+
+    def restart_service(self, name: str) -> str:
+        """Restart a managed service (or request haniel restart).
+
+        Satisfies AppHomeController protocol (duck-typed, no import needed).
+        """
+        if name == "haniel":
+            return self.request_restart()
+        self.process_manager.stop_service(name)
+        self._start_service(name)
+        return f"Service '{name}' restarted"
+
+    def start_service(self, name: str) -> None:
+        """Start a managed service.
+
+        Satisfies AppHomeController protocol (duck-typed, no import needed).
+        """
+        self._start_service(name)
+
+    def stop_service(self, name: str) -> None:
+        """Stop a managed service.
+
+        Satisfies AppHomeController protocol (duck-typed, no import needed).
+        """
+        self.process_manager.stop_service(name)
+
+    def enable_service(self, name: str) -> str:
+        """Reset circuit breaker for a service.
+
+        The poll loop will restart the service on its next cycle.
+        Satisfies AppHomeController protocol (duck-typed, no import needed).
+        """
+        self.health_manager.reset_circuit(name)
+        return f"Circuit reset for '{name}'. Poll loop will restart the service."
 
     @property
     def restart_requested(self) -> bool:
