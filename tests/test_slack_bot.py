@@ -574,3 +574,86 @@ services: {}
 
     # L708 branch: already pulled externally — no Slack notification
     slack_bot.notify_pending.assert_not_called()
+
+
+def test_detect_changes_self_repo_external_pull_notifies_pending(tmp_path: Path):
+    """notify_pending IS called when self-repo HEAD advances externally (needs restart)."""
+    from haniel.config.model import load_config
+    from haniel.core.runner import ServiceRunner
+
+    yaml_content = """\
+poll_interval: 60
+repos:
+  haniel:
+    url: https://github.com/eiaserinnys/Haniel.git
+    branch: main
+    path: ./haniel-src
+self:
+  repo: haniel
+  auto_update: false
+services: {}
+"""
+    config_file = tmp_path / "haniel.yaml"
+    config_file.write_text(yaml_content)
+    (tmp_path / "haniel-src").mkdir()
+
+    slack_bot = MagicMock()
+    pending = {"commits": ["abc fix"], "stat": ""}
+
+    with (
+        patch("haniel.core.runner.fetch_repo"),
+        patch("haniel.core.runner.get_head", return_value="NEW_HEAD"),
+        patch("haniel.core.runner.get_pending_changes", return_value=pending),
+    ):
+        runner = ServiceRunner(load_config(config_file), config_dir=tmp_path)
+        runner._repo_states["haniel"].last_head = "OLD_HEAD"  # externally pulled
+        runner._slack_bot = slack_bot
+
+        runner._detect_changes()
+
+    # Self-repo Case 1: code already pulled but Haniel needs restart → notify
+    slack_bot.notify_pending.assert_called_once_with("haniel", pending)
+
+
+def test_trigger_pull_self_repo_signals_restart(tmp_path: Path):
+    """trigger_pull for self-repo signals self-update restart after pull."""
+    from haniel.config.model import load_config
+    from haniel.core.runner import ServiceRunner
+
+    yaml_content = """\
+poll_interval: 60
+repos:
+  haniel:
+    url: https://github.com/eiaserinnys/Haniel.git
+    branch: main
+    path: ./haniel-src
+self:
+  repo: haniel
+  auto_update: false
+services: {}
+"""
+    config_file = tmp_path / "haniel.yaml"
+    config_file.write_text(yaml_content)
+    (tmp_path / "haniel-src").mkdir()
+
+    with (
+        patch("haniel.core.runner.get_head", return_value="abc1234"),
+        patch("haniel.core.runner.fetch_repo"),
+        patch("haniel.core.runner.pull_repo"),
+        patch("haniel.core.runner.get_remote_head", return_value="abc1234"),
+    ):
+        runner = ServiceRunner(load_config(config_file), config_dir=tmp_path)
+
+    slack_bot = MagicMock()
+    runner._slack_bot = slack_bot
+    runner._repo_states["haniel"].pending_changes = {"commits": ["a"], "stat": ""}
+
+    with (
+        patch.object(runner, "_pull_repo", return_value=True),
+        patch.object(runner, "stop") as mock_stop,
+    ):
+        runner.trigger_pull("haniel", auto=False)
+
+    # After self-repo pull, restart should be signalled
+    assert runner._self_update_requested.is_set()
+    mock_stop.assert_called_once()

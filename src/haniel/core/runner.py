@@ -740,6 +740,14 @@ class ServiceRunner:
                 logger.info("Restarting %s after pull", svc)
                 self._start_service(svc)
 
+            if self._self_repo and repo_name == self._self_repo:
+                # Self-update: signal wrapper to restart Haniel with new code.
+                # notify_done is skipped — startup notification fires after restart.
+                self._notify_self_update_approved()
+                self._self_update_requested.set()
+                self.stop()
+                return
+
             if self._slack_bot:
                 self._slack_bot.notify_done(
                     repo_name, success=True, pending_changes=captured_changes
@@ -851,6 +859,15 @@ class ServiceRunner:
                         self._ws_handler.broadcast_repo_change(
                             name, state.pending_changes or {}
                         )
+                    # Self-repo: even after an external pull, Haniel needs a restart to
+                    # use the new code. Notify Slack so the user can approve the restart.
+                    if (
+                        name == self._self_repo
+                        and self._slack_bot
+                        and state.pending_changes
+                        and not self._pull_locks[name].locked()
+                    ):
+                        self._slack_bot.notify_pending(name, state.pending_changes)
                 else:
                     # current == last_head, check if remote has new commits
                     remote_head = get_remote_head(repo_path, state.config.branch)
