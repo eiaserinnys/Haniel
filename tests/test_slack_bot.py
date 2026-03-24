@@ -215,6 +215,43 @@ def test_build_pending_blocks_truncates_commits(slack_bot):
     assert "외 5개" in combined
 
 
+def test_build_pending_blocks_truncates_long_stat(slack_bot):
+    """stat이 3000자를 초과하면 truncate되어야 한다."""
+    long_stat = "file.py | 10 +-\n" * 200  # ~3200자
+    pending = {"commits": ["abc fix"], "stat": long_stat}
+    blocks = slack_bot._build_pending_blocks("repo", pending)
+
+    stat_blocks = [
+        b for b in blocks
+        if b.get("type") == "section"
+        and "변경 통계" in b["text"]["text"]
+    ]
+    assert len(stat_blocks) == 1
+    assert len(stat_blocks[0]["text"]["text"]) <= 3000
+    assert "생략" in stat_blocks[0]["text"]["text"]
+
+
+def test_notify_done_success_with_pending_changes(slack_bot, mock_web_client):
+    """notify_done(success=True)에 pending_changes를 넘기면 커밋 목록과 stat이 표시된다."""
+    pending = {
+        "commits": ["abc123 fix: bug", "def456 feat: new"],
+        "stat": "2 files changed",
+    }
+    slack_bot.notify_done("my-repo", success=True, pending_changes=pending)
+
+    posted = mock_web_client.chat_postMessage.call_args[1]
+    blocks_text = str(posted.get("blocks", ""))
+    assert "abc123" in blocks_text or "fix: bug" in blocks_text
+
+
+def test_notify_done_success_without_pending_changes(slack_bot, mock_web_client):
+    """notify_done(success=True, pending_changes=None)이면 기존처럼 완료 메시지만 표시."""
+    slack_bot.notify_done("my-repo", success=True, pending_changes=None)
+
+    posted = mock_web_client.chat_postMessage.call_args[1]
+    assert "완료" in posted["text"]
+
+
 def test_start_opens_dm_channel(mock_web_client):
     """start() opens a DM channel with notify_user and starts Socket Mode thread."""
     config = _make_slack_config(notify_user="U99999")
@@ -352,7 +389,9 @@ def test_trigger_pull_calls_slack_notify(mock_runner):
         mock_runner.trigger_pull("my-repo", auto=False)
 
     slack_bot.notify_pulling.assert_called_once_with("my-repo", auto=False)
-    slack_bot.notify_done.assert_called_once_with("my-repo", success=True)
+    slack_bot.notify_done.assert_called_once_with(
+        "my-repo", success=True, pending_changes={"commits": ["a"], "stat": ""}
+    )
 
 
 def test_trigger_pull_broadcasts_ws_pulling(mock_runner):
@@ -384,6 +423,7 @@ def test_trigger_pull_releases_lock_on_failure(mock_runner):
     slack_bot.notify_done.assert_called_once()
     _, kwargs = slack_bot.notify_done.call_args
     assert kwargs["success"] is False
+    assert "pending_changes" in kwargs  # captured_changes 전달 확인
 
 
 def test_trigger_pull_unknown_repo_raises(mock_runner):
