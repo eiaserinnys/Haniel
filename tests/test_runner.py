@@ -484,6 +484,48 @@ class TestRunnerStatus:
         status = runner.get_status()
         assert "repo1" in status["repos"]
 
+    def test_get_status_includes_pulling_field(self, tmp_path: Path):
+        """Test that repo status includes pulling field (False when idle)."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={
+                "repo1": RepoConfig(
+                    url="git@github.com:test/test.git",
+                    branch="main",
+                    path="./repo1",
+                ),
+            },
+            services={},
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        status = runner.get_status()
+        assert "pulling" in status["repos"]["repo1"]
+        assert status["repos"]["repo1"]["pulling"] is False
+
+    def test_get_status_pulling_true_when_lock_held(self, tmp_path: Path):
+        """Test that pulling is True when the pull lock is held."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={
+                "repo1": RepoConfig(
+                    url="git@github.com:test/test.git",
+                    branch="main",
+                    path="./repo1",
+                ),
+            },
+            services={},
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        # Simulate an in-progress pull by holding the lock
+        runner._pull_locks["repo1"].acquire()
+        try:
+            status = runner.get_status()
+            assert status["repos"]["repo1"]["pulling"] is True
+        finally:
+            runner._pull_locks["repo1"].release()
+
 
 # --- Extended Runner Tests ---
 

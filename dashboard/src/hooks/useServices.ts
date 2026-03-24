@@ -7,6 +7,7 @@ import type {
   WsEvent,
   WsStateChangeEvent,
   WsRepoChangeEvent,
+  WsRepoPullingEvent,
 } from '@/lib/types'
 import { api } from '@/lib/api'
 import { useWebSocket } from './useWebSocket'
@@ -21,6 +22,13 @@ export function useServices() {
     switch (event.type) {
       case 'init': {
         setStatus(event.status)
+        // Sync pullingRepos from server state (handles WS reconnection recovery)
+        const pulling = new Set(
+          Object.entries(event.status.repos)
+            .filter(([, r]) => r.pulling)
+            .map(([name]) => name)
+        )
+        setPullingRepos(pulling)
         setLoading(false)
         setError(null)
         break
@@ -69,6 +77,19 @@ export function useServices() {
         })
         break
       }
+      case 'repo_pulling': {
+        const e = event as WsRepoPullingEvent
+        setPullingRepos(prev => {
+          const next = new Set(prev)
+          e.is_pulling ? next.add(e.repo) : next.delete(e.repo)
+          return next
+        })
+        // Pull complete: refresh full status to sync pending_changes etc.
+        if (!e.is_pulling) {
+          api.getStatus().then(setStatus).catch(() => null)
+        }
+        break
+      }
       case 'reload_complete': {
         api.getStatus().then(setStatus).catch(() => null)
         break
@@ -96,27 +117,15 @@ export function useServices() {
 
   const [pullingRepos, setPullingRepos] = useState<Set<string>>(new Set())
 
+  // pullRepo only triggers the REST call — pulling state is managed
+  // exclusively via WS repo_pulling events (single source of truth).
+  // This ensures consistent UI whether pull is triggered from dashboard,
+  // Slack approval, or auto_apply.
   const pullRepo = useCallback(async (name: string) => {
-    setPullingRepos(prev => new Set(prev).add(name))
     try {
-      const result = await api.pullRepo(name)
-      // Immediate state update: clear pending_changes + update head
-      setStatus(prev => {
-        if (!prev) return prev
-        const repos = { ...prev.repos }
-        if (repos[name]) {
-          repos[name] = { ...repos[name], pending_changes: null, last_head: result.head ?? repos[name].last_head }
-        }
-        return { ...prev, repos }
-      })
+      await api.pullRepo(name)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setPullingRepos(prev => {
-        const next = new Set(prev)
-        next.delete(name)
-        return next
-      })
     }
   }, [])
 

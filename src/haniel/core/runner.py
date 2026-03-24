@@ -1170,6 +1170,7 @@ class ServiceRunner:
                 else None,
                 "fetch_error": state.fetch_error,
                 "pending_changes": state.pending_changes,
+                "pulling": self._pull_locks[name].locked(),
             }
 
         # Read runner state with lock for thread safety
