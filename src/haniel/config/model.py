@@ -6,7 +6,7 @@ haniel doesn't care what it runs - it just parses the config and validates struc
 """
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
@@ -106,6 +106,10 @@ class RepoConfig(BaseModel):
     branch: str = Field(default="main", description="Branch to track")
     path: str = Field(..., description="Local path for the repository")
     hooks: HooksConfig | None = Field(default=None, description="Lifecycle hooks")
+    pull_strategy: Literal["merge", "force"] | None = Field(
+        default=None,
+        description="Pull 전략. 'force'이면 git reset --hard로 로컬 변경을 드롭. 기본값 None은 'merge'(기존 git pull)와 동일.",
+    )
 
 
 class ServiceShutdownConfig(BaseModel):

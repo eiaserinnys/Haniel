@@ -884,10 +884,12 @@ class TestServiceRunnerPollCycle:
     def test_pull_repo_success(self, mock_head, mock_pull, runner_with_mock_repo):
         """Test pulling a repo successfully."""
         mock_head.return_value = "new_commit"
+        mock_pull.return_value = []
 
-        result = runner_with_mock_repo._pull_repo("test-repo")
+        success, discarded = runner_with_mock_repo._pull_repo("test-repo")
 
-        assert result is True
+        assert success is True
+        assert discarded == []
         mock_pull.assert_called_once()
 
     @patch("haniel.core.runner.pull_repo")
@@ -897,9 +899,10 @@ class TestServiceRunnerPollCycle:
 
         mock_pull.side_effect = GitError("Pull failed")
 
-        result = runner_with_mock_repo._pull_repo("test-repo")
+        success, discarded = runner_with_mock_repo._pull_repo("test-repo")
 
-        assert result is False
+        assert success is False
+        assert discarded == []
 
     def test_pull_repo_unknown(self, tmp_path: Path):
         """Test pulling unknown repo."""
@@ -910,9 +913,10 @@ class TestServiceRunnerPollCycle:
         )
         runner = ServiceRunner(config, config_dir=tmp_path)
 
-        result = runner._pull_repo("unknown")
+        success, discarded = runner._pull_repo("unknown")
 
-        assert result is False
+        assert success is False
+        assert discarded == []
 
 
 class TestServiceRunnerMcp:

@@ -417,6 +417,7 @@ class SlackBot:
         success: bool,
         pending_changes: dict | None = None,
         error: str | None = None,
+        discarded_changes: list[str] | None = None,
     ) -> None:
         """Update the pulling DM to show success or failure."""
         if not self._dm_channel:
@@ -465,6 +466,17 @@ class SlackBot:
                             "text": {"type": "mrkdwn", "text": stat_text},
                         }
                     )
+            if discarded_changes:
+                lines = "\n".join(f"• `{f}`" for f in discarded_changes)
+                blocks.append(
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"⚠️ *로컬 변경사항 드롭됨 (force pull)*\n{lines}",
+                        },
+                    }
+                )
             text = f"[{repo_name}] 배포 완료"
         else:
             error_text = self._truncate_for_block(
