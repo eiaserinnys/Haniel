@@ -8,12 +8,14 @@ Client -> Server message types:
   {"type": "send_message", "session_id": "<uuid|null>", "text": "..."}
   {"type": "new_session"}
   {"type": "list_sessions"}
+  {"type": "load_history", "session_id": "<uuid>"}
 
 Server -> Client message types:
   {"type": "session_start", "session_id": "<uuid>", "is_new": true/false}
   {"type": "text_delta", "delta": "..."}
   {"type": "message_end", "session_id": "<uuid>"}
   {"type": "sessions_list", "sessions": [...]}
+  {"type": "history", "session_id": "<uuid>", "messages": [...]}
   {"type": "error", "error": "..."}
 """
 
@@ -80,6 +82,18 @@ class ChatWebSocket:
 
         elif msg_type == "send_message":
             await self._handle_send_message(ws, msg)
+
+        elif msg_type == "load_history":
+            session_id = msg.get("session_id", "")
+            messages = self._manager.get_history(session_id)
+            await self._send(
+                ws,
+                {
+                    "type": "history",
+                    "session_id": session_id,
+                    "messages": messages,
+                },
+            )
 
         else:
             await self._send(

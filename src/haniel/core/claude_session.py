@@ -88,8 +88,13 @@ class ClaudeSessionManager:
     # ── Public API ────────────────────────────────────────────────────────────
 
     def list_sessions(self) -> list[dict]:
-        """Return a deep copy of all sessions (safe to iterate; won't mutate internal state)."""
-        return copy.deepcopy(self._data["sessions"])
+        """Return sessions sorted by last_active_at desc, max 20 entries."""
+        sorted_sessions = sorted(
+            self._data["sessions"],
+            key=lambda s: s.get("last_active_at", ""),
+            reverse=True,
+        )
+        return copy.deepcopy(sorted_sessions[:20])
 
     def create_session(self) -> str:
         """Create and register a new session, returning its haniel UUID.
@@ -113,6 +118,13 @@ class ClaudeSessionManager:
     def get_session(self, session_id: str) -> dict | None:
         """Return a session by haniel UUID, or None."""
         return self._find_session(session_id)
+
+    def get_history(self, session_id: str) -> list[dict]:
+        """Return message history for a session (safe copy)."""
+        session = self._find_session(session_id)
+        if session is None:
+            return []
+        return list(session.get("messages", []))
 
     async def stream_message(
         self,
@@ -173,6 +185,14 @@ class ClaudeSessionManager:
                 "is_new": is_new,
                 "resumed": resumed and not is_new,
             }
+
+            # Persist user message before sending to Claude
+            session["messages"].append({
+                "role": "user",
+                "content": text,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
+            self._save_sessions()
 
             await client.query(text)
 
@@ -305,6 +325,9 @@ class ClaudeSessionManager:
             "created_at": now,
             "last_active_at": now,
             "preview": None,
+            "messages": [],
+            "slack_thread_ts": None,
+            "slack_channel_id": None,
         }
 
     def _find_session(self, session_id: str) -> dict | None:
@@ -456,6 +479,12 @@ class ClaudeSessionManager:
         else:
             self._data = {"sessions": [], "last_session_id": None}
 
+        # Backwards compatibility: fill missing fields for sessions created before schema extension
+        for s in self._data.get("sessions", []):
+            s.setdefault("messages", [])
+            s.setdefault("slack_thread_ts", None)
+            s.setdefault("slack_channel_id", None)
+
     def _save_sessions(self) -> None:
         """Persist session metadata to disk."""
         try:
@@ -482,7 +511,16 @@ class ClaudeSessionManager:
         if claude_session_id:
             session["claude_session_id"] = claude_session_id
 
-        session["last_active_at"] = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
+        session["last_active_at"] = now
         session["preview"] = last_text.replace("\n", " ")[:80] if last_text else None
+
+        # Persist assistant message (compaction 이후에도 messages는 유지됨)
+        if last_text:
+            session["messages"].append({
+                "role": "assistant",
+                "content": last_text,
+                "ts": now,
+            })
 
         self._save_sessions()
