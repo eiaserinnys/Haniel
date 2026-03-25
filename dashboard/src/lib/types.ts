@@ -47,6 +47,7 @@ export interface RepoStatus {
   last_head: string | null
   pending_changes: PendingChanges | null
   fetch_error: string | null
+  pulling: boolean
 }
 
 export interface RepoConfigInput {
@@ -105,9 +106,16 @@ export interface WsReloadCompleteEvent {
   type: 'reload_complete'
 }
 
+export interface WsRepoPullingEvent {
+  type: 'repo_pulling'
+  repo: string
+  is_pulling: boolean
+}
+
 export type WsEvent =
   | WsInitEvent
   | WsStateChangeEvent
   | WsRepoChangeEvent
   | WsSelfUpdatePendingEvent
   | WsReloadCompleteEvent
+  | WsRepoPullingEvent

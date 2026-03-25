@@ -31,6 +31,7 @@ export interface UseChatWebSocket {
   connected: boolean;
   sendMessage: (text: string) => void;
   loadSessions: () => void;
+  loadHistory: (sessionId: string) => void;
   startNewSession: () => void;
   switchSession: (sessionId: string) => void;
 }
@@ -52,6 +53,13 @@ export function useChatWebSocket(): UseChatWebSocket {
     }
   }, []);
 
+  const loadHistory = useCallback(
+    (sessionId: string) => {
+      sendRaw({ type: "load_history", session_id: sessionId });
+    },
+    [sendRaw]
+  );
+
   const handleServerMessage = useCallback((raw: string) => {
     let msg: Record<string, unknown>;
     try {
@@ -65,15 +73,28 @@ export function useChatWebSocket(): UseChatWebSocket {
     if (type === "sessions_list") {
       const list = (msg.sessions ?? []) as ChatSession[];
       setSessions(list);
-      // Auto-activate the most recently used session
+      // Auto-activate the most recently used session and load its history
       if (list.length > 0) {
         const sorted = [...list].sort(
           (a, b) =>
             new Date(b.last_active_at).getTime() -
             new Date(a.last_active_at).getTime()
         );
-        setActiveSessionId(sorted[0].id);
+        const mostRecentId = sorted[0].id;
+        setActiveSessionId(mostRecentId);
+        sendRaw({ type: "load_history", session_id: mostRecentId });
       }
+    } else if (type === "history") {
+      type HistoryEntry = { role: string; content: string; ts: string };
+      const historyMsgs = (msg.messages ?? []) as HistoryEntry[];
+      const chatMsgs: ChatMessage[] = historyMsgs
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => ({
+          id: crypto.randomUUID(),
+          role: m.role as "user" | "assistant",
+          content: m.content,
+        }));
+      setMessages(chatMsgs);
     } else if (type === "session_start") {
       const sessionId = msg.session_id as string;
       const isNew = msg.is_new as boolean;
@@ -163,7 +184,7 @@ export function useChatWebSocket(): UseChatWebSocket {
         },
       ]);
     }
-  }, []);
+  }, [sendRaw]);
 
   const connect = useCallback(() => {
     if (!mountedRef.current) return;
@@ -247,6 +268,7 @@ export function useChatWebSocket(): UseChatWebSocket {
     connected,
     sendMessage,
     loadSessions,
+    loadHistory,
     startNewSession,
     switchSession,
   };

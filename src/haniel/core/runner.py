@@ -9,6 +9,8 @@ Implements the poll → pull → restart cycle:
 haniel doesn't care what it runs. It polls, pulls, and restarts as configured.
 """
 
+import hashlib
+import json
 import logging
 import os
 import re
@@ -308,6 +310,10 @@ class ServiceRunner:
         self._pull_locks: dict[str, threading.Lock] = {
             name: threading.Lock() for name in self._repo_states
         }
+
+        # Deduplication: track last notified pending_changes hash per repo
+        # to avoid spamming Slack on every poll when content hasn't changed.
+        self._last_pending_hash: dict[str, str] = {}
 
         # Track whether post_pull hooks have been run on first start
         self._post_pull_executed = False
@@ -675,6 +681,7 @@ class ServiceRunner:
             self._slack_bot = SlackBot(
                 config=self.config.slack,
                 approve_callback=self.trigger_pull,
+                app_home_controller=self,
             )
             self._slack_bot.start()
         except Exception as e:
@@ -703,6 +710,7 @@ class ServiceRunner:
             logger.info("Already pulling %s, ignoring duplicate request", repo_name)
             return
 
+        captured_changes: dict | None = None
         try:
             state = self._repo_states[repo_name]
 
@@ -710,6 +718,9 @@ class ServiceRunner:
             if not state.pending_changes:
                 logger.info("No pending changes for %s, skipping", repo_name)
                 return
+
+            # _pull_repo() clears state.pending_changes → capture before any ops
+            captured_changes = state.pending_changes
 
             if self._ws_handler is not None:
                 self._ws_handler.broadcast_repo_pulling(repo_name, True)
@@ -736,18 +747,39 @@ class ServiceRunner:
                 logger.info("Restarting %s after pull", svc)
                 self._start_service(svc)
 
+            if self._self_repo and repo_name == self._self_repo:
+                # Self-update: signal wrapper to restart Haniel with new code.
+                # notify_done is skipped — startup notification fires after restart.
+                self._notify_self_update_approved()
+                self._self_update_requested.set()
+                self.stop()
+                return
+
             if self._slack_bot:
-                self._slack_bot.notify_done(repo_name, success=True)
+                self._slack_bot.notify_done(
+                    repo_name, success=True, pending_changes=captured_changes
+                )
 
         except Exception as e:
             if self._slack_bot:
-                self._slack_bot.notify_done(repo_name, success=False, error=str(e))
+                self._slack_bot.notify_done(
+                    repo_name, success=False, pending_changes=captured_changes, error=str(e)
+                )
             raise
         finally:
             # Broadcast before release to preserve state propagation order
             if self._ws_handler is not None:
                 self._ws_handler.broadcast_repo_pulling(repo_name, False)
+            # Clear pending hash so new changes after this pull trigger fresh notifications
+            self._last_pending_hash.pop(repo_name, None)
             self._pull_locks[repo_name].release()
+
+    @staticmethod
+    def _hash_pending(pending: dict) -> str:
+        """Return a stable SHA-256 hex digest of a pending_changes dict."""
+        return hashlib.sha256(
+            json.dumps(pending, sort_keys=True).encode()
+        ).hexdigest()
 
     def _init_repo_states(self) -> None:
         """Initialize repo states with current HEAD."""
@@ -843,6 +875,15 @@ class ServiceRunner:
                         self._ws_handler.broadcast_repo_change(
                             name, state.pending_changes or {}
                         )
+                    # Self-repo: even after an external pull, Haniel needs a restart to
+                    # use the new code. Notify Slack so the user can approve the restart.
+                    if (
+                        name == self._self_repo
+                        and self._slack_bot
+                        and state.pending_changes
+                        and not self._pull_locks[name].locked()
+                    ):
+                        self._slack_bot.notify_pending(name, state.pending_changes)
                 else:
                     # current == last_head, check if remote has new commits
                     remote_head = get_remote_head(repo_path, state.config.branch)
@@ -861,8 +902,12 @@ class ServiceRunner:
                                 name, state.pending_changes or {}
                             )
                         # Notify Slack only when remote has new commits (not already pulling)
+                        # and only when the pending content has actually changed.
                         if self._slack_bot and state.pending_changes and not self._pull_locks[name].locked():
-                            self._slack_bot.notify_pending(name, state.pending_changes)
+                            content_hash = self._hash_pending(state.pending_changes)
+                            if self._last_pending_hash.get(name) != content_hash:
+                                self._last_pending_hash[name] = content_hash
+                                self._slack_bot.notify_pending(name, state.pending_changes)
                     else:
                         state.pending_changes = None
 
@@ -989,6 +1034,42 @@ class ServiceRunner:
         self._restart_requested.set()
         self.stop()
         return "Restart initiated. Shutting down..."
+
+    # ── AppHomeController interface methods ──────────────────────────────────
+
+    def restart_service(self, name: str) -> str:
+        """Restart a managed service (or request haniel restart).
+
+        Satisfies AppHomeController protocol (duck-typed, no import needed).
+        """
+        if name == "haniel":
+            return self.request_restart()
+        self.process_manager.stop_service(name)
+        self._start_service(name)
+        return f"Service '{name}' restarted"
+
+    def start_service(self, name: str) -> None:
+        """Start a managed service.
+
+        Satisfies AppHomeController protocol (duck-typed, no import needed).
+        """
+        self._start_service(name)
+
+    def stop_service(self, name: str) -> None:
+        """Stop a managed service.
+
+        Satisfies AppHomeController protocol (duck-typed, no import needed).
+        """
+        self.process_manager.stop_service(name)
+
+    def enable_service(self, name: str) -> str:
+        """Reset circuit breaker for a service.
+
+        The poll loop will restart the service on its next cycle.
+        Satisfies AppHomeController protocol (duck-typed, no import needed).
+        """
+        self.health_manager.reset_circuit(name)
+        return f"Circuit reset for '{name}'. Poll loop will restart the service."
 
     @property
     def restart_requested(self) -> bool:
@@ -1145,6 +1226,7 @@ class ServiceRunner:
                 else None,
                 "fetch_error": state.fetch_error,
                 "pending_changes": state.pending_changes,
+                "pulling": self._pull_locks[name].locked(),
             }
 
         # Read runner state with lock for thread safety
