@@ -735,7 +735,7 @@ class ServiceRunner:
                     logger.info("Stopping %s for pull", svc)
                     self.process_manager.stop_service(svc)
 
-            success = self._pull_repo(repo_name)
+            success, discarded = self._pull_repo(repo_name)
             if not success:
                 raise RuntimeError(f"git pull failed for {repo_name}")
 
@@ -757,7 +757,10 @@ class ServiceRunner:
 
             if self._slack_bot:
                 self._slack_bot.notify_done(
-                    repo_name, success=True, pending_changes=captured_changes
+                    repo_name,
+                    success=True,
+                    pending_changes=captured_changes,
+                    discarded_changes=discarded,
                 )
 
         except Exception as e:
@@ -1127,34 +1130,37 @@ class ServiceRunner:
             "Self-update approved. Shutting down for update.",
         )
 
-    def _pull_repo(self, repo_name: str) -> bool:
+    def _pull_repo(self, repo_name: str) -> tuple[bool, list[str]]:
         """Pull changes for a repository.
 
         Args:
             repo_name: Name of the repository
 
         Returns:
-            True if pull succeeded
+            Tuple of (success, discarded_files). discarded_files is non-empty only
+            when pull_strategy is 'force' and local changes were discarded.
         """
         if repo_name not in self._repo_states:
-            return False
+            return False, []
 
         state = self._repo_states[repo_name]
         repo_path = self.config_dir / state.config.path
+        strategy = state.config.pull_strategy or "merge"
 
         try:
-            pull_repo(
+            discarded = pull_repo(
                 path=repo_path,
                 branch=state.config.branch,
+                strategy=strategy,
             )
             state.last_head = get_head(repo_path)
             state.pending_changes = None
             head_short = state.last_head[:8] if state.last_head else "unknown"
             logger.info(f"Pulled {repo_name}, new HEAD: {head_short}")
-            return True
+            return True, discarded
         except GitError as e:
             logger.error(f"Failed to pull {repo_name}: {e}")
-            return False
+            return False, []
 
     def _process_pending_restarts(self) -> None:
         """Process any pending service restarts."""

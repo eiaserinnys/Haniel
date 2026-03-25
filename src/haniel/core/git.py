@@ -5,6 +5,7 @@ Provides functions for git operations: clone, fetch, pull, and change detection.
 haniel doesn't care what it clones - it just executes git commands as specified.
 """
 
+import logging
 import os
 import re
 import subprocess
@@ -12,6 +13,8 @@ from pathlib import Path
 
 # Default timeout for git operations (5 minutes)
 DEFAULT_GIT_TIMEOUT = 300
+
+logger = logging.getLogger(__name__)
 
 
 class GitError(Exception):
@@ -330,13 +333,23 @@ def fetch_repo(path: Path, branch: str, remote: str = "origin") -> bool:
     return local_head != remote_head
 
 
-def pull_repo(path: Path, branch: str, remote: str = "origin") -> None:
+def pull_repo(
+    path: Path,
+    branch: str,
+    remote: str = "origin",
+    strategy: str = "merge",
+) -> list[str]:
     """Pull updates from remote.
 
     Args:
         path: Path to the git repository
         branch: Branch to pull
         remote: Remote name (default: origin)
+        strategy: Pull strategy. 'force' uses git fetch + reset --hard to discard
+            local changes. 'merge' (default) uses git pull.
+
+    Returns:
+        list[str]: force 전략일 때 드롭된 파일 목록 (git status --short 형식). 그 외 빈 리스트.
 
     Raises:
         GitPullError: If pull fails (network issue, merge conflict, etc.)
@@ -353,15 +366,42 @@ def pull_repo(path: Path, branch: str, remote: str = "origin") -> None:
             path=path,
         )
 
-    try:
-        _run_git(["pull", remote, branch], cwd=path)
-    except subprocess.CalledProcessError as e:
-        raise GitPullError(
-            f"Failed to pull from {remote}/{branch}",
-            path=path,
-            stderr=e.stderr.strip(),
-            returncode=e.returncode,
-        ) from e
+    if strategy == "force":
+        try:
+            status = _run_git(["status", "--short"], cwd=path)
+            discarded = [
+                line.strip()
+                for line in status.stdout.strip().splitlines()
+                if line.strip()
+            ]
+            if discarded:
+                logger.warning(
+                    "Force pull: discarding %d local change(s) in %s: %s",
+                    len(discarded),
+                    path.name,
+                    discarded,
+                )
+            _run_git(["fetch", remote], cwd=path)
+            _run_git(["reset", "--hard", f"{remote}/{branch}"], cwd=path)
+        except subprocess.CalledProcessError as e:
+            raise GitPullError(
+                f"Failed to force-pull from {remote}/{branch}",
+                path=path,
+                stderr=e.stderr.strip(),
+                returncode=e.returncode,
+            ) from e
+        return discarded
+    else:
+        try:
+            _run_git(["pull", remote, branch], cwd=path)
+        except subprocess.CalledProcessError as e:
+            raise GitPullError(
+                f"Failed to pull from {remote}/{branch}",
+                path=path,
+                stderr=e.stderr.strip(),
+                returncode=e.returncode,
+            ) from e
+        return []
 
 
 def get_pending_changes(path: Path, branch: str, remote: str = "origin") -> dict:
