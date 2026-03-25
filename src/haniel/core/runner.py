@@ -9,6 +9,8 @@ Implements the poll → pull → restart cycle:
 haniel doesn't care what it runs. It polls, pulls, and restarts as configured.
 """
 
+import hashlib
+import json
 import logging
 import os
 import re
@@ -308,6 +310,10 @@ class ServiceRunner:
         self._pull_locks: dict[str, threading.Lock] = {
             name: threading.Lock() for name in self._repo_states
         }
+
+        # Deduplication: track last notified pending_changes hash per repo
+        # to avoid spamming Slack on every poll when content hasn't changed.
+        self._last_pending_hash: dict[str, str] = {}
 
         # Track whether post_pull hooks have been run on first start
         self._post_pull_executed = False
@@ -764,7 +770,16 @@ class ServiceRunner:
             # Broadcast before release to preserve state propagation order
             if self._ws_handler is not None:
                 self._ws_handler.broadcast_repo_pulling(repo_name, False)
+            # Clear pending hash so new changes after this pull trigger fresh notifications
+            self._last_pending_hash.pop(repo_name, None)
             self._pull_locks[repo_name].release()
+
+    @staticmethod
+    def _hash_pending(pending: dict) -> str:
+        """Return a stable SHA-256 hex digest of a pending_changes dict."""
+        return hashlib.sha256(
+            json.dumps(pending, sort_keys=True).encode()
+        ).hexdigest()
 
     def _init_repo_states(self) -> None:
         """Initialize repo states with current HEAD."""
@@ -887,8 +902,12 @@ class ServiceRunner:
                                 name, state.pending_changes or {}
                             )
                         # Notify Slack only when remote has new commits (not already pulling)
+                        # and only when the pending content has actually changed.
                         if self._slack_bot and state.pending_changes and not self._pull_locks[name].locked():
-                            self._slack_bot.notify_pending(name, state.pending_changes)
+                            content_hash = self._hash_pending(state.pending_changes)
+                            if self._last_pending_hash.get(name) != content_hash:
+                                self._last_pending_hash[name] = content_hash
+                                self._slack_bot.notify_pending(name, state.pending_changes)
                     else:
                         state.pending_changes = None
 

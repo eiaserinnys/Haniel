@@ -46,6 +46,9 @@ class DashboardWebSocket:
         self._chat_broadcaster = None
         self._chat_session_manager = None
 
+        # Auto-diagnosis: tracks services currently being diagnosed
+        self._diagnosing_services: set[str] = set()
+
     def configure_chat(
         self,
         slack_bot: "SlackBot | None",
@@ -85,7 +88,12 @@ class DashboardWebSocket:
 
         This runs on the runner's poll thread (sync), so we schedule
         the broadcast on the event loop thread.
+
+        Also triggers auto-diagnosis when a service crashes, and clears
+        the diagnosing flag when it recovers.
         """
+        from ..core.health import ServiceState
+
         event = {
             "type": "state_change",
             "service": service_name,
@@ -94,6 +102,14 @@ class DashboardWebSocket:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         self._schedule_broadcast(event)
+
+        # Auto-diagnosis: trigger on crash, clear on recovery
+        if new_state in (ServiceState.CRASHED, ServiceState.CIRCUIT_OPEN):
+            if service_name not in self._diagnosing_services:
+                self._diagnosing_services.add(service_name)
+                self._schedule_coroutine(self._run_diagnosis(service_name))
+        elif new_state in (ServiceState.READY, ServiceState.RUNNING):
+            self._diagnosing_services.discard(service_name)
 
     def broadcast_repo_change(self, repo_name: str, pending_changes: dict) -> None:
         """Broadcast a repo change event (call after fetch detects changes)."""
@@ -132,6 +148,13 @@ class DashboardWebSocket:
         }
         self._schedule_broadcast(event)
 
+    def _schedule_coroutine(self, coro) -> None:
+        """Thread-safe: schedule a coroutine on the event loop."""
+        if self._loop and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(
+                lambda c=coro: self._loop.create_task(c)
+            )
+
     def _schedule_broadcast(self, event: dict) -> None:
         """Thread-safe: schedule broadcast on the event loop."""
         if self._loop and not self._loop.is_closed():
@@ -139,6 +162,93 @@ class DashboardWebSocket:
             self._loop.call_soon_threadsafe(
                 lambda e=event: self._loop.create_task(self._broadcast(e))
             )
+
+    async def _run_diagnosis(self, service_name: str) -> None:
+        """Create a new chat session and send an auto-diagnosis prompt.
+
+        Skipped silently when the chat session manager is not configured.
+        Exceptions are caught to ensure _diagnosing_services cleanup always runs.
+        """
+        if self._chat_session_manager is None:
+            self._diagnosing_services.discard(service_name)
+            return
+
+        try:
+            prompt = (
+                f"하니엘 서비스 '{service_name}'이 다운되었습니다. "
+                "원인을 진단하고 해결 방법을 제안해주세요."
+            )
+            session_id = self._chat_session_manager.create_session()
+
+            # Bind to Slack thread if bot is available
+            if self._chat_slack_bot is not None and self._chat_slack_bot._dm_channel:
+                dm_channel = self._chat_slack_bot._dm_channel
+                thread_ts = self._chat_slack_bot.create_chat_thread(
+                    session_id, dm_channel
+                )
+                if thread_ts:
+                    self._chat_session_manager.update_slack_binding(
+                        session_id, thread_ts, dm_channel
+                    )
+
+            compaction_msg_ts: str | None = None
+            buffer: list[str] = []
+
+            async for evt in self._chat_session_manager.stream_message(session_id, prompt):
+                evt_type = evt.get("type")
+
+                if evt_type == "text_delta":
+                    buffer.append(evt.get("delta", ""))
+
+                elif evt_type == "message_end":
+                    full_text = "".join(buffer)
+                    if full_text and self._chat_slack_bot is not None:
+                        session = self._chat_session_manager.get_session(session_id)
+                        if session and session.get("slack_thread_ts"):
+                            self._chat_slack_bot.post_chat_message(
+                                session["slack_channel_id"],
+                                session["slack_thread_ts"],
+                                full_text,
+                            )
+                    buffer.clear()
+
+                elif evt_type == "compact_start":
+                    if self._chat_slack_bot is not None:
+                        session = self._chat_session_manager.get_session(session_id)
+                        if session and session.get("slack_thread_ts"):
+                            compaction_msg_ts = self._chat_slack_bot.post_compaction_start(
+                                session["slack_channel_id"], session["slack_thread_ts"]
+                            )
+
+                elif evt_type == "compact_end":
+                    if compaction_msg_ts and self._chat_slack_bot is not None:
+                        session = self._chat_session_manager.get_session(session_id)
+                        if session and session.get("slack_thread_ts"):
+                            self._chat_slack_bot.update_compaction_done(
+                                session["slack_channel_id"],
+                                session["slack_thread_ts"],
+                                compaction_msg_ts,
+                            )
+                        compaction_msg_ts = None
+
+                elif evt_type == "error":
+                    if self._chat_slack_bot is not None:
+                        session = self._chat_session_manager.get_session(session_id)
+                        if session and session.get("slack_thread_ts"):
+                            self._chat_slack_bot.post_error(
+                                session["slack_channel_id"],
+                                session["slack_thread_ts"],
+                                evt.get("error", ""),
+                            )
+
+                # Broadcast all events to watching dashboard WS clients
+                if self._chat_broadcaster is not None:
+                    await self._chat_broadcaster.broadcast(session_id, evt)
+
+        except Exception as e:
+            logger.warning("Auto-diagnosis failed for %s: %s", service_name, e)
+        finally:
+            self._diagnosing_services.discard(service_name)
 
     async def _broadcast(self, event: dict) -> None:
         """Send an event to all connected WebSocket clients."""
