@@ -126,6 +126,25 @@ class ClaudeSessionManager:
             return []
         return list(session.get("messages", []))
 
+    def get_session_by_thread_ts(self, thread_ts: str) -> dict | None:
+        """Return the session bound to the given Slack thread_ts, or None."""
+        for s in self._data["sessions"]:
+            if s.get("slack_thread_ts") == thread_ts:
+                return s
+        return None
+
+    def update_slack_binding(
+        self, session_id: str, thread_ts: str, channel_id: str
+    ) -> None:
+        """Bind a Slack DM thread to a session and persist to disk."""
+        session = self._find_session(session_id)
+        if session is None:
+            logger.warning("update_slack_binding: session %s not found", session_id)
+            return
+        session["slack_thread_ts"] = thread_ts
+        session["slack_channel_id"] = channel_id
+        self._save_sessions()
+
     async def stream_message(
         self,
         session_id: str | None,

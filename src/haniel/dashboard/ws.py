@@ -19,6 +19,9 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 if TYPE_CHECKING:
     from ..core.runner import ServiceRunner
     from ..core.health import ServiceState
+    from ..integrations.slack_bot import SlackBot
+    from ..dashboard.chat_broadcast import ChatBroadcaster
+    from ..core.claude_session import ClaudeSessionManager
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +41,39 @@ class DashboardWebSocket:
         self._clients: set[WebSocket] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
 
+        # Chat integration (set by configure_chat before setup())
+        self._chat_slack_bot = None
+        self._chat_broadcaster = None
+        self._chat_session_manager = None
+
+    def configure_chat(
+        self,
+        slack_bot: "SlackBot | None",
+        broadcaster: "ChatBroadcaster | None",
+        session_manager: "ClaudeSessionManager | None",
+    ) -> None:
+        """Store chat integration dependencies for later binding in setup(loop)."""
+        self._chat_slack_bot = slack_bot
+        self._chat_broadcaster = broadcaster
+        self._chat_session_manager = session_manager
+
     def setup(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Bind to event loop and register HealthManager callback."""
+        """Bind to event loop, register health callbacks, and connect chat DM handler."""
         self._loop = loop
         self.runner.health_manager.add_callback(self._on_state_change)
+        # Register Slack DM handler once the event loop is running
+        if (
+            self._chat_slack_bot is not None
+            and self._chat_broadcaster is not None
+            and self._chat_session_manager is not None
+        ):
+            try:
+                self._chat_slack_bot._register_dm_handler(
+                    loop, self._chat_session_manager, self._chat_broadcaster
+                )
+                logger.info("Slack DM chat handler registered")
+            except Exception as e:
+                logger.warning("Failed to register Slack DM chat handler: %s", e)
 
     def _on_state_change(
         self,
