@@ -3,7 +3,10 @@ Phase 3 tests: auto-diagnosis + deploy notification deduplication.
 
 Covers:
 - DashboardWebSocket._on_state_change: diagnosis triggered on CRASHED/CIRCUIT_OPEN,
-  cleared on READY/RUNNING, not re-triggered while already diagnosing
+  not re-triggered while already diagnosing
+- DashboardWebSocket._on_state_change: READY/RUNNING does NOT clear _diagnosing_services
+  (cleanup is exclusively _run_diagnosis's finally block)
+- DashboardWebSocket._on_state_change: no duplicate session on rapid crash-recovery-crash
 - DashboardWebSocket._run_diagnosis: creates session, sends prompt, relays to Slack
 - DashboardWebSocket._run_diagnosis: cleans up _diagnosing_services on exception
 - ServiceRunner._hash_pending: stable hash for same/different input
@@ -101,24 +104,60 @@ class TestDiagnosisLifecycle:
         assert len(scheduled_coros) == 1
 
     @pytest.mark.asyncio
-    async def test_diagnosis_cleared_on_ready(self):
-        """READY state removes service from _diagnosing_services."""
+    async def test_diagnosis_flag_not_cleared_by_ready(self):
+        """READY state does NOT clear _diagnosing_services while diagnosis is running.
+
+        Cleanup is the exclusive responsibility of _run_diagnosis's finally block.
+        Clearing the flag here would allow a rapid crash-recovery-crash cycle to
+        spawn a duplicate diagnosis session before the first one finishes.
+        """
         ws = _make_ws_handler()
         ws._diagnosing_services.add("svc-d")
 
         ws._on_state_change("svc-d", ServiceState.CRASHED, ServiceState.READY)
 
-        assert "svc-d" not in ws._diagnosing_services
+        assert "svc-d" in ws._diagnosing_services
 
     @pytest.mark.asyncio
-    async def test_diagnosis_cleared_on_running(self):
-        """RUNNING state also clears _diagnosing_services."""
+    async def test_diagnosis_flag_not_cleared_by_running(self):
+        """RUNNING state does NOT clear _diagnosing_services while diagnosis is running."""
         ws = _make_ws_handler()
         ws._diagnosing_services.add("svc-e")
 
         ws._on_state_change("svc-e", ServiceState.CRASHED, ServiceState.RUNNING)
 
-        assert "svc-e" not in ws._diagnosing_services
+        assert "svc-e" in ws._diagnosing_services
+
+    @pytest.mark.asyncio
+    async def test_no_duplicate_session_on_rapid_crash_recovery_crash(self):
+        """Rapid CRASHED→READY→CRASHED cycle does not spawn a duplicate diagnosis session.
+
+        Regression test for: _on_state_change previously called discard() on READY/RUNNING,
+        which cleared the guard flag while _run_diagnosis was still executing, allowing the
+        subsequent CRASHED event to schedule a second concurrent diagnosis session.
+        """
+        ws = _make_ws_handler()
+        scheduled_coros = []
+
+        def capture_schedule(coro):
+            scheduled_coros.append(coro)
+
+        ws._schedule_coroutine = capture_schedule
+
+        # First crash: diagnosis starts
+        ws._on_state_change("svc-f", ServiceState.RUNNING, ServiceState.CRASHED)
+        # Service briefly recovers — must NOT clear the flag
+        ws._on_state_change("svc-f", ServiceState.CRASHED, ServiceState.READY)
+        # Service crashes again — guard flag still set, so no second session
+        ws._on_state_change("svc-f", ServiceState.READY, ServiceState.CRASHED)
+
+        for coro in scheduled_coros:
+            coro.close()
+
+        assert len(scheduled_coros) == 1, (
+            "Expected exactly one diagnosis session; "
+            f"got {len(scheduled_coros)} (duplicate session bug)"
+        )
 
 
 # ── DashboardWebSocket: _run_diagnosis ────────────────────────────────────────

@@ -103,13 +103,12 @@ class DashboardWebSocket:
         }
         self._schedule_broadcast(event)
 
-        # Auto-diagnosis: trigger on crash, clear on recovery
+        # Auto-diagnosis: trigger on crash.
+        # _diagnosing_services cleanup is handled exclusively by _run_diagnosis's finally block.
         if new_state in (ServiceState.CRASHED, ServiceState.CIRCUIT_OPEN):
             if service_name not in self._diagnosing_services:
                 self._diagnosing_services.add(service_name)
                 self._schedule_coroutine(self._run_diagnosis(service_name))
-        elif new_state in (ServiceState.READY, ServiceState.RUNNING):
-            self._diagnosing_services.discard(service_name)
 
     def broadcast_repo_change(self, repo_name: str, pending_changes: dict) -> None:
         """Broadcast a repo change event (call after fetch detects changes)."""
