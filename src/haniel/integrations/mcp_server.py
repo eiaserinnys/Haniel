@@ -1086,6 +1086,7 @@ class HanielMcpServer:
                             self.runner,
                             token=dashboard_cfg.token,
                             claude_session_manager=sm,
+                            slack_bot=self.runner._slack_bot,
                         )
                     )
                     all_routes.extend(dashboard_routes)

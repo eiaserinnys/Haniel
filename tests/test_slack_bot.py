@@ -385,12 +385,15 @@ def test_trigger_pull_calls_slack_notify(mock_runner):
     mock_runner._slack_bot = slack_bot
     mock_runner._repo_states["my-repo"].pending_changes = {"commits": ["a"], "stat": ""}
 
-    with patch.object(mock_runner, "_pull_repo", return_value=True):
+    with patch.object(mock_runner, "_pull_repo", return_value=(True, [])):
         mock_runner.trigger_pull("my-repo", auto=False)
 
     slack_bot.notify_pulling.assert_called_once_with("my-repo", auto=False)
     slack_bot.notify_done.assert_called_once_with(
-        "my-repo", success=True, pending_changes={"commits": ["a"], "stat": ""}
+        "my-repo",
+        success=True,
+        pending_changes={"commits": ["a"], "stat": ""},
+        discarded_changes=[],
     )
 
 
@@ -400,7 +403,7 @@ def test_trigger_pull_broadcasts_ws_pulling(mock_runner):
     mock_runner._ws_handler = ws
     mock_runner._repo_states["my-repo"].pending_changes = {"commits": ["a"], "stat": ""}
 
-    with patch.object(mock_runner, "_pull_repo", return_value=True):
+    with patch.object(mock_runner, "_pull_repo", return_value=(True, [])):
         mock_runner.trigger_pull("my-repo")
 
     assert ws.broadcast_repo_pulling.call_count == 2
@@ -649,7 +652,7 @@ services: {}
     runner._repo_states["haniel"].pending_changes = {"commits": ["a"], "stat": ""}
 
     with (
-        patch.object(runner, "_pull_repo", return_value=True),
+        patch.object(runner, "_pull_repo", return_value=(True, [])),
         patch.object(runner, "stop") as mock_stop,
     ):
         runner.trigger_pull("haniel", auto=False)

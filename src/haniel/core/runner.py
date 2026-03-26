@@ -9,6 +9,8 @@ Implements the poll → pull → restart cycle:
 haniel doesn't care what it runs. It polls, pulls, and restarts as configured.
 """
 
+import hashlib
+import json
 import logging
 import os
 import re
@@ -309,6 +311,10 @@ class ServiceRunner:
             name: threading.Lock() for name in self._repo_states
         }
 
+        # Deduplication: track last notified pending_changes hash per repo
+        # to avoid spamming Slack on every poll when content hasn't changed.
+        self._last_pending_hash: dict[str, str] = {}
+
         # Track whether post_pull hooks have been run on first start
         self._post_pull_executed = False
 
@@ -596,6 +602,9 @@ class ServiceRunner:
         # Start Slack bot if configured
         self._start_slack_bot()
 
+        # Apply pending updates before starting services
+        self._apply_startup_updates()
+
         # Start services
         self.start_services()
 
@@ -729,7 +738,7 @@ class ServiceRunner:
                     logger.info("Stopping %s for pull", svc)
                     self.process_manager.stop_service(svc)
 
-            success = self._pull_repo(repo_name)
+            success, discarded = self._pull_repo(repo_name)
             if not success:
                 raise RuntimeError(f"git pull failed for {repo_name}")
 
@@ -751,7 +760,10 @@ class ServiceRunner:
 
             if self._slack_bot:
                 self._slack_bot.notify_done(
-                    repo_name, success=True, pending_changes=captured_changes
+                    repo_name,
+                    success=True,
+                    pending_changes=captured_changes,
+                    discarded_changes=discarded,
                 )
 
         except Exception as e:
@@ -764,7 +776,16 @@ class ServiceRunner:
             # Broadcast before release to preserve state propagation order
             if self._ws_handler is not None:
                 self._ws_handler.broadcast_repo_pulling(repo_name, False)
+            # Clear pending hash so new changes after this pull trigger fresh notifications
+            self._last_pending_hash.pop(repo_name, None)
             self._pull_locks[repo_name].release()
+
+    @staticmethod
+    def _hash_pending(pending: dict) -> str:
+        """Return a stable SHA-256 hex digest of a pending_changes dict."""
+        return hashlib.sha256(
+            json.dumps(pending, sort_keys=True).encode()
+        ).hexdigest()
 
     def _init_repo_states(self) -> None:
         """Initialize repo states with current HEAD."""
@@ -776,6 +797,70 @@ class ServiceRunner:
                     logger.info(f"Repo {name} at HEAD: {state.last_head[:8]}")
                 except GitError as e:
                     logger.warning(f"Failed to get HEAD for {name}: {e}")
+
+    def _apply_startup_updates(self) -> None:
+        """Fetch and pull all repos that have pending remote changes.
+
+        Called once during start(), before start_services().
+        Self-update repo is excluded (handled by haniel-runner.ps1).
+        Individual repo failures are logged but do not block other repos.
+        """
+        logger.info("Checking for pending updates on startup...")
+        updated: list[str] = []
+        failed: list[str] = []
+
+        for name, state in self._repo_states.items():
+            # Skip self-update repo (haniel-runner.ps1 handles it)
+            if name == self._self_repo:
+                continue
+
+            repo_path = self.config_dir / state.config.path
+            if not repo_path.exists():
+                logger.warning(
+                    "Repo %s path does not exist: %s, skipping", name, repo_path
+                )
+                continue
+
+            try:
+                has_updates = fetch_repo(
+                    path=repo_path,
+                    branch=state.config.branch,
+                )
+                state.last_fetch = datetime.now()
+                state.fetch_error = None
+
+                if has_updates:
+                    logger.info("Startup update: pulling %s", name)
+                    pull_repo(
+                        path=repo_path,
+                        branch=state.config.branch,
+                    )
+                    state.last_head = get_head(repo_path)
+                    state.pending_changes = None
+                    updated.append(name)
+                else:
+                    logger.debug("Startup update: %s is up to date", name)
+
+            except GitError as e:
+                logger.error("Startup update failed for %s: %s", name, e)
+                state.fetch_error = str(e)
+                failed.append(name)
+
+        if updated:
+            logger.info(
+                "Startup update complete: %d repos updated (%s)",
+                len(updated),
+                ", ".join(updated),
+            )
+        else:
+            logger.info("Startup update complete: all repos up to date")
+
+        if failed:
+            logger.warning(
+                "Startup update: %d repos failed (%s)",
+                len(failed),
+                ", ".join(failed),
+            )
 
     def _poll_loop(self) -> None:
         """Main poll loop."""
@@ -887,8 +972,12 @@ class ServiceRunner:
                                 name, state.pending_changes or {}
                             )
                         # Notify Slack only when remote has new commits (not already pulling)
+                        # and only when the pending content has actually changed.
                         if self._slack_bot and state.pending_changes and not self._pull_locks[name].locked():
-                            self._slack_bot.notify_pending(name, state.pending_changes)
+                            content_hash = self._hash_pending(state.pending_changes)
+                            if self._last_pending_hash.get(name) != content_hash:
+                                self._last_pending_hash[name] = content_hash
+                                self._slack_bot.notify_pending(name, state.pending_changes)
                     else:
                         state.pending_changes = None
 
@@ -1108,34 +1197,37 @@ class ServiceRunner:
             "Self-update approved. Shutting down for update.",
         )
 
-    def _pull_repo(self, repo_name: str) -> bool:
+    def _pull_repo(self, repo_name: str) -> tuple[bool, list[str]]:
         """Pull changes for a repository.
 
         Args:
             repo_name: Name of the repository
 
         Returns:
-            True if pull succeeded
+            Tuple of (success, discarded_files). discarded_files is non-empty only
+            when pull_strategy is 'force' and local changes were discarded.
         """
         if repo_name not in self._repo_states:
-            return False
+            return False, []
 
         state = self._repo_states[repo_name]
         repo_path = self.config_dir / state.config.path
+        strategy = state.config.pull_strategy or "merge"
 
         try:
-            pull_repo(
+            discarded = pull_repo(
                 path=repo_path,
                 branch=state.config.branch,
+                strategy=strategy,
             )
             state.last_head = get_head(repo_path)
             state.pending_changes = None
             head_short = state.last_head[:8] if state.last_head else "unknown"
             logger.info(f"Pulled {repo_name}, new HEAD: {head_short}")
-            return True
+            return True, discarded
         except GitError as e:
             logger.error(f"Failed to pull {repo_name}: {e}")
-            return False
+            return False, []
 
     def _process_pending_restarts(self) -> None:
         """Process any pending service restarts."""

@@ -302,6 +302,32 @@ class TestPullRepo:
         with pytest.raises(GitPullError):
             pull_repo(tmp_path, "master")
 
+    def test_force_pull_discards_local_changes(
+        self, git_repo: Path, bare_remote: Path
+    ):
+        """Force strategy should discard local tracked changes and return their list."""
+        readme = git_repo / "README.md"
+        original_content = readme.read_text()
+        readme.write_text("locally modified content")
+
+        discarded = pull_repo(git_repo, "master", strategy="force")
+
+        assert any("README.md" in entry for entry in discarded)
+        assert readme.read_text() == original_content
+
+    def test_force_pull_returns_empty_when_clean(
+        self, git_repo: Path, bare_remote: Path
+    ):
+        """Force strategy should return empty list when there are no local changes."""
+        discarded = pull_repo(git_repo, "master", strategy="force")
+
+        assert discarded == []
+
+    def test_force_pull_raises_on_invalid_path(self):
+        """Force strategy should raise GitPullError for non-existent path."""
+        with pytest.raises(GitPullError):
+            pull_repo(Path("/nonexistent"), "master", strategy="force")
+
 
 class TestHasChanges:
     """Tests for has_changes function."""

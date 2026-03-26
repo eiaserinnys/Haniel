@@ -13,10 +13,11 @@ Socket Mode is used so no public URL is required.
 The approve button triggers trigger_pull() via approve_callback.
 """
 
+import asyncio
 import logging
 import re
 import threading
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, TYPE_CHECKING, runtime_checkable
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -24,6 +25,10 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 from ..config.model import SlackBotConfig
+
+if TYPE_CHECKING:
+    from ..core.claude_session import ClaudeSessionManager
+    from ..dashboard.chat_broadcast import ChatBroadcaster
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +102,9 @@ class SlackBot:
         self._pulling_ts: dict[str, str] = {}
         self._lock = threading.Lock()
 
+        # Session-level locks for sequential DM handling (keyed by session_id)
+        self._session_locks: dict[str, asyncio.Lock] = {}
+
         # Register action handler for the approve button
         self._register_action_handlers()
 
@@ -158,6 +166,165 @@ class SlackBot:
                 name=f"approve-{repo_name}",
             ).start()
 
+    # ── Chat Session Methods ────────────────────────────────────────────────
+
+    def create_chat_thread(self, session_id: str, user_id: str) -> str | None:
+        """Post an initial DM to start a chat thread. Returns thread_ts or None."""
+        try:
+            resp = self._client.chat_postMessage(
+                channel=user_id,
+                text="💬 새 채팅 세션이 시작됐습니다.",
+            )
+            return resp["ts"]
+        except Exception as e:
+            logger.warning("create_chat_thread failed: %s", e)
+            return None
+
+    def post_chat_message(self, user_id: str, thread_ts: str, text: str) -> None:
+        """Post a message to a chat DM thread (best-effort)."""
+        try:
+            self._client.chat_postMessage(
+                channel=user_id,
+                thread_ts=thread_ts,
+                text=text,
+            )
+        except Exception as e:
+            logger.warning("post_chat_message failed: %s", e)
+
+    def post_compaction_start(self, user_id: str, thread_ts: str) -> str | None:
+        """Post a compaction-in-progress notice. Returns message ts or None."""
+        try:
+            resp = self._client.chat_postMessage(
+                channel=user_id,
+                thread_ts=thread_ts,
+                text="🔄 컴팩션 진행 중...",
+            )
+            return resp["ts"]
+        except Exception as e:
+            logger.warning("post_compaction_start failed: %s", e)
+            return None
+
+    def update_compaction_done(
+        self, user_id: str, thread_ts: str, msg_ts: str
+    ) -> None:
+        """Replace the compaction notice with a completion message."""
+        try:
+            self._client.chat_update(
+                channel=user_id,
+                ts=msg_ts,
+                text="✅ 컴팩션 완료",
+            )
+        except Exception as e:
+            logger.warning("update_compaction_done failed: %s", e)
+
+    def post_error(self, user_id: str, thread_ts: str, error: str) -> None:
+        """Post an error message to the chat DM thread (best-effort)."""
+        try:
+            self._client.chat_postMessage(
+                channel=user_id,
+                thread_ts=thread_ts,
+                text=f"❌ 오류: {error}",
+            )
+        except Exception as e:
+            logger.warning("post_error failed: %s", e)
+
+    # ── DM Chat Handler ────────────────────────────────────────────────────
+
+    def _register_dm_handler(
+        self,
+        loop: "asyncio.AbstractEventLoop",
+        session_manager: "ClaudeSessionManager",
+        broadcaster: "ChatBroadcaster",
+    ) -> None:
+        """Register Bolt message event handler for DM events.
+
+        Bridges synchronous Bolt Socket Mode into the async event loop via
+        run_coroutine_threadsafe. Called once in DashboardWebSocket.setup(loop).
+        """
+
+        @self._app.event("message")
+        def handle_dm_message(event, say):
+            # Only handle DMs, ignore bot's own messages
+            if event.get("channel_type") != "im":
+                return
+            if event.get("bot_id"):
+                return
+            future = asyncio.run_coroutine_threadsafe(
+                self._handle_dm_async(session_manager, broadcaster, event),
+                loop,
+            )
+            try:
+                future.result(timeout=120)
+            except Exception as e:
+                logger.error("DM 처리 실패: %s", e)
+
+    async def _handle_dm_async(
+        self,
+        session_manager: "ClaudeSessionManager",
+        broadcaster: "ChatBroadcaster",
+        event: dict,
+    ) -> None:
+        """Handle an incoming DM event: find/create session, stream, relay.
+
+        New DM (no thread_ts): creates new session.
+        Thread reply (thread_ts set): resumes bound session.
+        """
+        text = (event.get("text") or "").strip()
+        if not text:
+            return
+
+        channel_id = event.get("channel", "")
+        # Top-level DM has no thread_ts; its own ts becomes the thread anchor.
+        thread_ts = event.get("thread_ts") or event.get("ts", "")
+
+        if not thread_ts or not channel_id:
+            logger.warning("DM event missing thread_ts or channel: %s", event)
+            return
+
+        # Find or create session bound to this thread
+        session = session_manager.get_session_by_thread_ts(thread_ts)
+        if session is None:
+            session_id = session_manager.create_session()
+            session_manager.update_slack_binding(session_id, thread_ts, channel_id)
+        else:
+            session_id = session["id"]
+
+        # Per-session lock prevents concurrent input processing
+        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            compaction_msg_ts: str | None = None
+            buffer: list[str] = []
+
+            async for evt in session_manager.stream_message(session_id, text):
+                evt_type = evt.get("type")
+
+                if evt_type == "text_delta":
+                    buffer.append(evt.get("delta", ""))
+
+                elif evt_type == "message_end":
+                    full_text = "".join(buffer)
+                    if full_text:
+                        self.post_chat_message(channel_id, thread_ts, full_text)
+                    buffer.clear()
+
+                elif evt_type == "compact_start":
+                    compaction_msg_ts = self.post_compaction_start(
+                        channel_id, thread_ts
+                    )
+
+                elif evt_type == "compact_end":
+                    if compaction_msg_ts:
+                        self.update_compaction_done(
+                            channel_id, thread_ts, compaction_msg_ts
+                        )
+                        compaction_msg_ts = None
+
+                elif evt_type == "error":
+                    self.post_error(channel_id, thread_ts, evt.get("error", ""))
+
+                # Broadcast all events to watching dashboard WS clients
+                await broadcaster.broadcast(session_id, evt)
+
     # ── Lifecycle Notifications ────────────────────────────────────────────────
 
     def notify_startup(self) -> None:
@@ -185,6 +352,18 @@ class SlackBot:
         except Exception as e:
             # best-effort: shutdown notification failure must not abort runner shutdown
             logger.warning("Failed to send shutdown notification: %s", e)
+
+    def notify_crash(self, service_name: str) -> None:
+        """Send a crash notification to the DM channel (best-effort)."""
+        if not self._dm_channel:
+            return
+        try:
+            self._client.chat_postMessage(
+                channel=self._dm_channel,
+                text=f"🔴 서비스 '{service_name}'이 크래시되었습니다.",
+            )
+        except Exception as e:
+            logger.warning("Failed to send crash notification: %s", e)
 
     # ── Notifications ─────────────────────────────────────────────────────────
 
@@ -250,6 +429,7 @@ class SlackBot:
         success: bool,
         pending_changes: dict | None = None,
         error: str | None = None,
+        discarded_changes: list[str] | None = None,
     ) -> None:
         """Update the pulling DM to show success or failure."""
         if not self._dm_channel:
@@ -298,6 +478,17 @@ class SlackBot:
                             "text": {"type": "mrkdwn", "text": stat_text},
                         }
                     )
+            if discarded_changes:
+                lines = "\n".join(f"• `{f}`" for f in discarded_changes)
+                blocks.append(
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"⚠️ *로컬 변경사항 드롭됨 (force pull)*\n{lines}",
+                        },
+                    }
+                )
             text = f"[{repo_name}] 배포 완료"
         else:
             error_text = self._truncate_for_block(

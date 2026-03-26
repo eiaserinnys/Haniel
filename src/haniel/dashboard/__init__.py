@@ -22,6 +22,7 @@ from .static import setup_static
 if TYPE_CHECKING:
     from ..core.runner import ServiceRunner
     from ..core.claude_session import ClaudeSessionManager
+    from ..integrations.slack_bot import SlackBot
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ def setup_dashboard(
     runner: "ServiceRunner",
     token: str | None = None,
     claude_session_manager: "ClaudeSessionManager | None" = None,
+    slack_bot: "SlackBot | None" = None,
 ) -> tuple[list[Route | WebSocketRoute], list[Middleware], DashboardWebSocket]:
     """Create dashboard routes, middleware, and WebSocket handler.
 
@@ -88,9 +90,23 @@ def setup_dashboard(
 
     if claude_session_manager is not None:
         from .chat_ws import ChatWebSocket
+        from .chat_broadcast import ChatBroadcaster
 
-        chat_ws_handler = ChatWebSocket(claude_session_manager)
+        broadcaster = ChatBroadcaster()
+        chat_ws_handler = ChatWebSocket(
+            claude_session_manager,
+            slack_bot=slack_bot,
+            broadcaster=broadcaster,
+        )
         routes.append(WebSocketRoute("/ws/chat", chat_ws_handler.handle_ws))
+
+        # Bind chat deps to DashboardWebSocket for deferred DM handler registration
+        ws_handler.configure_chat(
+            slack_bot=slack_bot,
+            broadcaster=broadcaster,
+            session_manager=claude_session_manager,
+        )
+
         logger.info(
             "Dashboard routes registered: %d API + %d config API + WebSocket + Chat WebSocket",
             len(api_routes),
