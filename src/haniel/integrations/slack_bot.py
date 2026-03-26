@@ -353,6 +353,18 @@ class SlackBot:
             # best-effort: shutdown notification failure must not abort runner shutdown
             logger.warning("Failed to send shutdown notification: %s", e)
 
+    def notify_crash(self, service_name: str) -> None:
+        """Send a crash notification to the DM channel (best-effort)."""
+        if not self._dm_channel:
+            return
+        try:
+            self._client.chat_postMessage(
+                channel=self._dm_channel,
+                text=f"🔴 서비스 '{service_name}'이 크래시되었습니다.",
+            )
+        except Exception as e:
+            logger.warning("Failed to send crash notification: %s", e)
+
     # ── Notifications ─────────────────────────────────────────────────────────
 
     def notify_pending(self, repo_name: str, pending_changes: dict) -> None:
