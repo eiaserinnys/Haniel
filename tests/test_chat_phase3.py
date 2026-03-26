@@ -1,5 +1,5 @@
 """
-Phase 3 tests: auto-diagnosis + deploy notification deduplication.
+Phase 3 tests: crash notification + deploy notification deduplication.
 
 Covers:
 - DashboardWebSocket._on_state_change: diagnosis triggered on CRASHED/CIRCUIT_OPEN,
@@ -7,7 +7,7 @@ Covers:
 - DashboardWebSocket._on_state_change: READY/RUNNING does NOT clear _diagnosing_services
   (cleanup is exclusively _run_diagnosis's finally block)
 - DashboardWebSocket._on_state_change: no duplicate session on rapid crash-recovery-crash
-- DashboardWebSocket._run_diagnosis: creates session, sends prompt, relays to Slack
+- DashboardWebSocket._run_diagnosis: calls notify_crash when slack_bot is available
 - DashboardWebSocket._run_diagnosis: cleans up _diagnosing_services on exception
 - ServiceRunner._hash_pending: stable hash for same/different input
 - ServiceRunner._detect_changes: notify_pending skipped on repeated identical content
@@ -15,9 +15,8 @@ Covers:
 """
 
 import asyncio
-import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -164,104 +163,41 @@ class TestDiagnosisLifecycle:
 
 
 class TestRunDiagnosis:
-    def _make_stream(*events):
-        async def _gen(session_id, text):
-            for evt in events:
-                yield evt
-        return _gen
-
     @pytest.mark.asyncio
-    async def test_skipped_when_no_session_manager(self):
-        """_run_diagnosis is a no-op when session_manager is None."""
-        ws = _make_ws_handler(session_manager=None)
+    async def test_cleans_up_when_no_slack_bot(self):
+        """_run_diagnosis cleans up _diagnosing_services even when no slack_bot."""
+        ws = _make_ws_handler(slack_bot=None)
         ws._diagnosing_services.add("svc")
 
         await ws._run_diagnosis("svc")
 
-        # Service should be cleaned up even when skipped
         assert "svc" not in ws._diagnosing_services
 
     @pytest.mark.asyncio
-    async def test_creates_session_and_streams_prompt(self):
-        """_run_diagnosis creates a session and sends a diagnosis prompt."""
-        session_manager = MagicMock()
-        session_manager.create_session = MagicMock(return_value="sess-diag-1")
-        session_manager.get_session = MagicMock(return_value=None)
+    async def test_notify_crash_called(self):
+        """_run_diagnosis calls notify_crash on the slack_bot."""
+        slack_bot = MagicMock()
 
-        async def mock_stream(sid, text):
-            assert "svc-broken" in text
-            yield {"type": "message_end"}
-
-        session_manager.stream_message = mock_stream
-
-        ws = _make_ws_handler(session_manager=session_manager)
+        ws = _make_ws_handler(slack_bot=slack_bot)
         ws._diagnosing_services.add("svc-broken")
 
         await ws._run_diagnosis("svc-broken")
 
-        session_manager.create_session.assert_called_once()
+        slack_bot.notify_crash.assert_called_once_with("svc-broken")
         assert "svc-broken" not in ws._diagnosing_services
 
     @pytest.mark.asyncio
     async def test_exception_cleans_up_diagnosing_services(self):
         """_run_diagnosis removes service from _diagnosing_services even on error."""
-        session_manager = MagicMock()
-        session_manager.create_session = MagicMock(side_effect=Exception("init error"))
+        slack_bot = MagicMock()
+        slack_bot.notify_crash = MagicMock(side_effect=Exception("notify error"))
 
-        ws = _make_ws_handler(session_manager=session_manager)
+        ws = _make_ws_handler(slack_bot=slack_bot)
         ws._diagnosing_services.add("svc-err")
 
         await ws._run_diagnosis("svc-err")  # must not raise
 
         assert "svc-err" not in ws._diagnosing_services
-
-    @pytest.mark.asyncio
-    async def test_events_broadcast_to_broadcaster(self):
-        """All stream events are forwarded through ChatBroadcaster."""
-        broadcaster = MagicMock()
-        broadcaster.broadcast = AsyncMock()
-        session_manager = MagicMock()
-        session_manager.create_session = MagicMock(return_value="sess-2")
-        session_manager.get_session = MagicMock(return_value=None)
-
-        async def mock_stream(sid, text):
-            yield {"type": "text_delta", "delta": "diag"}
-            yield {"type": "message_end"}
-
-        session_manager.stream_message = mock_stream
-
-        ws = _make_ws_handler(session_manager=session_manager, broadcaster=broadcaster)
-        ws._diagnosing_services.add("svc-x")
-
-        await ws._run_diagnosis("svc-x")
-
-        assert broadcaster.broadcast.await_count == 2
-
-    @pytest.mark.asyncio
-    async def test_slack_thread_created_and_bound(self):
-        """_run_diagnosis creates a Slack thread and binds it to the session."""
-        slack_bot = MagicMock()
-        slack_bot._dm_channel = "D_CHAN"
-        slack_bot.create_chat_thread = MagicMock(return_value="thread.ts")
-
-        session_manager = MagicMock()
-        session_manager.create_session = MagicMock(return_value="sess-3")
-        session_manager.get_session = MagicMock(return_value=None)
-
-        async def mock_stream(sid, text):
-            yield {"type": "message_end"}
-
-        session_manager.stream_message = mock_stream
-
-        ws = _make_ws_handler(session_manager=session_manager, slack_bot=slack_bot)
-        ws._diagnosing_services.add("svc-y")
-
-        await ws._run_diagnosis("svc-y")
-
-        slack_bot.create_chat_thread.assert_called_once_with("sess-3", "D_CHAN")
-        session_manager.update_slack_binding.assert_called_once_with(
-            "sess-3", "thread.ts", "D_CHAN"
-        )
 
 
 # ── ServiceRunner._hash_pending ───────────────────────────────────────────────
