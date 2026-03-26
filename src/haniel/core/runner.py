@@ -602,6 +602,9 @@ class ServiceRunner:
         # Start Slack bot if configured
         self._start_slack_bot()
 
+        # Apply pending updates before starting services
+        self._apply_startup_updates()
+
         # Start services
         self.start_services()
 
@@ -794,6 +797,70 @@ class ServiceRunner:
                     logger.info(f"Repo {name} at HEAD: {state.last_head[:8]}")
                 except GitError as e:
                     logger.warning(f"Failed to get HEAD for {name}: {e}")
+
+    def _apply_startup_updates(self) -> None:
+        """Fetch and pull all repos that have pending remote changes.
+
+        Called once during start(), before start_services().
+        Self-update repo is excluded (handled by haniel-runner.ps1).
+        Individual repo failures are logged but do not block other repos.
+        """
+        logger.info("Checking for pending updates on startup...")
+        updated: list[str] = []
+        failed: list[str] = []
+
+        for name, state in self._repo_states.items():
+            # Skip self-update repo (haniel-runner.ps1 handles it)
+            if name == self._self_repo:
+                continue
+
+            repo_path = self.config_dir / state.config.path
+            if not repo_path.exists():
+                logger.warning(
+                    "Repo %s path does not exist: %s, skipping", name, repo_path
+                )
+                continue
+
+            try:
+                has_updates = fetch_repo(
+                    path=repo_path,
+                    branch=state.config.branch,
+                )
+                state.last_fetch = datetime.now()
+                state.fetch_error = None
+
+                if has_updates:
+                    logger.info("Startup update: pulling %s", name)
+                    pull_repo(
+                        path=repo_path,
+                        branch=state.config.branch,
+                    )
+                    state.last_head = get_head(repo_path)
+                    state.pending_changes = None
+                    updated.append(name)
+                else:
+                    logger.debug("Startup update: %s is up to date", name)
+
+            except GitError as e:
+                logger.error("Startup update failed for %s: %s", name, e)
+                state.fetch_error = str(e)
+                failed.append(name)
+
+        if updated:
+            logger.info(
+                "Startup update complete: %d repos updated (%s)",
+                len(updated),
+                ", ".join(updated),
+            )
+        else:
+            logger.info("Startup update complete: all repos up to date")
+
+        if failed:
+            logger.warning(
+                "Startup update: %d repos failed (%s)",
+                len(failed),
+                ", ".join(failed),
+            )
 
     def _poll_loop(self) -> None:
         """Main poll loop."""

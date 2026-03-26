@@ -14,6 +14,7 @@ from haniel.config import (
     BackoffConfig,
     HooksConfig,
 )
+from haniel.core.git import GitError
 from haniel.core.runner import (
     ServiceRunner,
     DependencyGraph,
@@ -831,8 +832,6 @@ class TestServiceRunnerPollCycle:
         self, mock_head, mock_fetch, runner_with_mock_repo
     ):
         """Test handling fetch errors."""
-        from haniel.core.git import GitError
-
         mock_fetch.side_effect = GitError("Fetch failed")
         mock_head.return_value = "abc1234"
 
@@ -895,8 +894,6 @@ class TestServiceRunnerPollCycle:
     @patch("haniel.core.runner.pull_repo")
     def test_pull_repo_failure(self, mock_pull, runner_with_mock_repo):
         """Test pulling a repo with failure."""
-        from haniel.core.git import GitError
-
         mock_pull.side_effect = GitError("Pull failed")
 
         success, discarded = runner_with_mock_repo._pull_repo("test-repo")
@@ -1274,3 +1271,166 @@ class TestReloadConfig:
 
         assert runner._repo_states["main"].last_head == "abc12345"
         assert runner._repo_states["main"].config.branch == "develop"
+
+
+# --- Startup Updates Tests ---
+
+
+class TestStartupUpdates:
+    """Tests for _apply_startup_updates() method."""
+
+    @pytest.fixture
+    def runner_with_repos(self, tmp_path: Path):
+        """Create a runner with multiple repos (some with services, some without)."""
+        from haniel.config import SelfUpdateConfig
+
+        # Create fake repo directories
+        for name in ["service-repo", "dev-repo", "haniel-repo"]:
+            repo_path = tmp_path / name
+            repo_path.mkdir()
+            (repo_path / ".git").mkdir()
+
+        config = HanielConfig(
+            poll_interval=5,
+            repos={
+                "service-repo": RepoConfig(
+                    url="git@github.com:test/service.git",
+                    branch="main",
+                    path="./service-repo",
+                ),
+                "dev-repo": RepoConfig(
+                    url="git@github.com:test/dev.git",
+                    branch="main",
+                    path="./dev-repo",
+                ),
+                "haniel-repo": RepoConfig(
+                    url="git@github.com:test/haniel.git",
+                    branch="main",
+                    path="./haniel-repo",
+                ),
+            },
+            services={
+                "test-service": ServiceConfig(
+                    run="echo hello",
+                    repo="service-repo",
+                    enabled=True,
+                ),
+            },
+            **{"self": SelfUpdateConfig(repo="haniel-repo")},
+        )
+        return ServiceRunner(config, config_dir=tmp_path)
+
+    @patch("haniel.core.runner.get_head", return_value="new_commit_hash")
+    @patch("haniel.core.runner.pull_repo")
+    @patch("haniel.core.runner.fetch_repo", return_value=True)
+    def test_pulls_repos_with_updates(
+        self, mock_fetch, mock_pull, mock_head, runner_with_repos
+    ):
+        """Repos with remote changes should be fetched and pulled."""
+        runner_with_repos._apply_startup_updates()
+
+        # Should fetch service-repo and dev-repo (not haniel-repo)
+        assert mock_fetch.call_count == 2
+        # Should pull both since fetch returns True
+        assert mock_pull.call_count == 2
+
+    @patch("haniel.core.runner.pull_repo")
+    @patch("haniel.core.runner.fetch_repo", return_value=False)
+    def test_skips_pull_when_no_changes(
+        self, mock_fetch, mock_pull, runner_with_repos
+    ):
+        """Repos without remote changes should not be pulled."""
+        runner_with_repos._apply_startup_updates()
+
+        assert mock_fetch.call_count == 2  # Still fetches to check
+        mock_pull.assert_not_called()  # But no pull needed
+
+    @patch("haniel.core.runner.fetch_repo")
+    def test_excludes_self_update_repo(self, mock_fetch, runner_with_repos):
+        """Self-update repo should be skipped entirely."""
+        mock_fetch.return_value = False
+
+        runner_with_repos._apply_startup_updates()
+
+        # Verify haniel-repo was NOT fetched
+        fetched_paths = [call.kwargs.get("path") or call.args[0] for call in mock_fetch.call_args_list]
+        haniel_path = runner_with_repos.config_dir / "haniel-repo"
+        assert haniel_path not in fetched_paths
+
+    @patch("haniel.core.runner.get_head", return_value="new_hash")
+    @patch("haniel.core.runner.pull_repo")
+    @patch("haniel.core.runner.fetch_repo")
+    def test_failure_isolation(self, mock_fetch, mock_pull, mock_head, runner_with_repos):
+        """Failure in one repo should not block others."""
+        # First repo fails, second succeeds
+        mock_fetch.side_effect = [
+            GitError("Network error"),
+            True,
+        ]
+
+        runner_with_repos._apply_startup_updates()
+
+        # pull should still be called for the successful repo
+        assert mock_pull.call_count == 1
+
+        # Verify fetch_error is set on the failed repo
+        failed_repos = [
+            name for name, state in runner_with_repos._repo_states.items()
+            if state.fetch_error is not None and name != "haniel-repo"
+        ]
+        assert len(failed_repos) == 1
+        failed_state = runner_with_repos._repo_states[failed_repos[0]]
+        assert "Network error" in failed_state.fetch_error
+
+    def test_skips_nonexistent_repo_path(self, tmp_path: Path):
+        """Repos with non-existent paths should be skipped."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={
+                "missing-repo": RepoConfig(
+                    url="git@github.com:test/missing.git",
+                    branch="main",
+                    path="./nonexistent",
+                ),
+            },
+            services={},
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        # Should not raise
+        runner._apply_startup_updates()
+
+    @patch("haniel.core.runner.ServiceRunner._apply_startup_updates")
+    @patch("haniel.core.runner.ServiceRunner._start_mcp_server")
+    @patch("haniel.core.runner.ServiceRunner.start_services")
+    def test_called_during_start(
+        self, mock_start_services, mock_mcp, mock_startup_updates, tmp_path: Path
+    ):
+        """_apply_startup_updates should be called during start()."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={},
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        runner.start()
+        mock_startup_updates.assert_called_once()
+        runner.stop()
+
+    @patch("haniel.core.runner.get_head", return_value="updated_head")
+    @patch("haniel.core.runner.pull_repo")
+    @patch("haniel.core.runner.fetch_repo", return_value=True)
+    def test_updates_repo_state_after_pull(
+        self, mock_fetch, mock_pull, mock_head, runner_with_repos
+    ):
+        """After pulling, repo state should be updated."""
+        runner_with_repos._apply_startup_updates()
+
+        # Check that non-self repos have updated state
+        for name, state in runner_with_repos._repo_states.items():
+            if name == "haniel-repo":
+                continue
+            assert state.last_head == "updated_head"
+            assert state.pending_changes is None
+            assert state.last_fetch is not None
