@@ -192,6 +192,8 @@ class Finalizer:
 
         if platform.system() == "Windows":
             self._register_winsw_service(service_cfg)
+        elif platform.system() == "Linux":
+            self._register_systemd_service(service_cfg)
         else:
             self._log_service_instructions(service_cfg)
 
@@ -419,6 +421,57 @@ class Finalizer:
         conf_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         logger.info(f"Generated wrapper configuration: {conf_path}")
 
+    def _generate_systemd_unit(self, service_cfg) -> str:
+        """Generate systemd unit file content for Haniel service."""
+        service_name = service_cfg.name
+        working_dir = service_cfg.working_directory.replace(
+            "{root}", str(self.config_dir)
+        )
+        env_lines = ""
+        if service_cfg.environment:
+            resolved_env = {
+                k: v.replace("{root}", str(self.config_dir))
+                for k, v in service_cfg.environment.items()
+            }
+            env_lines = "\n" + "\n".join(
+                f"Environment={k}={v}" for k, v in resolved_env.items()
+            )
+        # Use a display placeholder when haniel CLI is not yet installed (e.g. log-only paths).
+        # _register_systemd_service validates the binary separately before writing.
+        haniel_bin = shutil.which("haniel") or "haniel"
+        return (
+            f"[Unit]\nDescription={service_cfg.display or service_name}\n"
+            f"After=network.target\n\n"
+            f"[Service]\nType=simple\nWorkingDirectory={working_dir}\n"
+            f"ExecStart={haniel_bin} run haniel.yaml{env_lines}\n"
+            f"Restart=always\nRestartSec=5\n\n"
+            f"[Install]\nWantedBy=multi-user.target\n"
+        )
+
+    def _register_systemd_service(self, service_cfg) -> None:
+        """Write systemd unit file and enable it."""
+        if not shutil.which("haniel"):
+            raise RuntimeError(
+                "haniel CLI not found in PATH. "
+                "Ensure haniel is installed (pip install haniel) before registering the service."
+            )
+        unit_content = self._generate_systemd_unit(service_cfg)
+        service_name = service_cfg.name
+        unit_path = Path(f"/etc/systemd/system/{service_name}.service")
+        try:
+            unit_path.write_text(unit_content, encoding="utf-8")
+            subprocess.run(["systemctl", "daemon-reload"], check=True)
+            subprocess.run(["systemctl", "enable", service_name], check=True)
+            logger.info(f"systemd service '{service_name}' enabled")
+        except PermissionError:
+            logger.warning(
+                f"Permission denied writing to {unit_path}. "
+                "Run with sudo or manually copy the unit file."
+            )
+            self._log_service_instructions(service_cfg)
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"systemctl failed: {e}. Unit file written but not enabled.")
+
     def _log_service_instructions(self, service_cfg) -> None:
         """Log instructions for setting up service on non-Windows.
 
@@ -438,36 +491,8 @@ class Finalizer:
         logger.info(f"  cd {working_dir}")
         logger.info("  haniel run haniel.yaml")
         logger.info("")
-        # Resolve environment variables
-        env_lines = ""
-        if service_cfg.environment:
-            resolved_env = {
-                k: v.replace("{root}", str(self.config_dir))
-                for k, v in service_cfg.environment.items()
-            }
-            env_lines = "\n".join(
-                f"Environment={k}={v}" for k, v in resolved_env.items()
-            )
-            env_lines = "\n" + env_lines
-
-        logger.info("For systemd, create /etc/systemd/system/{service_name}.service:")
-        logger.info(
-            f"""
-[Unit]
-Description={service_cfg.display or service_name}
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory={working_dir}
-ExecStart=/usr/bin/python -m haniel.cli run haniel.yaml{env_lines}
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-"""
-        )
+        logger.info(f"For systemd, create /etc/systemd/system/{service_name}.service:")
+        logger.info(self._generate_systemd_unit(service_cfg))
         logger.info("")
         logger.info("Then run:")
         logger.info("  sudo systemctl daemon-reload")
