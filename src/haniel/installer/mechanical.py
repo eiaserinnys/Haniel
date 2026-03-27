@@ -149,6 +149,11 @@ class MechanicalInstaller:
 
         # Check Node.js
         if "node" in requirements:
+            _node_install_hint = (
+                "winget install OpenJS.NodeJS.LTS (or re-run install-haniel.ps1)"
+                if platform.system() == "Windows"
+                else "sudo apt install nodejs (or use nvm: https://github.com/nvm-sh/nvm)"
+            )
             try:
                 result = subprocess.run(
                     ["node", "--version"],
@@ -158,11 +163,7 @@ class MechanicalInstaller:
                 )
                 version = result.stdout.strip().lstrip("v")
                 passes, msg = self._check_version(version, str(requirements["node"]))
-                error_hint = (
-                    ""
-                    if passes
-                    else " Install newer version via: winget install OpenJS.NodeJS.LTS (or re-run install-haniel.ps1)"
-                )
+                error_hint = "" if passes else f" Install newer version via: {_node_install_hint}"
                 results.append(
                     {
                         "name": "node",
@@ -177,7 +178,7 @@ class MechanicalInstaller:
                     {
                         "name": "node",
                         "installed": False,
-                        "error": f"Node.js not found. Install via: winget install OpenJS.NodeJS.LTS (or re-run install-haniel.ps1). Detail: {e}",
+                        "error": f"Node.js not found. Install via: {_node_install_hint}. Detail: {e}",
                     }
                 )
 
@@ -596,7 +597,7 @@ class MechanicalInstaller:
         env = os.environ.copy()
         tool_paths = detect_tool_paths(commands)
         if tool_paths:
-            env["PATH"] = env.get("PATH", "") + ";" + ";".join(tool_paths)
+            env["PATH"] = env.get("PATH", "") + os.pathsep + os.pathsep.join(tool_paths)
         return env
 
     def create_static_configs(self) -> None:

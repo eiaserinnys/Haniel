@@ -220,6 +220,35 @@ class TestMechanicalInstaller:
             assert mock_run.called
 
 
+    @patch("platform.system")
+    def test_env_with_tool_paths_uses_os_pathsep(self, mock_system, sample_config):
+        """Test that PATH is joined with os.pathsep, not a hard-coded semicolon."""
+        import os
+        from haniel.installer.mechanical import MechanicalInstaller, detect_tool_paths
+        from haniel.installer.state import InstallState
+
+        mock_system.return_value = "Linux"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState()
+            installer = MechanicalInstaller(sample_config, config_dir, state)
+
+            fake_tool_path = "/usr/local/bin"
+            with patch(
+                "haniel.installer.mechanical.detect_tool_paths",
+                return_value=[fake_tool_path],
+            ):
+                env = installer._env_with_tool_paths(["node"])
+
+            path_entries = env["PATH"].split(os.pathsep)
+            assert fake_tool_path in path_entries
+            # On Linux os.pathsep is ':'; verify no Windows-style ';' separator
+            # in the injected segment
+            injected_part = env["PATH"][env["PATH"].rfind(os.pathsep) + 1 :]
+            assert ";" not in injected_part
+
+
 class TestInteractiveInstaller:
     """Tests for InteractiveInstaller MCP tools."""
 
@@ -504,19 +533,21 @@ class TestFinalizer:
 
     @patch("platform.system")
     def test_register_service_non_windows(self, mock_system, finalizer_config):
-        """Test service registration logs instructions on non-Windows."""
+        """Test service registration logs instructions on non-Windows/non-Linux (e.g. macOS)."""
         from haniel.installer.finalize import Finalizer
         from haniel.installer.state import InstallState
 
-        mock_system.return_value = "Linux"
+        mock_system.return_value = "Darwin"
 
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir)
             state = InstallState()
             finalizer = Finalizer(finalizer_config, config_dir, state)
 
-            # Should not raise, just log instructions
-            finalizer.register_service()
+            # Should not raise — _log_service_instructions is called on non-Linux
+            with patch.object(finalizer, "_log_service_instructions") as mock_log:
+                finalizer.register_service()
+                mock_log.assert_called_once()
 
     def test_register_service_no_service_config(self):
         """Test that register_service skips when no service is configured."""
@@ -532,6 +563,63 @@ class TestFinalizer:
 
             # Should not raise
             finalizer.register_service()
+
+    def test_generate_systemd_unit_content(self, finalizer_config):
+        """Test that generated unit file contains required sections."""
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState()
+            finalizer = Finalizer(finalizer_config, config_dir, state)
+
+            service_cfg = finalizer_config.install.service
+            unit = finalizer._generate_systemd_unit(service_cfg)
+
+            assert "WorkingDirectory=" in unit
+            assert "ExecStart=" in unit
+            assert "WantedBy=multi-user.target" in unit
+
+    @patch("subprocess.run")
+    @patch("haniel.installer.finalize.Path.write_text")
+    @patch("haniel.installer.finalize.shutil.which")
+    def test_register_systemd_service_calls_systemctl(
+        self, mock_which, mock_write, mock_run, finalizer_config
+    ):
+        """Test that _register_systemd_service calls daemon-reload and enable."""
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+
+        mock_which.return_value = "/usr/local/bin/haniel"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState()
+            finalizer = Finalizer(finalizer_config, config_dir, state)
+
+            service_cfg = finalizer_config.install.service
+            finalizer._register_systemd_service(service_cfg)
+
+            assert any("daemon-reload" in str(c) for c in mock_run.call_args_list)
+            assert any("enable" in str(c) for c in mock_run.call_args_list)
+
+    @patch("platform.system")
+    def test_register_service_linux_branch(self, mock_system, finalizer_config):
+        """Test that register_service dispatches to _register_systemd_service on Linux."""
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+
+        mock_system.return_value = "Linux"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            state = InstallState()
+            finalizer = Finalizer(finalizer_config, config_dir, state)
+
+            with patch.object(finalizer, "_register_systemd_service") as mock_reg:
+                finalizer.register_service()
+                mock_reg.assert_called_once_with(finalizer_config.install.service)
 
 
 class TestInstallOrchestrator:
@@ -1731,9 +1819,8 @@ class TestFinalizerExtended:
                 or f'name="PYTHONPATH" value="{str(config_dir)}/src"' in xml_content
             )
 
-    @patch("platform.system")
-    def test_systemd_environment_resolves_root_template(self, mock_system):
-        """Test that {root} in service environment is resolved in systemd instructions."""
+    def test_systemd_environment_resolves_root_template(self):
+        """Test that {root} in service environment is resolved in generated unit."""
         from haniel.installer.finalize import Finalizer
         from haniel.installer.state import InstallState
 
@@ -1750,23 +1837,16 @@ class TestFinalizerExtended:
             ),
         )
 
-        mock_system.return_value = "Linux"
-
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir)
             state = InstallState()
             finalizer = Finalizer(config, config_dir, state)
 
-            # Should not raise; just logs instructions
-            with patch("haniel.installer.finalize.logger") as mock_logger:
-                finalizer.register_service()
+            service_cfg = config.install.service
+            unit = finalizer._generate_systemd_unit(service_cfg)
 
-                # Find the log call containing Environment=
-                logged_texts = [str(call) for call in mock_logger.info.call_args_list]
-                joined = " ".join(logged_texts)
-
-                assert "Environment=PYTHONPATH=" in joined
-                assert "{root}" not in joined
+            assert "Environment=PYTHONPATH=" in unit
+            assert "{root}" not in unit
 
 
 class TestServiceAccount:
