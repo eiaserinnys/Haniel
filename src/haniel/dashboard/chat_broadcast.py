@@ -25,7 +25,9 @@ class ChatBroadcaster:
             if not watchers:
                 del self._watchers[session_id]
 
-    async def broadcast(self, session_id: str, event: dict) -> None:
+    async def broadcast(
+        self, session_id: str, event: dict, exclude: "WebSocket | None" = None
+    ) -> None:
         """Broadcast to all watchers. Dead connections are auto-removed."""
         watchers = set(self._watchers.get(session_id, ()))
         if not watchers:
@@ -33,6 +35,8 @@ class ChatBroadcaster:
         dead: set[WebSocket] = set()
         payload = json.dumps(event)
         for ws in watchers:
+            if ws is exclude:
+                continue
             try:
                 await ws.send_text(payload)
             except Exception:

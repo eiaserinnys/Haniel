@@ -258,9 +258,10 @@ class ChatWebSocket:
                         except Exception as e:
                             logger.warning("Slack error relay failed: %s", e)
 
-            # Broadcast to other dashboard clients watching this session (slack-initiated)
+            # Broadcast to other dashboard clients watching this session.
+            # Exclude the originating ws — it already received the event via _send above.
             if self._broadcaster and actual_session_id:
-                await self._broadcaster.broadcast(actual_session_id, event)
+                await self._broadcaster.broadcast(actual_session_id, event, exclude=ws)
 
         return actual_session_id or raw_session_id
 
