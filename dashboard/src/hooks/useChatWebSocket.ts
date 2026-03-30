@@ -46,6 +46,8 @@ export function useChatWebSocket(): UseChatWebSocket {
   const retryDelayRef = useRef(INITIAL_DELAY);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
+  const connectionIdRef = useRef(0);
+  const handleServerMessageRef = useRef<(raw: string) => void>(() => {});
 
   const sendRaw = useCallback((data: object) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -186,8 +188,14 @@ export function useChatWebSocket(): UseChatWebSocket {
     }
   }, [sendRaw]);
 
+  // Keep ref in sync so connect's stable closure always calls the latest version
+  useEffect(() => {
+    handleServerMessageRef.current = handleServerMessage;
+  });
+
   const connect = useCallback(() => {
     if (!mountedRef.current) return;
+    const myId = ++connectionIdRef.current;
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const url = `${protocol}//${window.location.host}/ws/chat`;
@@ -195,7 +203,7 @@ export function useChatWebSocket(): UseChatWebSocket {
     wsRef.current = ws;
 
     ws.onopen = () => {
-      if (!mountedRef.current) { ws.close(); return; }
+      if (!mountedRef.current || myId !== connectionIdRef.current) { ws.close(); return; }
       setConnected(true);
       retryDelayRef.current = INITIAL_DELAY;
       // Auto-load sessions on connect
@@ -203,14 +211,14 @@ export function useChatWebSocket(): UseChatWebSocket {
     };
 
     ws.onmessage = (ev) => {
-      if (!mountedRef.current) return;
-      handleServerMessage(ev.data as string);
+      if (!mountedRef.current || myId !== connectionIdRef.current) return;
+      handleServerMessageRef.current(ev.data as string);
     };
 
     ws.onerror = () => { /* onerror always precedes onclose */ };
 
     ws.onclose = () => {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || myId !== connectionIdRef.current) return;
       wsRef.current = null;
       setConnected(false);
 
@@ -220,7 +228,7 @@ export function useChatWebSocket(): UseChatWebSocket {
         if (mountedRef.current) connect();
       }, delay);
     };
-  }, [handleServerMessage]);
+  }, []); // stable — no deps needed; uses refs for latest values
 
   useEffect(() => {
     mountedRef.current = true;
@@ -230,7 +238,7 @@ export function useChatWebSocket(): UseChatWebSocket {
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
       wsRef.current?.close();
     };
-  }, [connect]);
+  }, []); // connect is stable, so [] is correct
 
   const sendMessage = useCallback(
     (text: string) => {

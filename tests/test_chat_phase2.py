@@ -129,6 +129,44 @@ class TestChatBroadcaster:
         broadcaster = ChatBroadcaster()
         await broadcaster.broadcast("no-watchers", {"type": "ping"})  # no exception
 
+    @pytest.mark.asyncio
+    async def test_broadcast_exclude_skips_sender(self):
+        """broadcast with exclude= does not send to the excluded WebSocket."""
+        broadcaster = ChatBroadcaster()
+        sender_ws = MagicMock()
+        sender_ws.send_text = AsyncMock()
+        other_ws = MagicMock()
+        other_ws.send_text = AsyncMock()
+
+        broadcaster.register("sess-x", sender_ws)
+        broadcaster.register("sess-x", other_ws)
+
+        event = {"type": "text_delta", "delta": "hi"}
+        await broadcaster.broadcast("sess-x", event, exclude=sender_ws)
+
+        # sender should NOT receive the message
+        sender_ws.send_text.assert_not_awaited()
+        # other watcher should receive the message
+        other_ws.send_text.assert_awaited_once_with(json.dumps(event))
+
+    @pytest.mark.asyncio
+    async def test_broadcast_exclude_none_sends_to_all(self):
+        """broadcast with exclude=None (default) sends to all watchers."""
+        broadcaster = ChatBroadcaster()
+        ws1 = MagicMock()
+        ws1.send_text = AsyncMock()
+        ws2 = MagicMock()
+        ws2.send_text = AsyncMock()
+
+        broadcaster.register("sess-y", ws1)
+        broadcaster.register("sess-y", ws2)
+
+        event = {"type": "ping"}
+        await broadcaster.broadcast("sess-y", event)
+
+        ws1.send_text.assert_awaited_once_with(json.dumps(event))
+        ws2.send_text.assert_awaited_once_with(json.dumps(event))
+
 
 # ── ClaudeSessionManager: Slack binding ───────────────────────────────────────
 
