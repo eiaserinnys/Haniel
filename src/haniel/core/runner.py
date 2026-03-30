@@ -596,11 +596,12 @@ class ServiceRunner:
         # Initialize repo states (get current HEAD)
         self._init_repo_states()
 
+        # Start Slack bot if configured (must precede MCP server so _slack_bot
+        # is available when setup_dashboard() is called inside _start_mcp_server)
+        self._start_slack_bot()
+
         # Start MCP server if enabled
         self._start_mcp_server()
-
-        # Start Slack bot if configured
-        self._start_slack_bot()
 
         # Apply pending updates before starting services
         self._apply_startup_updates()
