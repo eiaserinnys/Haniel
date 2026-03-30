@@ -60,6 +60,65 @@ These apply to every workflow below. Internalize them — don't treat them as a 
 | `haniel_update_repo_config` | Modifies an existing repo in haniel.yaml | Config change (needs reload) |
 | `haniel_delete_repo_config` | Removes a repo from haniel.yaml | Config change (needs reload) |
 
+## Config Reference
+
+### Service config fields
+
+```yaml
+name:
+  run: "python -m my_app"       # Required. The command to start the service.
+  cwd: "./repos/my-app"         # Required. Working directory for the run command.
+  repo: "my-repo"               # Optional. Links the service to a repo (for auto-deploy).
+  after:                        # Optional. Services that must be running before this one starts.
+    - other-service
+  ready: "port:8080"            # Optional. How Haniel knows the service is up. See below.
+  enabled: true                 # Optional. Set false to prevent Haniel from starting this service.
+  hooks:
+    post_pull: "pip install -r requirements.txt"  # Runs after git pull, before service restart.
+    pre_start: null             # Runs just before the service process is launched.
+  shutdown:
+    signal: SIGTERM             # Signal sent to stop the process (default: SIGTERM).
+    timeout: 15                 # Seconds to wait for graceful shutdown before escalating.
+    method: null                # null or "http". If "http", sends a request to endpoint instead.
+    endpoint: null              # HTTP endpoint to call for shutdown (if method is "http").
+```
+
+**`ready` condition types:**
+
+| Format | Example | What it waits for |
+|---|---|---|
+| `port:N` | `port:8080` | TCP port N to accept connections |
+| `delay:N` | `delay:5` | N seconds to pass after process starts |
+| `log:pattern` | `log:Server started` | A matching string to appear in stdout |
+| `http:url` | `http:http://localhost:8080/health` | The URL to return HTTP 200 |
+
+If `ready` is omitted, Haniel considers the service ready immediately after process launch.
+
+**`after` and startup ordering:**
+
+Services listed in `after` must be in a running+ready state before this service starts.
+Haniel uses topological sort (Kahn's algorithm) to determine the full startup order.
+If a circular dependency is detected, Haniel will refuse to start the affected services.
+
+### Repo config fields
+
+```yaml
+name:
+  url: "https://github.com/org/repo"  # Required. Git remote URL.
+  branch: "main"                       # Required. Branch to track.
+  path: "./repos/my-repo"              # Required. Local path to clone into.
+  pull_strategy: null                  # null (default merge) or "force" (git reset --hard origin/<branch>).
+  hooks:
+    post_pull: "pnpm install"          # Runs after every successful git pull for this repo.
+```
+
+**When to use `pull_strategy: "force"`:**
+
+Use `force` only when the repo may accumulate local changes that would block a normal merge
+(e.g. auto-generated files committed by the service itself, or a repo that is never edited locally).
+For all other repos, leave `pull_strategy` as `null` — a failed merge will surface as an error
+rather than silently discarding local work.
+
 ## Workflows
 
 ### 1. Health Check & Troubleshooting
@@ -85,6 +144,12 @@ Read the logs carefully. Look for:
 - Timestamps — when did the problem start?
 - Dependency failures — is this service failing because something else is down?
 
+**Circuit breaker:** If a service crashes more than a configured number of times within a short
+window, Haniel trips the circuit breaker and stops trying to restart it automatically. The service
+will stay stopped until you reset it with `haniel_enable`. Always fix the root cause first —
+resetting the circuit breaker without fixing the underlying problem just puts the service back into
+a crash loop.
+
 **Step 3 — Report and recommend**
 
 Tell the user what you found in plain language, with the actual error in a blockquote.
@@ -107,18 +172,21 @@ haniel_check_updates()
 
 This shows which repos have upstream changes. Share the results with the user.
 
+If `auto_apply` is `false` in haniel.yaml, Haniel detects changes but does not deploy them
+automatically — they sit pending until manually triggered. `haniel_check_updates` will show
+these as waiting. To deploy, proceed to Step 2.
+
 **Step 2 — Pull and restart**
 
-For a specific repo:
+For a specific repo (restarts all services that depend on it):
 
 ```
 haniel_pull(repo=<name>)
 ```
 
-This pulls the repo AND restarts all services that depend on it.
 Tell the user which services will restart before doing this.
 
-For a specific service (pulls its repo and restarts just that service):
+For a specific service only (pulls its repo and restarts just that service):
 
 ```
 haniel_update(service=<name>)
@@ -140,27 +208,43 @@ When the user wants to register a new service:
 
 **Step 1 — Add the repo** (if it's not already registered)
 
+Ask the user for the GitHub URL, the branch to track, and where to clone it.
+If the repo contains generated or auto-committed files that could block merges, ask whether
+`pull_strategy: "force"` is appropriate.
+
 ```
 haniel_create_repo_config(name=<repo-name>, config={
   "url": "https://github.com/org/repo",
   "branch": "main",
-  "path": "repos/<repo-name>"
+  "path": "repos/<repo-name>",
+  "pull_strategy": null,
+  "hooks": {
+    "post_pull": "pip install -r requirements.txt"  # omit if not needed
+  }
 })
 ```
 
 **Step 2 — Add the service**
+
+Ask the user for any details you don't have. Key questions:
+- What command starts the service? (required)
+- What is the working directory? (required)
+- Does this service depend on other services being up first? (`after`)
+- How do we know it's ready? (`ready` — port, delay, log pattern, or HTTP endpoint)
+- Does the repo need any setup after a pull? (`hooks.post_pull`)
 
 ```
 haniel_create_service_config(name=<service-name>, config={
   "repo": "<repo-name>",
   "run": "<start command>",
   "cwd": "<working directory>",
-  "ready": "<readiness check if applicable>"
+  "after": ["<dependency-service>"],      # omit if no dependencies
+  "ready": "port:8080",                   # omit if no readiness check needed
+  "hooks": {
+    "post_pull": "<setup command>"        # omit if not needed
+  }
 })
 ```
-
-Ask the user for any details you don't have — the start command, working directory,
-environment variables, dependencies on other services, etc.
 
 **Step 3 — Apply and start**
 

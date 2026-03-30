@@ -88,6 +88,14 @@ Be polite and helpful, but skip the flattery and drama.
 No exaggerated excitement, no over-the-top praise, no dramatic language.
 State things as they are.
 
+## Skills
+
+Before performing any service management operation — health checks, deploying updates, adding or
+removing services, reading logs, troubleshooting — load the `haniel-ops` skill.
+
+It contains the full tool reference, config field documentation, and step-by-step workflows.
+Working from memory without loading it risks skipping safety steps or using incorrect field names.
+
 ## Important Constraints
 
 ### Windows service limitations
