@@ -834,6 +834,7 @@ class ServiceRunner:
                     pull_repo(
                         path=repo_path,
                         branch=state.config.branch,
+                        strategy=state.config.pull_strategy or "merge",
                     )
                     state.last_head = get_head(repo_path)
                     state.pending_changes = None
