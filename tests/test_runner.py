@@ -1434,3 +1434,67 @@ class TestStartupUpdates:
             assert state.last_head == "updated_head"
             assert state.pending_changes is None
             assert state.last_fetch is not None
+
+    @patch("haniel.core.runner.get_head", return_value="new_head")
+    @patch("haniel.core.runner.pull_repo")
+    @patch("haniel.core.runner.fetch_repo", return_value=True)
+    def test_startup_pull_uses_pull_strategy_force(
+        self, mock_fetch, mock_pull, mock_head, tmp_path: Path
+    ):
+        """pull_strategy: force should be passed to pull_repo() during startup pull."""
+        from haniel.config import SelfUpdateConfig
+
+        for name in ["repo-a"]:
+            repo_path = tmp_path / name
+            repo_path.mkdir()
+            (repo_path / ".git").mkdir()
+
+        config = HanielConfig(
+            poll_interval=5,
+            repos={
+                "repo-a": RepoConfig(
+                    url="git@github.com:test/a.git",
+                    branch="main",
+                    path="./repo-a",
+                    pull_strategy="force",
+                ),
+            },
+            services={},
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        runner._apply_startup_updates()
+
+        mock_pull.assert_called_once()
+        _, kwargs = mock_pull.call_args
+        assert kwargs.get("strategy") == "force"
+
+    @patch("haniel.core.runner.get_head", return_value="new_head")
+    @patch("haniel.core.runner.pull_repo")
+    @patch("haniel.core.runner.fetch_repo", return_value=True)
+    def test_startup_pull_defaults_to_merge_when_strategy_is_none(
+        self, mock_fetch, mock_pull, mock_head, tmp_path: Path
+    ):
+        """pull_strategy: None should default to 'merge' during startup pull."""
+        for name in ["repo-b"]:
+            repo_path = tmp_path / name
+            repo_path.mkdir()
+            (repo_path / ".git").mkdir()
+
+        config = HanielConfig(
+            poll_interval=5,
+            repos={
+                "repo-b": RepoConfig(
+                    url="git@github.com:test/b.git",
+                    branch="main",
+                    path="./repo-b",
+                    pull_strategy=None,
+                ),
+            },
+            services={},
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        runner._apply_startup_updates()
+
+        mock_pull.assert_called_once()
+        _, kwargs = mock_pull.call_args
+        assert kwargs.get("strategy") == "merge"
