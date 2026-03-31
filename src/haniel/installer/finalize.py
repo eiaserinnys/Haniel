@@ -74,8 +74,8 @@ class Finalizer:
         for name, cfg in self.config.install.configs.items():
             if cfg.keys:
                 for key_cfg in cfg.keys:
-                    # Skip keys with defaults
-                    if key_cfg.default:
+                    # Skip keys with defaults (empty string is a valid default)
+                    if key_cfg.default is not None:
                         continue
 
                     # Check if value is set
@@ -113,7 +113,7 @@ class Finalizer:
                 value = self.state.config_values.get(name, {}).get(key_cfg.key)
 
                 # Fall back to default
-                if value is None and key_cfg.default:
+                if value is None and key_cfg.default is not None:
                     value = key_cfg.default
 
                 if value is not None:
