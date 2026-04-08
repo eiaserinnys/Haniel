@@ -456,10 +456,11 @@ class ServiceRunner:
         logger.info(f"Executing {hook_name} hook for {service_name}: {hook_cmd}")
 
         try:
-            # On Windows, use shell=True to support .cmd/.bat executables (pnpm,
-            # npx, etc.) and shell operators (&&, ||).  Pass the command as a
-            # string so CreateProcess / cmd.exe handle it natively.
-            if os.name == "nt":
+            # Use shell=True when the command contains shell operators (&&, ||,
+            # ;, |) so they are interpreted correctly on all platforms.
+            # On Windows this is always needed for .cmd/.bat executables too.
+            shell_operators = re.search(r"&&|\|\||[;|]", hook_cmd)
+            if os.name == "nt" or shell_operators:
                 run_cmd: str | list[str] = hook_cmd
                 shell = True
             else:
