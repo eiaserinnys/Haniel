@@ -306,6 +306,9 @@ class ServiceRunner:
         # Slack bot (initialized in start() if configured)
         self._slack_bot: "SlackBot | None" = None
 
+        # Orchestrator client (initialized in start() if configured)
+        self._orch_client: "OrchestratorClient | None" = None
+
         # Per-repo pull locks: acquire(blocking=False) for atomic duplicate guard
         self._pull_locks: dict[str, threading.Lock] = {
             name: threading.Lock() for name in self._repo_states
@@ -603,6 +606,9 @@ class ServiceRunner:
         # Start Slack bot if configured
         self._start_slack_bot()
 
+        # Start orchestrator client if configured
+        self._start_orch_client()
+
         # Apply pending updates before starting services
         self._apply_startup_updates()
 
@@ -644,6 +650,10 @@ class ServiceRunner:
         # Wait for poll thread
         if self._poll_thread and self._poll_thread.is_alive():
             self._poll_thread.join(timeout=5)
+
+        # Stop orchestrator client (after poll thread to avoid race with notify_change)
+        if self._orch_client:
+            self._orch_client.stop()
 
         # Stop services
         self.stop_services()
@@ -691,6 +701,25 @@ class ServiceRunner:
         except Exception as e:
             logger.error("Failed to start Slack bot: %s", e)
             self._slack_bot = None
+
+    def _start_orch_client(self) -> None:
+        """Start orchestrator client if configured."""
+        orch_cfg = self.config.orchestrator_client
+        if orch_cfg is None or not orch_cfg.enabled:
+            return
+        try:
+            from ..integrations.orchestrator_client import OrchestratorClient
+            import haniel
+
+            self._orch_client = OrchestratorClient(
+                config=orch_cfg,
+                haniel_version=haniel.__version__,
+            )
+            self._orch_client.start()
+            logger.info("Orchestrator client started")
+        except Exception as e:
+            logger.warning(f"Failed to start orchestrator client: {e}")
+            self._orch_client = None
 
     def trigger_pull(self, repo_name: str, auto: bool = False) -> None:
         """Pull changes for a repository and restart affected services.
@@ -943,6 +972,17 @@ class ServiceRunner:
                         path=repo_path,
                         branch=state.config.branch,
                     )
+                    # Notify orchestrator (if connected)
+                    if self._orch_client and state.pending_changes:
+                        commits = state.pending_changes.get("commits", [])
+                        if commits:
+                            self._orch_client.notify_change(
+                                repo=name,
+                                branch=state.config.branch,
+                                commits=commits,
+                                affected_services=self.get_affected_services(name),
+                                diff_stat=state.pending_changes.get("stat"),
+                            )
                     if self._ws_handler is not None:
                         self._ws_handler.broadcast_repo_change(
                             name, state.pending_changes or {}
@@ -969,6 +1009,17 @@ class ServiceRunner:
                             path=repo_path,
                             branch=state.config.branch,
                         )
+                        # Notify orchestrator (if connected)
+                        if self._orch_client and state.pending_changes:
+                            commits = state.pending_changes.get("commits", [])
+                            if commits:
+                                self._orch_client.notify_change(
+                                    repo=name,
+                                    branch=state.config.branch,
+                                    commits=commits,
+                                    affected_services=self.get_affected_services(name),
+                                    diff_stat=state.pending_changes.get("stat"),
+                                )
                         if self._ws_handler is not None:
                             self._ws_handler.broadcast_repo_change(
                                 name, state.pending_changes or {}
