@@ -284,6 +284,27 @@ class SlackBotConfig(BaseModel):
     )
 
 
+class OrchestratorClientConfig(BaseModel):
+    """Configuration for connecting to a remote orchestrator server."""
+
+    enabled: bool = Field(default=True, description="Whether to connect to orchestrator")
+    url: str = Field(
+        ..., description="Orchestrator WebSocket URL (wss://host/ws/node)"
+    )
+    token: str = Field(
+        ..., description="Authentication token — shared secret with OrchestratorConfig.token"
+    )
+    node_id: str = Field(
+        ..., description="This node's identifier"
+    )
+    reconnect_base: float = Field(
+        default=1.0, description="Base reconnect delay in seconds"
+    )
+    reconnect_max: float = Field(
+        default=60.0, description="Max reconnect delay in seconds"
+    )
+
+
 class HanielConfig(BaseModel):
     """Root configuration for haniel.yaml."""
 
@@ -322,6 +343,9 @@ class HanielConfig(BaseModel):
     )
     self_update: SelfUpdateConfig | None = Field(
         default=None, alias="self", description="Self-update configuration"
+    )
+    orchestrator_client: OrchestratorClientConfig | None = Field(
+        default=None, description="Orchestrator client configuration"
     )
 
 

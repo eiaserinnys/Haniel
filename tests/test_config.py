@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from pydantic import ValidationError
+
 from haniel.config import (
     HanielConfig,
     RepoConfig,
@@ -12,6 +14,7 @@ from haniel.config import (
     BackoffConfig,
     load_config,
 )
+from haniel.config.model import OrchestratorClientConfig
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -263,3 +266,55 @@ services:
         config_file.write_text(yaml_content)
         config = load_config(config_file)
         assert config.services["test"].reflect is False
+
+
+class TestOrchestratorClientConfig:
+    """Tests for OrchestratorClientConfig schema."""
+
+    def test_valid_config(self):
+        cfg = OrchestratorClientConfig(
+            url="wss://orch.example.com/ws/node",
+            token="secret",
+            node_id="node-1",
+        )
+        assert cfg.url == "wss://orch.example.com/ws/node"
+        assert cfg.token == "secret"
+        assert cfg.node_id == "node-1"
+
+    def test_defaults(self):
+        cfg = OrchestratorClientConfig(
+            url="ws://localhost:9300/ws/node",
+            token="t",
+            node_id="n1",
+        )
+        assert cfg.enabled is True
+        assert cfg.reconnect_base == 1.0
+        assert cfg.reconnect_max == 60.0
+
+    def test_missing_url_raises(self):
+        with pytest.raises(ValidationError):
+            OrchestratorClientConfig(token="t", node_id="n1")
+
+    def test_missing_token_raises(self):
+        with pytest.raises(ValidationError):
+            OrchestratorClientConfig(url="ws://localhost/ws/node", node_id="n1")
+
+    def test_missing_node_id_raises(self):
+        with pytest.raises(ValidationError):
+            OrchestratorClientConfig(url="ws://localhost/ws/node", token="t")
+
+    def test_haniel_config_orchestrator_client_default_none(self):
+        """HanielConfig should have orchestrator_client=None by default."""
+        config = HanielConfig()
+        assert config.orchestrator_client is None
+
+    def test_haniel_config_with_orchestrator_client(self):
+        config = HanielConfig(
+            orchestrator_client=OrchestratorClientConfig(
+                url="ws://localhost:9300/ws/node",
+                token="secret",
+                node_id="node-1",
+            )
+        )
+        assert config.orchestrator_client is not None
+        assert config.orchestrator_client.node_id == "node-1"
