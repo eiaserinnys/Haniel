@@ -182,3 +182,189 @@ class TestStartStop:
 
             keep_alive.set()
             client.stop()
+
+
+class TestParseDeployId:
+    def test_parses_valid(self):
+        result = OrchestratorClient._parse_deploy_id("node-1:my-repo:main:abc1234")
+        assert result == ("node-1", "my-repo", "main", "abc1234")
+
+    def test_too_few_parts(self):
+        assert OrchestratorClient._parse_deploy_id("a:b:c") is None
+
+    def test_empty(self):
+        assert OrchestratorClient._parse_deploy_id("") is None
+
+    def test_non_string(self):
+        assert OrchestratorClient._parse_deploy_id(None) is None  # type: ignore[arg-type]
+
+    def test_extra_colons_in_4th(self):
+        # split(':', 3) keeps any extra ':' inside the 4th element
+        result = OrchestratorClient._parse_deploy_id("n:r:b:h:extra")
+        assert result == ("n", "r", "b", "h:extra")
+
+
+class TestHandleDeployApproval:
+    @staticmethod
+    def _capture_send_json(client):
+        sent = []
+
+        async def fake_send_json(msg):
+            sent.append(msg)
+
+        client._send_json = fake_send_json  # type: ignore[assignment]
+        return sent
+
+    async def test_invalid_format_sends_failed(self, config):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+        sent = self._capture_send_json(client)
+        await client._handle_deploy_approval({"deploy_id": "badformat"})
+        assert len(sent) == 1
+        assert sent[0]["type"] == "deploy_result"
+        assert sent[0]["status"] == "failed"
+        assert "invalid deploy_id format" in sent[0]["error"]
+        assert sent[0]["node_id"] == config.node_id
+
+    async def test_node_id_mismatch_sends_failed(self, config):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+        sent = self._capture_send_json(client)
+        await client._handle_deploy_approval(
+            {"deploy_id": "other-node:repo:main:abc1234"}
+        )
+        assert sent[0]["status"] == "failed"
+        assert "node mismatch" in sent[0]["error"]
+
+    async def test_no_handler_sends_failed(self, config):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+        sent = self._capture_send_json(client)
+        await client._handle_deploy_approval(
+            {"deploy_id": f"{config.node_id}:repo:main:abc1234"}
+        )
+        assert sent[0]["status"] == "failed"
+        assert "no deploy_approval handler" in sent[0]["error"]
+
+    async def test_success_sends_success(self, config):
+        called = []
+
+        def handler(deploy_id, repo, branch):
+            called.append((deploy_id, repo, branch))
+            return None
+
+        client = OrchestratorClient(
+            config, haniel_version="0.1.0",
+            deploy_approval_handler=handler,
+        )
+        sent = self._capture_send_json(client)
+        await client._handle_deploy_approval(
+            {"deploy_id": f"{config.node_id}:repo:main:abc1234"}
+        )
+        assert called == [
+            (f"{config.node_id}:repo:main:abc1234", "repo", "main")
+        ]
+        assert sent[0]["status"] == "success"
+        assert sent[0]["error"] is None
+        assert sent[0]["duration_ms"] is not None
+        assert sent[0]["duration_ms"] >= 0
+
+    async def test_handler_raises_sends_failed(self, config):
+        def handler(deploy_id, repo, branch):
+            raise RuntimeError("boom")
+
+        client = OrchestratorClient(
+            config, haniel_version="0.1.0",
+            deploy_approval_handler=handler,
+        )
+        sent = self._capture_send_json(client)
+        await client._handle_deploy_approval(
+            {"deploy_id": f"{config.node_id}:repo:main:abc1234"}
+        )
+        assert sent[0]["status"] == "failed"
+        assert sent[0]["error"] == "boom"
+        assert sent[0]["duration_ms"] is not None
+
+    async def test_deferred_does_not_send(self, config):
+        def handler(deploy_id, repo, branch):
+            return "deferred"
+
+        client = OrchestratorClient(
+            config, haniel_version="0.1.0",
+            deploy_approval_handler=handler,
+        )
+        sent = self._capture_send_json(client)
+        await client._handle_deploy_approval(
+            {"deploy_id": f"{config.node_id}:repo:main:abc1234"}
+        )
+        assert sent == []
+
+
+class TestEnqueueDeployResult:
+    def test_buffers_when_disconnected(self, config):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+        client.enqueue_deploy_result("d1", "success", duration_ms=1234)
+        with client._pending_lock:
+            assert len(client._pending_deploy_results) == 1
+            msg = client._pending_deploy_results[0]
+            assert msg["type"] == "deploy_result"
+            assert msg["deploy_id"] == "d1"
+            assert msg["status"] == "success"
+            assert msg["duration_ms"] == 1234
+            assert msg["error"] is None
+            assert msg["node_id"] == config.node_id
+
+    def test_buffers_with_error(self, config):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+        client.enqueue_deploy_result("d2", "failed", error="boom")
+        with client._pending_lock:
+            assert client._pending_deploy_results[0]["error"] == "boom"
+            assert client._pending_deploy_results[0]["status"] == "failed"
+            assert client._pending_deploy_results[0]["duration_ms"] is None
+
+    async def test_flush_sends_pending(self, config):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+        client.enqueue_deploy_result("d1", "success")
+        client.enqueue_deploy_result("d2", "failed", error="boom")
+
+        sent = []
+
+        async def fake_send_json(msg):
+            sent.append(msg)
+
+        client._send_json = fake_send_json  # type: ignore[assignment]
+        await client._flush_pending_deploy_results()
+        assert len(sent) == 2
+        assert sent[0]["deploy_id"] == "d1"
+        assert sent[1]["deploy_id"] == "d2"
+        assert sent[1]["error"] == "boom"
+        with client._pending_lock:
+            assert client._pending_deploy_results == []
+
+    async def test_flush_requeues_on_failure(self, config):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+        client.enqueue_deploy_result("d1", "success")
+        client.enqueue_deploy_result("d2", "success")
+
+        sent = []
+
+        async def fake_send_json(msg):
+            if len(sent) >= 1:
+                raise OSError("connection lost")
+            sent.append(msg)
+
+        client._send_json = fake_send_json  # type: ignore[assignment]
+        await client._flush_pending_deploy_results()
+        assert len(sent) == 1
+        # d2 was attempted, failed, and re-queued (order preserved)
+        with client._pending_lock:
+            assert len(client._pending_deploy_results) == 1
+            assert client._pending_deploy_results[0]["deploy_id"] == "d2"
+
+    async def test_flush_with_empty_buffer_noop(self, config):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+        sent = []
+
+        async def fake_send_json(msg):
+            sent.append(msg)
+
+        client._send_json = fake_send_json  # type: ignore[assignment]
+        await client._flush_pending_deploy_results()
+        assert sent == []
