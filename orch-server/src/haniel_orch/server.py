@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import os
 import pathlib
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from typing import Literal
 
 from pydantic import BaseModel
@@ -114,27 +116,26 @@ class OrchestratorServer:
             ]
             logger.info(f"Dashboard mounted from {dashboard_dir}")
 
+        @asynccontextmanager
+        async def lifespan(app: Starlette) -> AsyncGenerator[None, None]:
+            # startup
+            await self._store.initialize()
+            await self._hub.start_heartbeat_checker()
+            logger.info(
+                f"Orchestrator started on {self._config.host}:{self._config.port}"
+            )
+            yield
+            # shutdown
+            await self._hub.shutdown()
+            await self._push.close()
+            await self._store.close()
+            logger.info("Orchestrator shut down")
+
         self._app = Starlette(
             routes=api_routes + ws_routes + dashboard_routes,
-            on_startup=[self._on_startup],
-            on_shutdown=[self._on_shutdown],
+            lifespan=lifespan,
         )
         return self._app
-
-    async def _on_startup(self) -> None:
-        """Initialize store and start heartbeat checker."""
-        await self._store.initialize()
-        await self._hub.start_heartbeat_checker()
-        logger.info(
-            f"Orchestrator started on {self._config.host}:{self._config.port}"
-        )
-
-    async def _on_shutdown(self) -> None:
-        """Graceful shutdown: hub + push + store."""
-        await self._hub.shutdown()
-        await self._push.close()
-        await self._store.close()
-        logger.info("Orchestrator shut down")
 
 
 def create_app() -> Starlette:
