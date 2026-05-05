@@ -1014,3 +1014,19 @@ h1 {
 @keyframes orch-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .svc-btn[data-in-flight] svg { animation: orch-spin 0.8s linear infinite; transform-origin: center; }
 .svc-btn[disabled] { opacity: 0.6; cursor: not-allowed; }
+
+/* ── Deploying pill (PendingView for in-flight deploys) ── */
+.deploying-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber) 30%, transparent);
+}
+.deploying-pill svg { animation: orch-spin 1.2s linear infinite; transform-origin: center; }
+.pending-card.is-deploying { opacity: 0.92; }

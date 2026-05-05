@@ -61,6 +61,12 @@ export interface StatusChangeEvent {
   deploy_id: string;
   status: DeployStatus;
   node_id: string;
+  // Present when an entry is rejected (explicit user reject) or auto-superseded
+  // by a newer deploy in the same (node, repo, branch). For supersede, the
+  // value starts with 'superseded by '. NOTE: there is no separate
+  // 'superseded' DeployStatus value — supersede is detected as
+  // status === 'rejected' && reject_reason?.startsWith('superseded').
+  reject_reason?: string | null;
 }
 
 export interface NodeConnectedEvent {
@@ -115,6 +121,10 @@ export interface InFlightCommand {
   nodeId: string;
   serviceName: string;
   action: 'restart' | 'stop';
+  // Date.now() at insertion. Used by useInFlightCommands.removeWithMinDelay
+  // to enforce a minimum spinner display window even when the node responds
+  // very fast.
+  addedAt: number;
 }
 
 // Page navigation

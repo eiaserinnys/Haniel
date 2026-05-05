@@ -16,7 +16,11 @@ export function PendingView({ deploys, onApprove, onReject, onApproveAll }: Pend
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [rejectTarget, setRejectTarget] = useState<Deploy | null>(null);
 
-  const allSelected = deploys.length > 0 && selected.size === deploys.length;
+  // Deploying cards are display-only (server returns 409 if you try to
+  // approve them again) — exclude them from selection-driven actions.
+  const selectableDeploys = deploys.filter(d => d.status === 'pending');
+  const allSelected =
+    selectableDeploys.length > 0 && selected.size === selectableDeploys.length;
 
   const toggleSelect = useCallback((id: string) => {
     setSelected(s => {
@@ -28,8 +32,8 @@ export function PendingView({ deploys, onApprove, onReject, onApproveAll }: Pend
 
   const toggleSelectAll = useCallback(() => {
     if (allSelected) setSelected(new Set());
-    else setSelected(new Set(deploys.map(d => d.deploy_id)));
-  }, [allSelected, deploys]);
+    else setSelected(new Set(selectableDeploys.map(d => d.deploy_id)));
+  }, [allSelected, selectableDeploys]);
 
   const toggleExpand = useCallback((id: string) => {
     setExpanded(s => {
@@ -58,10 +62,17 @@ export function PendingView({ deploys, onApprove, onReject, onApproveAll }: Pend
     );
   }
 
+  const pendingCount = selectableDeploys.length;
+  const deployingCount = deploys.length - pendingCount;
+  const subtitle =
+    deployingCount > 0
+      ? `${pendingCount} pending · ${deployingCount} deploying`
+      : `${pendingCount} change${pendingCount !== 1 ? 's' : ''} detected · awaiting approval`;
+
   return (
     <div className="view-pending">
       <h1>Pending Deploys</h1>
-      <p className="view-subtitle">{deploys.length} changes detected · awaiting approval</p>
+      <p className="view-subtitle">{subtitle}</p>
 
       <div className="pending-actions">
         <label className="select-all-label">
@@ -86,6 +97,7 @@ export function PendingView({ deploys, onApprove, onReject, onApproveAll }: Pend
           <PendingCard
             key={deploy.deploy_id}
             deploy={deploy}
+            isDeploying={deploy.status === 'deploying'}
             isSelected={selected.has(deploy.deploy_id)}
             isExpanded={expanded.has(deploy.deploy_id)}
             onToggleSelect={() => toggleSelect(deploy.deploy_id)}
@@ -111,6 +123,7 @@ export function PendingView({ deploys, onApprove, onReject, onApproveAll }: Pend
 
 interface PendingCardProps {
   deploy: Deploy;
+  isDeploying: boolean;
   isSelected: boolean;
   isExpanded: boolean;
   onToggleSelect: () => void;
@@ -121,6 +134,7 @@ interface PendingCardProps {
 
 function PendingCard({
   deploy,
+  isDeploying,
   isSelected,
   isExpanded,
   onToggleSelect,
@@ -137,12 +151,19 @@ function PendingCard({
   const diffLabel = deploy.diff_stat || '';
 
   return (
-    <div className={cn('pending-card', isSelected && 'is-selected')}>
+    <div
+      className={cn(
+        'pending-card',
+        isSelected && 'is-selected',
+        isDeploying && 'is-deploying',
+      )}
+    >
       <div className="pending-card-header">
         <input
           type="checkbox"
           className="native-checkbox"
           checked={isSelected}
+          disabled={isDeploying}
           onChange={onToggleSelect}
         />
         <button
@@ -170,11 +191,20 @@ function PendingCard({
         </div>
 
         <div className="pending-card-actions">
-          <button className="btn-reject" onClick={onReject}>Reject</button>
-          <button className="btn-approve" onClick={onApprove}>
-            <Icon name="check" size={12} />
-            Approve
-          </button>
+          {isDeploying ? (
+            <span className="deploying-pill" aria-live="polite">
+              <Icon name="loader" size={12} />
+              Deploying
+            </span>
+          ) : (
+            <>
+              <button className="btn-reject" onClick={onReject}>Reject</button>
+              <button className="btn-approve" onClick={onApprove}>
+                <Icon name="check" size={12} />
+                Approve
+              </button>
+            </>
+          )}
         </div>
       </div>
 

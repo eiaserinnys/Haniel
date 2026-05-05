@@ -8,7 +8,10 @@ import { NodesView } from '@/views/NodesView';
 import { HistoryView } from '@/views/HistoryView';
 import { useIsMobile } from '@/hooks/useIsMobile';
 import { useWebSocket } from '@/hooks/useWebSocket';
-import { useInFlightCommands } from '@/hooks/useInFlightCommands';
+import {
+  useInFlightCommands,
+  SERVICE_SPINNER_MIN_MS,
+} from '@/hooks/useInFlightCommands';
 import * as api from '@/lib/api';
 import { cn } from '@/lib/utils';
 import type {
@@ -29,7 +32,7 @@ function App() {
   const {
     inFlight,
     add: addInFlight,
-    remove: removeInFlight,
+    removeWithMinDelay,
     clear: clearInFlight,
     lookupByService,
   } = useInFlightCommands();
@@ -68,8 +71,13 @@ function App() {
         pushToast(`New pending: ${event.repo} on ${event.node_id}`, 'amber');
         break;
       case 'status_change':
-        // Update pending: remove if no longer pending
-        if (event.status !== 'pending') {
+        // Pending and deploying are both shown in PendingView — keep the
+        // card visible. Refetch the active list so its status (and any
+        // newly attached fields) is in sync with the server.
+        if (event.status === 'pending' || event.status === 'deploying') {
+          api.fetchPending().then(r => setPending(r.deploys)).catch(() => {});
+        } else {
+          // Terminal — remove from PendingView. HistoryView refetch picks it up.
           setPending(ps => ps.filter(p => p.deploy_id !== event.deploy_id));
         }
         // Refetch history to get latest
@@ -79,7 +87,19 @@ function App() {
         } else if (event.status === 'success') {
           pushToast(`Deploy succeeded`, 'success');
         } else if (event.status === 'failed') {
-          pushToast(`Deploy failed`, 'error');
+          pushToast(
+            `Deploy failed${event.reject_reason ? `: ${event.reject_reason}` : ''}`,
+            'error',
+          );
+        } else if (
+          event.status === 'rejected' &&
+          event.reject_reason &&
+          event.reject_reason.startsWith('superseded')
+        ) {
+          // Auto-supersede triggered by approving a newer deploy on the
+          // same (node, repo, branch). User-driven rejects already toast
+          // from handleReject.
+          pushToast(`Superseded: newer deploy queued`, 'amber');
         }
         break;
       case 'node_connected':
@@ -92,8 +112,10 @@ function App() {
         pushToast(`Node disconnected: ${event.node_id}`, 'amber');
         break;
       case 'service_command_result':
-        // Release the matching button regardless of success/failure.
-        removeInFlight(event.command_id);
+        // Release the matching button regardless of success/failure, but
+        // keep the spinner visible for at least SERVICE_SPINNER_MIN_MS so
+        // the user perceives that something happened on a fast response.
+        removeWithMinDelay(event.command_id, SERVICE_SPINNER_MIN_MS);
         if (event.success) {
           pushToast(`${event.action} ${event.service_name}: success`, 'success');
         } else {
@@ -104,7 +126,7 @@ function App() {
         api.fetchNodes().then(r => setNodes(r.nodes)).catch(() => {});
         break;
     }
-  }, [pushToast, removeInFlight]);
+  }, [pushToast, removeWithMinDelay]);
 
   const { status: wsStatus } = useWebSocket(handleWsEvent);
 
@@ -151,7 +173,9 @@ function App() {
   const handleApprove = useCallback(async (deployId: string) => {
     try {
       const res = await api.approveDeploy(deployId);
-      setPending(ps => ps.filter(p => p.deploy_id !== deployId));
+      // Don't filter setPending here. The status_change WS event handles
+      // visibility: 'deploying' keeps the card visible, terminal states
+      // (or 'approved' with offline node) remove it.
       if (res.warning) {
         // Server returned 200 but the node was offline — surface the warning
         // instead of pretending the deploy started.
@@ -203,7 +227,9 @@ function App() {
       const deferred = fulfilled.filter(r => !!r.value.warning).length;
       const succeeded = fulfilled.length - deferred;
       const failed = results.length - fulfilled.length;
-      setPending(ps => ps.filter(p => !ids.includes(p.deploy_id)));
+      // Don't filter setPending here — the status_change WS events drive
+      // visibility (deploying → keep, terminal → remove, failed approve →
+      // stays as pending so the user can retry).
       if (failed === 0 && deferred === 0) {
         pushToast(`Approved ${succeeded} deploys`, 'success');
       } else if (failed === 0) {
@@ -224,7 +250,7 @@ function App() {
       // Approve all via server API
       try {
         const result = await api.approveAll();
-        setPending([]);
+        // Don't clear setPending — status_change events handle visibility.
         if (result.message === 'no pending deploys') {
           pushToast('No pending deploys', 'info');
         } else if (result.failed.length === 0) {
