@@ -32,9 +32,8 @@ interface MobileTabProps {
 
 function MobileTab({ icon, label, active, onClick, count, pending }: MobileTabProps) {
   return (
-    <button className={cn(active && 'is-on')} onClick={onClick}>
-      <Icon name={icon} size={18} />
-      <span>{label}</span>
+    <button className={cn(active && 'is-on')} onClick={onClick} aria-label={label} title={label}>
+      <Icon name={icon} size={20} />
       {pending && count != null && count > 0 && <span className="nav-count is-pending">{count}</span>}
     </button>
   );

@@ -111,6 +111,7 @@ body {
 .app {
   display: flex;
   height: 100vh;
+  height: 100dvh; /* prefer dynamic viewport on iOS Safari/WebView */
   overflow: hidden;
 }
 .main {
@@ -289,22 +290,29 @@ body {
     display: flex;
     justify-content: space-around;
   }
-  .page { padding-bottom: 72px; }
+  /* Bottom nav height (icon-only ≈ 42px) + iOS safe-area inset */
+  .page {
+    padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+  }
 }
 .mobile-bottom-nav button {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 2px;
-  padding: 6px 12px;
+  justify-content: center;
+  padding: 10px 16px;
   border: none;
   background: none;
   color: var(--muted);
-  font-size: 10px;
   cursor: pointer;
   position: relative;
 }
 .mobile-bottom-nav button.is-on { color: var(--fg); }
+.mobile-bottom-nav .nav-count {
+  position: absolute;
+  top: 2px;
+  right: calc(50% - 18px);
+  margin-left: 0;
+}
 
 /* ── Toasts ──────────────────────────────────────────────── */
 .toasts {
