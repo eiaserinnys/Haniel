@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import pathlib
 from typing import Literal
 
@@ -38,6 +39,7 @@ class OrchestratorConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 9300
     heartbeat_timeout: float = 90.0
+    dashboard_dir: str | None = None  # override dashboard static path
     push: PushConfig | None = None  # None = push disabled
 
 
@@ -88,10 +90,14 @@ class OrchestratorServer:
         ]
 
         # Dashboard SPA (mount only when build artifacts exist)
-        # Path: __file__ = src/haniel_orch/server.py
-        #   .parent = src/haniel_orch/  .parent = src/  .parent = orch-server/
-        #   / "dashboard" / "dist" = orch-server/dashboard/dist/
-        dashboard_dir = pathlib.Path(__file__).parent.parent.parent / "dashboard" / "dist"
+        # Config override (e.g. production deployment) or auto-detect via __file__
+        if self._config.dashboard_dir:
+            dashboard_dir = pathlib.Path(self._config.dashboard_dir)
+        else:
+            # Path: __file__ = src/haniel_orch/server.py
+            #   .parent = src/haniel_orch/  .parent = src/  .parent = orch-server/
+            #   / "dashboard" / "dist" = orch-server/dashboard/dist/
+            dashboard_dir = pathlib.Path(__file__).parent.parent.parent / "dashboard" / "dist"
         dashboard_routes: list[Route | Mount] = []
         if dashboard_dir.exists():
             async def serve_dashboard(request: Request) -> Response:
@@ -129,3 +135,36 @@ class OrchestratorServer:
         await self._push.close()
         await self._store.close()
         logger.info("Orchestrator shut down")
+
+
+def create_app() -> Starlette:
+    """Uvicorn factory entry point.
+
+    Reads configuration from environment variables:
+        TOKEN            — shared secret for node authentication (required)
+        DB_PATH          — SQLite database path
+        HOST             — bind address
+        PORT             — bind port
+        HEARTBEAT_TIMEOUT — seconds before a node is considered disconnected
+        DASHBOARD_DIR    — override dashboard static file path
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    token = os.environ.get("TOKEN")
+    if not token:
+        raise RuntimeError("TOKEN environment variable is required")
+
+    config = OrchestratorConfig(
+        token=token,
+        db_path=os.environ.get("DB_PATH", "orchestrator.db"),
+        host=os.environ.get("HOST", "0.0.0.0"),
+        port=int(os.environ.get("PORT", "9300")),
+        heartbeat_timeout=float(os.environ.get("HEARTBEAT_TIMEOUT", "90")),
+        dashboard_dir=os.environ.get("DASHBOARD_DIR"),
+    )
+
+    server = OrchestratorServer(config)
+    return server.build_app()
