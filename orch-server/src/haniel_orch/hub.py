@@ -20,6 +20,7 @@ from .protocol import (
     NodeHello,
     NodeStatus,
     OrchestratorMessage,
+    ServiceCommandResult,
     parse_node_message,
 )
 
@@ -105,6 +106,8 @@ class WebSocketHub:
                     await self._registry.heartbeat(incoming.node_id, services=incoming.services)
                 elif isinstance(incoming, DeployResult):
                     await self._handle_deploy_result(incoming)
+                elif isinstance(incoming, ServiceCommandResult):
+                    await self._handle_service_command_result(incoming)
 
         except WebSocketDisconnect:
             pass
@@ -167,6 +170,18 @@ class WebSocketHub:
                 body=f"{msg.node_id}의 배포가 {status_text}했습니다",
                 data={"deploy_id": msg.deploy_id, "type": "status_change", "status": status.value},
             )
+
+    async def _handle_service_command_result(self, msg: ServiceCommandResult) -> None:
+        """Process a ServiceCommandResult: broadcast to dashboards."""
+        await self.broadcast_to_dashboards({
+            "type": "service_command_result",
+            "command_id": msg.command_id,
+            "node_id": msg.node_id,
+            "service_name": msg.service_name,
+            "action": msg.action,
+            "success": msg.success,
+            "error": msg.error,
+        })
 
     def _spawn_push(self, title: str, body: str, data: dict[str, Any]) -> None:
         """Spawn a fire-and-forget push task. Task ref is held to prevent GC."""

@@ -75,7 +75,17 @@ export interface NodeDisconnectedEvent {
   reason: string;
 }
 
-export type WsEvent = NewPendingEvent | StatusChangeEvent | NodeConnectedEvent | NodeDisconnectedEvent;
+export interface ServiceCommandResultEvent {
+  type: 'service_command_result';
+  command_id: string;
+  node_id: string;
+  service_name: string;
+  action: string;
+  success: boolean;
+  error: string | null;
+}
+
+export type WsEvent = NewPendingEvent | StatusChangeEvent | NodeConnectedEvent | NodeDisconnectedEvent | ServiceCommandResultEvent;
 
 // Page navigation
 export type Page = 'pending' | 'nodes' | 'history';

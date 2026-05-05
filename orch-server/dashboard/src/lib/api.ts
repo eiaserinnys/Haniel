@@ -72,3 +72,15 @@ export function rejectDeploy(deployId: string, reason: string): Promise<{ status
 export function approveAll(): Promise<{ approved: string[] }> {
   return request('/api/orch/approve-all', { method: 'POST' });
 }
+
+export function serviceCommand(
+  nodeId: string,
+  serviceName: string,
+  action: 'restart' | 'stop'
+): Promise<{ command_id: string; status: string }> {
+  return request('/api/orch/service-command', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ node_id: nodeId, service_name: serviceName, action }),
+  });
+}

@@ -6,9 +6,10 @@ import type { OrchestratorNode } from '@/types';
 
 interface NodesViewProps {
   nodes: OrchestratorNode[];
+  onServiceCommand?: (nodeId: string, serviceName: string, action: 'restart' | 'stop') => void;
 }
 
-export function NodesView({ nodes }: NodesViewProps) {
+export function NodesView({ nodes, onServiceCommand }: NodesViewProps) {
   const [filter, setFilter] = useState('');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
@@ -74,6 +75,7 @@ export function NodesView({ nodes }: NodesViewProps) {
             node={node}
             isExpanded={expanded.has(node.node_id)}
             onToggleExpand={() => toggleExpand(node.node_id)}
+            onServiceCommand={onServiceCommand}
           />
         ))}
         {filtered.length === 0 && (
@@ -92,9 +94,10 @@ interface NodeCardProps {
   node: OrchestratorNode;
   isExpanded: boolean;
   onToggleExpand: () => void;
+  onServiceCommand?: (nodeId: string, serviceName: string, action: 'restart' | 'stop') => void;
 }
 
-function NodeCard({ node, isExpanded, onToggleExpand }: NodeCardProps) {
+function NodeCard({ node, isExpanded, onToggleExpand, onServiceCommand }: NodeCardProps) {
   const isConnected = node.connected === 1;
   const osIcon = node.os.toLowerCase().includes('windows') ? 'windows' : 'linux';
 
@@ -170,6 +173,7 @@ function NodeCard({ node, isExpanded, onToggleExpand }: NodeCardProps) {
                         <th>Uptime</th>
                         <th className="hide-mobile">Role</th>
                         <th>Status</th>
+                        {onServiceCommand && <th>Actions</th>}
                       </tr>
                     </thead>
                     <tbody>
@@ -186,6 +190,25 @@ function NodeCard({ node, isExpanded, onToggleExpand }: NodeCardProps) {
                           <td>{uptimeStr(svc.uptime_ms)}</td>
                           <td className="hide-mobile">{svc.role || '\u2014'}</td>
                           <td><StatusPill status={svc.status} size="sm" /></td>
+                          {onServiceCommand && (
+                            <td className="svc-actions">
+                              {svc.enabled && svc.status === 'running' && (
+                                <>
+                                  <button className="svc-btn" onClick={() => onServiceCommand(node.node_id, svc.name, 'restart')} title="Restart">
+                                    <Icon name="refresh" size={12} />
+                                  </button>
+                                  <button className="svc-btn svc-btn-danger" onClick={() => onServiceCommand(node.node_id, svc.name, 'stop')} title="Stop">
+                                    <Icon name="stop" size={12} />
+                                  </button>
+                                </>
+                              )}
+                              {svc.enabled && svc.status === 'stopped' && (
+                                <button className="svc-btn" onClick={() => onServiceCommand(node.node_id, svc.name, 'restart')} title="Start">
+                                  <Icon name="play" size={12} />
+                                </button>
+                              )}
+                            </td>
+                          )}
                         </tr>
                       ))}
                     </tbody>

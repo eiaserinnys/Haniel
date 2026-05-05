@@ -715,6 +715,7 @@ class ServiceRunner:
                 config=orch_cfg,
                 haniel_version=haniel.__version__,
                 get_services_info=self._collect_services_info,
+                service_command_handler=self._handle_service_command,
             )
             self._orch_client.start()
             logger.info("Orchestrator client started")
@@ -747,6 +748,20 @@ class ServiceRunner:
                 "deps": svc_config.after,
             })
         return services
+
+    def _handle_service_command(self, service_name: str, action: str) -> None:
+        """Handle remote service command from orchestrator.
+
+        Raises ValueError for unknown service or action (caught by OrchestratorClient).
+        """
+        if service_name not in self.config.services:
+            raise ValueError(f"Unknown service: {service_name}")
+        if action == "restart":
+            self.restart_service(service_name)
+        elif action == "stop":
+            self.stop_service(service_name)
+        else:
+            raise ValueError(f"Unknown action: {action}")
 
     def trigger_pull(self, repo_name: str, auto: bool = False) -> None:
         """Pull changes for a repository and restart affected services.

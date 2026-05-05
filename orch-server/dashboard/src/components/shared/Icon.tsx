@@ -72,6 +72,10 @@ export function Icon({ name, size = 14, style, className }: IconProps) {
       return <svg {...common}><path d="M3 4h10l-3.5 5v3.5L6.5 11.5V9z" /></svg>;
     case 'arrow-r':
       return <svg {...common}><path d="M3 8h10M9.5 4.5 13 8l-3.5 3.5" /></svg>;
+    case 'refresh':
+      return <svg {...common}><path d="M3 8a5 5 0 0 1 9-3M13 8a5 5 0 0 1-9 3" /><path d="M12 2v3h-3M4 14v-3h3" /></svg>;
+    case 'stop':
+      return <svg {...common}><rect x="4" y="4" width="8" height="8" rx="1" /></svg>;
     default:
       return null;
   }

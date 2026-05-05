@@ -38,10 +38,12 @@ class OrchestratorClient:
         config: "OrchestratorClientConfig",
         haniel_version: str,
         get_services_info: "Callable[[], list[dict]] | None" = None,
+        service_command_handler: "Callable[[str, str], None] | None" = None,
     ) -> None:
         self._config = config
         self._haniel_version = haniel_version
         self._get_services_info = get_services_info
+        self._service_command_handler = service_command_handler
         self._ws = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -232,8 +234,40 @@ class OrchestratorClient:
                 f"Deploy rejected: {msg.get('deploy_id')} "
                 f"reason: {msg.get('reason', 'unknown')}"
             )
+        elif msg_type == "service_command":
+            await self._handle_service_command(msg)
         else:
             logger.debug(f"Unknown orchestrator message type: {msg_type}")
+
+    async def _handle_service_command(self, msg: dict) -> None:
+        """Handle a service_command message: execute and send result back."""
+        command_id = msg.get("command_id", "")
+        service_name = msg.get("service_name", "")
+        action = msg.get("action", "")
+        logger.info(f"Service command: {action} {service_name} (cmd={command_id})")
+
+        success = True
+        error = None
+        if self._service_command_handler:
+            try:
+                self._service_command_handler(service_name, action)
+            except Exception as e:
+                success = False
+                error = str(e)
+        else:
+            success = False
+            error = "no handler registered"
+
+        result = {
+            "type": "service_command_result",
+            "command_id": command_id,
+            "node_id": self._config.node_id,
+            "service_name": service_name,
+            "action": action,
+            "success": success,
+            "error": error,
+        }
+        await self._send_json(result)
 
     async def _send_json(self, data: dict) -> None:
         """Send a JSON message to the orchestrator."""

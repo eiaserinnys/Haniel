@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from starlette.requests import Request
@@ -11,7 +12,7 @@ from starlette.routing import Route
 
 from .event_store import EventStore
 from .hub import WebSocketHub
-from .protocol import DeployApproval, DeployReject, DeployStatus
+from .protocol import DeployApproval, DeployReject, DeployStatus, ServiceCommand
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,35 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
 
         return JSONResponse({"approved": approved, "failed": failed})
 
+    async def service_command(request: Request) -> JSONResponse:
+        """POST /api/orch/service-command — send restart/stop to a node's service."""
+        body = await request.json()
+        node_id = body.get("node_id")
+        service_name = body.get("service_name")
+        action = body.get("action")
+
+        if not all([node_id, service_name, action]):
+            return JSONResponse(
+                {"error": "node_id, service_name, action required"}, status_code=400
+            )
+        if action not in ("restart", "stop"):
+            return JSONResponse(
+                {"error": "action must be 'restart' or 'stop'"}, status_code=400
+            )
+
+        command_id = f"{node_id}:{service_name}:{action}:{int(time.time())}"
+        msg = ServiceCommand(
+            command_id=command_id, service_name=service_name, action=action
+        )
+        sent = await hub.send_to_node(node_id, msg)
+
+        if not sent:
+            return JSONResponse(
+                {"error": "node not connected"}, status_code=503
+            )
+
+        return JSONResponse({"command_id": command_id, "status": "sent"})
+
     return [
         Route("/api/orch/pending", get_pending, methods=["GET"]),
         Route("/api/orch/nodes", get_nodes, methods=["GET"]),
@@ -185,4 +215,5 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         Route("/api/orch/approve", approve_deploy, methods=["POST"]),
         Route("/api/orch/reject", reject_deploy, methods=["POST"]),
         Route("/api/orch/approve-all", approve_all, methods=["POST"]),
+        Route("/api/orch/service-command", service_command, methods=["POST"]),
     ]

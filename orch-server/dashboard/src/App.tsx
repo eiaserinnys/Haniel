@@ -76,6 +76,15 @@ function App() {
         api.fetchNodes().then(r => setNodes(r.nodes)).catch(() => {});
         pushToast(`Node disconnected: ${event.node_id}`, 'amber');
         break;
+      case 'service_command_result':
+        if (event.success) {
+          pushToast(`${event.action} ${event.service_name}: success`, 'success');
+        } else {
+          pushToast(`${event.action} ${event.service_name}: ${event.error || 'failed'}`, 'error');
+        }
+        // Refetch nodes to update service status
+        api.fetchNodes().then(r => setNodes(r.nodes)).catch(() => {});
+        break;
     }
   }, [pushToast]);
 
@@ -118,6 +127,15 @@ function App() {
       pushToast(`Rejected deploy`, 'info');
     } catch (e) {
       pushToast(`Reject failed: ${e instanceof api.ApiError ? e.body : 'Unknown error'}`, 'error');
+    }
+  }, [pushToast]);
+
+  const handleServiceCommand = useCallback(async (nodeId: string, serviceName: string, action: 'restart' | 'stop') => {
+    try {
+      await api.serviceCommand(nodeId, serviceName, action);
+      pushToast(`${action} ${serviceName} sent`, 'info');
+    } catch (e) {
+      pushToast(`${action} failed: ${e instanceof api.ApiError ? e.body : 'Unknown error'}`, 'error');
     }
   }, [pushToast]);
 
@@ -193,7 +211,7 @@ function App() {
               onApproveAll={handleApproveAll}
             />
           )}
-          {page === 'nodes' && <NodesView nodes={nodes} />}
+          {page === 'nodes' && <NodesView nodes={nodes} onServiceCommand={handleServiceCommand} />}
           {page === 'history' && <HistoryView deploys={history} />}
         </main>
       </div>

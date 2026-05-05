@@ -88,9 +88,35 @@ class DeployReject(BaseModel):
     reason: str
 
 
+class ServiceCommand(BaseModel):
+    """Server instructs node to restart/stop a service."""
+
+    type: str = "service_command"
+    command_id: str  # unique ID for tracking
+    service_name: str
+    action: str  # "restart" | "stop"
+
+
+# --- Node → Server messages (additional) ---
+
+
+class ServiceCommandResult(BaseModel):
+    """Node reports result of a service command."""
+
+    type: str = "service_command_result"
+    command_id: str
+    node_id: str
+    service_name: str
+    action: str
+    success: bool
+    error: str | None = None
+
+
 # Union types
-OrchestratorMessage = Union[DeployApproval, DeployReject]
-NodeMessage = Union[NodeHello, ChangeNotification, NodeStatus, DeployResult]
+OrchestratorMessage = Union[DeployApproval, DeployReject, ServiceCommand]
+NodeMessage = Union[
+    NodeHello, ChangeNotification, NodeStatus, DeployResult, ServiceCommandResult
+]
 
 # Type dispatch map for parse_node_message
 _NODE_MESSAGE_TYPES: dict[str, type[NodeMessage]] = {
@@ -98,6 +124,7 @@ _NODE_MESSAGE_TYPES: dict[str, type[NodeMessage]] = {
     "change_notification": ChangeNotification,
     "node_status": NodeStatus,
     "deploy_result": DeployResult,
+    "service_command_result": ServiceCommandResult,
 }
 
 
