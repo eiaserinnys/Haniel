@@ -19,7 +19,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..config import (
@@ -42,6 +42,11 @@ from .process import ProcessManager
 from .self_update_marker import (
     SelfUpdateResult,
     read_and_consume as _read_self_update_marker,
+)
+from .orch_pending_deploy import (
+    OrchPendingDeploy,
+    read_and_consume as _read_orch_pending_deploy,
+    write as _write_orch_pending_deploy,
 )
 
 if __import__("typing").TYPE_CHECKING:
@@ -733,7 +738,13 @@ class ServiceRunner:
                 haniel_version=haniel.__version__,
                 get_services_info=self._collect_services_info,
                 service_command_handler=self._handle_service_command,
+                deploy_approval_handler=self._handle_deploy_approval,
             )
+            # Map any self-update result from the previous wrapper iteration
+            # into a buffered DeployResult before the client connects. The
+            # buffer is flushed on the first successful WS connection so the
+            # orch-server gets a definitive result instead of a stuck DEPLOYING.
+            self._enqueue_pending_self_deploy_result()
             self._orch_client.start()
             logger.info("Orchestrator client started")
         except Exception as e:
@@ -765,6 +776,158 @@ class ServiceRunner:
                 "deps": svc_config.after,
             })
         return services
+
+    def _handle_deploy_approval(
+        self, deploy_id: str, repo: str, branch: str
+    ) -> str | None:
+        """Handle a deploy_approval from orch-server.
+
+        Runs on an orch_client asyncio executor thread (via asyncio.to_thread).
+
+        Returns:
+            None on synchronous success — caller sends DeployResult{success}.
+            "deferred" for self_repo — caller sends nothing; result is sent
+              on the NEXT runner startup via the orch_pending_deploy marker.
+
+        Raises:
+            ValueError: Unknown repo (caller sends DeployResult{failed}).
+            RuntimeError: trigger_pull failure or already pulling
+              (caller sends DeployResult{failed}).
+        """
+        if repo not in self._repo_states:
+            raise ValueError(f"Unknown repo: {repo}")
+        configured_branch = self._repo_states[repo].config.branch
+        if branch != configured_branch:
+            # The node only knows how to pull its configured branch. Log
+            # a warning but proceed — orch may have echoed back a stale
+            # branch value, or the node config drifted from what orch sees.
+            logger.warning(
+                "Deploy approval branch %r differs from configured %r for repo %r — "
+                "using configured branch",
+                branch, configured_branch, repo,
+            )
+
+        if self._self_repo and repo == self._self_repo:
+            # Self-update path. trigger_pull(self_repo) calls self.stop()
+            # which calls self._orch_client.stop(), which joins the
+            # orch_client thread. We are running on an orch_client executor
+            # thread, so calling trigger_pull here would deadlock the join.
+            # Instead: persist the deploy_id so the next runner can
+            # correlate the marker result with this deploy, signal the
+            # self-update via approve_self_update, and stop on a
+            # separate daemon thread after a small delay (gives the
+            # caller coroutine time to return "deferred" and let the
+            # orch_client coroutine finish cleanly).
+            _write_orch_pending_deploy(
+                self.config_dir,
+                deploy_id=deploy_id,
+                started_at=datetime.now(timezone.utc).isoformat(),
+            )
+            # Mark self-update pending so approve_self_update() proceeds
+            # even if the polling loop hasn't yet detected the change.
+            with self._state_lock:
+                self._state.self_update_pending = True
+            self.approve_self_update()
+            threading.Thread(
+                target=self._deferred_stop_for_self_update,
+                name="haniel-deferred-stop",
+                daemon=True,
+            ).start()
+            return "deferred"
+
+        # Non-self repo path. trigger_pull holds a per-repo Lock; if another
+        # caller is already pulling, it returns silently — convert that to
+        # an error so the DeployResult accurately reflects what happened.
+        if self._pull_locks[repo].locked():
+            raise RuntimeError("already pulling")
+
+        # trigger_pull also silently returns if state.pending_changes is None
+        # (e.g., a previous pull already applied this commit, or the change
+        # was superseded). Detect that here and report a no-op success
+        # instead of falsely claiming the pull happened.
+        state = self._repo_states[repo]
+        if not state.pending_changes:
+            logger.info(
+                "Deploy approval for %s: no pending changes, "
+                "treating as already-applied success",
+                repo,
+            )
+            return None
+
+        self.trigger_pull(repo, auto=False)
+        return None
+
+    def _deferred_stop_for_self_update(self) -> None:
+        """Helper: small delay then stop. Allows the orch_client coroutine
+        that returned 'deferred' to finish before orch_client.stop() joins
+        the orch_client thread. Runs on a daemon thread.
+        """
+        time.sleep(0.5)
+        try:
+            self.stop()
+        except Exception as e:
+            logger.warning("Deferred stop for self-update failed: %s", e)
+
+    def _enqueue_pending_self_deploy_result(self) -> None:
+        """Map a consumed self-update marker to a buffered DeployResult.
+
+        Called from _start_orch_client after _read_self_update_marker so
+        self._last_self_update_result is already populated. The buffered
+        result is flushed when orch_client connects.
+
+        Skips silently in these cases:
+          - no orch_pending_deploy marker → nothing to report
+          - orch_client is None → orchestrator integration disabled
+          - marker present but self_update_result missing → defensive
+            failed report (the wrapper didn't write a marker, so the
+            update either never ran or crashed before completing)
+        """
+        pending = _read_orch_pending_deploy(self.config_dir)
+        if pending is None:
+            return
+        if self._orch_client is None:
+            logger.info(
+                "orch_pending_deploy marker present but orch_client is "
+                "disabled — discarding deploy_id=%s",
+                pending.deploy_id,
+            )
+            return
+        last = self._last_self_update_result
+        if last is None:
+            logger.warning(
+                "orch_pending_deploy marker present but self_update_result "
+                "missing — sending failed for deploy_id=%s",
+                pending.deploy_id,
+            )
+            self._orch_client.enqueue_deploy_result(
+                pending.deploy_id,
+                status="failed",
+                error="self-update result marker missing after restart",
+            )
+            return
+
+        duration_ms: int | None = None
+        try:
+            t0 = datetime.fromisoformat(pending.started_at)
+            t1 = datetime.fromisoformat(last.finished_at)
+            duration_ms = int((t1 - t0).total_seconds() * 1000)
+            if duration_ms < 0:
+                duration_ms = None
+        except Exception:
+            duration_ms = None
+
+        status = "success" if last.ok else "failed"
+        error = None if last.ok else (last.error or "self-update reported failure")
+        self._orch_client.enqueue_deploy_result(
+            pending.deploy_id,
+            status=status,
+            error=error,
+            duration_ms=duration_ms,
+        )
+        logger.info(
+            "Enqueued DeployResult for self-update: deploy_id=%s status=%s",
+            pending.deploy_id, status,
+        )
 
     def _handle_service_command(self, service_name: str, action: str) -> None:
         """Handle remote service command from orchestrator.

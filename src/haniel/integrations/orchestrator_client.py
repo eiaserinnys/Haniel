@@ -39,17 +39,29 @@ class OrchestratorClient:
         haniel_version: str,
         get_services_info: "Callable[[], list[dict]] | None" = None,
         service_command_handler: "Callable[[str, str], None] | None" = None,
+        deploy_approval_handler: "Callable[[str, str, str], str | None] | None" = None,
     ) -> None:
         self._config = config
         self._haniel_version = haniel_version
         self._get_services_info = get_services_info
         self._service_command_handler = service_command_handler
+        # handler convention: (deploy_id, repo, branch) -> None | "deferred".
+        #   None       — synchronous success; we send DeployResult{success}.
+        #   "deferred" — handler scheduled the work elsewhere (e.g. self-update
+        #                via deferred stop); DeployResult is sent on next
+        #                startup via enqueue_deploy_result.
+        #   Exception  — failure; we send DeployResult{failed, error=str(e)}.
+        self._deploy_approval_handler = deploy_approval_handler
         self._ws = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._connected = False
         self._reconnect_delay = config.reconnect_base
+        # Buffered DeployResults — flushed on every successful (re)connect.
+        # Used for self-update results that survive runner restart.
+        self._pending_deploy_results: list[dict] = []
+        self._pending_lock = threading.Lock()
 
     def start(self) -> None:
         """Start the background WebSocket connection thread."""
@@ -111,6 +123,56 @@ class OrchestratorClient:
             )
         except Exception as e:
             logger.debug(f"Failed to queue change notification: {e}")
+
+    def enqueue_deploy_result(
+        self,
+        deploy_id: str,
+        status: str,
+        error: str | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
+        """Buffer a DeployResult to send on the next successful connection.
+
+        Used by runner.start() to report self-update results that completed
+        during the previous wrapper iteration. Thread-safe.
+        """
+        msg = {
+            "type": "deploy_result",
+            "deploy_id": deploy_id,
+            "node_id": self._config.node_id,
+            "status": status,
+            "error": error,
+            "duration_ms": duration_ms,
+        }
+        with self._pending_lock:
+            self._pending_deploy_results.append(msg)
+        # If already connected, kick a flush on the loop
+        if self._connected and self._loop is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._flush_pending_deploy_results(), self._loop
+                )
+            except Exception as e:
+                logger.debug(f"Failed to schedule deploy result flush: {e}")
+
+    async def _flush_pending_deploy_results(self) -> None:
+        """Send all buffered DeployResults. Re-queue on send failure."""
+        with self._pending_lock:
+            pending = list(self._pending_deploy_results)
+            self._pending_deploy_results.clear()
+        for msg in pending:
+            try:
+                await self._send_json(msg)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to send buffered deploy result "
+                    f"{msg.get('deploy_id')}: {e}"
+                )
+                # Re-queue this message and stop processing further messages
+                # to preserve order. The next connect will flush again.
+                with self._pending_lock:
+                    self._pending_deploy_results.append(msg)
+                break
 
     def _run_loop(self) -> None:
         """Entry point for the background thread."""
@@ -176,6 +238,12 @@ class OrchestratorClient:
             self._reset_backoff()
             logger.info(f"Connected to orchestrator at {self._config.url}")
 
+            # Flush any DeployResults buffered during the previous startup
+            # (e.g. self-update results). Order matters: must complete before
+            # listener/heartbeat tasks start so the result reaches the server
+            # before the connection can be torn down.
+            await self._flush_pending_deploy_results()
+
             # Run heartbeat and listener concurrently
             listener = asyncio.create_task(self._listen(ws))
             heartbeat = asyncio.create_task(self._heartbeat_loop(ws))
@@ -224,11 +292,7 @@ class OrchestratorClient:
         """Handle messages from the orchestrator server."""
         msg_type = msg.get("type")
         if msg_type == "deploy_approval":
-            logger.info(
-                f"Deploy approved: {msg.get('deploy_id')} "
-                f"by {msg.get('approved_by', 'unknown')}"
-            )
-            # TODO: trigger actual deployment via runner callback
+            await self._handle_deploy_approval(msg)
         elif msg_type == "deploy_reject":
             logger.info(
                 f"Deploy rejected: {msg.get('deploy_id')} "
@@ -238,6 +302,115 @@ class OrchestratorClient:
             await self._handle_service_command(msg)
         else:
             logger.debug(f"Unknown orchestrator message type: {msg_type}")
+
+    async def _handle_deploy_approval(self, msg: dict) -> None:
+        """Handle a deploy_approval message from orch-server.
+
+        Parses deploy_id, runs the registered handler in a worker thread
+        (to avoid blocking the event loop during git pull + service restart),
+        then sends DeployResult with success/failed status.
+
+        For self_repo deploys, the handler returns "deferred" after scheduling
+        the actual restart elsewhere; in that case DeployResult is sent on the
+        NEXT startup via the orch_pending_deploy marker, not from here.
+        """
+        deploy_id = msg.get("deploy_id", "")
+        approved_by = msg.get("approved_by", "unknown")
+        logger.info(f"Deploy approved: {deploy_id} by {approved_by}")
+
+        parsed = self._parse_deploy_id(deploy_id)
+        if parsed is None:
+            await self._send_deploy_result(
+                deploy_id, "failed",
+                error=f"invalid deploy_id format: {deploy_id!r}",
+            )
+            return
+        node_id_in_id, repo, branch, _commit = parsed
+        if node_id_in_id != self._config.node_id:
+            await self._send_deploy_result(
+                deploy_id, "failed",
+                error=(
+                    f"deploy_id node mismatch: "
+                    f"{node_id_in_id} != {self._config.node_id}"
+                ),
+            )
+            return
+
+        if self._deploy_approval_handler is None:
+            await self._send_deploy_result(
+                deploy_id, "failed",
+                error="no deploy_approval handler registered",
+            )
+            return
+
+        started = time.monotonic()
+        try:
+            # Run the sync handler off the event loop. The handler returns
+            # quickly for self_repo (deferred stop) and may take seconds-
+            # to-minutes for other repos (git pull + restart).
+            result = await asyncio.to_thread(
+                self._deploy_approval_handler, deploy_id, repo, branch
+            )
+        except Exception as e:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            logger.warning(f"Deploy {deploy_id} failed: {e}")
+            await self._send_deploy_result(
+                deploy_id, "failed", error=str(e), duration_ms=duration_ms,
+            )
+            return
+
+        if result == "deferred":
+            logger.info(
+                f"Deploy {deploy_id} deferred (self_repo) — "
+                f"DeployResult will be sent after restart"
+            )
+            return
+
+        duration_ms = int((time.monotonic() - started) * 1000)
+        await self._send_deploy_result(
+            deploy_id, "success", duration_ms=duration_ms,
+        )
+
+    async def _send_deploy_result(
+        self,
+        deploy_id: str,
+        status: str,
+        error: str | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
+        """Send a single DeployResult message to orch-server."""
+        result = {
+            "type": "deploy_result",
+            "deploy_id": deploy_id,
+            "node_id": self._config.node_id,
+            "status": status,
+            "error": error,
+            "duration_ms": duration_ms,
+        }
+        try:
+            await self._send_json(result)
+        except Exception as e:
+            logger.warning(
+                f"Failed to send deploy result {deploy_id}: {e}"
+            )
+
+    @staticmethod
+    def _parse_deploy_id(
+        deploy_id: str,
+    ) -> tuple[str, str, str, str] | None:
+        """Parse '{node_id}:{repo}:{branch}:{first_commit_hash}'.
+
+        Returns (node_id, repo, branch, first_commit_hash) or None on
+        format error. Uses split(':', 3) so the 4th element captures any
+        leftover ':' (commit hashes are pure hex so the 4th element is
+        always a single hash).
+        """
+        if not isinstance(deploy_id, str) or not deploy_id:
+            return None
+        parts = deploy_id.split(":", 3)
+        if len(parts) != 4:
+            return None
+        return tuple(parts)  # type: ignore[return-value]
 
     async def _handle_service_command(self, msg: dict) -> None:
         """Handle a service_command message: execute and send result back."""
