@@ -26,6 +26,17 @@ function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const isMobile = useIsMobile();
 
+  // Extract token from URL (set by OAuth callback redirect) and store in localStorage
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('token');
+    if (token) {
+      localStorage.setItem('haniel-token', token);
+      // Remove token from URL without reload
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
+
   // Toast helper
   const pushToast = useCallback((text: string, kind: Toast['kind'] = 'info') => {
     const id = Math.random().toString(36).slice(2);

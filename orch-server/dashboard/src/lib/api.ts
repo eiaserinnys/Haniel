@@ -18,8 +18,21 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, init);
+  const token = localStorage.getItem('haniel-token') || '';
+  const headers: Record<string, string> = {
+    ...(init?.headers as Record<string, string> || {}),
+  };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  const res = await fetch(path, { ...init, headers });
   if (!res.ok) {
+    // If unauthorized, redirect to login
+    if (res.status === 401) {
+      window.location.href = '/auth/login';
+      throw new ApiError(res.status, 'Unauthorized');
+    }
     const text = await res.text().catch(() => 'Unknown error');
     throw new ApiError(res.status, text);
   }

@@ -31,7 +31,9 @@ export function useWebSocket(onEvent: (event: WsEvent) => void): {
     }
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${protocol}//${window.location.host}/ws/dashboard`;
+    const token = localStorage.getItem('haniel-token') || '';
+    const qs = token ? `?token=${encodeURIComponent(token)}` : '';
+    const url = `${protocol}//${window.location.host}/ws/dashboard${qs}`;
 
     try {
       const ws = new WebSocket(url);

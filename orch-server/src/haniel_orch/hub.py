@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 from typing import Any
@@ -34,11 +35,13 @@ class WebSocketHub:
         store: EventStore,
         token: str,
         push_service: PushService | None = None,
+        auth_bearer_token: str = "",
     ) -> None:
         self._registry = registry
         self._store = store
         self._token = token
         self._push: PushService = push_service or NullPushService()
+        self._auth_bearer_token = auth_bearer_token
         self._dashboard_connections: set[WebSocket] = set()
         self._heartbeat_task: asyncio.Task | None = None
         self._background_tasks: set[asyncio.Task[None]] = set()
@@ -47,6 +50,14 @@ class WebSocketHub:
     def registry(self) -> NodeRegistry:
         """Public accessor for the node registry."""
         return self._registry
+
+    def _verify_dashboard_token(self, token: str | None) -> bool:
+        """Verify dashboard WebSocket token. Empty auth_bearer_token = auth disabled."""
+        if not self._auth_bearer_token:
+            return True  # auth disabled — backward compat for tests
+        if not token:
+            return False
+        return hmac.compare_digest(token, self._auth_bearer_token)
 
     async def handle_node_ws(self, websocket: WebSocket) -> None:
         """Handle a node WebSocket connection lifecycle."""
@@ -171,7 +182,12 @@ class WebSocketHub:
             logger.warning(f"Push notification failed: {e}")
 
     async def handle_dashboard_ws(self, websocket: WebSocket) -> None:
-        """Handle a dashboard WebSocket connection. No auth (MVP localhost)."""
+        """Handle a dashboard WebSocket connection with optional token auth."""
+        token = websocket.query_params.get("token")
+        if not self._verify_dashboard_token(token):
+            await websocket.close(code=4001, reason="auth failed")
+            return
+
         await websocket.accept()
         self._dashboard_connections.add(websocket)
         logger.info(f"Dashboard connected ({len(self._dashboard_connections)} total)")
