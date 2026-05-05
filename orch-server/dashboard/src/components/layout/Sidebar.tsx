@@ -16,7 +16,7 @@ export function Sidebar({ page, setPage, pendingCount, nodesConnected, historyCo
     <aside className="sidebar">
       {/* Brand */}
       <div className="brand">
-        <div className="brand-mark">H</div>
+        <img className="brand-mark" src="/dashboard/haniel-icon.png" alt="Haniel" />
         <div>
           <div className="brand-name">Haniel</div>
           <div className="brand-sub">Orchestrator</div>

@@ -105,16 +105,24 @@ function NodeCard({ node, isExpanded, onToggleExpand }: NodeCardProps) {
 
         <div className="node-card-info">
           <div className="node-card-title">
-            <span className="node-hostname">{node.hostname}</span>
+            <span className="node-name">{node.node_id}</span>
             <span className="node-tag os-tag">
               <Icon name={osIcon} size={11} />
-              {node.os}/{node.arch}
+              {node.os}
             </span>
           </div>
           <div className="node-card-meta">
             <span>haniel {node.haniel_version}</span>
             <span className="pending-sep">·</span>
-            <span>{isConnected ? 'connected' : `last seen ${relTime(node.last_seen)}`}</span>
+            {isConnected ? (
+              <span style={{ color: 'var(--green)' }}>connected</span>
+            ) : (
+              <>
+                <span style={{ color: 'var(--red)' }}>disconnected</span>
+                <span className="pending-sep">·</span>
+                <span>last seen {relTime(node.last_seen)}</span>
+              </>
+            )}
           </div>
         </div>
 
