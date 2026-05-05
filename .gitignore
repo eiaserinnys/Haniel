@@ -54,6 +54,10 @@ logs/
 .services/
 install.state
 
+# Dashboard (unignore paths matched by Python boilerplate rules)
+!orch-server/dashboard/src/lib/
+!orch-server/dashboard/dist/
+
 # Runtime workspace for Claude Code sessions
 workspace/*
 !workspace/CLAUDE.md
