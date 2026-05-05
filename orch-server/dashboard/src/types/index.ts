@@ -87,6 +87,36 @@ export interface ServiceCommandResultEvent {
 
 export type WsEvent = NewPendingEvent | StatusChangeEvent | NodeConnectedEvent | NodeDisconnectedEvent | ServiceCommandResultEvent;
 
+// API response types — for in-flight tracking and warning surfaces.
+// Mirror api.py exactly so that warning/failed are not silently swallowed.
+
+export interface ApproveResponse {
+  deploy_id: string;
+  status: string; // 'deploying' | 'approved'
+  warning?: string; // 'node not connected, will deploy on reconnect'
+}
+
+// api.py L142-180 approve_all: always returns approved/failed arrays;
+// `message` is added only when there are no pending deploys.
+export interface ApproveAllResponse {
+  approved: string[];
+  failed: Array<{ deploy_id: string; reason: string }>;
+  message?: string; // 'no pending deploys'
+}
+
+export interface ServiceCommandResponse {
+  command_id: string;
+  status: string; // 'sent'
+}
+
+// In-flight service command tracking (dashboard-only, dies on WS disconnect).
+export interface InFlightCommand {
+  commandId: string;
+  nodeId: string;
+  serviceName: string;
+  action: 'restart' | 'stop';
+}
+
 // Page navigation
 export type Page = 'pending' | 'nodes' | 'history';
 

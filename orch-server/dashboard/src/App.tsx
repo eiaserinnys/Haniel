@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { Topbar } from '@/components/layout/Topbar';
 import { MobileNav } from '@/components/layout/MobileNav';
@@ -8,9 +8,17 @@ import { NodesView } from '@/views/NodesView';
 import { HistoryView } from '@/views/HistoryView';
 import { useIsMobile } from '@/hooks/useIsMobile';
 import { useWebSocket } from '@/hooks/useWebSocket';
+import { useInFlightCommands } from '@/hooks/useInFlightCommands';
 import * as api from '@/lib/api';
 import { cn } from '@/lib/utils';
-import type { Page, Deploy, OrchestratorNode, Toast, WsEvent } from '@/types';
+import type {
+  Page,
+  Deploy,
+  OrchestratorNode,
+  Toast,
+  WsEvent,
+  ApproveResponse,
+} from '@/types';
 
 function App() {
   const [page, setPageRaw] = useState<Page>('pending');
@@ -18,6 +26,13 @@ function App() {
   const [nodes, setNodes] = useState<OrchestratorNode[]>([]);
   const [history, setHistory] = useState<Deploy[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const {
+    inFlight,
+    add: addInFlight,
+    remove: removeInFlight,
+    clear: clearInFlight,
+    lookupByService,
+  } = useInFlightCommands();
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     const stored = localStorage.getItem('haniel-theme');
     return (stored === 'light' || stored === 'dark') ? stored : 'dark';
@@ -77,18 +92,41 @@ function App() {
         pushToast(`Node disconnected: ${event.node_id}`, 'amber');
         break;
       case 'service_command_result':
+        // Release the matching button regardless of success/failure.
+        removeInFlight(event.command_id);
         if (event.success) {
           pushToast(`${event.action} ${event.service_name}: success`, 'success');
         } else {
+          // error includes 'timeout', 'node disconnected', or node-reported error.
           pushToast(`${event.action} ${event.service_name}: ${event.error || 'failed'}`, 'error');
         }
         // Refetch nodes to update service status
         api.fetchNodes().then(r => setNodes(r.nodes)).catch(() => {});
         break;
     }
-  }, [pushToast]);
+  }, [pushToast, removeInFlight]);
 
   const { status: wsStatus } = useWebSocket(handleWsEvent);
+
+  // WS disconnected (final, after MAX_RETRIES) → clear in-flight commands so
+  // buttons unlock. The server-side 30s timeout would eventually broadcast
+  // a 'timeout' result, but the dashboard wouldn't be listening anymore.
+  // Read inFlight via ref so this effect only runs on wsStatus changes —
+  // including inFlight.size in deps would let the previous status update
+  // before a real disconnected transition is observed.
+  const prevWsStatus = useRef(wsStatus);
+  const inFlightRef = useRef(inFlight);
+  inFlightRef.current = inFlight;
+  useEffect(() => {
+    if (prevWsStatus.current !== 'disconnected' && wsStatus === 'disconnected') {
+      const n = inFlightRef.current.size;
+      if (n > 0) {
+        clearInFlight();
+        pushToast(`Lost connection — ${n} in-flight command(s) cleared`, 'amber');
+      }
+    }
+    prevWsStatus.current = wsStatus;
+  }, [wsStatus, clearInFlight, pushToast]);
 
   // Auto-close mobile drawer when crossing to desktop
   useEffect(() => { if (!isMobile) setMobileMenuOpen(false); }, [isMobile]);
@@ -112,9 +150,15 @@ function App() {
   // Action handlers
   const handleApprove = useCallback(async (deployId: string) => {
     try {
-      await api.approveDeploy(deployId);
+      const res = await api.approveDeploy(deployId);
       setPending(ps => ps.filter(p => p.deploy_id !== deployId));
-      pushToast(`Approved deploy`, 'success');
+      if (res.warning) {
+        // Server returned 200 but the node was offline — surface the warning
+        // instead of pretending the deploy started.
+        pushToast(`Approved (deferred): ${res.warning}`, 'amber');
+      } else {
+        pushToast(`Approved deploy`, 'success');
+      }
     } catch (e) {
       pushToast(`Approve failed: ${e instanceof api.ApiError ? e.body : 'Unknown error'}`, 'error');
     }
@@ -132,31 +176,66 @@ function App() {
 
   const handleServiceCommand = useCallback(async (nodeId: string, serviceName: string, action: 'restart' | 'stop') => {
     try {
-      await api.serviceCommand(nodeId, serviceName, action);
+      const res = await api.serviceCommand(nodeId, serviceName, action);
+      // Buttons disable until the matching service_command_result arrives
+      // (or the WS finalises as 'disconnected', which clears in-flight).
+      addInFlight({
+        commandId: res.command_id,
+        nodeId,
+        serviceName,
+        action,
+      });
       pushToast(`${action} ${serviceName} sent`, 'info');
     } catch (e) {
+      // 503 (node not connected), 400, etc. — no in-flight added, button stays idle.
       pushToast(`${action} failed: ${e instanceof api.ApiError ? e.body : 'Unknown error'}`, 'error');
     }
-  }, [pushToast]);
+  }, [pushToast, addInFlight]);
 
   const handleApproveAll = useCallback(async (ids: string[]) => {
     if (ids.length > 0) {
-      // Approve selected items individually
+      // Approve selected items individually. Classify each result as
+      // succeeded / deferred (200 + warning) / failed (HTTP error).
       const results = await Promise.allSettled(ids.map(id => api.approveDeploy(id)));
-      const succeeded = results.filter(r => r.status === 'fulfilled').length;
-      const failed = results.length - succeeded;
+      const fulfilled = results.filter(
+        (r): r is PromiseFulfilledResult<ApproveResponse> => r.status === 'fulfilled',
+      );
+      const deferred = fulfilled.filter(r => !!r.value.warning).length;
+      const succeeded = fulfilled.length - deferred;
+      const failed = results.length - fulfilled.length;
       setPending(ps => ps.filter(p => !ids.includes(p.deploy_id)));
-      if (failed === 0) {
+      if (failed === 0 && deferred === 0) {
         pushToast(`Approved ${succeeded} deploys`, 'success');
+      } else if (failed === 0) {
+        pushToast(`Approved ${succeeded}, deferred ${deferred} (node not connected)`, 'amber');
       } else {
-        pushToast(`Approved ${succeeded}, failed ${failed}`, 'amber');
+        const firstRejected = results.find(
+          (r): r is PromiseRejectedResult => r.status === 'rejected',
+        );
+        const firstFailureReason = firstRejected
+          ? (firstRejected.reason instanceof api.ApiError
+              ? firstRejected.reason.body
+              : String(firstRejected.reason))
+          : '';
+        const tail = firstFailureReason ? ` (first failure: ${firstFailureReason})` : '';
+        pushToast(`Approved ${succeeded}, deferred ${deferred}, failed ${failed}${tail}`, 'amber');
       }
     } else {
       // Approve all via server API
       try {
         const result = await api.approveAll();
         setPending([]);
-        pushToast(`Approved ${result.approved.length} deploys`, 'success');
+        if (result.message === 'no pending deploys') {
+          pushToast('No pending deploys', 'info');
+        } else if (result.failed.length === 0) {
+          pushToast(`Approved ${result.approved.length} deploys`, 'success');
+        } else {
+          const reasons = result.failed.map(f => f.reason).join(', ');
+          pushToast(
+            `Approved ${result.approved.length}, failed ${result.failed.length} (${reasons})`,
+            'amber',
+          );
+        }
       } catch (e) {
         pushToast(`Approve all failed: ${e instanceof api.ApiError ? e.body : 'Unknown error'}`, 'error');
       }
@@ -211,7 +290,13 @@ function App() {
               onApproveAll={handleApproveAll}
             />
           )}
-          {page === 'nodes' && <NodesView nodes={nodes} onServiceCommand={handleServiceCommand} />}
+          {page === 'nodes' && (
+            <NodesView
+              nodes={nodes}
+              onServiceCommand={handleServiceCommand}
+              lookupInFlight={lookupByService}
+            />
+          )}
           {page === 'history' && <HistoryView deploys={history} />}
         </main>
       </div>

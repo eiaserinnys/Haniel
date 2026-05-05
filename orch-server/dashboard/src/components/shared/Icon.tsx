@@ -52,6 +52,8 @@ export function Icon({ name, size = 14, style, className }: IconProps) {
       return <svg {...common}><circle cx="7" cy="7" r="3.5" /><path d="m9.7 9.7 3 3" /></svg>;
     case 'play':
       return <svg {...common}><path d="M5 3.5v9l7-4.5z" /></svg>;
+    case 'loader':
+      return <svg {...common}><circle cx="8" cy="8" r="5.5" strokeDasharray="6 18" /></svg>;
     case 'wifi-off':
       return <svg {...common}><path d="m3 3 10 10M2 6.5a8 8 0 0 1 3-2M11 4.5a8 8 0 0 1 3 2M5 9a4 4 0 0 1 1.5-1M9.5 8a4 4 0 0 1 1.5 1" /><circle cx="8" cy="11.5" r=".7" fill="currentColor" stroke="none" /></svg>;
     case 'cpu':

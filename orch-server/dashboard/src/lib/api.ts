@@ -3,7 +3,13 @@
  * Base URL is same-origin (relative paths).
  */
 
-import type { Deploy, OrchestratorNode } from '@/types';
+import type {
+  Deploy,
+  OrchestratorNode,
+  ApproveResponse,
+  ApproveAllResponse,
+  ServiceCommandResponse,
+} from '@/types';
 
 export class ApiError extends Error {
   status: number;
@@ -53,7 +59,7 @@ export function fetchHistory(): Promise<{ deploys: Deploy[] }> {
   return request('/api/orch/history');
 }
 
-export function approveDeploy(deployId: string): Promise<{ status: string }> {
+export function approveDeploy(deployId: string): Promise<ApproveResponse> {
   return request('/api/orch/approve', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -69,7 +75,7 @@ export function rejectDeploy(deployId: string, reason: string): Promise<{ status
   });
 }
 
-export function approveAll(): Promise<{ approved: string[] }> {
+export function approveAll(): Promise<ApproveAllResponse> {
   return request('/api/orch/approve-all', { method: 'POST' });
 }
 
@@ -77,7 +83,7 @@ export function serviceCommand(
   nodeId: string,
   serviceName: string,
   action: 'restart' | 'stop'
-): Promise<{ command_id: string; status: string }> {
+): Promise<ServiceCommandResponse> {
   return request('/api/orch/service-command', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

@@ -2,14 +2,15 @@ import { useState, useMemo } from 'react';
 import { Icon } from '@/components/shared/Icon';
 import { StatusPill } from '@/components/shared/StatusPill';
 import { relTime, uptimeStr, cn } from '@/lib/utils';
-import type { OrchestratorNode } from '@/types';
+import type { OrchestratorNode, InFlightCommand } from '@/types';
 
 interface NodesViewProps {
   nodes: OrchestratorNode[];
   onServiceCommand?: (nodeId: string, serviceName: string, action: 'restart' | 'stop') => void;
+  lookupInFlight?: (nodeId: string, serviceName: string) => InFlightCommand | null;
 }
 
-export function NodesView({ nodes, onServiceCommand }: NodesViewProps) {
+export function NodesView({ nodes, onServiceCommand, lookupInFlight }: NodesViewProps) {
   const [filter, setFilter] = useState('');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
@@ -76,6 +77,7 @@ export function NodesView({ nodes, onServiceCommand }: NodesViewProps) {
             isExpanded={expanded.has(node.node_id)}
             onToggleExpand={() => toggleExpand(node.node_id)}
             onServiceCommand={onServiceCommand}
+            lookupInFlight={lookupInFlight}
           />
         ))}
         {filtered.length === 0 && (
@@ -95,9 +97,10 @@ interface NodeCardProps {
   isExpanded: boolean;
   onToggleExpand: () => void;
   onServiceCommand?: (nodeId: string, serviceName: string, action: 'restart' | 'stop') => void;
+  lookupInFlight?: (nodeId: string, serviceName: string) => InFlightCommand | null;
 }
 
-function NodeCard({ node, isExpanded, onToggleExpand, onServiceCommand }: NodeCardProps) {
+function NodeCard({ node, isExpanded, onToggleExpand, onServiceCommand, lookupInFlight }: NodeCardProps) {
   const isConnected = node.connected === 1;
   const osIcon = node.os.toLowerCase().includes('windows') ? 'windows' : 'linux';
 
@@ -192,21 +195,49 @@ function NodeCard({ node, isExpanded, onToggleExpand, onServiceCommand }: NodeCa
                           <td><StatusPill status={svc.status} size="sm" /></td>
                           {onServiceCommand && (
                             <td className="svc-actions">
-                              {svc.enabled && svc.status === 'running' && (
-                                <>
-                                  <button className="svc-btn" onClick={() => onServiceCommand(node.node_id, svc.name, 'restart')} title="Restart">
-                                    <Icon name="refresh" size={12} />
-                                  </button>
-                                  <button className="svc-btn svc-btn-danger" onClick={() => onServiceCommand(node.node_id, svc.name, 'stop')} title="Stop">
-                                    <Icon name="stop" size={12} />
-                                  </button>
-                                </>
-                              )}
-                              {svc.enabled && svc.status === 'stopped' && (
-                                <button className="svc-btn" onClick={() => onServiceCommand(node.node_id, svc.name, 'restart')} title="Start">
-                                  <Icon name="play" size={12} />
-                                </button>
-                              )}
+                              {(() => {
+                                // Cell wrapper guarantees onServiceCommand is defined here.
+                                const inFlightCmd = lookupInFlight?.(node.node_id, svc.name) ?? null;
+                                const isInFlight = inFlightCmd !== null;
+                                if (svc.enabled && svc.status === 'running') {
+                                  return (
+                                    <>
+                                      <button
+                                        className="svc-btn"
+                                        disabled={isInFlight}
+                                        data-in-flight={isInFlight ? inFlightCmd.action : undefined}
+                                        onClick={() => onServiceCommand!(node.node_id, svc.name, 'restart')}
+                                        title={isInFlight ? `${inFlightCmd.action} in progress…` : 'Restart'}
+                                      >
+                                        <Icon name={isInFlight && inFlightCmd.action === 'restart' ? 'loader' : 'refresh'} size={12} />
+                                      </button>
+                                      <button
+                                        className="svc-btn svc-btn-danger"
+                                        disabled={isInFlight}
+                                        data-in-flight={isInFlight ? inFlightCmd.action : undefined}
+                                        onClick={() => onServiceCommand!(node.node_id, svc.name, 'stop')}
+                                        title={isInFlight ? `${inFlightCmd.action} in progress…` : 'Stop'}
+                                      >
+                                        <Icon name={isInFlight && inFlightCmd.action === 'stop' ? 'loader' : 'stop'} size={12} />
+                                      </button>
+                                    </>
+                                  );
+                                }
+                                if (svc.enabled && svc.status === 'stopped') {
+                                  return (
+                                    <button
+                                      className="svc-btn"
+                                      disabled={isInFlight}
+                                      data-in-flight={isInFlight ? inFlightCmd.action : undefined}
+                                      onClick={() => onServiceCommand!(node.node_id, svc.name, 'restart')}
+                                      title={isInFlight ? `${inFlightCmd.action} in progress…` : 'Start'}
+                                    >
+                                      <Icon name={isInFlight ? 'loader' : 'play'} size={12} />
+                                    </button>
+                                  );
+                                }
+                                return null;
+                              })()}
                             </td>
                           )}
                         </tr>
