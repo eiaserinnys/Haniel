@@ -231,3 +231,121 @@ class TestShutdown:
         await hub.shutdown()
 
         ws.close.assert_called_once_with(code=1001, reason="server shutdown")
+
+
+class TestPushIntegration:
+    """Tests for push notification integration in WebSocketHub."""
+
+    async def test_change_notification_fires_push(self, store: EventStore):
+        """ChangeNotification triggers push_service.notify with new_pending data."""
+        push = AsyncMock()
+        registry = NodeRegistry(store)
+        hub = WebSocketHub(registry, store, token="t", push_service=push)
+
+        notification = ChangeNotification(
+            deploy_id="n1:repo:main:abc",
+            node_id="n1",
+            repo="myrepo",
+            branch="main",
+            commits=["abc fix"],
+            affected_services=["svc"],
+            detected_at="2026-05-05T00:00:00Z",
+        )
+
+        await hub._handle_change_notification(notification)
+        # Let the fire-and-forget task complete
+        await asyncio.sleep(0.05)
+
+        push.notify.assert_called_once()
+        args, kwargs = push.notify.call_args
+        title = kwargs.get("title", args[0])
+        data = kwargs.get("data", args[2])
+        assert "myrepo" in title
+        assert data["type"] == "new_pending"
+        assert data["deploy_id"] == "n1:repo:main:abc"
+
+    async def test_deploy_result_success_fires_push(self, store: EventStore):
+        """DeployResult(success) triggers push notification."""
+        push = AsyncMock()
+        registry = NodeRegistry(store)
+        hub = WebSocketHub(registry, store, token="t", push_service=push)
+
+        await store.create_deploy_event(
+            deploy_id="d1", node_id="n1", repo="r", branch="main",
+            commits=["h msg"], affected_services=[], diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+        )
+        await store.update_deploy_status("d1", DeployStatus.DEPLOYING)
+
+        result = DeployResult(deploy_id="d1", node_id="n1", status="success", duration_ms=5000)
+        await hub._handle_deploy_result(result)
+        await asyncio.sleep(0.05)
+
+        push.notify.assert_called_once()
+        args, kwargs = push.notify.call_args
+        data = kwargs.get("data", args[2])
+        assert data["status"] == "success"
+
+    async def test_deploy_result_failed_fires_push(self, store: EventStore):
+        """DeployResult(failed) triggers push notification."""
+        push = AsyncMock()
+        registry = NodeRegistry(store)
+        hub = WebSocketHub(registry, store, token="t", push_service=push)
+
+        await store.create_deploy_event(
+            deploy_id="d2", node_id="n1", repo="r", branch="main",
+            commits=["h msg"], affected_services=[], diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+        )
+        await store.update_deploy_status("d2", DeployStatus.DEPLOYING)
+
+        result = DeployResult(deploy_id="d2", node_id="n1", status="failed", error="exit 1")
+        await hub._handle_deploy_result(result)
+        await asyncio.sleep(0.05)
+
+        push.notify.assert_called_once()
+        args, kwargs = push.notify.call_args
+        data = kwargs.get("data", args[2])
+        assert data["status"] == "failed"
+
+    async def test_push_failure_does_not_break_broadcast(self, store: EventStore):
+        """Push failure does not prevent dashboard broadcast."""
+        push = AsyncMock()
+        push.notify = AsyncMock(side_effect=Exception("relay down"))
+        registry = NodeRegistry(store)
+        hub = WebSocketHub(registry, store, token="t", push_service=push)
+
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+
+        notification = ChangeNotification(
+            deploy_id="d1:repo:main:abc",
+            node_id="n1",
+            repo="repo",
+            branch="main",
+            commits=["abc fix"],
+            affected_services=["svc"],
+            detected_at="2026-05-05T00:00:00Z",
+        )
+
+        await hub._handle_change_notification(notification)
+        await asyncio.sleep(0.05)
+
+        # Dashboard broadcast should succeed even if push fails
+        ws_dash.send_text.assert_called_once()
+
+    async def test_null_push_service_is_noop(self, hub: WebSocketHub, store: EventStore):
+        """Default hub (no push_service arg) uses NullPushService — no errors."""
+        # hub fixture has push_service=None → auto-injected NullPushService
+        notification = ChangeNotification(
+            deploy_id="d1:repo:main:abc",
+            node_id="n1",
+            repo="repo",
+            branch="main",
+            commits=["abc fix"],
+            affected_services=["svc"],
+            detected_at="2026-05-05T00:00:00Z",
+        )
+        # Should not raise any errors — NullPushService.notify is no-op
+        await hub._handle_change_notification(notification)
+        await asyncio.sleep(0.05)  # let fire-and-forget complete

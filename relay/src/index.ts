@@ -157,11 +157,20 @@ async function handlePush(request: Request, env: Env): Promise<Response> {
   return Response.json({ sent, failed, errors });
 }
 
+const DEVICE_TOKEN_PATTERN = /^[0-9a-fA-F]{64}$/;
+
 async function handleRegisterDevice(request: Request, env: Env): Promise<Response> {
   const body = await request.json<DeviceRegistration>();
   if (!body.token || !body.device_name) {
     return Response.json(
       { error: "token and device_name are required" },
+      { status: 400 },
+    );
+  }
+
+  if (!DEVICE_TOKEN_PATTERN.test(body.token)) {
+    return Response.json(
+      { error: "invalid token format — expected 64-char hex string" },
       { status: 400 },
     );
   }

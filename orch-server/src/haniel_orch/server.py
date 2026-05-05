@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+from typing import Literal
 
 from pydantic import BaseModel
 from starlette.applications import Starlette
@@ -16,8 +17,17 @@ from .api import create_api_routes
 from .event_store import EventStore
 from .hub import WebSocketHub
 from .node_registry import NodeRegistry
+from .push import NullPushService, PushService, RelayPushService
 
 logger = logging.getLogger(__name__)
+
+
+class PushConfig(BaseModel):
+    """Push notification configuration. Relay mode sends via CF Workers."""
+
+    mode: Literal["relay"]  # future: add "direct"
+    relay_url: str | None = None
+    instance_key: str | None = None
 
 
 class OrchestratorConfig(BaseModel):
@@ -28,6 +38,7 @@ class OrchestratorConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 9300
     heartbeat_timeout: float = 90.0
+    push: PushConfig | None = None  # None = push disabled
 
 
 class OrchestratorServer:
@@ -39,8 +50,22 @@ class OrchestratorServer:
         self._registry = NodeRegistry(
             self._store, heartbeat_timeout=config.heartbeat_timeout
         )
-        self._hub = WebSocketHub(self._registry, self._store, config.token)
+        self._push = self._create_push_service(config)
+        self._hub = WebSocketHub(
+            self._registry, self._store, config.token, push_service=self._push
+        )
         self._app: Starlette | None = None
+
+    @staticmethod
+    def _create_push_service(config: OrchestratorConfig) -> PushService:
+        """Create push service based on configuration."""
+        if config.push and config.push.mode == "relay":
+            if not config.push.relay_url or not config.push.instance_key:
+                raise ValueError(
+                    "push.relay_url and push.instance_key required for relay mode"
+                )
+            return RelayPushService(config.push.relay_url, config.push.instance_key)
+        return NullPushService()
 
     @property
     def store(self) -> EventStore:
@@ -99,7 +124,8 @@ class OrchestratorServer:
         )
 
     async def _on_shutdown(self) -> None:
-        """Graceful shutdown: hub + store."""
+        """Graceful shutdown: hub + push + store."""
         await self._hub.shutdown()
+        await self._push.close()
         await self._store.close()
         logger.info("Orchestrator shut down")

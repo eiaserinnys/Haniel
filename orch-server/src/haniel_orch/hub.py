@@ -11,6 +11,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from .event_store import EventStore
 from .node_registry import NodeRegistry
+from .push import NullPushService, PushService
 from .protocol import (
     ChangeNotification,
     DeployResult,
@@ -27,12 +28,20 @@ logger = logging.getLogger(__name__)
 class WebSocketHub:
     """Central hub managing node and dashboard WebSocket connections."""
 
-    def __init__(self, registry: NodeRegistry, store: EventStore, token: str) -> None:
+    def __init__(
+        self,
+        registry: NodeRegistry,
+        store: EventStore,
+        token: str,
+        push_service: PushService | None = None,
+    ) -> None:
         self._registry = registry
         self._store = store
         self._token = token
+        self._push: PushService = push_service or NullPushService()
         self._dashboard_connections: set[WebSocket] = set()
         self._heartbeat_task: asyncio.Task | None = None
+        self._background_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def registry(self) -> NodeRegistry:
@@ -116,6 +125,13 @@ class WebSocketHub:
             "detected_at": msg.detected_at,
         })
 
+        # Fire-and-forget push notification
+        self._spawn_push(
+            title=f"배포 대기: {msg.repo}",
+            body=f"{msg.node_id}에서 {msg.repo} ({msg.branch}) 변경 감지",
+            data={"deploy_id": msg.deploy_id, "type": "new_pending", "node_id": msg.node_id},
+        )
+
     async def _handle_deploy_result(self, msg: DeployResult) -> None:
         """Process a DeployResult: update status + broadcast."""
         status = DeployStatus[msg.status.upper()]
@@ -131,6 +147,28 @@ class WebSocketHub:
             "status": status.value,
             "node_id": msg.node_id,
         })
+
+        # Fire-and-forget push for terminal states
+        if status in (DeployStatus.SUCCESS, DeployStatus.FAILED):
+            status_text = "성공" if status == DeployStatus.SUCCESS else "실패"
+            self._spawn_push(
+                title=f"배포 {status_text}: {msg.node_id}",
+                body=f"{msg.node_id}의 배포가 {status_text}했습니다",
+                data={"deploy_id": msg.deploy_id, "type": "status_change", "status": status.value},
+            )
+
+    def _spawn_push(self, title: str, body: str, data: dict[str, Any]) -> None:
+        """Spawn a fire-and-forget push task. Task ref is held to prevent GC."""
+        task = asyncio.create_task(self._fire_push(title, body, data))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _fire_push(self, title: str, body: str, data: dict[str, Any]) -> None:
+        """Send push notification. Failures are logged and ignored."""
+        try:
+            await self._push.notify(title, body, data)
+        except Exception as e:
+            logger.warning(f"Push notification failed: {e}")
 
     async def handle_dashboard_ws(self, websocket: WebSocket) -> None:
         """Handle a dashboard WebSocket connection. No auth (MVP localhost)."""
