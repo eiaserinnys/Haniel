@@ -33,6 +33,7 @@ class NodeHello(BaseModel):
     os: str
     arch: str
     haniel_version: str
+    services: list[dict] | None = None  # optional service list from node
 
 
 class ChangeNotification(BaseModel):

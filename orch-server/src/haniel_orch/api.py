@@ -27,6 +27,10 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
     async def get_nodes(request: Request) -> JSONResponse:
         """GET /api/orch/nodes — list all registered nodes."""
         nodes = await store.get_nodes()
+        for node in nodes:
+            connected_node = hub.registry.get_node(node["node_id"])
+            if connected_node and connected_node.hello.services:
+                node["services"] = connected_node.hello.services
         return JSONResponse({"nodes": nodes})
 
     async def get_history(request: Request) -> JSONResponse:

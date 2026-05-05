@@ -34,6 +34,11 @@ class WebSocketHub:
         self._dashboard_connections: set[WebSocket] = set()
         self._heartbeat_task: asyncio.Task | None = None
 
+    @property
+    def registry(self) -> NodeRegistry:
+        """Public accessor for the node registry."""
+        return self._registry
+
     async def handle_node_ws(self, websocket: WebSocket) -> None:
         """Handle a node WebSocket connection lifecycle."""
         await websocket.accept()

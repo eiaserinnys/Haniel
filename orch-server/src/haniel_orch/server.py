@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import logging
+import pathlib
 
 from pydantic import BaseModel
 from starlette.applications import Starlette
-from starlette.routing import Route, WebSocketRoute
+from starlette.requests import Request
+from starlette.responses import FileResponse, Response
+from starlette.routing import Mount, Route, WebSocketRoute
+from starlette.staticfiles import StaticFiles
 
 from .api import create_api_routes
 from .event_store import EventStore
@@ -53,13 +57,34 @@ class OrchestratorServer:
     def build_app(self) -> Starlette:
         """Build the Starlette application with all routes."""
         api_routes = create_api_routes(self._hub, self._store)
-        ws_routes = [
+        ws_routes: list[Route | WebSocketRoute | Mount] = [
             WebSocketRoute("/ws/node", self._hub.handle_node_ws),
             WebSocketRoute("/ws/dashboard", self._hub.handle_dashboard_ws),
         ]
 
+        # Dashboard SPA (mount only when build artifacts exist)
+        # Path: __file__ = src/haniel_orch/server.py
+        #   .parent = src/haniel_orch/  .parent = src/  .parent = orch-server/
+        #   / "dashboard" / "dist" = orch-server/dashboard/dist/
+        dashboard_dir = pathlib.Path(__file__).parent.parent.parent / "dashboard" / "dist"
+        dashboard_routes: list[Route | Mount] = []
+        if dashboard_dir.exists():
+            async def serve_dashboard(request: Request) -> Response:
+                """SPA fallback: serve static file if exists, else index.html."""
+                path = request.path_params.get("path", "")
+                file_path = dashboard_dir / path
+                if path and file_path.is_file():
+                    return FileResponse(str(file_path))
+                return FileResponse(str(dashboard_dir / "index.html"))
+
+            dashboard_routes = [
+                Route("/dashboard", serve_dashboard),
+                Route("/dashboard/{path:path}", serve_dashboard),
+            ]
+            logger.info(f"Dashboard mounted from {dashboard_dir}")
+
         self._app = Starlette(
-            routes=api_routes + ws_routes,
+            routes=api_routes + ws_routes + dashboard_routes,
             on_startup=[self._on_startup],
             on_shutdown=[self._on_shutdown],
         )
