@@ -167,15 +167,49 @@ class OrchestratorClient:
             self._reset_backoff()
             logger.info(f"Connected to orchestrator at {self._config.url}")
 
-            # Listen for server messages
-            async for raw in ws:
-                if self._stop_event.is_set():
-                    break
-                try:
-                    msg = json.loads(raw)
-                    await self._handle_server_message(msg)
-                except Exception as e:
-                    logger.warning(f"Error handling orchestrator message: {e}")
+            # Run heartbeat and listener concurrently
+            listener = asyncio.create_task(self._listen(ws))
+            heartbeat = asyncio.create_task(self._heartbeat_loop(ws))
+            try:
+                # Wait for either to finish (disconnect or stop)
+                done, pending = await asyncio.wait(
+                    [listener, heartbeat],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                # Re-raise if listener had an exception
+                for task in done:
+                    task.result()
+            except asyncio.CancelledError:
+                pass
+
+    async def _listen(self, ws) -> None:
+        """Listen for server messages on the WebSocket."""
+        async for raw in ws:
+            if self._stop_event.is_set():
+                break
+            try:
+                msg = json.loads(raw)
+                await self._handle_server_message(msg)
+            except Exception as e:
+                logger.warning(f"Error handling orchestrator message: {e}")
+
+    async def _heartbeat_loop(self, ws) -> None:
+        """Send periodic heartbeats to keep the connection alive."""
+        while not self._stop_event.is_set():
+            await asyncio.sleep(30)
+            if self._stop_event.is_set():
+                break
+            try:
+                await self._send_heartbeat()
+            except Exception as e:
+                logger.debug(f"Heartbeat send failed: {e}")
+                break
 
     async def _handle_server_message(self, msg: dict) -> None:
         """Handle messages from the orchestrator server."""
