@@ -26,34 +26,36 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-/* ── Endpoints ───────────────────────────────────���──── */
+/* ── Endpoints ─────────────────────────────────────── */
 
 export function fetchPending(): Promise<{ deploys: Deploy[] }> {
-  return request('/api/deploys/pending');
+  return request('/api/orch/pending');
 }
 
 export function fetchNodes(): Promise<{ nodes: OrchestratorNode[] }> {
-  return request('/api/nodes');
+  return request('/api/orch/nodes');
 }
 
 export function fetchHistory(): Promise<{ deploys: Deploy[] }> {
-  return request('/api/deploys/history');
+  return request('/api/orch/history');
 }
 
 export function approveDeploy(deployId: string): Promise<{ status: string }> {
-  return request(`/api/deploys/${encodeURIComponent(deployId)}/approve`, {
+  return request('/api/orch/approve', {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deploy_id: deployId }),
   });
 }
 
 export function rejectDeploy(deployId: string, reason: string): Promise<{ status: string }> {
-  return request(`/api/deploys/${encodeURIComponent(deployId)}/reject`, {
+  return request('/api/orch/reject', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ reason }),
+    body: JSON.stringify({ deploy_id: deployId, reason }),
   });
 }
 
 export function approveAll(): Promise<{ approved: string[] }> {
-  return request('/api/deploys/approve-all', { method: 'POST' });
+  return request('/api/orch/approve-all', { method: 'POST' });
 }
