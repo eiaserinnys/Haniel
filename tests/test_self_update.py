@@ -152,6 +152,7 @@ class TestRunnerSelfUpdate:
         runner._restart_lock = threading.Lock()
         runner._stop_event = threading.Event()
         runner._self_update_requested = threading.Event()
+        runner._last_self_update_result = None
         runner._pending_restarts = {}
         runner._dependency_graph = MagicMock()
         runner._dependency_graph.get_dependencies.return_value = []
@@ -251,6 +252,59 @@ class TestRunnerSelfUpdate:
         assert "self_update" in status
         assert status["self_update"]["repo"] == "haniel"
         assert status["self_update"]["pending"] is False
+
+    def test_approve_self_update_broadcasts_started(self):
+        """approve_self_update with a pending update should broadcast started."""
+        config = self._make_config()
+        runner = self._make_runner(config)
+        runner._state.self_update_pending = True
+        runner._ws_handler = MagicMock()
+
+        result = runner.approve_self_update()
+
+        assert runner.self_update_requested is True
+        assert "approved" in result.lower()
+        runner._ws_handler.broadcast_self_update_started.assert_called_once_with("haniel")
+
+    def test_get_status_includes_last_result_when_loaded(self):
+        """get_status should expose last_result when a marker was consumed."""
+        from haniel.core.self_update_marker import SelfUpdateResult, SelfUpdateStep
+
+        config = self._make_config()
+        runner = self._make_runner(config)
+        runner._enabled_services = {}
+        runner._repo_states = {}
+        runner.poll_interval = 60
+        runner.health_manager = MagicMock()
+        runner._last_self_update_result = SelfUpdateResult(
+            version=1,
+            started_at="2026-05-05T12:00:00+09:00",
+            finished_at="2026-05-05T12:01:00+09:00",
+            ok=True,
+            steps=[SelfUpdateStep(name="git_fetch", ok=True)],
+            error=None,
+        )
+
+        status = runner.get_status()
+
+        assert status["self_update"]["last_result"] is not None
+        assert status["self_update"]["last_result"]["ok"] is True
+        assert status["self_update"]["last_result"]["version"] == 1
+
+    def test_get_status_last_result_none_when_not_loaded(self):
+        """When no marker was consumed, last_result should be None."""
+        config = self._make_config()
+        runner = self._make_runner(config)
+        runner._enabled_services = {}
+        runner._repo_states = {}
+        runner.poll_interval = 60
+        runner.health_manager = MagicMock()
+        # _last_self_update_result default is None (set in __init__).
+        runner._last_self_update_result = None
+
+        status = runner.get_status()
+
+        assert status["self_update"]["last_result"] is None
 
 
 # --- Webhook Event Tests ---

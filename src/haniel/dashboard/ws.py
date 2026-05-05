@@ -78,6 +78,13 @@ class DashboardWebSocket:
             except Exception as e:
                 logger.warning("Failed to register Slack DM chat handler: %s", e)
 
+        # If the runner consumed a self-update marker on startup, broadcast it
+        # now that the loop is bound. Late-connecting clients also pick it up
+        # via the init message (status.self_update.last_result).
+        last = getattr(self.runner, "_last_self_update_result", None)
+        if last is not None:
+            self.broadcast_self_update_completed(last.to_dict())
+
     def _on_state_change(
         self,
         service_name: str,
@@ -135,6 +142,28 @@ class DashboardWebSocket:
         event = {
             "type": "self_update_pending",
             "repo": repo,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        self._schedule_broadcast(event)
+
+    def broadcast_self_update_started(self, repo: str) -> None:
+        """Broadcast that an approved self-update is starting (server about to
+        shut down). Canonical 'updating' signal for the dashboard overlay."""
+        event = {
+            "type": "self_update_started",
+            "repo": repo,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        self._schedule_broadcast(event)
+
+    def broadcast_self_update_completed(self, result: dict) -> None:
+        """Broadcast the outcome of the previous self-update cycle.
+
+        Called from setup() when the runner consumed a marker on startup.
+        """
+        event = {
+            "type": "self_update_completed",
+            "result": result,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         self._schedule_broadcast(event)

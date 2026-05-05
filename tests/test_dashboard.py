@@ -278,6 +278,82 @@ class TestDashboardWebSocket:
         assert sent_data["old"] == ServiceState.STARTING.value
         assert sent_data["new"] == ServiceState.RUNNING.value
 
+    def test_broadcast_self_update_started_schedules_event(self, mock_runner):
+        """broadcast_self_update_started schedules a self_update_started event."""
+        from haniel.dashboard.ws import DashboardWebSocket
+
+        ws_handler = DashboardWebSocket(mock_runner)
+        mock_loop = MagicMock()
+        mock_loop.is_closed.return_value = False
+        ws_handler._loop = mock_loop
+
+        ws_handler.broadcast_self_update_started("haniel")
+
+        # _schedule_broadcast → loop.call_soon_threadsafe(callback)
+        mock_loop.call_soon_threadsafe.assert_called_once()
+        # Inspect the captured event by invoking the callback's default arg
+        callback = mock_loop.call_soon_threadsafe.call_args[0][0]
+        # callback is a lambda(e=event): self._loop.create_task(self._broadcast(e))
+        # The captured 'e' is the keyword default; inspect via the closure's defaults
+        captured_event = callback.__defaults__[0]
+        assert captured_event["type"] == "self_update_started"
+        assert captured_event["repo"] == "haniel"
+        assert "timestamp" in captured_event
+
+    def test_broadcast_self_update_completed_schedules_event(self, mock_runner):
+        """broadcast_self_update_completed schedules a self_update_completed event."""
+        from haniel.dashboard.ws import DashboardWebSocket
+
+        ws_handler = DashboardWebSocket(mock_runner)
+        mock_loop = MagicMock()
+        mock_loop.is_closed.return_value = False
+        ws_handler._loop = mock_loop
+
+        result_dict = {"version": 1, "ok": False, "error": "git_reset failed"}
+        ws_handler.broadcast_self_update_completed(result_dict)
+
+        mock_loop.call_soon_threadsafe.assert_called_once()
+        callback = mock_loop.call_soon_threadsafe.call_args[0][0]
+        captured_event = callback.__defaults__[0]
+        assert captured_event["type"] == "self_update_completed"
+        assert captured_event["result"] == result_dict
+        assert "timestamp" in captured_event
+
+    def test_setup_broadcasts_pending_marker_result(self, mock_runner):
+        """setup(loop) broadcasts a self_update_completed event when the runner
+        has consumed a marker on startup (covers reconnect after restart)."""
+        from haniel.core.self_update_marker import SelfUpdateResult, SelfUpdateStep
+        from haniel.dashboard.ws import DashboardWebSocket
+
+        # Runner exposes a consumed marker
+        mock_runner._last_self_update_result = SelfUpdateResult(
+            version=1,
+            started_at="2026-05-05T12:00:00+09:00",
+            finished_at="2026-05-05T12:01:00+09:00",
+            ok=False,
+            steps=[SelfUpdateStep(name="git_reset", ok=False, error="bad ref")],
+            error="git_reset failed: bad ref",
+        )
+        mock_runner.health_manager = MagicMock()
+
+        ws_handler = DashboardWebSocket(mock_runner)
+        mock_loop = MagicMock()
+        mock_loop.is_closed.return_value = False
+
+        ws_handler.setup(mock_loop)
+
+        # setup() schedules at least one broadcast (the completed event)
+        assert mock_loop.call_soon_threadsafe.called
+        # Find the self_update_completed call among scheduled ones
+        completed_calls = [
+            c for c in mock_loop.call_soon_threadsafe.call_args_list
+            if c[0][0].__defaults__[0].get("type") == "self_update_completed"
+        ]
+        assert len(completed_calls) == 1
+        captured_event = completed_calls[0][0][0].__defaults__[0]
+        assert captured_event["result"]["ok"] is False
+        assert captured_event["result"]["error"] == "git_reset failed: bad ref"
+
 
 # ── git.get_pending_changes Tests ─────────────────────────────────────────────
 

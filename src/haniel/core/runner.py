@@ -39,6 +39,10 @@ from .git import (
 )
 from .health import HealthManager
 from .process import ProcessManager
+from .self_update_marker import (
+    SelfUpdateResult,
+    read_and_consume as _read_self_update_marker,
+)
 
 if __import__("typing").TYPE_CHECKING:
     from ..integrations.slack_bot import SlackBot
@@ -328,6 +332,9 @@ class ServiceRunner:
         self._self_update_requested = threading.Event()
         self._restart_requested = threading.Event()
 
+        # Self-update result from previous wrapper iteration (consumed on start)
+        self._last_self_update_result: SelfUpdateResult | None = None
+
     @property
     def is_running(self) -> bool:
         """Check if the runner is active."""
@@ -599,6 +606,16 @@ class ServiceRunner:
 
         # Initialize repo states (get current HEAD)
         self._init_repo_states()
+
+        # Consume self-update result from previous wrapper iteration (if any).
+        # Done before MCP server starts so ws_handler.setup(loop) can broadcast it.
+        self._last_self_update_result = _read_self_update_marker(self.config_dir)
+        if self._last_self_update_result is not None:
+            logger.info(
+                "Loaded self-update result: ok=%s err=%s",
+                self._last_self_update_result.ok,
+                self._last_self_update_result.error,
+            )
 
         # Start MCP server if enabled
         self._start_mcp_server()
@@ -1179,6 +1196,12 @@ class ServiceRunner:
         logger.info("Self-update approved, shutting down for update")
         self._notify_self_update_approved()
         self._self_update_requested.set()
+        # Notify dashboard that the update work is now starting (server about
+        # to shut down). This is the canonical signal for the dashboard's
+        # 'Updating…' overlay — the API response alone is insufficient.
+        # ws_handler가 None이면(대시보드 비활성) broadcast 스킵 — 의도된 동작.
+        if self._ws_handler is not None and self._self_repo:
+            self._ws_handler.broadcast_self_update_started(self._self_repo)
         return "Self-update approved. Shutting down for update."
 
     @property
@@ -1415,11 +1438,17 @@ class ServiceRunner:
                 "repos": repo_status,
             }
             if self._self_repo:
+                last_result = (
+                    self._last_self_update_result.to_dict()
+                    if self._last_self_update_result is not None
+                    else None
+                )
                 result["self_update"] = {
                     "repo": self._self_repo,
                     "pending": self._state.self_update_pending,
                     "auto_update": self.config.self_update.auto_update
                     if self.config.self_update
                     else False,
+                    "last_result": last_result,
                 }
             return result
