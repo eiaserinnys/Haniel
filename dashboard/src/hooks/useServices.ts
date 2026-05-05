@@ -1,9 +1,10 @@
 // useServices — WebSocket + service state management
 // Uses Phase 1 API types: RunnerStatus, WsEvent
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import type {
   RunnerStatus,
+  SelfUpdateResult,
   WsEvent,
   WsStateChangeEvent,
   WsRepoChangeEvent,
@@ -17,6 +18,47 @@ export function useServices() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [updating, setUpdating] = useState(false)
+  const [updateResult, setUpdateResult] = useState<SelfUpdateResult | null>(null)
+  // Track when overlay opened. null until self_update_started arrives.
+  // Used to filter stale last_result in self_update_completed events
+  // (e.g. duplicate broadcasts within the same runner instance) and to
+  // distinguish init-time recovery from in-session completion.
+  const updateStartedAtRef = useRef<number | null>(null)
+
+  const applyResultOutcome = useCallback((result: SelfUpdateResult) => {
+    setUpdateResult(result)
+    if (result.ok) {
+      // Defer reload slightly so React commits state before navigation.
+      window.setTimeout(() => window.location.reload(), 200)
+    } else {
+      const msg = result.error ?? 'Self-update failed (no error message).'
+      setError(`Self-update failed: ${msg}`)
+      setUpdating(false)
+    }
+  }, [])
+
+  const processCompletedResult = useCallback((result: SelfUpdateResult) => {
+    // Stale-result filter: only act on results finished AFTER overlay opened.
+    // Used by the self_update_completed broadcast — overlay was opened by
+    // self_update_started so updateStartedAtRef is set.
+    const started = updateStartedAtRef.current
+    if (started === null) return
+    const finishedMs = Date.parse(result.finished_at)
+    if (Number.isNaN(finishedMs) || finishedMs < started) return
+    applyResultOutcome(result)
+  }, [applyResultOutcome])
+
+  const processInitRecoveryResult = useCallback((result: SelfUpdateResult) => {
+    // Init recovery: last_result was loaded from a marker before this client
+    // connected. There is no overlay open and updateStartedAtRef is null,
+    // because self_update_started broadcast was lost during server restart.
+    // We still must surface the outcome (req: 실패 시 명확한 에러 표시).
+    // - On failure: show error in main UI (no overlay flash).
+    // - On success: silently reload — the previous cycle succeeded and
+    //   the user just connecting now does not need to see "Updating…".
+    if (updateStartedAtRef.current !== null) return  // already handled by completed path
+    applyResultOutcome(result)
+  }, [applyResultOutcome])
 
   const handleEvent = useCallback((event: WsEvent) => {
     switch (event.type) {
@@ -31,6 +73,11 @@ export function useServices() {
         setPullingRepos(pulling)
         setLoading(false)
         setError(null)
+        // Recover from a self_update_started broadcast that was lost during
+        // server restart. Without this, a failed self-update would be
+        // silently swallowed.
+        const lr = event.status.self_update?.last_result ?? null
+        if (lr !== null) processInitRecoveryResult(lr)
         break
       }
       case 'state_change': {
@@ -72,9 +119,19 @@ export function useServices() {
             ...prev,
             self_update: prev.self_update
               ? { ...prev.self_update, pending: true }
-              : { repo: event.repo, pending: true, auto_update: false },
+              : { repo: event.repo, pending: true, auto_update: false, last_result: null },
           }
         })
+        break
+      }
+      case 'self_update_started': {
+        updateStartedAtRef.current = Date.now()
+        setUpdating(true)
+        setUpdateResult(null)
+        break
+      }
+      case 'self_update_completed': {
+        processCompletedResult(event.result)
         break
       }
       case 'repo_pulling': {
@@ -95,7 +152,7 @@ export function useServices() {
         break
       }
     }
-  }, [])
+  }, [processCompletedResult, processInitRecoveryResult])
 
   const { connectionState } = useWebSocket({ onEvent: handleEvent })
 
@@ -132,7 +189,11 @@ export function useServices() {
   const approveSelfUpdate = useCallback(async () => {
     try {
       await api.approveSelfUpdate()
-      setUpdating(true)
+      // Overlay is opened by the WS self_update_started event
+      // (canonical 'work in progress' signal). API response alone
+      // is insufficient — see ADR-0002 result propagation.
+      // If the broadcast is lost (rare), init-time last_result recovery
+      // (case 'init') will surface success/failure when WS reconnects.
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     }
@@ -167,5 +228,6 @@ export function useServices() {
     selfRestart,
     refreshStatus,
     updating,
+    updateResult,
   }
 }

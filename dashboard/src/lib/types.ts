@@ -56,10 +56,26 @@ export interface RepoConfigInput {
   path: string
 }
 
+export interface SelfUpdateStep {
+  name: string
+  ok: boolean
+  error: string | null
+}
+
+export interface SelfUpdateResult {
+  version: number
+  started_at: string
+  finished_at: string
+  ok: boolean
+  steps: SelfUpdateStep[]
+  error: string | null
+}
+
 export interface SelfUpdateStatus {
   repo: string
   pending: boolean
   auto_update: boolean
+  last_result: SelfUpdateResult | null
 }
 
 export interface DependencyInfo {
@@ -102,6 +118,16 @@ export interface WsSelfUpdatePendingEvent {
   repo: string
 }
 
+export interface WsSelfUpdateStartedEvent {
+  type: 'self_update_started'
+  repo: string
+}
+
+export interface WsSelfUpdateCompletedEvent {
+  type: 'self_update_completed'
+  result: SelfUpdateResult
+}
+
 export interface WsReloadCompleteEvent {
   type: 'reload_complete'
 }
@@ -117,5 +143,7 @@ export type WsEvent =
   | WsStateChangeEvent
   | WsRepoChangeEvent
   | WsSelfUpdatePendingEvent
+  | WsSelfUpdateStartedEvent
+  | WsSelfUpdateCompletedEvent
   | WsReloadCompleteEvent
   | WsRepoPullingEvent

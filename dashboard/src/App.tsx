@@ -13,7 +13,7 @@ import { ChatPanel } from '@/components/ChatPanel'
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable'
 import { api } from '@/lib/api'
 import { groupServicesAndRepos } from '@/lib/groups'
-import type { ServiceConfig, ServiceConfigInput, RepoConfigInput } from '@/lib/types'
+import type { ServiceConfig, ServiceConfigInput, RepoConfigInput, SelfUpdateResult } from '@/lib/types'
 import { useEffect, useMemo, useState } from 'react'
 import './index.css'
 
@@ -67,6 +67,7 @@ export default function App() {
     selfRestart,
     refreshStatus,
     updating,
+    updateResult,
   } = useServices()
 
   const countdown = useNextPollCountdown(
@@ -421,35 +422,28 @@ export default function App() {
       )}
 
       {/* Self-update overlay */}
-      {updating && <UpdateOverlay />}
+      {updating && <UpdateOverlay result={updateResult} />}
     </div>
   )
 }
 
-const UPDATE_POLL_INTERVAL_MS = 2000
 const UPDATE_TIMEOUT_MS = 120_000
 
-function UpdateOverlay() {
+interface UpdateOverlayProps {
+  result: SelfUpdateResult | null
+}
+
+function UpdateOverlay({ result }: UpdateOverlayProps) {
   const [timedOut, setTimedOut] = useState(false)
 
   useEffect(() => {
-    const start = Date.now()
-    const id = setInterval(async () => {
-      if (Date.now() - start > UPDATE_TIMEOUT_MS) {
-        clearInterval(id)
-        setTimedOut(true)
-        return
-      }
-      try {
-        await api.getStatus()
-        clearInterval(id)
-        window.location.reload()
-      } catch {
-        // Server still down — retry on next tick
-      }
-    }, UPDATE_POLL_INTERVAL_MS)
-    return () => clearInterval(id)
-  }, [])
+    // Only count down while still waiting. Once a result arrives, useServices
+    // either reloads (ok) or surfaces an error (not ok), and the overlay
+    // closes — no need for the timeout to fire then.
+    if (result !== null) return
+    const t = window.setTimeout(() => setTimedOut(true), UPDATE_TIMEOUT_MS)
+    return () => window.clearTimeout(t)
+  }, [result])
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -471,7 +465,7 @@ function UpdateOverlay() {
           <>
             <RefreshCw className="animate-spin text-blue-400" size={32} />
             <div className="text-zinc-100 font-medium">Updating…</div>
-            <div className="text-zinc-400 text-sm">Will auto-refresh when the server restarts.</div>
+            <div className="text-zinc-400 text-sm">Will auto-refresh when the update completes.</div>
           </>
         )}
       </div>
