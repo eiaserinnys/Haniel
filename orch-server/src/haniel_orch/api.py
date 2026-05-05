@@ -30,11 +30,20 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         return JSONResponse({"deploys": deploys})
 
     async def get_nodes(request: Request) -> JSONResponse:
-        """GET /api/orch/nodes — list all registered nodes."""
+        """GET /api/orch/nodes — list all registered nodes.
+
+        services field semantics:
+          - omitted (key absent): node hasn't reported services yet (pre-handshake
+            or stale client without get_services_info callable wired)
+          - [] (empty list): node has no services configured
+          - [...]: list of service info dicts
+        Distinguishing None vs [] lets the dashboard show "no services configured"
+        for the empty case without conflating it with "information missing".
+        """
         nodes = await store.get_nodes()
         for node in nodes:
             connected_node = hub.registry.get_node(node["node_id"])
-            if connected_node and connected_node.services:
+            if connected_node is not None and connected_node.services is not None:
                 node["services"] = connected_node.services
         return JSONResponse({"nodes": nodes})
 

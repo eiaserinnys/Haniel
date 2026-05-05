@@ -165,6 +165,17 @@ function NodeCard({ node, isExpanded, onToggleExpand, onServiceCommand, lookupIn
                 <span className="node-detail-label">Last seen</span>
                 <span className="node-detail-value">{relTime(node.last_seen)}</span>
               </div>
+              {node.services === undefined && (
+                <div className="node-services-hint">
+                  <Icon name="loader" size={12} />
+                  <span>Awaiting service info from node…</span>
+                </div>
+              )}
+              {node.services && node.services.length === 0 && (
+                <div className="node-services-hint">
+                  <span>No services configured on this node.</span>
+                </div>
+              )}
               {node.services && node.services.length > 0 && (
                 <div className="node-services">
                   <table className="services-table">

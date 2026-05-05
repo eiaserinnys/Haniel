@@ -760,6 +760,16 @@ h1 {
   color: var(--dim);
   font-style: italic;
 }
+.node-services-hint {
+  margin-top: 10px;
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  font-size: var(--t-xs);
+  color: var(--dim);
+  font-style: italic;
+}
+.node-services-hint svg { animation: orch-spin 0.8s linear infinite; transform-origin: center; }
 
 /* ── View: History ──────────────────────────────────── */
 .history-tabs {
