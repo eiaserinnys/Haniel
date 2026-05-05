@@ -1,5 +1,7 @@
 """Tests for EventStore CRUD operations."""
 
+import asyncio
+
 import pytest
 
 from haniel_orch.event_store import EventStore
@@ -102,6 +104,100 @@ class TestGetPendingDeploys:
     async def test_empty_when_none_pending(self, store: EventStore):
         pending = await store.get_pending_deploys()
         assert pending == []
+
+
+class TestGetActiveDeploys:
+    """get_active_deploys returns PENDING + DEPLOYING (used by /api/orch/pending)."""
+
+    async def test_includes_pending_and_deploying(self, store: EventStore):
+        # Create 3 events: pending, deploying, rejected
+        for i in range(3):
+            await store.create_deploy_event(
+                deploy_id=f"d{i}",
+                node_id="n1",
+                repo="r",
+                branch="main",
+                commits=[f"h{i} msg"],
+                affected_services=[],
+                diff_stat=None,
+                detected_at=f"2026-01-0{i+1}T00:00:00Z",
+            )
+        await store.update_deploy_status("d1", DeployStatus.DEPLOYING)
+        await store.update_deploy_status(
+            "d2", DeployStatus.REJECTED, reject_reason="not ready"
+        )
+
+        active = await store.get_active_deploys()
+        ids = {d["deploy_id"] for d in active}
+        assert ids == {"d0", "d1"}
+
+    async def test_ordered_newest_first(self, store: EventStore):
+        for i in range(3):
+            await store.create_deploy_event(
+                deploy_id=f"d{i}",
+                node_id="n1",
+                repo="r",
+                branch="main",
+                commits=[f"h{i} msg"],
+                affected_services=[],
+                diff_stat=None,
+                detected_at=f"2026-01-0{i+1}T00:00:00Z",
+            )
+            # Distinct created_at timestamps so ORDER BY is deterministic.
+            await asyncio.sleep(0.005)
+
+        active = await store.get_active_deploys()
+        # newest insert (d2) first
+        assert [d["deploy_id"] for d in active] == ["d2", "d1", "d0"]
+
+    async def test_empty_when_none_active(self, store: EventStore):
+        active = await store.get_active_deploys()
+        assert active == []
+
+
+class TestGetPendingDeploysForBranch:
+    """get_pending_deploys_for_branch returns PENDING for the matching (node, repo, branch)."""
+
+    async def test_returns_only_matching_branch(self, store: EventStore):
+        # same node + repo, different branches; same branch + different node
+        await store.create_deploy_event(
+            deploy_id="m1", node_id="n1", repo="r", branch="main",
+            commits=["h"], affected_services=[], diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+        )
+        await store.create_deploy_event(
+            deploy_id="d1", node_id="n1", repo="r", branch="dev",
+            commits=["h"], affected_services=[], diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+        )
+        await store.create_deploy_event(
+            deploy_id="m2", node_id="n2", repo="r", branch="main",
+            commits=["h"], affected_services=[], diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+        )
+
+        result = await store.get_pending_deploys_for_branch("n1", "r", "main")
+        assert {d["deploy_id"] for d in result} == {"m1"}
+
+    async def test_includes_only_pending(self, store: EventStore):
+        await store.create_deploy_event(
+            deploy_id="m1", node_id="n1", repo="r", branch="main",
+            commits=["h"], affected_services=[], diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+        )
+        await store.create_deploy_event(
+            deploy_id="m2", node_id="n1", repo="r", branch="main",
+            commits=["h"], affected_services=[], diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+        )
+        await store.update_deploy_status("m1", DeployStatus.DEPLOYING)
+
+        result = await store.get_pending_deploys_for_branch("n1", "r", "main")
+        assert {d["deploy_id"] for d in result} == {"m2"}
+
+    async def test_empty_when_no_match(self, store: EventStore):
+        result = await store.get_pending_deploys_for_branch("nope", "r", "main")
+        assert result == []
 
 
 class TestGetDeployHistory:

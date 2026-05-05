@@ -93,6 +93,7 @@ class OrchestratorConfig(BaseModel):
     dashboard_dir: str | None = None  # override dashboard static path
     push: PushConfig | None = None  # None = push disabled
     command_timeout_sec: float = 30.0  # service-command 응답 대기 타임아웃
+    deploy_timeout_sec: float = 300.0  # deploy 결과 대기 타임아웃 (5분)
 
 
 class OrchestratorServer:
@@ -112,6 +113,7 @@ class OrchestratorServer:
             push_service=self._push,
             auth_bearer_token=config.auth_bearer_token,
             command_timeout_sec=config.command_timeout_sec,
+            deploy_timeout_sec=config.deploy_timeout_sec,
         )
         self._app: Starlette | None = None
 
@@ -218,6 +220,7 @@ def create_app() -> Starlette:
         HEARTBEAT_TIMEOUT  — seconds before a node is considered disconnected
         DASHBOARD_DIR      — override dashboard static file path
         ORCH_COMMAND_TIMEOUT_SEC — optional override, default 30.0s (service-command 응답 대기)
+        ORCH_DEPLOY_TIMEOUT_SEC  — optional override, default 300.0s (deploy 결과 대기)
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -247,6 +250,17 @@ def create_app() -> Starlette:
                 f"ORCH_COMMAND_TIMEOUT_SEC must be > 0, got {timeout_override}"
             )
         config = config.model_copy(update={"command_timeout_sec": timeout_override})
+
+    # ORCH_DEPLOY_TIMEOUT_SEC: optional override.
+    # 기본값(300.0)은 OrchestratorConfig.deploy_timeout_sec 필드가 정본으로 보유
+    # (env-variables.md §1: 코드에 fallback 기본값을 두지 않음).
+    if "ORCH_DEPLOY_TIMEOUT_SEC" in os.environ:
+        deploy_override = float(os.environ["ORCH_DEPLOY_TIMEOUT_SEC"])
+        if deploy_override <= 0:
+            raise ValueError(
+                f"ORCH_DEPLOY_TIMEOUT_SEC must be > 0, got {deploy_override}"
+            )
+        config = config.model_copy(update={"deploy_timeout_sec": deploy_override})
 
     server = OrchestratorServer(config)
     return server.build_app()

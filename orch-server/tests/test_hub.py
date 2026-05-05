@@ -1,7 +1,9 @@
 """Tests for WebSocketHub — node/dashboard WS handling, broadcast, send_to_node."""
 
 import asyncio
+import contextlib
 import json
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -349,3 +351,209 @@ class TestPushIntegration:
         # Should not raise any errors — NullPushService.notify is no-op
         await hub._handle_change_notification(notification)
         await asyncio.sleep(0.05)  # let fire-and-forget complete
+
+
+class TestDeployTimeout:
+    """Hub tracks in-flight deploys; broadcasts timeout/orphan-fail."""
+
+    async def _seed_deploying(
+        self, store: EventStore, deploy_id: str, node_id: str = "n1"
+    ) -> None:
+        await store.create_deploy_event(
+            deploy_id=deploy_id, node_id=node_id, repo="r", branch="main",
+            commits=["h msg"], affected_services=[], diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+        )
+        await store.update_deploy_status(deploy_id, DeployStatus.DEPLOYING)
+
+    async def test_timeout_broadcasts_failure(self, registry, store):
+        hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=0.1)
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        await self._seed_deploying(store, "d1")
+        await hub.register_pending_deploy("d1", "n1", "r", "main")
+        await asyncio.sleep(0.25)
+
+        sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
+        timeouts = [
+            p for p in sent
+            if p.get("type") == "status_change" and p.get("status") == "failed"
+        ]
+        assert len(timeouts) == 1
+        assert timeouts[0]["deploy_id"] == "d1"
+        assert timeouts[0]["node_id"] == "n1"
+        assert "d1" not in hub._pending_deploys
+        ev = await store.get_deploy_event("d1")
+        assert ev["status"] == "failed"
+        assert ev["error"] == "timeout"
+
+    async def test_result_arrival_cancels_timeout(self, registry, store):
+        hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        await self._seed_deploying(store, "d1")
+        await hub.register_pending_deploy("d1", "n1", "r", "main")
+        timeout_task = hub._pending_deploys["d1"].timeout_task
+
+        result = DeployResult(
+            deploy_id="d1", node_id="n1", status="success", duration_ms=500,
+        )
+        await hub._handle_deploy_result(result)
+
+        assert "d1" not in hub._pending_deploys
+        with contextlib.suppress(asyncio.CancelledError):
+            await timeout_task
+        assert timeout_task.cancelled()
+        # Single broadcast — the success status_change. No timeout.
+        sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
+        statuses = [p["status"] for p in sent if p.get("type") == "status_change"]
+        assert statuses == ["success"]
+
+    async def test_cleanup_orphan_deploys_via_pending(self, registry, store):
+        """orphan deploys tracked in _pending_deploys are cancelled + broadcast on disconnect."""
+        hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        await self._seed_deploying(store, "d_a", node_id="n1")
+        await self._seed_deploying(store, "d_b", node_id="n2")
+        await hub.register_pending_deploy("d_a", "n1", "r", "main")
+        await hub.register_pending_deploy("d_b", "n2", "r", "main")
+
+        await hub._cleanup_orphan_deploys("n1", error="node disconnected")
+
+        assert "d_a" not in hub._pending_deploys
+        assert "d_b" in hub._pending_deploys
+        sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
+        failed = [
+            p for p in sent
+            if p.get("type") == "status_change" and p.get("status") == "failed"
+        ]
+        assert len(failed) == 1 and failed[0]["deploy_id"] == "d_a"
+        ev = await store.get_deploy_event("d_a")
+        assert ev["status"] == "failed"
+        assert ev["error"] == "node disconnected"
+
+    async def test_cleanup_orphan_deploys_via_store(self, registry, store):
+        """DEPLOYING events that were never registered (e.g., previous server lifecycle)
+        are still failed + broadcast on cleanup. Replaces the former
+        NodeRegistry.unregister responsibility."""
+        hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        await self._seed_deploying(store, "d_orphan", node_id="n1")
+
+        await hub._cleanup_orphan_deploys("n1", error="node disconnected")
+
+        ev = await store.get_deploy_event("d_orphan")
+        assert ev["status"] == "failed"
+        assert ev["error"] == "node disconnected"
+        sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
+        failed = [
+            p for p in sent
+            if p.get("type") == "status_change" and p.get("status") == "failed"
+        ]
+        assert len(failed) == 1 and failed[0]["deploy_id"] == "d_orphan"
+
+    async def test_heartbeat_timeout_path_fails_deploys(self, store):
+        """Integration: registry.check_stale → unregister (no deploy fail) →
+        hub._cleanup_orphan_deploys → DEPLOYING events transition to FAILED.
+        Guards against accidental coupling between registry.unregister and
+        deploy cleanup."""
+        registry = NodeRegistry(store, heartbeat_timeout=0.05)
+        hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+
+        ws = AsyncMock()
+        hello = NodeHello(
+            node_id="n1", token="t", hostname="h",
+            os="Linux", arch="x86_64", haniel_version="0.1.0",
+        )
+        await registry.register(ws, hello)
+        await self._seed_deploying(store, "d1", node_id="n1")
+        await hub.register_pending_deploy("d1", "n1", "r", "main")
+
+        # Force the heartbeat to be older than the timeout
+        registry.get_node("n1").last_heartbeat = time.time() - 1.0
+
+        # `check_stale` calls `unregister` internally. After our refactor,
+        # `unregister` no longer touches DEPLOYING events; the hub's cleanup
+        # is the single source of truth.
+        stale = await registry.check_stale()
+        assert stale == ["n1"]
+        ev_before = await store.get_deploy_event("d1")
+        assert ev_before["status"] == "deploying"  # registry didn't fail it
+
+        # _check_loop would then call cleanup_orphan_deploys; simulate that.
+        await hub._cleanup_orphan_deploys(
+            "n1", error="node disconnected (heartbeat timeout)"
+        )
+
+        ev_after = await store.get_deploy_event("d1")
+        assert ev_after["status"] == "failed"
+        assert ev_after["error"] == "node disconnected (heartbeat timeout)"
+
+
+class TestSupersedePending:
+    """supersede_pending rejects older PENDING deploys in the same (node, repo, branch)."""
+
+    async def _seed_pending(
+        self,
+        store: EventStore,
+        deploy_id: str,
+        node_id: str = "n1",
+        repo: str = "r",
+        branch: str = "main",
+    ) -> None:
+        await store.create_deploy_event(
+            deploy_id=deploy_id, node_id=node_id, repo=repo, branch=branch,
+            commits=["h"], affected_services=[], diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+        )
+
+    async def test_marks_others_rejected(self, hub: WebSocketHub, store):
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        await self._seed_pending(store, "d1")
+        await asyncio.sleep(0.005)
+        await self._seed_pending(store, "d2")
+        await asyncio.sleep(0.005)
+        await self._seed_pending(store, "d3")
+
+        result = await hub.supersede_pending("n1", "r", "main", "d3")
+
+        assert set(result) == {"d1", "d2"}
+        for did in ("d1", "d2"):
+            ev = await store.get_deploy_event(did)
+            assert ev["status"] == "rejected"
+            assert ev["reject_reason"] == "superseded by d3"
+        ev3 = await store.get_deploy_event("d3")
+        assert ev3["status"] == "pending"
+
+        sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
+        rejected = [
+            p for p in sent
+            if p.get("type") == "status_change" and p.get("status") == "rejected"
+        ]
+        assert {p["deploy_id"] for p in rejected} == {"d1", "d2"}
+        for p in rejected:
+            assert p.get("reject_reason") == "superseded by d3"
+
+    async def test_skips_other_branches(self, hub: WebSocketHub, store):
+        # Only the dev-branch deploy exists; supersede_pending on main → no-op.
+        # Verifies that a PENDING entry on a different branch is untouched.
+        await self._seed_pending(store, "d_dev", branch="dev")
+
+        result = await hub.supersede_pending("n1", "r", "main", "d_new")
+
+        assert result == []
+        ev_dev = await store.get_deploy_event("d_dev")
+        assert ev_dev["status"] == "pending"
+        assert ev_dev["reject_reason"] is None
+
+    async def test_returns_empty_when_no_others(self, hub: WebSocketHub, store):
+        await self._seed_pending(store, "d_alone")
+        result = await hub.supersede_pending("n1", "r", "main", "d_alone")
+        assert result == []
+        ev = await store.get_deploy_event("d_alone")
+        assert ev["status"] == "pending"

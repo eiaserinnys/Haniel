@@ -21,9 +21,13 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
     """Create REST API routes bound to the given hub and store."""
 
     async def get_pending(request: Request) -> JSONResponse:
-        """GET /api/orch/pending — list all pending deploy events."""
-        pending = await store.get_pending_deploys()
-        return JSONResponse({"deploys": pending})
+        """GET /api/orch/pending — list active deploys (pending + deploying).
+
+        PendingView shows both states so that a deploy stays visible after
+        approval (DEPLOYING) until the node reports a terminal result.
+        """
+        deploys = await store.get_active_deploys()
+        return JSONResponse({"deploys": deploys})
 
     async def get_nodes(request: Request) -> JSONResponse:
         """GET /api/orch/nodes — list all registered nodes."""
@@ -76,6 +80,14 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         sent = await hub.send_to_node(event["node_id"], msg)
 
         if sent:
+            # Track for timeout/disconnect handling FIRST. A fast node may
+            # send DeployResult before our await chain completes; if that
+            # arrives before register, _handle_deploy_result.pop() returns
+            # None and we'd leak a timeout task that fires false-positive
+            # status='failed' minutes later.
+            await hub.register_pending_deploy(
+                deploy_id, event["node_id"], event["repo"], event["branch"]
+            )
             # Node received — mark as deploying
             await store.update_deploy_status(deploy_id, DeployStatus.DEPLOYING)
             await hub.broadcast_to_dashboards({
@@ -84,9 +96,15 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
                 "status": DeployStatus.DEPLOYING.value,
                 "node_id": event["node_id"],
             })
+            # Supersede any other PENDING deploys in the same (node, repo, branch).
+            # `kept_deploy_id` is the one we just approved.
+            await hub.supersede_pending(
+                event["node_id"], event["repo"], event["branch"], deploy_id
+            )
             return JSONResponse({"deploy_id": deploy_id, "status": "deploying"})
         else:
-            # Node not connected — leave as approved (will deploy when reconnects)
+            # Node not connected — leave as approved (will deploy when reconnects).
+            # No supersede / no register_pending_deploy: deploy is not in flight yet.
             return JSONResponse({
                 "deploy_id": deploy_id,
                 "status": "approved",
@@ -135,7 +153,13 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
     async def approve_all(request: Request) -> JSONResponse:
         """POST /api/orch/approve-all — approve all pending deploys.
 
-        If no pending deploys: returns {approved: [], failed: [], message: "no pending deploys"}.
+        Within each (node, repo, branch) group, only the latest (by created_at)
+        is approved; the others are auto-superseded so that a stale older
+        deploy does not run after a newer one. Response includes ``superseded``
+        list when any auto-supersede occurred.
+
+        If no pending deploys: returns
+        {approved: [], failed: [], message: "no pending deploys"}.
         """
         pending = await store.get_pending_deploys()
 
@@ -146,10 +170,40 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
                 "message": "no pending deploys",
             })
 
+        # Group by (node, repo, branch). `pending` is ordered created_at DESC,
+        # so the first occurrence per group is the latest commit. Older
+        # entries in the same group are auto-superseded right away.
+        seen_groups: set[tuple[str, str, str]] = set()
+        to_approve: list[dict[str, Any]] = []
+        auto_superseded: list[str] = []
+        for ev in pending:
+            key = (ev["node_id"], ev["repo"], ev["branch"])
+            if key in seen_groups:
+                # Older deploy in the same branch → supersede now.
+                kept = next(
+                    t for t in to_approve
+                    if (t["node_id"], t["repo"], t["branch"]) == key
+                )
+                reason = f"superseded by {kept['deploy_id']}"
+                await store.update_deploy_status(
+                    ev["deploy_id"], DeployStatus.REJECTED, reject_reason=reason
+                )
+                await hub.broadcast_to_dashboards({
+                    "type": "status_change",
+                    "deploy_id": ev["deploy_id"],
+                    "status": DeployStatus.REJECTED.value,
+                    "node_id": ev["node_id"],
+                    "reject_reason": reason,
+                })
+                auto_superseded.append(ev["deploy_id"])
+                continue
+            seen_groups.add(key)
+            to_approve.append(ev)
+
         approved: list[str] = []
         failed: list[dict[str, Any]] = []
 
-        for event in pending:
+        for event in to_approve:
             deploy_id = event["deploy_id"]
             node_id = event["node_id"]
 
@@ -161,6 +215,11 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
             sent = await hub.send_to_node(node_id, msg)
 
             if sent:
+                # Race-safe: register before any further await so a fast
+                # DeployResult finds the entry. See approve_deploy comment.
+                await hub.register_pending_deploy(
+                    deploy_id, node_id, event["repo"], event["branch"]
+                )
                 await store.update_deploy_status(
                     deploy_id, DeployStatus.DEPLOYING
                 )
@@ -177,7 +236,10 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
                     "reason": "node not connected",
                 })
 
-        return JSONResponse({"approved": approved, "failed": failed})
+        response: dict[str, Any] = {"approved": approved, "failed": failed}
+        if auto_superseded:
+            response["superseded"] = auto_superseded
+        return JSONResponse(response)
 
     async def service_command(request: Request) -> JSONResponse:
         """POST /api/orch/service-command — send restart/stop to a node's service."""

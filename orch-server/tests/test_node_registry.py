@@ -7,7 +7,7 @@ import pytest
 
 from haniel_orch.event_store import EventStore
 from haniel_orch.node_registry import ConnectedNode, NodeRegistry
-from haniel_orch.protocol import DeployStatus, NodeHello
+from haniel_orch.protocol import NodeHello
 
 
 def _make_hello(node_id: str = "n1") -> NodeHello:
@@ -81,29 +81,9 @@ class TestUnregister:
         nodes = await store.get_nodes()
         assert nodes[0]["connected"] == 0
 
-    async def test_fails_deploying_events(self, store: EventStore):
-        registry = NodeRegistry(store)
-        ws = MagicMock()
-        await registry.register(ws, _make_hello("n1"))
-
-        # Create a deploying event
-        await store.create_deploy_event(
-            deploy_id="d1",
-            node_id="n1",
-            repo="r",
-            branch="main",
-            commits=["h msg"],
-            affected_services=[],
-            diff_stat=None,
-            detected_at="2026-01-01T00:00:00Z",
-        )
-        await store.update_deploy_status("d1", DeployStatus.DEPLOYING)
-
-        await registry.unregister("n1")
-
-        event = await store.get_deploy_event("d1")
-        assert event["status"] == "failed"
-        assert event["error"] == "node disconnected"
+    # NOTE: in-flight deploy failure (DEPLOYING → FAILED on disconnect) is
+    # the responsibility of WebSocketHub._cleanup_orphan_deploys. See
+    # test_hub.py::TestDeployTimeout for that coverage.
 
     async def test_unregister_nonexistent_does_not_raise(self, store: EventStore):
         registry = NodeRegistry(store)

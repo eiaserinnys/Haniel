@@ -38,6 +38,16 @@ class PendingCommand:
     timeout_task: asyncio.Task[None]
 
 
+@dataclass
+class PendingDeploy:
+    """In-flight deploy tracked by the hub (post-approval, pre-result)."""
+
+    node_id: str
+    repo: str
+    branch: str
+    timeout_task: asyncio.Task[None]
+
+
 class WebSocketHub:
     """Central hub managing node and dashboard WebSocket connections."""
 
@@ -49,6 +59,7 @@ class WebSocketHub:
         push_service: PushService | None = None,
         auth_bearer_token: str = "",
         command_timeout_sec: float = 30.0,
+        deploy_timeout_sec: float = 300.0,
     ) -> None:
         self._registry = registry
         self._store = store
@@ -64,6 +75,11 @@ class WebSocketHub:
         # deployments, an asyncio.Lock would be required.
         self._command_timeout_sec = command_timeout_sec
         self._pending_commands: dict[str, PendingCommand] = {}
+        # In-flight deploys: deploy_id → PendingDeploy.
+        # Single source of truth for deploy tracking (timeout + orphan cleanup);
+        # mirrors the _pending_commands pattern. Race-safe via pop ownership transfer.
+        self._deploy_timeout_sec = deploy_timeout_sec
+        self._pending_deploys: dict[str, PendingDeploy] = {}
 
     @property
     def registry(self) -> NodeRegistry:
@@ -136,6 +152,7 @@ class WebSocketHub:
                 {"type": "node_disconnected", "node_id": node_id, "reason": "ws_closed"}
             )
             await self._cleanup_orphan_commands(node_id, error="node disconnected")
+            await self._cleanup_orphan_deploys(node_id, error="node disconnected")
 
     async def _handle_change_notification(self, msg: ChangeNotification) -> None:
         """Process a ChangeNotification: store + broadcast."""
@@ -166,7 +183,11 @@ class WebSocketHub:
         )
 
     async def _handle_deploy_result(self, msg: DeployResult) -> None:
-        """Process a DeployResult: update status + broadcast."""
+        """Process a DeployResult: cancel timeout, update status, broadcast."""
+        # Race-safe ownership transfer: pop ensures the timeout task can no longer broadcast.
+        pending = self._pending_deploys.pop(msg.deploy_id, None)
+        if pending is not None:
+            pending.timeout_task.cancel()
         status = DeployStatus[msg.status.upper()]
         await self._store.update_deploy_status(
             msg.deploy_id,
@@ -305,6 +326,123 @@ class WebSocketHub:
                 "error": error,
             })
 
+    async def register_pending_deploy(
+        self, deploy_id: str, node_id: str, repo: str, branch: str
+    ) -> None:
+        """Track an in-flight deploy and schedule a timeout broadcast.
+
+        On timeout (after `deploy_timeout_sec`), marks status=FAILED with
+        error='timeout' in the store and broadcasts status_change. Cancelled
+        when DeployResult arrives, the node disconnects, or the deploy is
+        superseded.
+        """
+        timeout_task = asyncio.create_task(self._deploy_timeout(deploy_id))
+        self._pending_deploys[deploy_id] = PendingDeploy(
+            node_id=node_id,
+            repo=repo,
+            branch=branch,
+            timeout_task=timeout_task,
+        )
+
+    async def _deploy_timeout(self, deploy_id: str) -> None:
+        """Wait `deploy_timeout_sec`; broadcast failure if deploy is still in-flight."""
+        try:
+            await asyncio.sleep(self._deploy_timeout_sec)
+        except asyncio.CancelledError:
+            return
+        # Race-safe: if the result already arrived (or supersede consumed the
+        # entry), pop returns None and we no-op.
+        pending = self._pending_deploys.pop(deploy_id, None)
+        if pending is None:
+            return
+        await self._store.update_deploy_status(
+            deploy_id, DeployStatus.FAILED, error="timeout"
+        )
+        await self.broadcast_to_dashboards({
+            "type": "status_change",
+            "deploy_id": deploy_id,
+            "status": DeployStatus.FAILED.value,
+            "node_id": pending.node_id,
+        })
+
+    async def _cleanup_orphan_deploys(self, node_id: str, *, error: str) -> None:
+        """Fail in-flight deploys for a disconnected node + broadcast status_change.
+
+        Single source of truth for in-flight deploy cleanup (replaces the
+        former NodeRegistry.unregister DEPLOYING→FAILED path). Called from
+        handle_node_ws.finally, _check_loop, and shutdown so that ws-disconnect,
+        heartbeat-timeout, and graceful shutdown all flow through the same code.
+
+        Two responsibilities:
+        1. Cancel any outstanding _pending_deploys timeout tasks for this node.
+        2. Mark all DEPLOYING events for this node as FAILED + broadcast
+           status_change. Covers both deploys we registered and any DEPLOYING
+           rows from a previous server lifecycle.
+        """
+        # 1. Cancel in-flight (post-approval) deploys for this node.
+        orphan_ids = [
+            did for did, pending in self._pending_deploys.items()
+            if pending.node_id == node_id
+        ]
+        for did in orphan_ids:
+            pending = self._pending_deploys.pop(did)
+            pending.timeout_task.cancel()
+
+        # 2. FAIL + broadcast for all DEPLOYING events on this node.
+        deploying = await self._store.get_deploying_events_for_node(node_id)
+        for event in deploying:
+            await self._store.update_deploy_status(
+                event["deploy_id"], DeployStatus.FAILED, error=error
+            )
+            await self.broadcast_to_dashboards({
+                "type": "status_change",
+                "deploy_id": event["deploy_id"],
+                "status": DeployStatus.FAILED.value,
+                "node_id": node_id,
+            })
+
+    async def supersede_pending(
+        self, node_id: str, repo: str, branch: str, kept_deploy_id: str
+    ) -> list[str]:
+        """Reject all PENDING deploys for the same (node, repo, branch) except `kept_deploy_id`.
+
+        Used by approve_deploy/approve_all so that approving a newer deploy
+        automatically supersedes older PENDING deploys in the same branch.
+        Each superseded deploy gets status=REJECTED + reject_reason
+        ='superseded by ${kept_deploy_id}' and a status_change broadcast
+        with the reject_reason field.
+
+        Returns the list of superseded deploy_ids. Defensive: cancels any
+        outstanding _pending_deploys timeout task for the superseded id
+        (PENDING deploys typically aren't tracked yet, so this is a no-op
+        in normal operation).
+        """
+        same_branch = await self._store.get_pending_deploys_for_branch(
+            node_id, repo, branch
+        )
+        superseded: list[str] = []
+        for ev in same_branch:
+            did = ev["deploy_id"]
+            if did == kept_deploy_id:
+                continue
+            reason = f"superseded by {kept_deploy_id}"
+            await self._store.update_deploy_status(
+                did, DeployStatus.REJECTED, reject_reason=reason
+            )
+            # Defensive: cancel a timeout task if one exists (rare for PENDING).
+            pending = self._pending_deploys.pop(did, None)
+            if pending is not None:
+                pending.timeout_task.cancel()
+            await self.broadcast_to_dashboards({
+                "type": "status_change",
+                "deploy_id": did,
+                "status": DeployStatus.REJECTED.value,
+                "node_id": node_id,
+                "reject_reason": reason,
+            })
+            superseded.append(did)
+        return superseded
+
     async def broadcast_to_dashboards(self, event: dict[str, Any]) -> None:
         """Send event to all connected dashboards. Individual failures are logged and ignored."""
         if not self._dashboard_connections:
@@ -354,19 +492,24 @@ class WebSocketHub:
                     await self._cleanup_orphan_commands(
                         node_id, error="node disconnected (heartbeat timeout)"
                     )
+                    await self._cleanup_orphan_deploys(
+                        node_id, error="node disconnected (heartbeat timeout)"
+                    )
 
         self._heartbeat_task = asyncio.create_task(_check_loop())
 
     async def shutdown(self) -> None:
-        """Graceful shutdown: cancel pending command timeouts, close all connections."""
+        """Graceful shutdown: cancel pending timeouts, close all connections."""
         # Cancel pending timeout tasks first; await for graceful unwind to avoid
         # RuntimeWarning: "coroutine was never awaited" on event-loop teardown.
         pending_tasks = [pending.timeout_task for pending in self._pending_commands.values()]
+        pending_tasks += [pending.timeout_task for pending in self._pending_deploys.values()]
         for t in pending_tasks:
             t.cancel()
         if pending_tasks:
             await asyncio.gather(*pending_tasks, return_exceptions=True)
         self._pending_commands.clear()
+        self._pending_deploys.clear()
 
         if self._heartbeat_task:
             self._heartbeat_task.cancel()

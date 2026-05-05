@@ -132,10 +132,61 @@ class EventStore:
         return result
 
     async def get_pending_deploys(self) -> list[dict[str, Any]]:
-        """Get all events with status='pending'."""
+        """Get all events with status='pending'.
+
+        Used by approve_all (PENDING-only semantics — DEPLOYING shouldn't be re-approved).
+        For dashboard's PendingView (which shows pending+deploying), use
+        ``get_active_deploys`` instead.
+        """
         cursor = await self._db.execute(
             "SELECT * FROM deploy_events WHERE status = ? ORDER BY created_at DESC",
             (DeployStatus.PENDING.value,),
+        )
+        rows = await cursor.fetchall()
+        results = []
+        for row in rows:
+            d = _row_to_dict(cursor, row)
+            d["commits"] = json.loads(d.pop("commits_json"))
+            d["affected_services"] = json.loads(d.pop("affected_services_json"))
+            results.append(d)
+        return results
+
+    async def get_active_deploys(self) -> list[dict[str, Any]]:
+        """Get pending + deploying events (newest first).
+
+        Used by /api/orch/pending so that PendingView keeps showing deploys
+        that have advanced to DEPLOYING after approval. APPROVED is transient
+        and not included — the hub flips APPROVED → DEPLOYING immediately
+        on send_to_node.
+        """
+        cursor = await self._db.execute(
+            "SELECT * FROM deploy_events WHERE status IN (?, ?) "
+            "ORDER BY created_at DESC",
+            (DeployStatus.PENDING.value, DeployStatus.DEPLOYING.value),
+        )
+        rows = await cursor.fetchall()
+        results = []
+        for row in rows:
+            d = _row_to_dict(cursor, row)
+            d["commits"] = json.loads(d.pop("commits_json"))
+            d["affected_services"] = json.loads(d.pop("affected_services_json"))
+            results.append(d)
+        return results
+
+    async def get_pending_deploys_for_branch(
+        self, node_id: str, repo: str, branch: str
+    ) -> list[dict[str, Any]]:
+        """Get PENDING deploys for the same (node, repo, branch).
+
+        Used by hub.supersede_pending to mark older PENDING deploys as
+        REJECTED (with reject_reason='superseded by ${kept}') when a newer
+        deploy is approved.
+        """
+        cursor = await self._db.execute(
+            "SELECT * FROM deploy_events "
+            "WHERE node_id = ? AND repo = ? AND branch = ? AND status = ? "
+            "ORDER BY created_at DESC",
+            (node_id, repo, branch, DeployStatus.PENDING.value),
         )
         rows = await cursor.fetchall()
         results = []
@@ -199,7 +250,9 @@ class EventStore:
     ) -> list[dict[str, Any]]:
         """Get events in DEPLOYING state for a specific node.
 
-        Used by NodeRegistry.unregister() to mark in-flight deploys as FAILED.
+        Used by WebSocketHub._cleanup_orphan_deploys() to mark in-flight
+        deploys as FAILED on node disconnect (ws-disconnect, heartbeat-timeout,
+        and shutdown share this single source of truth).
         """
         cursor = await self._db.execute(
             "SELECT * FROM deploy_events WHERE node_id = ? AND status = ?",

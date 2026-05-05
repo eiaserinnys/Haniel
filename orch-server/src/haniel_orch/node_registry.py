@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from starlette.websockets import WebSocket
 
 from .event_store import EventStore
-from .protocol import DeployStatus, NodeHello
+from .protocol import NodeHello
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,15 @@ class NodeRegistry:
         logger.info(f"Node registered: {hello.node_id} ({hello.hostname})")
 
     async def unregister(self, node_id: str) -> None:
-        """Unregister a node. Marks as disconnected + fails deploying events."""
+        """Unregister a node. Marks as disconnected.
+
+        NOTE: in-flight deploy failure (DEPLOYING → FAILED) is handled by
+        :meth:`WebSocketHub._cleanup_orphan_deploys` — single source of truth
+        for ws-disconnect, heartbeat-timeout, and shutdown paths. The hub
+        invokes both ``unregister`` and ``_cleanup_orphan_deploys`` after
+        observing a disconnect, so DEPLOYING events still transition to
+        FAILED + broadcast.
+        """
         self._nodes.pop(node_id, None)
 
         # Mark node as disconnected in DB
@@ -66,18 +74,6 @@ class NodeRegistry:
             haniel_version="",
             connected=False,
         )
-
-        # Fail any in-flight deploys for this node
-        deploying = await self._store.get_deploying_events_for_node(node_id)
-        for event in deploying:
-            await self._store.update_deploy_status(
-                event["deploy_id"],
-                DeployStatus.FAILED,
-                error="node disconnected",
-            )
-            logger.warning(
-                f"Deploy {event['deploy_id']} marked as failed: node {node_id} disconnected"
-            )
 
         logger.info(f"Node unregistered: {node_id}")
 
