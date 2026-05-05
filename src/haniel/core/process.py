@@ -376,6 +376,14 @@ class ProcessManager:
         for name in reversed(names):
             self.stop_service(name, timeout=timeout)
 
+    def get_pid(self, name: str) -> int | None:
+        """Get the PID of a running service process, or None if not running."""
+        with self._lock:
+            managed = self._processes.get(name)
+            if managed and managed.process and managed.process.poll() is None:
+                return managed.process.pid
+            return None
+
     def is_running(self, name: str) -> bool:
         """Check if a service is running.
 

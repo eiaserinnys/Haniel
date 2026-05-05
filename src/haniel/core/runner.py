@@ -714,12 +714,39 @@ class ServiceRunner:
             self._orch_client = OrchestratorClient(
                 config=orch_cfg,
                 haniel_version=haniel.__version__,
+                get_services_info=self._collect_services_info,
             )
             self._orch_client.start()
             logger.info("Orchestrator client started")
         except Exception as e:
             logger.warning(f"Failed to start orchestrator client: {e}")
             self._orch_client = None
+
+    def _collect_services_info(self) -> list[dict]:
+        """Collect service info for orchestrator reporting."""
+        services = []
+        for name, svc_config in self.config.services.items():
+            health = self.health_manager.get_health(name)
+            # Extract port from ready condition (format: "port:N")
+            port = None
+            if svc_config.ready and svc_config.ready.startswith("port:"):
+                try:
+                    port = int(svc_config.ready.split(":")[1])
+                except (ValueError, IndexError):
+                    pass
+            # Get PID via public method
+            pid = self.process_manager.get_pid(name)
+            services.append({
+                "name": name,
+                "port": port,
+                "pid": pid,
+                "status": health.state.value,
+                "role": svc_config.repo or "",
+                "uptime_ms": int(health.get_uptime() * 1000) if health.get_uptime() else 0,
+                "enabled": svc_config.enabled,
+                "deps": svc_config.after,
+            })
+        return services
 
     def trigger_pull(self, repo_name: str, auto: bool = False) -> None:
         """Pull changes for a repository and restart affected services.

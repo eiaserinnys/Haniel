@@ -22,9 +22,13 @@ export interface Deploy {
 
 export interface NodeService {
   name: string;
+  port: number | null;
+  pid: number | null;
   status: string;
-  role?: string;
-  uptime_ms?: number;
+  role: string;
+  uptime_ms: number;
+  enabled: boolean;
+  deps: string[];
 }
 
 export interface OrchestratorNode {

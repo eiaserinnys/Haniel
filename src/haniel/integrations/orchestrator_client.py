@@ -17,7 +17,7 @@ import platform
 import threading
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from ..config.model import OrchestratorClientConfig
@@ -33,9 +33,15 @@ class OrchestratorClient:
     Reconnects with exponential backoff on disconnection.
     """
 
-    def __init__(self, config: "OrchestratorClientConfig", haniel_version: str) -> None:
+    def __init__(
+        self,
+        config: "OrchestratorClientConfig",
+        haniel_version: str,
+        get_services_info: "Callable[[], list[dict]] | None" = None,
+    ) -> None:
         self._config = config
         self._haniel_version = haniel_version
+        self._get_services_info = get_services_info
         self._ws = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -160,6 +166,7 @@ class OrchestratorClient:
                 "os": platform.system(),
                 "arch": platform.machine(),
                 "haniel_version": self._haniel_version,
+                "services": self._get_services_info() if self._get_services_info else None,
             }
             await ws.send(json.dumps(hello))
 
@@ -234,10 +241,11 @@ class OrchestratorClient:
             await self._ws.send(json.dumps(data))
 
     async def _send_heartbeat(self) -> None:
-        """Send a heartbeat message."""
+        """Send a heartbeat message with current service state."""
         msg = {
             "type": "node_status",
             "node_id": self._config.node_id,
+            "services": self._get_services_info() if self._get_services_info else None,
         }
         await self._send_json(msg)
 

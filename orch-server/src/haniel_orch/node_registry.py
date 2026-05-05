@@ -23,6 +23,7 @@ class ConnectedNode:
     hello: NodeHello
     last_heartbeat: float = field(default_factory=time.time)
     connected_at: float = field(default_factory=time.time)
+    services: list[dict] | None = None  # latest service state (updated by heartbeat)
 
 
 class NodeRegistry:
@@ -39,6 +40,7 @@ class NodeRegistry:
             node_id=hello.node_id,
             websocket=ws,
             hello=hello,
+            services=hello.services,
         )
         self._nodes[hello.node_id] = node
         await self._store.upsert_node(
@@ -79,11 +81,13 @@ class NodeRegistry:
 
         logger.info(f"Node unregistered: {node_id}")
 
-    async def heartbeat(self, node_id: str) -> None:
-        """Update heartbeat timestamp for a node."""
+    async def heartbeat(self, node_id: str, services: list[dict] | None = None) -> None:
+        """Update heartbeat timestamp and optionally service state for a node."""
         node = self._nodes.get(node_id)
         if node:
             node.last_heartbeat = time.time()
+            if services is not None:
+                node.services = services
         await self._store.update_node_heartbeat(node_id)
 
     def get_node(self, node_id: str) -> ConnectedNode | None:

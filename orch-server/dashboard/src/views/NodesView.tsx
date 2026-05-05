@@ -165,18 +165,27 @@ function NodeCard({ node, isExpanded, onToggleExpand }: NodeCardProps) {
                     <thead>
                       <tr>
                         <th>Service</th>
-                        <th>Status</th>
+                        <th>Port</th>
+                        <th>PID</th>
+                        <th>Uptime</th>
                         <th className="hide-mobile">Role</th>
-                        <th className="hide-mobile">Uptime</th>
+                        <th>Status</th>
                       </tr>
                     </thead>
                     <tbody>
                       {node.services.map(svc => (
-                        <tr key={svc.name}>
-                          <td className="svc-name">{svc.name}</td>
-                          <td><StatusPill status={svc.status} size="sm" /></td>
+                        <tr key={svc.name} className={cn(!svc.enabled && 'svc-dim')}>
+                          <td className="svc-name">
+                            {svc.name}
+                            {svc.deps && svc.deps.length > 0 && (
+                              <span className="svc-deps">{'\u2190'} {svc.deps.join(', ')}</span>
+                            )}
+                          </td>
+                          <td>{svc.port ?? '\u2014'}</td>
+                          <td>{svc.pid ?? '\u2014'}</td>
+                          <td>{uptimeStr(svc.uptime_ms)}</td>
                           <td className="hide-mobile">{svc.role || '\u2014'}</td>
-                          <td className="hide-mobile">{uptimeStr(svc.uptime_ms)}</td>
+                          <td><StatusPill status={svc.status} size="sm" /></td>
                         </tr>
                       ))}
                     </tbody>

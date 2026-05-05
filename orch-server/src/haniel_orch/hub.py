@@ -91,7 +91,7 @@ class WebSocketHub:
                 if isinstance(incoming, ChangeNotification):
                     await self._handle_change_notification(incoming)
                 elif isinstance(incoming, NodeStatus):
-                    await self._registry.heartbeat(incoming.node_id)
+                    await self._registry.heartbeat(incoming.node_id, services=incoming.services)
                 elif isinstance(incoming, DeployResult):
                     await self._handle_deploy_result(incoming)
 

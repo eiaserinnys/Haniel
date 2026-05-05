@@ -51,10 +51,11 @@ class ChangeNotification(BaseModel):
 
 
 class NodeStatus(BaseModel):
-    """Heartbeat message — indicates node is alive."""
+    """Heartbeat message — indicates node is alive. Optionally carries service state."""
 
     type: str = "node_status"
     node_id: str
+    services: list[dict] | None = None
 
 
 class DeployResult(BaseModel):
