@@ -1,5 +1,7 @@
 """Tests for service command — API endpoint, hub broadcast, protocol."""
 
+import asyncio
+import contextlib
 import json
 from unittest.mock import AsyncMock
 
@@ -202,3 +204,68 @@ class TestServiceCommandProtocol:
         assert isinstance(msg, ServiceCommandResult)
         assert msg.success is False
         assert msg.error == "service crashed"
+
+
+class TestServiceCommandTimeout:
+    """Hub tracks in-flight commands; broadcasts timeout/disconnect."""
+
+    async def test_timeout_broadcasts_failure(self, registry, store):
+        hub = WebSocketHub(registry, store, token="t", command_timeout_sec=0.1)
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        await hub.register_pending_command("cid-1", "n1", "bot", "restart")
+        await asyncio.sleep(0.25)
+        sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
+        timeouts = [p for p in sent if p.get("error") == "timeout"]
+        assert len(timeouts) == 1
+        assert timeouts[0]["command_id"] == "cid-1"
+        assert timeouts[0]["success"] is False
+        assert timeouts[0]["node_id"] == "n1"
+        assert "cid-1" not in hub._pending_commands
+
+    async def test_result_arrival_cancels_timeout(self, registry, store):
+        hub = WebSocketHub(registry, store, token="t", command_timeout_sec=10.0)
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        await hub.register_pending_command("cid-2", "n1", "bot", "restart")
+        timeout_task = hub._pending_commands["cid-2"].timeout_task
+        result = ServiceCommandResult(
+            command_id="cid-2", node_id="n1", service_name="bot",
+            action="restart", success=True,
+        )
+        await hub._handle_service_command_result(result)
+        assert "cid-2" not in hub._pending_commands
+        # Deterministic: await the cancelled task to completion.
+        with contextlib.suppress(asyncio.CancelledError):
+            await timeout_task
+        assert timeout_task.cancelled()
+        sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
+        assert len(sent) == 1 and sent[0]["success"] is True
+
+    async def test_node_disconnect_cleans_orphan_commands(self, registry, store):
+        """Direct call to the helper used by both ws-disconnect and heartbeat paths."""
+        hub = WebSocketHub(registry, store, token="t", command_timeout_sec=10.0)
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        await hub.register_pending_command("cid-a", "n1", "bot", "restart")
+        await hub.register_pending_command("cid-b", "n2", "db", "stop")
+        await hub._cleanup_orphan_commands("n1", error="node disconnected")
+        assert "cid-a" not in hub._pending_commands
+        assert "cid-b" in hub._pending_commands
+        sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
+        disc = [p for p in sent if p.get("error") == "node disconnected"]
+        assert len(disc) == 1 and disc[0]["command_id"] == "cid-a"
+
+    async def test_heartbeat_timeout_cleans_orphan_commands(self, registry, store):
+        """Heartbeat-timeout path uses the same cleanup helper as ws-disconnect."""
+        hub = WebSocketHub(registry, store, token="t", command_timeout_sec=10.0)
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        await hub.register_pending_command("cid-x", "n1", "bot", "restart")
+        await hub._cleanup_orphan_commands(
+            "n1", error="node disconnected (heartbeat timeout)"
+        )
+        assert "cid-x" not in hub._pending_commands
+        sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
+        hb = [p for p in sent if p.get("error") == "node disconnected (heartbeat timeout)"]
+        assert len(hb) == 1 and hb[0]["success"] is False

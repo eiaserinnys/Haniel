@@ -206,6 +206,9 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
                 {"error": "node not connected"}, status_code=503
             )
 
+        # Track in-flight command for timeout/disconnect handling.
+        await hub.register_pending_command(command_id, node_id, service_name, action)
+
         return JSONResponse({"command_id": command_id, "status": "sent"})
 
     return [

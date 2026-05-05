@@ -6,6 +6,7 @@ import asyncio
 import hmac
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -27,6 +28,16 @@ from .protocol import (
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class PendingCommand:
+    """In-flight service command tracked by the hub."""
+
+    node_id: str
+    service_name: str
+    action: str
+    timeout_task: asyncio.Task[None]
+
+
 class WebSocketHub:
     """Central hub managing node and dashboard WebSocket connections."""
 
@@ -37,6 +48,7 @@ class WebSocketHub:
         token: str,
         push_service: PushService | None = None,
         auth_bearer_token: str = "",
+        command_timeout_sec: float = 30.0,
     ) -> None:
         self._registry = registry
         self._store = store
@@ -46,6 +58,12 @@ class WebSocketHub:
         self._dashboard_connections: set[WebSocket] = set()
         self._heartbeat_task: asyncio.Task | None = None
         self._background_tasks: set[asyncio.Task[None]] = set()
+        # In-flight service commands: command_id → PendingCommand.
+        # Single source of truth for command tracking — pop transfers ownership for race-safety.
+        # Assumes a single asyncio event loop (no cross-thread access). For multi-loop/thread
+        # deployments, an asyncio.Lock would be required.
+        self._command_timeout_sec = command_timeout_sec
+        self._pending_commands: dict[str, PendingCommand] = {}
 
     @property
     def registry(self) -> NodeRegistry:
@@ -117,6 +135,7 @@ class WebSocketHub:
             await self.broadcast_to_dashboards(
                 {"type": "node_disconnected", "node_id": node_id, "reason": "ws_closed"}
             )
+            await self._cleanup_orphan_commands(node_id, error="node disconnected")
 
     async def _handle_change_notification(self, msg: ChangeNotification) -> None:
         """Process a ChangeNotification: store + broadcast."""
@@ -172,7 +191,11 @@ class WebSocketHub:
             )
 
     async def _handle_service_command_result(self, msg: ServiceCommandResult) -> None:
-        """Process a ServiceCommandResult: broadcast to dashboards."""
+        """Process a ServiceCommandResult: cancel timeout task, broadcast to dashboards."""
+        # Race-safe ownership transfer: pop ensures the timeout task can no longer broadcast.
+        pending = self._pending_commands.pop(msg.command_id, None)
+        if pending is not None:
+            pending.timeout_task.cancel()
         await self.broadcast_to_dashboards({
             "type": "service_command_result",
             "command_id": msg.command_id,
@@ -216,6 +239,71 @@ class WebSocketHub:
         finally:
             self._dashboard_connections.discard(websocket)
             logger.info(f"Dashboard disconnected ({len(self._dashboard_connections)} total)")
+
+    async def register_pending_command(
+        self,
+        command_id: str,
+        node_id: str,
+        service_name: str,
+        action: str,
+    ) -> None:
+        """Track an in-flight service command and schedule a timeout broadcast.
+
+        On timeout (after `command_timeout_sec`), broadcasts a service_command_result
+        with success=False, error='timeout'. Cancelled when a real ServiceCommandResult
+        arrives or the target node disconnects.
+        """
+        timeout_task = asyncio.create_task(self._command_timeout(command_id))
+        self._pending_commands[command_id] = PendingCommand(
+            node_id=node_id,
+            service_name=service_name,
+            action=action,
+            timeout_task=timeout_task,
+        )
+
+    async def _command_timeout(self, command_id: str) -> None:
+        """Wait `command_timeout_sec`; broadcast timeout if command is still pending."""
+        try:
+            await asyncio.sleep(self._command_timeout_sec)
+        except asyncio.CancelledError:
+            return
+        # Race-safe: if the result already arrived, pop returns None and we no-op.
+        pending = self._pending_commands.pop(command_id, None)
+        if pending is None:
+            return
+        await self.broadcast_to_dashboards({
+            "type": "service_command_result",
+            "command_id": command_id,
+            "node_id": pending.node_id,
+            "service_name": pending.service_name,
+            "action": pending.action,
+            "success": False,
+            "error": "timeout",
+        })
+
+    async def _cleanup_orphan_commands(self, node_id: str, *, error: str) -> None:
+        """Cancel & broadcast for any in-flight commands targeted at the given node.
+
+        Single source of truth for both ws-disconnect (handle_node_ws.finally) and
+        heartbeat-timeout (_check_loop) paths so that the dashboard releases the
+        matching button rather than waiting for the per-command timeout.
+        """
+        orphans = [
+            cid for cid, pending in self._pending_commands.items()
+            if pending.node_id == node_id
+        ]
+        for cid in orphans:
+            pending = self._pending_commands.pop(cid)
+            pending.timeout_task.cancel()
+            await self.broadcast_to_dashboards({
+                "type": "service_command_result",
+                "command_id": cid,
+                "node_id": node_id,
+                "service_name": pending.service_name,
+                "action": pending.action,
+                "success": False,
+                "error": error,
+            })
 
     async def broadcast_to_dashboards(self, event: dict[str, Any]) -> None:
         """Send event to all connected dashboards. Individual failures are logged and ignored."""
@@ -261,11 +349,25 @@ class WebSocketHub:
                         "node_id": node_id,
                         "reason": "heartbeat_timeout",
                     })
+                    # Mirror the ws-disconnect path so dashboards stop waiting on
+                    # buttons whose target node has gone silent.
+                    await self._cleanup_orphan_commands(
+                        node_id, error="node disconnected (heartbeat timeout)"
+                    )
 
         self._heartbeat_task = asyncio.create_task(_check_loop())
 
     async def shutdown(self) -> None:
-        """Graceful shutdown: close all connections, cancel heartbeat task."""
+        """Graceful shutdown: cancel pending command timeouts, close all connections."""
+        # Cancel pending timeout tasks first; await for graceful unwind to avoid
+        # RuntimeWarning: "coroutine was never awaited" on event-loop teardown.
+        pending_tasks = [pending.timeout_task for pending in self._pending_commands.values()]
+        for t in pending_tasks:
+            t.cancel()
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+        self._pending_commands.clear()
+
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
             try:
