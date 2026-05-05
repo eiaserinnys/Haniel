@@ -1,0 +1,8 @@
+name = "haniel-push-relay"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+[[kv_namespaces]]
+binding = "DEVICE_TOKENS"
+id = "placeholder"
+preview_id = "placeholder"
