@@ -143,10 +143,8 @@ def setup_dashboard(
             claude_session_manager,
             slack_bot=slack_bot,
             broadcaster=broadcaster,
+            token=token,
         )
-        # NOTE: ChatWebSocket WS authentication is OUT OF SCOPE for this card.
-        # See analysis cache §"spec-reviewer 보강" item 7 — follow-up card
-        # planned to apply the same query-token pattern to /ws/chat.
         routes.append(WebSocketRoute("/ws/chat", chat_ws_handler.handle_ws))
 
         # Bind chat deps to DashboardWebSocket for deferred DM handler registration

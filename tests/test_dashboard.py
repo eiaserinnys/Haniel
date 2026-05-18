@@ -555,3 +555,86 @@ class TestDashboardWebSocketAuth:
         with client.websocket_connect("/ws") as ws:
             data = ws.receive_json()
             assert data["type"] == "init"
+
+
+# ── /ws/chat (ChatWebSocket) Auth Tests — follow-up to E2E review F5 ─────────
+
+
+def _make_dashboard_app_with_chat(mock_runner, token):
+    """Helper to build a dashboard app with the chat WS handler registered.
+
+    ``setup_dashboard`` only registers /ws/chat when claude_session_manager
+    is non-None — supply a MagicMock so the route is wired and we can
+    exercise the WS auth guard end-to-end.
+    """
+    from haniel.dashboard import setup_dashboard
+
+    chat_mgr = MagicMock()
+    routes, middleware, ws_handler = setup_dashboard(
+        mock_runner, token=token, claude_session_manager=chat_mgr
+    )
+    loop = asyncio.new_event_loop()
+    ws_handler.setup(loop)
+    app = Starlette(routes=routes, middleware=middleware)
+    return app, loop
+
+
+@pytest.fixture
+def dashboard_app_with_token_and_chat(mock_runner):
+    """Token enabled + /ws/chat registered."""
+    app, loop = _make_dashboard_app_with_chat(mock_runner, _AUTH_TOKEN)
+    yield app
+    loop.close()
+
+
+@pytest.fixture
+def dashboard_app_noauth_with_chat(mock_runner):
+    """token=None + /ws/chat registered (noauth regression)."""
+    app, loop = _make_dashboard_app_with_chat(mock_runner, None)
+    yield app
+    loop.close()
+
+
+class TestChatWebSocketAuth:
+    """ChatWebSocket.handle_ws — same query-param token guard as /ws.
+
+    Mirrors TestDashboardWebSocketAuth so the dashboard module enforces
+    one rule across both WS endpoints (design-principles §9 symmetry).
+    """
+
+    def test_chat_ws_rejected_without_token(self, dashboard_app_with_token_and_chat):
+        """No ?token= query → /ws/chat upgrade rejected (close 4001)."""
+        client = TestClient(dashboard_app_with_token_and_chat)
+        from starlette.websockets import WebSocketDisconnect
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect("/ws/chat") as ws:
+                ws.receive_text()
+        assert exc_info.value.code == 4001
+
+    def test_chat_ws_rejected_with_wrong_token(self, dashboard_app_with_token_and_chat):
+        """Wrong ?token= → rejected (close 4001)."""
+        client = TestClient(dashboard_app_with_token_and_chat)
+        from starlette.websockets import WebSocketDisconnect
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect("/ws/chat?token=wrong") as ws:
+                ws.receive_text()
+        assert exc_info.value.code == 4001
+
+    def test_chat_ws_accepted_with_correct_token(
+        self, dashboard_app_with_token_and_chat
+    ):
+        """Correct ?token= → accept succeeds; close cleanly with no exception."""
+        client = TestClient(dashboard_app_with_token_and_chat)
+        # If accept goes through, entering the context manager succeeds.
+        # ChatWebSocket waits for client input (no init broadcast), so we just
+        # close the connection — successful enter == auth passed.
+        with client.websocket_connect(f"/ws/chat?token={_AUTH_TOKEN}") as ws:
+            ws.close()
+
+    def test_chat_ws_noauth_mode_no_token_required(
+        self, dashboard_app_noauth_with_chat
+    ):
+        """token=None → /ws/chat accept without ?token= (noauth regression)."""
+        client = TestClient(dashboard_app_noauth_with_chat)
+        with client.websocket_connect("/ws/chat") as ws:
+            ws.close()

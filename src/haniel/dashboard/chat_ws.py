@@ -23,6 +23,7 @@ Server -> Client message types:
 """
 
 import asyncio
+import hmac
 import json
 import logging
 from typing import TYPE_CHECKING
@@ -50,13 +51,38 @@ class ChatWebSocket:
         session_manager: ClaudeSessionManager,
         slack_bot: "SlackBot | None" = None,
         broadcaster: "ChatBroadcaster | None" = None,
+        token: str | None = None,
     ):
+        """Construct the chat WS handler.
+
+        Args:
+            session_manager: ClaudeSessionManager driving subprocess sessions
+            slack_bot: Optional Slack bot for DM relay
+            broadcaster: Optional ChatBroadcaster for multi-client mirroring
+            token: Bearer token required as a query-param on the WS upgrade
+                URL (``/ws/chat?token=...``). When ``None`` or empty, WS auth
+                is disabled (noauth mode — matches DashboardWebSocket and
+                AuthMiddleware short-circuits).
+        """
         self._manager = session_manager
         self._slack_bot = slack_bot
         self._broadcaster = broadcaster
+        self._token = token or ""
 
     async def handle_ws(self, websocket: WebSocket) -> None:
-        """Handle a WebSocket upgrade request at GET /ws/chat."""
+        """Handle a WebSocket upgrade request at GET /ws/chat.
+
+        Token check mirrors ``DashboardWebSocket.handle_ws`` so the
+        dashboard module enforces a single rule across /ws and /ws/chat
+        (design-principles §9 symmetry).
+        """
+        if self._token:
+            client_token = websocket.query_params.get("token")
+            if not client_token or not hmac.compare_digest(
+                client_token, self._token
+            ):
+                await websocket.close(code=4001, reason="auth failed")
+                return
         await websocket.accept()
         logger.info("Chat WebSocket client connected")
 
