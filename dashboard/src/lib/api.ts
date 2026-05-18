@@ -87,7 +87,10 @@ export const api = {
   pullRepo: (name: string) =>
     request<{ ok: boolean; repo: string; head: string | null }>(
       `/api/repos/${name}/pull`,
-      { method: 'POST' },
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      },
     ),
 
   createRepo: (name: string, config: RepoConfigInput) =>

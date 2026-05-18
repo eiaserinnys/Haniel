@@ -26,8 +26,6 @@ _WINDOWS_ONLY = pytest.mark.skipif(
     sys.platform != "win32", reason="Windows-specific installer behavior"
 )
 
-import pytest
-
 from haniel.config import (
     HanielConfig,
     InstallConfig,
