@@ -100,7 +100,9 @@ function App() {
         } else if (
           event.status === 'rejected' &&
           event.reject_reason &&
-          event.reject_reason.startsWith('superseded')
+          // Match the server-side SQL filter exactly (LIKE 'superseded by %').
+          // Trailing space prevents false matches like "superseded for testing".
+          event.reject_reason.startsWith('superseded by ')
         ) {
           // Auto-supersede triggered by approving a newer deploy on the
           // same (node, repo, branch). User-driven rejects already toast
