@@ -55,8 +55,14 @@ export function fetchNodes(): Promise<{ nodes: OrchestratorNode[] }> {
   return request('/api/orch/nodes');
 }
 
-export function fetchHistory(): Promise<{ deploys: Deploy[] }> {
-  return request('/api/orch/history');
+export function fetchHistory(
+  options?: { includeSuperseded?: boolean },
+): Promise<{ deploys: Deploy[] }> {
+  // include_superseded=1 exposes auto-supersede entries (audit view). The
+  // default response excludes them so HistoryView is not drowned out by
+  // every change_notification that arrived before approval.
+  const qs = options?.includeSuperseded ? '?include_superseded=1' : '';
+  return request(`/api/orch/history${qs}`);
 }
 
 export function approveDeploy(deployId: string): Promise<ApproveResponse> {

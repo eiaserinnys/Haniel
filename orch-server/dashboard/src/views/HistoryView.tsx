@@ -6,6 +6,11 @@ import type { Deploy, DeployStatus } from '@/types';
 
 interface HistoryViewProps {
   deploys: Deploy[];
+  // Controlled by App.tsx so the toggle survives unmounts and the same
+  // checkbox state drives the next fetchHistory query. Default off — auto-
+  // supersede entries are noise unless the operator is auditing chains.
+  includeSuperseded: boolean;
+  onToggleSuperseded: (value: boolean) => void;
 }
 
 type FilterTab = 'all' | DeployStatus;
@@ -19,7 +24,11 @@ const TABS: { key: FilterTab; label: string }[] = [
   { key: 'rejected', label: 'Rejected' },
 ];
 
-export function HistoryView({ deploys }: HistoryViewProps) {
+export function HistoryView({
+  deploys,
+  includeSuperseded,
+  onToggleSuperseded,
+}: HistoryViewProps) {
   const [activeTab, setActiveTab] = useState<FilterTab>('all');
   const [expandedErrors, setExpandedErrors] = useState<Set<string>>(new Set());
 
@@ -87,6 +96,15 @@ export function HistoryView({ deploys }: HistoryViewProps) {
           </button>
         ))}
       </div>
+
+      <label className="history-superseded-toggle">
+        <input
+          type="checkbox"
+          checked={includeSuperseded}
+          onChange={e => onToggleSuperseded(e.target.checked)}
+        />
+        <span> superseded 포함</span>
+      </label>
 
       {groups.length === 0 && (
         <div className="empty-state-inline">

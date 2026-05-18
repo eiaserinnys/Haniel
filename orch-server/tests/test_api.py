@@ -128,6 +128,53 @@ class TestGetHistory:
         assert resp.status_code == 200
         assert len(resp.json()["deploys"]) == 3
 
+    async def test_history_excludes_superseded_by_default(
+        self, hub, store, routes
+    ):
+        """GET /api/orch/history (no query) must filter out auto-supersede
+        rows so the dashboard's HistoryView is not drowned by them."""
+        for did in ("d_old", "d_new"):
+            await _seed_pending(store, did)
+        await store.update_deploy_status(
+            "d_old", DeployStatus.REJECTED,
+            reject_reason="superseded by d_new",
+        )
+
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        app = Starlette(routes=routes)
+        client = TestClient(app)
+
+        resp = client.get("/api/orch/history")
+        assert resp.status_code == 200
+        ids = {d["deploy_id"] for d in resp.json()["deploys"]}
+        assert "d_old" not in ids
+        assert "d_new" in ids
+
+    async def test_history_includes_superseded_with_query(
+        self, hub, store, routes
+    ):
+        """GET /api/orch/history?include_superseded=1 must return supersede
+        rows so the operator can audit chains."""
+        for did in ("d_old", "d_new"):
+            await _seed_pending(store, did)
+        await store.update_deploy_status(
+            "d_old", DeployStatus.REJECTED,
+            reject_reason="superseded by d_new",
+        )
+
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        app = Starlette(routes=routes)
+        client = TestClient(app)
+
+        resp = client.get("/api/orch/history?include_superseded=1")
+        assert resp.status_code == 200
+        ids = {d["deploy_id"] for d in resp.json()["deploys"]}
+        assert ids == {"d_old", "d_new"}
+
 
 class TestApproveDeploy:
     async def test_approve_success_node_connected(self, hub, registry, store, routes):

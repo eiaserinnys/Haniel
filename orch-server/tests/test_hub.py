@@ -136,6 +136,115 @@ class TestHandleChangeNotification:
         assert broadcast_data["deploy_id"] == "n1:repo:main:abc1234"
 
 
+class TestHandleChangeNotificationSupersede:
+    """change_notification 수신 시점 supersede — 같은 (node, repo, branch)
+    이전 PENDING은 즉시 REJECTED('superseded by ${new}'). DEPLOYING은 무관.
+
+    Primary gate (generation-time). approve-time supersede in
+    api.approve_deploy/approve_all remains as defensive backup.
+    """
+
+    async def _seed_pending(
+        self,
+        store: EventStore,
+        deploy_id: str,
+        node_id: str = "n1",
+        repo: str = "r",
+        branch: str = "main",
+    ) -> None:
+        await store.create_deploy_event(
+            deploy_id=deploy_id, node_id=node_id, repo=repo, branch=branch,
+            commits=["h msg"], affected_services=[], diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+        )
+
+    def _notification(
+        self,
+        deploy_id: str,
+        node_id: str = "n1",
+        repo: str = "r",
+        branch: str = "main",
+    ) -> ChangeNotification:
+        return ChangeNotification(
+            deploy_id=deploy_id, node_id=node_id, repo=repo, branch=branch,
+            commits=["hN msgN"], affected_services=[], diff_stat=None,
+            detected_at="2026-05-19T00:00:00Z",
+        )
+
+    async def test_supersedes_prior_pending_same_branch(
+        self, hub: WebSocketHub, store: EventStore
+    ):
+        """d_old PENDING 존재 → d_new change_notification → d_old=REJECTED,
+        d_new=PENDING."""
+        await self._seed_pending(store, "d_old")
+
+        await hub._handle_change_notification(self._notification("d_new"))
+
+        ev_old = await store.get_deploy_event("d_old")
+        ev_new = await store.get_deploy_event("d_new")
+        assert ev_old["status"] == "rejected"
+        assert ev_old["reject_reason"] == "superseded by d_new"
+        assert ev_new["status"] == "pending"
+
+    async def test_does_not_touch_deploying(
+        self, hub: WebSocketHub, store: EventStore
+    ):
+        """d_running DEPLOYING + d_new change_notification → d_running 그대로
+        (이미 실행 중인 작업은 보호)."""
+        await self._seed_pending(store, "d_running")
+        await store.update_deploy_status(
+            "d_running", DeployStatus.DEPLOYING
+        )
+
+        await hub._handle_change_notification(self._notification("d_new"))
+
+        ev_running = await store.get_deploy_event("d_running")
+        ev_new = await store.get_deploy_event("d_new")
+        assert ev_running["status"] == "deploying"
+        assert ev_running["reject_reason"] is None
+        assert ev_new["status"] == "pending"
+
+    async def test_other_branch_untouched(
+        self, hub: WebSocketHub, store: EventStore
+    ):
+        """다른 branch의 PENDING은 영향 없음."""
+        await self._seed_pending(store, "d_dev", branch="dev")
+
+        await hub._handle_change_notification(
+            self._notification("d_main", branch="main")
+        )
+
+        ev_dev = await store.get_deploy_event("d_dev")
+        assert ev_dev["status"] == "pending"
+        assert ev_dev["reject_reason"] is None
+
+    async def test_broadcasts_supersede_status_change(
+        self, hub: WebSocketHub, store: EventStore
+    ):
+        """supersede 발생 시 status_change broadcast가 reject_reason과 함께
+        대시보드로 전달되어야 한다 (App.tsx의 startsWith('superseded') 분기가
+        토스트와 setPending refetch를 트리거)."""
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        await self._seed_pending(store, "d_old")
+
+        await hub._handle_change_notification(self._notification("d_new"))
+
+        sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
+        rejected = [
+            p for p in sent
+            if p.get("type") == "status_change"
+            and p.get("status") == "rejected"
+        ]
+        assert len(rejected) == 1
+        assert rejected[0]["deploy_id"] == "d_old"
+        assert rejected[0]["reject_reason"] == "superseded by d_new"
+        # new_pending도 함께 broadcast됨 (기존 동작)
+        new_pendings = [p for p in sent if p.get("type") == "new_pending"]
+        assert len(new_pendings) == 1
+        assert new_pendings[0]["deploy_id"] == "d_new"
+
+
 class TestHandleDeployResult:
     async def test_success_result(self, hub: WebSocketHub, store: EventStore):
         ws_dash = AsyncMock()

@@ -197,12 +197,37 @@ class EventStore:
             results.append(d)
         return results
 
-    async def get_deploy_history(self, limit: int = 50) -> list[dict[str, Any]]:
-        """Get all deploy events, newest first."""
-        cursor = await self._db.execute(
-            "SELECT * FROM deploy_events ORDER BY created_at DESC LIMIT ?",
-            (limit,),
-        )
+    async def get_deploy_history(
+        self,
+        limit: int = 50,
+        *,
+        include_superseded: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Get deploy events newest first.
+
+        By default, auto-supersede entries (status=rejected with
+        reject_reason starting with 'superseded by ') are excluded so the
+        dashboard history shows actionable deploys only. Pass
+        ``include_superseded=True`` to include them (audit view exposed via
+        ``GET /api/orch/history?include_superseded=1``).
+
+        Manual rejects (operator-provided reject_reason) are NOT filtered —
+        only the auto-supersede marker prefix is recognised.
+        """
+        if include_superseded:
+            sql = (
+                "SELECT * FROM deploy_events "
+                "ORDER BY created_at DESC LIMIT ?"
+            )
+            params: tuple[Any, ...] = (limit,)
+        else:
+            sql = (
+                "SELECT * FROM deploy_events "
+                "WHERE NOT (status = ? AND reject_reason LIKE 'superseded by %') "
+                "ORDER BY created_at DESC LIMIT ?"
+            )
+            params = (DeployStatus.REJECTED.value, limit)
+        cursor = await self._db.execute(sql, params)
         rows = await cursor.fetchall()
         results = []
         for row in rows:

@@ -752,7 +752,25 @@ class ServiceRunner:
             self._orch_client = None
 
     def _collect_services_info(self) -> list[dict]:
-        """Collect service info for orchestrator reporting."""
+        """Collect service info for orchestrator reporting.
+
+        Status fields are split into three axes so the dashboard can show
+        process state and readiness independently — the previous single
+        ``status`` field conflated ``running`` (HealthState) with the
+        action-button trigger and hid edge cases like
+        ``pid=None`` + ``health.state=ready`` (race window).
+
+        - ``process_status``: ``'running'`` when pid is reported by the
+          process manager, ``'stopped'`` when absent.
+        - ``health_status``: ``HealthManager`` state value
+          (``ready`` / ``running`` / ``starting`` / ``stopping`` /
+          ``crashed`` / ``stopped`` / ``circuit_open``).
+        - ``ready``: True iff process is running AND health state is ready.
+
+        The legacy ``status`` key is removed; orch-server's dashboard now
+        consumes ``process_status`` (action buttons) and ``health_status``
+        (display) separately. See atom 260519.01.
+        """
         services = []
         for name, svc_config in self.config.services.items():
             health = self.health_manager.get_health(name)
@@ -765,11 +783,17 @@ class ServiceRunner:
                     pass
             # Get PID via public method
             pid = self.process_manager.get_pid(name)
+            process_status = "running" if pid is not None else "stopped"
+            health_status = health.state.value
             services.append({
                 "name": name,
                 "port": port,
                 "pid": pid,
-                "status": health.state.value,
+                "process_status": process_status,
+                "health_status": health_status,
+                "ready": (
+                    process_status == "running" and health_status == "ready"
+                ),
                 "role": svc_config.repo or "",
                 "uptime_ms": int(health.get_uptime() * 1000) if health.get_uptime() else 0,
                 "enabled": svc_config.enabled,

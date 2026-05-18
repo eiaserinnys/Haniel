@@ -48,9 +48,19 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         return JSONResponse({"nodes": nodes})
 
     async def get_history(request: Request) -> JSONResponse:
-        """GET /api/orch/history — list deploy events, newest first."""
+        """GET /api/orch/history — list deploy events, newest first.
+
+        Default excludes auto-superseded entries (reject_reason starting with
+        'superseded by ') so the dashboard history isn't drowned out by them.
+        Pass ?include_superseded=1 to expose them for audit chains.
+        """
         limit = int(request.query_params.get("limit", "50"))
-        history = await store.get_deploy_history(limit=limit)
+        include_superseded = (
+            request.query_params.get("include_superseded") == "1"
+        )
+        history = await store.get_deploy_history(
+            limit=limit, include_superseded=include_superseded
+        )
         return JSONResponse({"deploys": history})
 
     async def approve_deploy(request: Request) -> JSONResponse:

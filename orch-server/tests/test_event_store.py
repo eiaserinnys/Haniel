@@ -221,6 +221,72 @@ class TestGetDeployHistory:
         history = await store.get_deploy_history()
         assert isinstance(history, list)
 
+    async def test_excludes_superseded_by_default(self, store: EventStore):
+        """superseded rows (reject_reason starting with 'superseded by ') are
+        excluded from history by default — they would otherwise drown out
+        actionable deploys."""
+        for did in ("d_old", "d_new", "d_manual"):
+            await store.create_deploy_event(
+                deploy_id=did, node_id="n1", repo="r", branch="main",
+                commits=["h msg"], affected_services=[], diff_stat=None,
+                detected_at="2026-01-01T00:00:00Z",
+            )
+        # d_old: auto-superseded by d_new
+        await store.update_deploy_status(
+            "d_old", DeployStatus.REJECTED,
+            reject_reason="superseded by d_new",
+        )
+        # d_manual: rejected by operator (non-supersede)
+        await store.update_deploy_status(
+            "d_manual", DeployStatus.REJECTED,
+            reject_reason="not ready yet",
+        )
+
+        history = await store.get_deploy_history()
+        ids = {d["deploy_id"] for d in history}
+        assert "d_old" not in ids, (
+            "superseded row should be excluded by default"
+        )
+        assert "d_new" in ids
+        assert "d_manual" in ids
+
+    async def test_includes_superseded_when_requested(self, store: EventStore):
+        """include_superseded=True returns supersede rows alongside others
+        (audit view)."""
+        for did in ("d_old", "d_new"):
+            await store.create_deploy_event(
+                deploy_id=did, node_id="n1", repo="r", branch="main",
+                commits=["h msg"], affected_services=[], diff_stat=None,
+                detected_at="2026-01-01T00:00:00Z",
+            )
+        await store.update_deploy_status(
+            "d_old", DeployStatus.REJECTED,
+            reject_reason="superseded by d_new",
+        )
+
+        history = await store.get_deploy_history(include_superseded=True)
+        ids = {d["deploy_id"] for d in history}
+        assert ids == {"d_old", "d_new"}
+
+    async def test_non_superseded_rejected_still_visible(
+        self, store: EventStore
+    ):
+        """Manual rejects (reject_reason not starting with 'superseded by ')
+        must remain visible in the default response — they carry operator
+        intent and should not be hidden."""
+        await store.create_deploy_event(
+            deploy_id="d_man", node_id="n1", repo="r", branch="main",
+            commits=["h msg"], affected_services=[], diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+        )
+        await store.update_deploy_status(
+            "d_man", DeployStatus.REJECTED,
+            reject_reason="rolled back during incident",
+        )
+
+        history = await store.get_deploy_history()
+        assert any(d["deploy_id"] == "d_man" for d in history)
+
 
 class TestUpdateDeployStatus:
     async def test_update_to_approved(self, store: EventStore):
