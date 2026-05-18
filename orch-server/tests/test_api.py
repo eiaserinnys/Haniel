@@ -164,6 +164,12 @@ class TestApproveDeploy:
         assert event["approved_by"] == "dashboard"
 
     async def test_approve_node_disconnected(self, hub, store, routes):
+        """Offline node approve: 503 + status revert to PENDING (no transient APPROVED leak).
+
+        Policy (analysis cache F1): rather than leaving APPROVED on the deploy
+        with no resend path, fail the approve outright and keep PENDING so the
+        operator can retry once the node reconnects.
+        """
         await _seed_pending(store, "d1", "n1")
 
         from starlette.applications import Starlette
@@ -175,10 +181,14 @@ class TestApproveDeploy:
         resp = client.post(
             "/api/orch/approve", json={"deploy_id": "d1"}
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 503
         data = resp.json()
-        assert data["status"] == "approved"
-        assert "warning" in data
+        assert "error" in data
+        assert data["deploy_id"] == "d1"
+        assert data["node_id"] == "n1"
+        # DB must be reverted to PENDING — no transient APPROVED leak.
+        event = await store.get_deploy_event("d1")
+        assert event["status"] == "pending"
 
     async def test_approve_missing_deploy_id(self, hub, store, routes):
         from starlette.applications import Starlette
@@ -371,6 +381,8 @@ class TestApproveAll:
         assert data["message"] == "no pending deploys"
 
     async def test_approve_all_node_disconnected(self, hub, store, routes):
+        """Offline node in approve_all: response shape unchanged,
+        but DB status reverts to PENDING (analysis cache F2)."""
         await _seed_pending(store, "d1", "n1")
 
         from starlette.applications import Starlette
@@ -385,6 +397,11 @@ class TestApproveAll:
         assert data["approved"] == []
         assert len(data["failed"]) == 1
         assert data["failed"][0]["deploy_id"] == "d1"
+        # Response shape preserved. DB status must revert to PENDING — no
+        # transient APPROVED leak so the operator can retry once the node
+        # reconnects.
+        event = await store.get_deploy_event("d1")
+        assert event["status"] == "pending"
 
     async def test_approve_all_no_supersede_no_key(
         self, hub, registry, store, routes

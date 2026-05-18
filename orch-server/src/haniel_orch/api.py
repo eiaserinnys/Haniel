@@ -112,13 +112,22 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
             )
             return JSONResponse({"deploy_id": deploy_id, "status": "deploying"})
         else:
-            # Node not connected — leave as approved (will deploy when reconnects).
-            # No supersede / no register_pending_deploy: deploy is not in flight yet.
-            return JSONResponse({
-                "deploy_id": deploy_id,
-                "status": "approved",
-                "warning": "node not connected, will deploy on reconnect",
-            })
+            # Node not connected — revert to PENDING and fail the approve.
+            # No deferred reconnect-deploy path exists in the hub register
+            # flow, so leaving APPROVED would strand the deploy silently
+            # (get_active_deploys returns pending+deploying only — APPROVED
+            # disappears from PendingView with no path back). 503 surfaces
+            # the failure; PENDING keeps it visible so the operator can
+            # retry once the node reconnects.
+            await store.update_deploy_status(deploy_id, DeployStatus.PENDING)
+            return JSONResponse(
+                {
+                    "error": "node not connected, retry after reconnect",
+                    "deploy_id": deploy_id,
+                    "node_id": event["node_id"],
+                },
+                status_code=503,
+            )
 
     async def reject_deploy(request: Request) -> JSONResponse:
         """POST /api/orch/reject — reject a pending deploy."""
@@ -240,6 +249,12 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
                 })
                 approved.append(deploy_id)
             else:
+                # Node not connected — revert APPROVED → PENDING so the
+                # deploy is not silently stranded (mirrors approve_deploy
+                # offline-revert policy in analysis cache F2). Response
+                # shape is preserved: failed array still carries the
+                # deploy_id and reason for the dashboard.
+                await store.update_deploy_status(deploy_id, DeployStatus.PENDING)
                 failed.append({
                     "deploy_id": deploy_id,
                     "reason": "node not connected",
