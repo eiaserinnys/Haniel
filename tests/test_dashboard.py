@@ -434,3 +434,124 @@ class TestDashboardConfig:
         cfg2 = HanielConfig(dashboard=DashboardConfig(enabled=False))
         assert cfg2.dashboard is not None
         assert cfg2.dashboard.enabled is False
+
+
+# ── Authentication Tests (analysis cache F5) ─────────────────────────────────
+
+
+_AUTH_TOKEN = "secret-test-token-XYZ"
+
+
+@pytest.fixture
+def dashboard_app_with_token(mock_runner):
+    """Starlette app with AuthMiddleware enabled.
+
+    Mirrors the production wiring: setup_dashboard returns middleware that
+    callers (mcp_server) wrap the app with. We assemble the same Middleware
+    list here so the test exercises both AuthMiddleware (HTTP) and
+    DashboardWebSocket.handle_ws (WS) gates.
+    """
+    from haniel.dashboard import setup_dashboard
+
+    routes, middleware, ws_handler = setup_dashboard(mock_runner, token=_AUTH_TOKEN)
+    loop = asyncio.new_event_loop()
+    ws_handler.setup(loop)
+    app = Starlette(routes=routes, middleware=middleware)
+    yield app
+    loop.close()
+
+
+class TestAuthMiddleware:
+    """AuthMiddleware (Pure ASGI) — REST /api/* guard with Bearer."""
+
+    def test_rest_rejects_missing_authorization(self, dashboard_app_with_token):
+        """Without Authorization header → 401 JSON."""
+        client = TestClient(dashboard_app_with_token)
+        resp = client.get("/api/status")
+        assert resp.status_code == 401
+        assert resp.json() == {"error": "unauthorized"}
+
+    def test_rest_rejects_wrong_token(self, dashboard_app_with_token):
+        """With wrong Bearer → 403 JSON."""
+        client = TestClient(dashboard_app_with_token)
+        resp = client.get(
+            "/api/status",
+            headers={"Authorization": "Bearer wrong-token"},
+        )
+        assert resp.status_code == 403
+        assert resp.json() == {"error": "forbidden"}
+
+    def test_rest_accepts_correct_token(self, dashboard_app_with_token):
+        """With matching Bearer → 200 + payload."""
+        client = TestClient(dashboard_app_with_token)
+        resp = client.get(
+            "/api/status",
+            headers={"Authorization": f"Bearer {_AUTH_TOKEN}"},
+        )
+        assert resp.status_code == 200
+        assert "services" in resp.json()
+
+    def test_noauth_mode_passes_through(self, dashboard_app, mock_runner):
+        """token=None (existing fixture) → no Authorization required.
+
+        Regression guard against AuthMiddleware short-circuit removal.
+        """
+        client = TestClient(dashboard_app)
+        resp = client.get("/api/status")
+        assert resp.status_code == 200
+
+    def test_non_api_path_passes_through(self, dashboard_app_with_token):
+        """Routes outside /api/* (e.g. /auth/login) must not require Bearer."""
+        client = TestClient(dashboard_app_with_token)
+        resp = client.get("/auth/login")
+        # FileResponse → 200 with html content
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers.get("content-type", "")
+        assert "haniel-token" in resp.text  # localStorage key present
+
+    def test_auth_login_works_in_noauth_mode(self, dashboard_app):
+        """The /auth/login route is registered regardless of auth mode."""
+        client = TestClient(dashboard_app)
+        resp = client.get("/auth/login")
+        assert resp.status_code == 200
+
+
+class TestDashboardWebSocketAuth:
+    """DashboardWebSocket.handle_ws — WS query-param token guard."""
+
+    def test_ws_rejected_without_token(self, dashboard_app_with_token):
+        """No ?token= query → WS upgrade rejected (close 4001)."""
+        client = TestClient(dashboard_app_with_token)
+        from starlette.websockets import WebSocketDisconnect
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_text()
+        assert exc_info.value.code == 4001
+
+    def test_ws_rejected_with_wrong_token(self, dashboard_app_with_token):
+        """Wrong ?token= → rejected (close 4001)."""
+        client = TestClient(dashboard_app_with_token)
+        from starlette.websockets import WebSocketDisconnect
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect("/ws?token=wrong") as ws:
+                ws.receive_text()
+        assert exc_info.value.code == 4001
+
+    def test_ws_accepted_with_correct_token(self, dashboard_app_with_token):
+        """Correct ?token= → accept + init message arrives."""
+        client = TestClient(dashboard_app_with_token)
+        with client.websocket_connect(f"/ws?token={_AUTH_TOKEN}") as ws:
+            data = ws.receive_json()
+            assert data["type"] == "init"
+            assert "status" in data
+
+    def test_ws_noauth_mode_no_token_required(self, dashboard_app):
+        """token=None fixture → WS accept without ?token= (regression).
+
+        Existing test_ws_connect_receives_init also covers this path; this
+        test makes the intent explicit for the auth guard.
+        """
+        client = TestClient(dashboard_app)
+        with client.websocket_connect("/ws") as ws:
+            data = ws.receive_json()
+            assert data["type"] == "init"

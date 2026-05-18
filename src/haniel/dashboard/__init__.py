@@ -5,14 +5,16 @@ Provides REST API and WebSocket event stream for service management.
 Integrated into the Starlette server used by the MCP Streamable HTTP transport.
 """
 
+import hmac
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from starlette.middleware import Middleware
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Route, WebSocketRoute
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .api import create_api_routes
 from .config_api import create_config_api_routes
@@ -26,30 +28,66 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DASHBOARD_PATHS_PREFIX = ("/api/", "/ws")
 
+class AuthMiddleware:
+    """Pure ASGI middleware for Bearer token authentication on /api/* routes.
 
-class AuthMiddleware(BaseHTTPMiddleware):
-    """Enforces Bearer token authentication on /api/* and /ws requests."""
+    Pure-ASGI (not BaseHTTPMiddleware) so that the `scope["type"]` check below
+    can short-circuit WebSocket upgrades — BaseHTTPMiddleware only sees HTTP
+    requests, so a previous /ws guard via path-prefix was *bypassed* by every
+    real WebSocket. WS authentication is now enforced inside ``handle_ws()``
+    via query-param token (matches the orchestrator-server pattern).
 
-    def __init__(self, app, token: str):
-        super().__init__(app)
+    When ``token`` is empty/None, all requests pass through (auth disabled —
+    backward compat for noauth deployments and existing tests).
+    """
+
+    def __init__(self, app: ASGIApp, token: str = "") -> None:
+        self._app = app
         self._token = token
 
-    async def dispatch(self, request: Request, call_next):
-        if request.url.path.startswith(DASHBOARD_PATHS_PREFIX):
-            auth_header = request.headers.get("Authorization", "")
-            if not auth_header.startswith("Bearer "):
-                return Response(
-                    content="Authorization: Bearer <token> required",
-                    status_code=401,
-                )
-            if auth_header[len("Bearer ") :] != self._token:
-                return Response(
-                    content="Invalid token",
-                    status_code=403,
-                )
-        return await call_next(request)
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # Skip WS (handled by handle_ws) and noauth mode
+        if scope["type"] != "http" or not self._token:
+            await self._app(scope, receive, send)
+            return
+
+        path: str = scope.get("path", "")
+
+        # Only guard /api/* routes. /ws/*, /auth/*, /dashboard SPA assets
+        # and root pass through.
+        if not path.startswith("/api/"):
+            await self._app(scope, receive, send)
+            return
+
+        # Check Authorization: Bearer header
+        headers = dict(scope.get("headers", []))
+        auth_value = headers.get(b"authorization", b"").decode()
+
+        if auth_value.startswith("Bearer "):
+            token = auth_value[7:]
+            if hmac.compare_digest(token, self._token):
+                await self._app(scope, receive, send)
+                return
+            # Token present but wrong — 403
+            response = JSONResponse(
+                {"error": "forbidden"}, status_code=403
+            )
+            await response(scope, receive, send)
+            return
+
+        # No (or malformed) Authorization header — 401
+        response = JSONResponse({"error": "unauthorized"}, status_code=401)
+        await response(scope, receive, send)
+
+
+def _login_handler(request: Request) -> FileResponse:
+    """Serve the static token-entry page.
+
+    Path is resolved relative to this file so the response works regardless
+    of the process cwd (cf. spec-reviewer 5-1 — no cwd-relative paths).
+    """
+    return FileResponse(Path(__file__).parent / "static" / "auth" / "login.html")
 
 
 def setup_dashboard(
@@ -62,8 +100,9 @@ def setup_dashboard(
 
     Args:
         runner: ServiceRunner instance to expose via API
-        token: Bearer token for authentication. If None, dashboard is
-               accessible without auth (a warning is logged).
+        token: Bearer token for authentication. If None/empty, dashboard is
+               accessible without auth (a warning is logged) — backward compat
+               with existing noauth deployments and tests.
         claude_session_manager: Optional ClaudeSessionManager for the chat panel
 
     Returns:
@@ -78,7 +117,9 @@ def setup_dashboard(
             "Set dashboard.token in haniel.yaml to restrict access."
         )
 
-    ws_handler = DashboardWebSocket(runner)
+    # token=None when auth disabled — DashboardWebSocket.handle_ws skips the
+    # query-token check in that case (mirrors AuthMiddleware short-circuit).
+    ws_handler = DashboardWebSocket(runner, token=token)
 
     api_routes = create_api_routes(runner)
     config_routes = create_config_api_routes(runner)
@@ -87,6 +128,11 @@ def setup_dashboard(
     routes.extend(api_routes)
     routes.extend(config_routes)
     routes.append(WebSocketRoute("/ws", ws_handler.handle_ws))
+    # /auth/login serves the token-entry page (login.html bundled via
+    # pyproject.toml force-include). MUST be registered before
+    # setup_static()'s SPA fallback `Route("/{path:path}")`, otherwise the
+    # catch-all swallows the path.
+    routes.append(Route("/auth/login", _login_handler, methods=["GET"]))
 
     if claude_session_manager is not None:
         from .chat_ws import ChatWebSocket
@@ -98,6 +144,9 @@ def setup_dashboard(
             slack_bot=slack_bot,
             broadcaster=broadcaster,
         )
+        # NOTE: ChatWebSocket WS authentication is OUT OF SCOPE for this card.
+        # See analysis cache §"spec-reviewer 보강" item 7 — follow-up card
+        # planned to apply the same query-token pattern to /ws/chat.
         routes.append(WebSocketRoute("/ws/chat", chat_ws_handler.handle_ws))
 
         # Bind chat deps to DashboardWebSocket for deferred DM handler registration
@@ -119,11 +168,11 @@ def setup_dashboard(
             len(config_routes),
         )
 
-    # Static file routes (SPA fallback must come last)
+    # Static file routes (SPA fallback must come last — catch-all)
     static_routes = setup_static()
     routes.extend(static_routes)
 
     return routes, middleware, ws_handler
 
 
-__all__ = ["setup_dashboard", "DashboardWebSocket"]
+__all__ = ["setup_dashboard", "DashboardWebSocket", "AuthMiddleware"]

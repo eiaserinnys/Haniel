@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Haniel Dashboard — Sign in</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #18181b;
+      color: #e4e4e7;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .card {
+      background: #27272a;
+      border: 1px solid #3f3f46;
+      border-radius: 8px;
+      padding: 28px 32px;
+      width: 100%;
+      max-width: 360px;
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+    }
+    h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+    p.hint { color: #a1a1aa; font-size: 13px; margin: 0 0 20px; }
+    label { display: block; font-size: 12px; color: #a1a1aa; margin-bottom: 6px; }
+    input[type="password"] {
+      width: 100%;
+      padding: 9px 11px;
+      background: #18181b;
+      border: 1px solid #3f3f46;
+      border-radius: 6px;
+      color: #e4e4e7;
+      font-size: 14px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    input[type="password"]:focus {
+      outline: none;
+      border-color: #3b82f6;
+    }
+    button {
+      margin-top: 16px;
+      width: 100%;
+      padding: 9px 12px;
+      background: #2563eb;
+      border: 0;
+      border-radius: 6px;
+      color: #f8fafc;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    button:hover { background: #1d4ed8; }
+    .footer { font-size: 11px; color: #71717a; margin-top: 16px; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <form class="card" id="login-form" autocomplete="off">
+    <h1>Haniel Dashboard</h1>
+    <p class="hint">Enter the dashboard token from <code>haniel.yaml</code>.</p>
+    <label for="token">Bearer token</label>
+    <input id="token" type="password" required autofocus>
+    <button type="submit">Sign in</button>
+    <p class="footer">The token is stored in <code>localStorage</code> on this device and sent as <code>Authorization: Bearer</code> for REST and as <code>?token=</code> for WebSocket. Pattern matches the orchestrator dashboard.</p>
+  </form>
+  <script>
+    (function () {
+      var form = document.getElementById('login-form');
+      var input = document.getElementById('token');
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        var value = input.value.trim();
+        if (!value) return;
+        try {
+          localStorage.setItem('haniel-token', value);
+        } catch (e) {
+          /* localStorage unavailable (private browsing) — surface and stop */
+          alert('localStorage is unavailable. Cannot store token.');
+          return;
+        }
+        window.location.href = '/';
+      });
+    })();
+  </script>
+</body>
+</html>
