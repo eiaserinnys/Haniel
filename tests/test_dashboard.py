@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 
 from haniel.config import (
@@ -522,7 +523,6 @@ class TestDashboardWebSocketAuth:
     def test_ws_rejected_without_token(self, dashboard_app_with_token):
         """No ?token= query → WS upgrade rejected (close 4001)."""
         client = TestClient(dashboard_app_with_token)
-        from starlette.websockets import WebSocketDisconnect
         with pytest.raises(WebSocketDisconnect) as exc_info:
             with client.websocket_connect("/ws") as ws:
                 ws.receive_text()
@@ -531,7 +531,6 @@ class TestDashboardWebSocketAuth:
     def test_ws_rejected_with_wrong_token(self, dashboard_app_with_token):
         """Wrong ?token= → rejected (close 4001)."""
         client = TestClient(dashboard_app_with_token)
-        from starlette.websockets import WebSocketDisconnect
         with pytest.raises(WebSocketDisconnect) as exc_info:
             with client.websocket_connect("/ws?token=wrong") as ws:
                 ws.receive_text()
@@ -605,7 +604,6 @@ class TestChatWebSocketAuth:
     def test_chat_ws_rejected_without_token(self, dashboard_app_with_token_and_chat):
         """No ?token= query → /ws/chat upgrade rejected (close 4001)."""
         client = TestClient(dashboard_app_with_token_and_chat)
-        from starlette.websockets import WebSocketDisconnect
         with pytest.raises(WebSocketDisconnect) as exc_info:
             with client.websocket_connect("/ws/chat") as ws:
                 ws.receive_text()
@@ -614,7 +612,6 @@ class TestChatWebSocketAuth:
     def test_chat_ws_rejected_with_wrong_token(self, dashboard_app_with_token_and_chat):
         """Wrong ?token= → rejected (close 4001)."""
         client = TestClient(dashboard_app_with_token_and_chat)
-        from starlette.websockets import WebSocketDisconnect
         with pytest.raises(WebSocketDisconnect) as exc_info:
             with client.websocket_connect("/ws/chat?token=wrong") as ws:
                 ws.receive_text()
