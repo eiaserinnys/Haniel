@@ -1498,3 +1498,94 @@ class TestStartupUpdates:
         mock_pull.assert_called_once()
         _, kwargs = mock_pull.call_args
         assert kwargs.get("strategy") == "merge"
+
+
+class TestServiceRunnerCollectServicesInfo:
+    """`_collect_services_info`는 orchestrator-server에 보내는 NodeStatus.services
+    payload를 만든다. 단일 `status` 필드를 폐기하고 process_status/health_status/
+    ready 3필드로 분리하여 process 상태와 readiness가 한 문자열로 섞이지 않도록
+    보장한다. design-principles §3 (정본 하나)."""
+
+    def _make_runner(self, tmp_path: Path) -> ServiceRunner:
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={
+                "svc": ServiceConfig(run="sleep 100"),
+            },
+        )
+        return ServiceRunner(config, config_dir=tmp_path)
+
+    def _mock_health(self, runner: ServiceRunner, state_value: str) -> None:
+        """health_manager.get_health()를 state.value=state_value인 객체로 교체."""
+        health = MagicMock()
+        state = MagicMock()
+        state.value = state_value
+        health.state = state
+        health.get_uptime = MagicMock(return_value=0.0)
+        runner.health_manager.get_health = MagicMock(return_value=health)
+
+    def _mock_pid(self, runner: ServiceRunner, pid: int | None) -> None:
+        runner.process_manager.get_pid = MagicMock(return_value=pid)
+
+    def test_process_status_running_when_pid_present(self, tmp_path: Path):
+        runner = self._make_runner(tmp_path)
+        self._mock_pid(runner, 12345)
+        self._mock_health(runner, "ready")
+
+        services = runner._collect_services_info()
+
+        assert len(services) == 1
+        assert services[0]["pid"] == 12345
+        assert services[0]["process_status"] == "running"
+
+    def test_process_status_stopped_when_pid_none(self, tmp_path: Path):
+        runner = self._make_runner(tmp_path)
+        self._mock_pid(runner, None)
+        self._mock_health(runner, "stopped")
+
+        services = runner._collect_services_info()
+
+        assert services[0]["pid"] is None
+        assert services[0]["process_status"] == "stopped"
+
+    def test_health_status_reflects_state_value(self, tmp_path: Path):
+        runner = self._make_runner(tmp_path)
+        self._mock_pid(runner, 99)
+        self._mock_health(runner, "starting")
+
+        services = runner._collect_services_info()
+
+        assert services[0]["health_status"] == "starting"
+
+    def test_ready_is_true_only_when_running_and_ready(self, tmp_path: Path):
+        runner = self._make_runner(tmp_path)
+
+        # case A: pid present + state=ready → ready=True
+        self._mock_pid(runner, 100)
+        self._mock_health(runner, "ready")
+        assert runner._collect_services_info()[0]["ready"] is True
+
+        # case B: pid present + state=starting → ready=False
+        self._mock_health(runner, "starting")
+        assert runner._collect_services_info()[0]["ready"] is False
+
+        # case C: pid None + state=ready (race window) → ready=False
+        # (process_status=stopped takes precedence)
+        self._mock_pid(runner, None)
+        self._mock_health(runner, "ready")
+        assert runner._collect_services_info()[0]["ready"] is False
+
+    def test_status_field_removed(self, tmp_path: Path):
+        """기존 단일 `status` 키는 폐기. 호출자(dashboard)는 process_status /
+        health_status / ready 세 키만 사용한다."""
+        runner = self._make_runner(tmp_path)
+        self._mock_pid(runner, 7)
+        self._mock_health(runner, "ready")
+
+        services = runner._collect_services_info()
+
+        assert "status" not in services[0], (
+            "legacy 'status' key must be removed — see atom "
+            "260519.01.오케스트레이터-대시보드-supersede-status-history"
+        )

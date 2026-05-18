@@ -203,14 +203,23 @@ function NodeCard({ node, isExpanded, onToggleExpand, onServiceCommand, lookupIn
                           <td>{svc.pid ?? '\u2014'}</td>
                           <td>{uptimeStr(svc.uptime_ms)}</td>
                           <td className="hide-mobile">{svc.role || '\u2014'}</td>
-                          <td><StatusPill status={svc.status} size="sm" /></td>
+                          <td>
+                            {/* process_status=stopped takes precedence over health state — covers
+                                the pid=None + health=ready race window (atom 260519.01). */}
+                            <StatusPill
+                              status={svc.process_status === 'stopped' ? 'stopped' : svc.health_status}
+                              size="sm"
+                            />
+                          </td>
                           {onServiceCommand && (
                             <td className="svc-actions">
                               {(() => {
                                 // Cell wrapper guarantees onServiceCommand is defined here.
+                                // Action visibility is driven by process_status only — health
+                                // state (ready/starting/…) must not hide the buttons.
                                 const inFlightCmd = lookupInFlight?.(node.node_id, svc.name) ?? null;
                                 const isInFlight = inFlightCmd !== null;
-                                if (svc.enabled && svc.status === 'running') {
+                                if (svc.enabled && svc.process_status === 'running') {
                                   return (
                                     <>
                                       <button
@@ -234,7 +243,7 @@ function NodeCard({ node, isExpanded, onToggleExpand, onServiceCommand, lookupIn
                                     </>
                                   );
                                 }
-                                if (svc.enabled && svc.status === 'stopped') {
+                                if (svc.enabled && svc.process_status === 'stopped') {
                                   return (
                                     <button
                                       className="svc-btn"

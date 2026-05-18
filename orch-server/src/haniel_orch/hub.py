@@ -155,7 +155,16 @@ class WebSocketHub:
             await self._cleanup_orphan_deploys(node_id, error="node disconnected")
 
     async def _handle_change_notification(self, msg: ChangeNotification) -> None:
-        """Process a ChangeNotification: store + broadcast."""
+        """Process a ChangeNotification: store + supersede older PENDING + broadcast.
+
+        Generation-time supersede is the primary gate for "newest PENDING per
+        (node, repo, branch)" — older PENDING entries for the same group are
+        auto-rejected with reject_reason='superseded by ${msg.deploy_id}'.
+        DEPLOYING is preserved because ``get_pending_deploys_for_branch``
+        binds ``DeployStatus.PENDING.value`` only (event_store.py:185-190).
+        approve-time supersede in api.approve_deploy/approve_all remains as a
+        defensive secondary gate.
+        """
         await self._store.create_deploy_event(
             deploy_id=msg.deploy_id,
             node_id=msg.node_id,
@@ -165,6 +174,14 @@ class WebSocketHub:
             affected_services=msg.affected_services,
             diff_stat=msg.diff_stat,
             detected_at=msg.detected_at,
+        )
+        # Supersede older PENDING entries in the same (node, repo, branch)
+        # BEFORE broadcasting new_pending so the dashboard refetches see the
+        # superseded rows already marked REJECTED. ``supersede_pending``
+        # itself broadcasts status_change(rejected, reject_reason='superseded
+        # by …') for each affected entry.
+        await self.supersede_pending(
+            msg.node_id, msg.repo, msg.branch, kept_deploy_id=msg.deploy_id
         )
         await self.broadcast_to_dashboards({
             "type": "new_pending",

@@ -48,9 +48,19 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         return JSONResponse({"nodes": nodes})
 
     async def get_history(request: Request) -> JSONResponse:
-        """GET /api/orch/history — list deploy events, newest first."""
+        """GET /api/orch/history — list deploy events, newest first.
+
+        Default excludes auto-superseded entries (reject_reason starting with
+        'superseded by ') so the dashboard history isn't drowned out by them.
+        Pass ?include_superseded=1 to expose them for audit chains.
+        """
         limit = int(request.query_params.get("limit", "50"))
-        history = await store.get_deploy_history(limit=limit)
+        include_superseded = (
+            request.query_params.get("include_superseded") == "1"
+        )
+        history = await store.get_deploy_history(
+            limit=limit, include_superseded=include_superseded
+        )
         return JSONResponse({"deploys": history})
 
     async def approve_deploy(request: Request) -> JSONResponse:
@@ -190,33 +200,31 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
 
         # Group by (node, repo, branch). `pending` is ordered created_at DESC,
         # so the first occurrence per group is the latest commit. Older
-        # entries in the same group are auto-superseded right away.
+        # entries in the same group are auto-superseded via the single
+        # source of truth (hub.supersede_pending) — keeps the reject_reason
+        # format ("superseded by <id>") and broadcast payload identical to
+        # the generation-time supersede path. See atom 260519.01.
         seen_groups: set[tuple[str, str, str]] = set()
         to_approve: list[dict[str, Any]] = []
-        auto_superseded: list[str] = []
         for ev in pending:
             key = (ev["node_id"], ev["repo"], ev["branch"])
             if key in seen_groups:
-                # Older deploy in the same branch → supersede now.
-                kept = next(
-                    t for t in to_approve
-                    if (t["node_id"], t["repo"], t["branch"]) == key
-                )
-                reason = f"superseded by {kept['deploy_id']}"
-                await store.update_deploy_status(
-                    ev["deploy_id"], DeployStatus.REJECTED, reject_reason=reason
-                )
-                await hub.broadcast_to_dashboards({
-                    "type": "status_change",
-                    "deploy_id": ev["deploy_id"],
-                    "status": DeployStatus.REJECTED.value,
-                    "node_id": ev["node_id"],
-                    "reject_reason": reason,
-                })
-                auto_superseded.append(ev["deploy_id"])
+                # Older deploy in the same branch — handled below by
+                # supersede_pending(kept=newest), no per-row action here.
                 continue
             seen_groups.add(key)
             to_approve.append(ev)
+
+        # Supersede older PENDINGs in each group through the canonical hub
+        # method. Defensive: by this point generation-time supersede should
+        # have already covered most cases, but a stale row that slipped in
+        # before the upgrade still gets cleaned up.
+        auto_superseded: list[str] = []
+        for ev in to_approve:
+            superseded = await hub.supersede_pending(
+                ev["node_id"], ev["repo"], ev["branch"], ev["deploy_id"]
+            )
+            auto_superseded.extend(superseded)
 
         approved: list[str] = []
         failed: list[dict[str, Any]] = []

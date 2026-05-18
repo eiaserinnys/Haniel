@@ -42,6 +42,11 @@ function App() {
   });
   const [showSidebar, setShowSidebar] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  // History 'include superseded' toggle — default off. Same value drives both
+  // HistoryView (UI) and the fetchHistory query param so the response stays
+  // consistent with the checkbox. Plain useState (no localStorage) so a fresh
+  // session lands on the actionable view by default.
+  const [includeSupersededHistory, setIncludeSupersededHistory] = useState(false);
   const isMobile = useIsMobile();
 
   // Extract token from URL (set by OAuth callback redirect) and store in localStorage
@@ -80,8 +85,9 @@ function App() {
           // Terminal — remove from PendingView. HistoryView refetch picks it up.
           setPending(ps => ps.filter(p => p.deploy_id !== event.deploy_id));
         }
-        // Refetch history to get latest
-        api.fetchHistory().then(r => setHistory(r.deploys)).catch(() => {});
+        // Refetch history to get latest (with current superseded toggle).
+        api.fetchHistory({ includeSuperseded: includeSupersededHistory })
+          .then(r => setHistory(r.deploys)).catch(() => {});
         if (event.status === 'deploying') {
           pushToast(`Deploying ${event.deploy_id.split(':')[1] || ''}`, 'amber');
         } else if (event.status === 'success') {
@@ -94,7 +100,9 @@ function App() {
         } else if (
           event.status === 'rejected' &&
           event.reject_reason &&
-          event.reject_reason.startsWith('superseded')
+          // Match the server-side SQL filter exactly (LIKE 'superseded by %').
+          // Trailing space prevents false matches like "superseded for testing".
+          event.reject_reason.startsWith('superseded by ')
         ) {
           // Auto-supersede triggered by approving a newer deploy on the
           // same (node, repo, branch). User-driven rejects already toast
@@ -126,7 +134,7 @@ function App() {
         api.fetchNodes().then(r => setNodes(r.nodes)).catch(() => {});
         break;
     }
-  }, [pushToast, removeWithMinDelay]);
+  }, [pushToast, removeWithMinDelay, includeSupersededHistory]);
 
   const { status: wsStatus } = useWebSocket(handleWsEvent);
 
@@ -163,8 +171,16 @@ function App() {
   useEffect(() => {
     api.fetchPending().then(r => setPending(r.deploys)).catch(() => {});
     api.fetchNodes().then(r => setNodes(r.nodes)).catch(() => {});
-    api.fetchHistory().then(r => setHistory(r.deploys)).catch(() => {});
+    // History fetch is driven by the toggle effect below — no double fetch.
   }, []);
+
+  // History: refetch whenever the include-superseded toggle changes (and on
+  // mount). Keeping this in its own effect keeps the dependency surface small
+  // and ensures the response shape always matches the checkbox state.
+  useEffect(() => {
+    api.fetchHistory({ includeSuperseded: includeSupersededHistory })
+      .then(r => setHistory(r.deploys)).catch(() => {});
+  }, [includeSupersededHistory]);
 
   // Page navigation
   const setPage = useCallback((p: Page) => { setPageRaw(p); setMobileMenuOpen(false); }, []);
@@ -323,7 +339,13 @@ function App() {
               lookupInFlight={lookupByService}
             />
           )}
-          {page === 'history' && <HistoryView deploys={history} />}
+          {page === 'history' && (
+            <HistoryView
+              deploys={history}
+              includeSuperseded={includeSupersededHistory}
+              onToggleSuperseded={setIncludeSupersededHistory}
+            />
+          )}
         </main>
       </div>
 

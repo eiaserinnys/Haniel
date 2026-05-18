@@ -20,11 +20,24 @@ export interface Deploy {
   updated_at: string;
 }
 
+// Service status is split into three axes so the dashboard can show process
+// state and readiness independently. See atom 260519.01 — the previous
+// single `status` field conflated `running` (HealthState) with the action-
+// button trigger and hid edge cases like pid=None + health=ready (race).
+//
+//   process_status: 'running' iff the node reports a pid for the service,
+//                   'stopped' otherwise. Drives action button visibility.
+//   health_status:  HealthManager state value
+//                   ('ready' | 'running' | 'starting' | 'stopping' |
+//                    'crashed' | 'stopped' | 'circuit_open').
+//   ready:          process_status === 'running' && health_status === 'ready'.
 export interface NodeService {
   name: string;
   port: number | null;
   pid: number | null;
-  status: string;
+  process_status: 'running' | 'stopped';
+  health_status: string;
+  ready: boolean;
   role: string;
   uptime_ms: number;
   enabled: boolean;
