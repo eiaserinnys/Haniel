@@ -165,7 +165,7 @@ class WebSocketHub:
         approve-time supersede in api.approve_deploy/approve_all remains as a
         defensive secondary gate.
         """
-        await self._store.create_deploy_event(
+        inserted = await self._store.create_deploy_event(
             deploy_id=msg.deploy_id,
             node_id=msg.node_id,
             repo=msg.repo,
@@ -175,6 +175,9 @@ class WebSocketHub:
             diff_stat=msg.diff_stat,
             detected_at=msg.detected_at,
         )
+        if not inserted:
+            return
+
         # Supersede older PENDING entries in the same (node, repo, branch)
         # BEFORE broadcasting new_pending so the dashboard refetches see the
         # superseded rows already marked REJECTED. ``supersede_pending``

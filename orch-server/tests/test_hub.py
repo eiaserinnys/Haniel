@@ -244,6 +244,22 @@ class TestHandleChangeNotificationSupersede:
         assert len(new_pendings) == 1
         assert new_pendings[0]["deploy_id"] == "d_new"
 
+    async def test_duplicate_change_notification_is_ignored(
+        self, hub: WebSocketHub, store: EventStore
+    ):
+        """Duplicate deterministic deploy_id should not rebroadcast or
+        re-run supersede."""
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        notification = self._notification("d_same")
+
+        await hub._handle_change_notification(notification)
+        await hub._handle_change_notification(notification)
+
+        sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
+        new_pendings = [p for p in sent if p.get("type") == "new_pending"]
+        assert len(new_pendings) == 1
+
 
 class TestHandleDeployResult:
     async def test_success_result(self, hub: WebSocketHub, store: EventStore):

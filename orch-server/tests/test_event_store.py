@@ -10,7 +10,7 @@ from haniel_orch.protocol import DeployStatus
 
 class TestCreateDeployEvent:
     async def test_create_and_get(self, store: EventStore):
-        await store.create_deploy_event(
+        inserted = await store.create_deploy_event(
             deploy_id="n1:repo:main:abc1234",
             node_id="n1",
             repo="repo",
@@ -20,6 +20,7 @@ class TestCreateDeployEvent:
             diff_stat="+10 -3",
             detected_at="2026-05-05T00:00:00Z",
         )
+        assert inserted is True
 
         event = await store.get_deploy_event("n1:repo:main:abc1234")
         assert event is not None
@@ -34,7 +35,7 @@ class TestCreateDeployEvent:
 
     async def test_duplicate_deploy_id_ignored(self, store: EventStore):
         """INSERT OR IGNORE — same deploy_id should not raise."""
-        await store.create_deploy_event(
+        inserted = await store.create_deploy_event(
             deploy_id="dup-id",
             node_id="n1",
             repo="r",
@@ -44,8 +45,9 @@ class TestCreateDeployEvent:
             diff_stat=None,
             detected_at="2026-01-01T00:00:00Z",
         )
+        assert inserted is True
         # Second insert with same deploy_id — should be silently ignored
-        await store.create_deploy_event(
+        inserted = await store.create_deploy_event(
             deploy_id="dup-id",
             node_id="n1",
             repo="r",
@@ -55,6 +57,7 @@ class TestCreateDeployEvent:
             diff_stat="+100 -0",
             detected_at="2026-01-02T00:00:00Z",
         )
+        assert inserted is False
 
         # Original data should be preserved
         event = await store.get_deploy_event("dup-id")
@@ -110,26 +113,44 @@ class TestGetActiveDeploys:
     """get_active_deploys returns PENDING + DEPLOYING (used by /api/orch/pending)."""
 
     async def test_includes_pending_and_deploying(self, store: EventStore):
-        # Create 3 events: pending, deploying, rejected
-        for i in range(3):
-            await store.create_deploy_event(
-                deploy_id=f"d{i}",
-                node_id="n1",
-                repo="r",
-                branch="main",
-                commits=[f"h{i} msg"],
-                affected_services=[],
-                diff_stat=None,
-                detected_at=f"2026-01-0{i+1}T00:00:00Z",
-            )
-        await store.update_deploy_status("d1", DeployStatus.DEPLOYING)
+        await store.create_deploy_event(
+            deploy_id="d_pending",
+            node_id="n1",
+            repo="r",
+            branch="main",
+            commits=["h msg"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+        )
+        await store.create_deploy_event(
+            deploy_id="d_deploying",
+            node_id="n1",
+            repo="r",
+            branch="dev",
+            commits=["h msg"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+        )
+        await store.create_deploy_event(
+            deploy_id="d_rejected",
+            node_id="n1",
+            repo="r",
+            branch="feature",
+            commits=["h msg"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+        )
+        await store.update_deploy_status("d_deploying", DeployStatus.DEPLOYING)
         await store.update_deploy_status(
-            "d2", DeployStatus.REJECTED, reject_reason="not ready"
+            "d_rejected", DeployStatus.REJECTED, reject_reason="not ready"
         )
 
         active = await store.get_active_deploys()
         ids = {d["deploy_id"] for d in active}
-        assert ids == {"d0", "d1"}
+        assert ids == {"d_pending", "d_deploying"}
 
     async def test_ordered_newest_first(self, store: EventStore):
         for i in range(3):
@@ -147,8 +168,38 @@ class TestGetActiveDeploys:
             await asyncio.sleep(0.005)
 
         active = await store.get_active_deploys()
-        # newest insert (d2) first
-        assert [d["deploy_id"] for d in active] == ["d2", "d1", "d0"]
+        # same group is repaired to newest only
+        assert [d["deploy_id"] for d in active] == ["d2"]
+
+    async def test_repairs_existing_stale_pending_rows(self, store: EventStore):
+        await store.create_deploy_event(
+            deploy_id="old",
+            node_id="n1",
+            repo="r",
+            branch="main",
+            commits=["h old"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+        )
+        await asyncio.sleep(0.005)
+        await store.create_deploy_event(
+            deploy_id="new",
+            node_id="n1",
+            repo="r",
+            branch="main",
+            commits=["h new"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-01-02T00:00:00Z",
+        )
+
+        active = await store.get_active_deploys()
+        assert [d["deploy_id"] for d in active] == ["new"]
+
+        old = await store.get_deploy_event("old")
+        assert old["status"] == "rejected"
+        assert old["reject_reason"] == "superseded by new"
 
     async def test_empty_when_none_active(self, store: EventStore):
         active = await store.get_active_deploys()

@@ -51,8 +51,8 @@ async def _seed_pending(
 
 class TestGetPending:
     async def test_returns_pending_deploys(self, hub, store, routes):
-        await _seed_pending(store, "d1")
-        await _seed_pending(store, "d2")
+        await _seed_pending(store, "d1", branch="main")
+        await _seed_pending(store, "d2", branch="dev")
 
         from starlette.applications import Starlette
         from starlette.testclient import TestClient
@@ -64,6 +64,25 @@ class TestGetPending:
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["deploys"]) == 2
+
+    async def test_repairs_stale_pending_deploys(self, hub, store, routes):
+        await _seed_pending(store, "old")
+        await asyncio.sleep(0.005)
+        await _seed_pending(store, "new")
+
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        app = Starlette(routes=routes)
+        client = TestClient(app)
+
+        resp = client.get("/api/orch/pending")
+        assert resp.status_code == 200
+        assert [d["deploy_id"] for d in resp.json()["deploys"]] == ["new"]
+
+        old = await store.get_deploy_event("old")
+        assert old["status"] == "rejected"
+        assert old["reject_reason"] == "superseded by new"
 
     async def test_empty_when_none(self, hub, store, routes):
         from starlette.applications import Starlette
@@ -79,8 +98,8 @@ class TestGetPending:
     async def test_includes_deploying(self, hub, store, routes):
         """/api/orch/pending returns active (pending + deploying), not just pending."""
         await _seed_pending(store, "d_pending")
-        await _seed_pending(store, "d_deploying")
-        await _seed_pending(store, "d_rejected")
+        await _seed_pending(store, "d_deploying", branch="dev")
+        await _seed_pending(store, "d_rejected", branch="feature")
         await store.update_deploy_status("d_deploying", DeployStatus.DEPLOYING)
         await store.update_deploy_status(
             "d_rejected", DeployStatus.REJECTED, reject_reason="not ready"

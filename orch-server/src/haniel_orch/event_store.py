@@ -91,10 +91,14 @@ class EventStore:
         affected_services: list[str],
         diff_stat: str | None,
         detected_at: str,
-    ) -> None:
-        """INSERT OR IGNORE — duplicate deploy_id is silently ignored."""
+    ) -> bool:
+        """Create a deploy event.
+
+        Returns True when a new row was inserted. Duplicate deploy_id is
+        silently ignored and returns False.
+        """
         now = _now_iso()
-        await self._db.execute(
+        cursor = await self._db.execute(
             """INSERT OR IGNORE INTO deploy_events
                (deploy_id, node_id, repo, branch, status,
                 commits_json, affected_services_json, diff_stat, detected_at,
@@ -115,6 +119,7 @@ class EventStore:
             ),
         )
         await self._db.commit()
+        return cursor.rowcount > 0
 
     async def get_deploy_event(self, deploy_id: str) -> dict[str, Any] | None:
         """Get a single deploy event by ID. Returns None if not found."""
@@ -159,6 +164,7 @@ class EventStore:
         and not included — the hub flips APPROVED → DEPLOYING immediately
         on send_to_node.
         """
+        await self.supersede_stale_pending_deploys()
         cursor = await self._db.execute(
             "SELECT * FROM deploy_events WHERE status IN (?, ?) "
             "ORDER BY created_at DESC",
@@ -172,6 +178,44 @@ class EventStore:
             d["affected_services"] = json.loads(d.pop("affected_services_json"))
             results.append(d)
         return results
+
+    async def supersede_stale_pending_deploys(self) -> list[str]:
+        """Reject older PENDING deploys per (node, repo, branch).
+
+        This is the read/repair gate for rows that existed before
+        generation-time supersede was added, or for rows inserted while an old
+        orch-server was running. DEPLOYING rows are intentionally excluded.
+        """
+        cursor = await self._db.execute(
+            "SELECT deploy_id, node_id, repo, branch FROM deploy_events "
+            "WHERE status = ? "
+            "ORDER BY node_id, repo, branch, created_at DESC, detected_at DESC, deploy_id DESC",
+            (DeployStatus.PENDING.value,),
+        )
+        rows = await cursor.fetchall()
+
+        kept_by_group: dict[tuple[str, str, str], str] = {}
+        superseded: list[str] = []
+        now = _now_iso()
+        for deploy_id, node_id, repo, branch in rows:
+            key = (node_id, repo, branch)
+            kept = kept_by_group.get(key)
+            if kept is None:
+                kept_by_group[key] = deploy_id
+                continue
+
+            reason = f"superseded by {kept}"
+            await self._db.execute(
+                "UPDATE deploy_events "
+                "SET status = ?, reject_reason = ?, updated_at = ? "
+                "WHERE deploy_id = ?",
+                (DeployStatus.REJECTED.value, reason, now, deploy_id),
+            )
+            superseded.append(deploy_id)
+
+        if superseded:
+            await self._db.commit()
+        return superseded
 
     async def get_pending_deploys_for_branch(
         self, node_id: str, repo: str, branch: str
