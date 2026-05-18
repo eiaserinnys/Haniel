@@ -9,6 +9,7 @@ Provides real-time events to dashboard clients:
 """
 
 import asyncio
+import hmac
 import json
 import logging
 from datetime import datetime, timezone
@@ -36,8 +37,18 @@ class DashboardWebSocket:
     4. On connection, current full status is sent as initial message
     """
 
-    def __init__(self, runner: "ServiceRunner"):
+    def __init__(self, runner: "ServiceRunner", token: str | None = None):
+        """Construct the dashboard WS handler.
+
+        Args:
+            runner: ServiceRunner instance to expose via WS broadcast
+            token: Bearer token required as a query-param on the WS upgrade
+                URL (``/ws?token=...``). When ``None`` or empty, WS auth is
+                disabled (noauth mode — matches AuthMiddleware short-circuit
+                and the backward-compat path used by existing tests).
+        """
         self.runner = runner
+        self._token = token or ""
         self._clients: set[WebSocket] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -297,7 +308,22 @@ class DashboardWebSocket:
             self._clients.discard(ws)
 
     async def handle_ws(self, websocket: WebSocket) -> None:
-        """Handle a WebSocket upgrade request at GET /ws."""
+        """Handle a WebSocket upgrade request at GET /ws.
+
+        Token check matches AuthMiddleware short-circuit: ``self._token``
+        falsy means noauth mode. With a token configured we require
+        ``?token=...`` query and constant-time compare it before accepting
+        the upgrade. Mirrors the orchestrator-server pattern
+        (``haniel_orch.hub._verify_dashboard_token``) — single rule both
+        sides of the codebase.
+        """
+        if self._token:
+            client_token = websocket.query_params.get("token")
+            if not client_token or not hmac.compare_digest(
+                client_token, self._token
+            ):
+                await websocket.close(code=4001, reason="auth failed")
+                return
         await websocket.accept()
         self._clients.add(websocket)
         logger.info("WebSocket client connected")
