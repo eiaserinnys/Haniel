@@ -24,7 +24,16 @@ export function useWebSocket({ onEvent, url = "/ws" }: UseWebSocketOptions) {
   const connect = useCallback(() => {
     if (!mountedRef.current) return;
 
-    const wsUrl = `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}${url}`;
+    // Auth token (matches dashboard/src/lib/api.ts localStorage key).
+    // Append as ?token= so DashboardWebSocket.handle_ws can verify before
+    // accepting the upgrade (matches orch-server hub.py pattern).
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const token =
+      typeof localStorage !== "undefined"
+        ? localStorage.getItem("haniel-token") || ""
+        : "";
+    const qs = token ? `?token=${encodeURIComponent(token)}` : "";
+    const wsUrl = `${protocol}//${window.location.host}${url}${qs}`;
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 

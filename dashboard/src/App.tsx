@@ -169,7 +169,15 @@ export default function App() {
         <h1 className="font-semibold text-zinc-100 flex-1">Haniel Dashboard</h1>
         <WsIndicator status={wsStatus} />
         <button
-          onClick={() => { api.reload().catch(() => null) }}
+          onClick={() => {
+            // Surface reload failures to the user — silent swallow hid the
+            // /api/config/reload 404 reported in the E2E review (P1). The
+            // endpoint is now /api/reload; the catch is kept defensive so
+            // future regressions are immediately visible.
+            api.reload().catch((e) => {
+              setCrudError(e instanceof Error ? e.message : String(e))
+            })
+          }}
           title="Reload config"
           className="p-1.5 text-zinc-400 hover:text-zinc-200 transition-colors"
         >
