@@ -589,6 +589,20 @@ class ServiceRunner:
             restart_time = time.time() + delay
             self._pending_restarts[name] = restart_time
 
+    def _cancel_pending_restart(self, name: str) -> bool:
+        """Cancel a pending service restart if one is queued.
+
+        Returns:
+            True when a queued restart was removed.
+        """
+        with self._restart_lock:
+            if name not in self._pending_restarts:
+                return False
+            del self._pending_restarts[name]
+
+        logger.info("Cancelled pending restart for %s", name)
+        return True
+
     def stop_services(self) -> None:
         """Stop all services in reverse dependency order."""
         shutdown_order = self.get_shutdown_order()
@@ -1010,6 +1024,7 @@ class ServiceRunner:
             affected = self.get_affected_services(repo_name)
             shutdown_order = [s for s in self.get_shutdown_order() if s in affected]
             for svc in shutdown_order:
+                self._cancel_pending_restart(svc)
                 if self.process_manager.is_running(svc):
                     logger.info("Stopping %s for pull", svc)
                     self.process_manager.stop_service(svc)

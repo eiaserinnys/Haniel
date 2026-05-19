@@ -859,6 +859,41 @@ class TestServiceRunnerPollCycle:
         with runner._restart_lock:
             assert "test" in runner._pending_restarts
 
+    def test_cancel_pending_restart(self, tmp_path: Path):
+        """Test cancelling a queued service restart."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={
+                "test": ServiceConfig(run="sleep 100"),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        runner._pending_restarts["test"] = time.time() + 5
+
+        assert runner._cancel_pending_restart("test") is True
+        assert runner._cancel_pending_restart("test") is False
+        with runner._restart_lock:
+            assert "test" not in runner._pending_restarts
+
+    @patch("haniel.core.runner.ServiceRunner._start_service")
+    def test_trigger_pull_cancels_pending_restart_for_affected_service(
+        self,
+        mock_start,
+        runner_with_mock_repo,
+    ):
+        """Pull owns the restart timing, so stale scheduled restarts are removed."""
+        runner = runner_with_mock_repo
+        runner._repo_states["test-repo"].pending_changes = {"commits": ["a"]}
+        runner._pending_restarts["test-service"] = time.time() - 1
+
+        with patch.object(runner, "_pull_repo", return_value=(True, [])):
+            runner.trigger_pull("test-repo")
+
+        with runner._restart_lock:
+            assert "test-service" not in runner._pending_restarts
+        mock_start.assert_called_once_with("test-service")
+
     @patch("haniel.core.runner.ServiceRunner._start_service")
     def test_process_pending_restarts(self, mock_start, tmp_path: Path):
         """Test processing pending restarts."""
