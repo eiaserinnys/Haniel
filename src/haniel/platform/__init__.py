@@ -56,6 +56,19 @@ class PlatformHandler(ABC):
         pass
 
     @abstractmethod
+    def is_port_owned_by_process_tree(self, port: int, root_pid: int) -> bool:
+        """Check whether a LISTEN port is owned by a process tree.
+
+        Args:
+            port: Port number to check
+            root_pid: Root process ID Haniel started
+
+        Returns:
+            True if the port listener is root_pid or one of its descendants.
+        """
+        pass
+
+    @abstractmethod
     def setup_process_group(self, process: "subprocess.Popen[str]") -> None:
         """Set up process group for proper signal propagation.
 

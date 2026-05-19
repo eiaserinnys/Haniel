@@ -245,6 +245,26 @@ class TestWindowsPortCheck:
             result = handler.is_port_listening(8080)
             assert result is False
 
+    def test_is_port_owned_by_process_tree_true(self, mock_windll):
+        """Should return True when PowerShell reports ownership."""
+        from haniel.platform.windows import WindowsHandler
+
+        handler = WindowsHandler()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.stdout = "true\n"
+
+            assert handler.is_port_owned_by_process_tree(4306, 12345) is True
+
+    def test_is_port_owned_by_process_tree_false(self, mock_windll):
+        """Should return False when PowerShell reports a different owner."""
+        from haniel.platform.windows import WindowsHandler
+
+        handler = WindowsHandler()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.stdout = "false\n"
+
+            assert handler.is_port_owned_by_process_tree(4306, 12345) is False
+
 
 class TestWindowsJobObject:
     """Tests for Job Object management."""

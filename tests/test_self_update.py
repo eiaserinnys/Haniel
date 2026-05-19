@@ -154,9 +154,15 @@ class TestRunnerSelfUpdate:
         runner._self_update_requested = threading.Event()
         runner._last_self_update_result = None
         runner._pending_restarts = {}
+        runner._enabled_services = config.services
+        runner.process_manager = MagicMock()
+        runner.process_manager.is_running.return_value = False
         runner._dependency_graph = MagicMock()
         runner._dependency_graph.get_dependencies.return_value = []
         runner._dependency_graph.get_dependents.return_value = []
+        runner._dependency_graph.topological_sort.return_value = list(
+            config.services.keys()
+        )
 
         return runner
 
@@ -175,6 +181,7 @@ class TestRunnerSelfUpdate:
         runner._initiate_self_update()
 
         assert runner.self_update_requested is True
+        runner.process_manager.is_running.assert_called_with("web")
         runner.stop.assert_called_once()
 
     def test_manual_update_sets_pending(self):
@@ -201,7 +208,21 @@ class TestRunnerSelfUpdate:
         result = runner.approve_self_update()
 
         assert runner.self_update_requested is True
+        runner.process_manager.is_running.assert_called_with("web")
         assert "approved" in result.lower()
+
+    def test_approve_self_update_blocks_when_service_stop_fails(self):
+        """Self-update should not proceed if a managed service cannot stop."""
+        config = self._make_config()
+        runner = self._make_runner(config)
+        runner._state.self_update_pending = True
+        runner.process_manager.is_running.return_value = True
+        runner.process_manager.stop_service.return_value = False
+
+        with pytest.raises(RuntimeError, match="Failed to stop all services"):
+            runner.approve_self_update()
+
+        assert runner.self_update_requested is False
 
     def test_approve_no_pending_returns_message(self):
         """Approving when no update is pending should return a message."""

@@ -19,7 +19,12 @@ from haniel.config import ServiceConfig
 from haniel.core.health import HealthManager, ServiceState
 from haniel.core.logs import LogManager, LogCapture
 from haniel.platform import get_platform_handler
-from haniel.core.process import ProcessManager, ReadyCondition, ReadyConditionType
+from haniel.core.process import (
+    ManagedProcess,
+    ProcessManager,
+    ReadyCondition,
+    ReadyConditionType,
+)
 
 
 # Path to the dummy server
@@ -339,6 +344,46 @@ class TestProcessManager:
             assert handler.is_port_listening(port)
         finally:
             process_manager.stop_service("test", timeout=2)
+
+    def test_port_ready_requires_started_process_tree(
+        self, process_manager: ProcessManager
+    ):
+        """A port owned by another process must not satisfy this service ready."""
+        condition = ReadyCondition.parse("port:4306")
+        process = MagicMock()
+        process.pid = 12345
+        process.poll.return_value = None
+        managed = ManagedProcess(
+            name="test",
+            config=ServiceConfig(run="echo hello", ready="port:4306"),
+            process=process,
+        )
+        process_manager.platform = MagicMock()
+        process_manager.platform.is_port_owned_by_process_tree.return_value = False
+        process_manager.platform.is_port_listening.return_value = True
+
+        assert process_manager._check_ready_condition(condition, managed) is False
+        process_manager.platform.is_port_owned_by_process_tree.assert_called_once_with(
+            4306, 12345
+        )
+
+    def test_port_ready_accepts_started_process_tree(
+        self, process_manager: ProcessManager
+    ):
+        """A port owned by the started process tree satisfies port ready."""
+        condition = ReadyCondition.parse("port:4306")
+        process = MagicMock()
+        process.pid = 12345
+        process.poll.return_value = None
+        managed = ManagedProcess(
+            name="test",
+            config=ServiceConfig(run="echo hello", ready="port:4306"),
+            process=process,
+        )
+        process_manager.platform = MagicMock()
+        process_manager.platform.is_port_owned_by_process_tree.return_value = True
+
+        assert process_manager._check_ready_condition(condition, managed) is True
 
     @pytest.mark.skipif(
         not DUMMY_SERVER.exists(),

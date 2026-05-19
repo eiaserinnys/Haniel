@@ -603,15 +603,26 @@ class ServiceRunner:
         logger.info("Cancelled pending restart for %s", name)
         return True
 
-    def stop_services(self) -> None:
+    def stop_services(self) -> bool:
         """Stop all services in reverse dependency order."""
         shutdown_order = self.get_shutdown_order()
         logger.info(f"Stopping services in order: {shutdown_order}")
+        all_stopped = True
 
         for name in shutdown_order:
+            self._cancel_pending_restart(name)
             if self.process_manager.is_running(name):
                 logger.info(f"Stopping service: {name}")
-                self.process_manager.stop_service(name)
+                if not self.process_manager.stop_service(name):
+                    logger.error("Failed to stop service: %s", name)
+                    all_stopped = False
+
+        return all_stopped
+
+    def _prepare_self_update_shutdown(self) -> None:
+        """Stop managed services before allowing Haniel itself to update."""
+        if not self.stop_services():
+            raise RuntimeError("Failed to stop all services for self-update")
 
     def start(self) -> None:
         """Start the runner (services + poll loop + MCP server)."""
@@ -1044,6 +1055,7 @@ class ServiceRunner:
             if self._self_repo and repo_name == self._self_repo:
                 # Self-update: signal wrapper to restart Haniel with new code.
                 # notify_done is skipped — startup notification fires after restart.
+                self._prepare_self_update_shutdown()
                 self._notify_self_update_approved()
                 self._self_update_requested.set()
                 self.stop()
@@ -1363,6 +1375,7 @@ class ServiceRunner:
         if self.config.self_update.auto_update:
             logger.info("Self-update: auto_update=true, exiting for update")
             self._notify_self_update_detected(auto=True)
+            self._prepare_self_update_shutdown()
             self._self_update_requested.set()
             self.stop()
             return
@@ -1396,6 +1409,7 @@ class ServiceRunner:
                 return "No self-update pending."
 
         logger.info("Self-update approved, shutting down for update")
+        self._prepare_self_update_shutdown()
         self._notify_self_update_approved()
         self._self_update_requested.set()
         # Notify dashboard that the update work is now starting (server about
