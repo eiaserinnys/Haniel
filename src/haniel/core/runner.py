@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..config import (
     BackoffConfig,
@@ -44,12 +45,12 @@ from .self_update_marker import (
     read_and_consume as _read_self_update_marker,
 )
 from .orch_pending_deploy import (
-    OrchPendingDeploy,
     read_and_consume as _read_orch_pending_deploy,
     write as _write_orch_pending_deploy,
 )
 
-if __import__("typing").TYPE_CHECKING:
+if TYPE_CHECKING:
+    from ..integrations.orchestrator_client import OrchestratorClient
     from ..integrations.slack_bot import SlackBot
 
 logger = logging.getLogger(__name__)
@@ -810,20 +811,22 @@ class ServiceRunner:
             pid = self.process_manager.get_pid(name)
             process_status = "running" if pid is not None else "stopped"
             health_status = health.state.value
-            services.append({
-                "name": name,
-                "port": port,
-                "pid": pid,
-                "process_status": process_status,
-                "health_status": health_status,
-                "ready": (
-                    process_status == "running" and health_status == "ready"
-                ),
-                "role": svc_config.repo or "",
-                "uptime_ms": int(health.get_uptime() * 1000) if health.get_uptime() else 0,
-                "enabled": svc_config.enabled,
-                "deps": svc_config.after,
-            })
+            services.append(
+                {
+                    "name": name,
+                    "port": port,
+                    "pid": pid,
+                    "process_status": process_status,
+                    "health_status": health_status,
+                    "ready": (process_status == "running" and health_status == "ready"),
+                    "role": svc_config.repo or "",
+                    "uptime_ms": int(health.get_uptime() * 1000)
+                    if health.get_uptime()
+                    else 0,
+                    "enabled": svc_config.enabled,
+                    "deps": svc_config.after,
+                }
+            )
         return services
 
     def _handle_deploy_approval(
@@ -853,7 +856,9 @@ class ServiceRunner:
             logger.warning(
                 "Deploy approval branch %r differs from configured %r for repo %r — "
                 "using configured branch",
-                branch, configured_branch, repo,
+                branch,
+                configured_branch,
+                repo,
             )
 
         if self._self_repo and repo == self._self_repo:
@@ -975,7 +980,8 @@ class ServiceRunner:
         )
         logger.info(
             "Enqueued DeployResult for self-update: deploy_id=%s status=%s",
-            pending.deploy_id, status,
+            pending.deploy_id,
+            status,
         )
 
     def _handle_service_command(self, service_name: str, action: str) -> None:
@@ -1072,7 +1078,10 @@ class ServiceRunner:
         except Exception as e:
             if self._slack_bot:
                 self._slack_bot.notify_done(
-                    repo_name, success=False, pending_changes=captured_changes, error=str(e)
+                    repo_name,
+                    success=False,
+                    pending_changes=captured_changes,
+                    error=str(e),
                 )
             raise
         finally:
@@ -1086,9 +1095,7 @@ class ServiceRunner:
     @staticmethod
     def _hash_pending(pending: dict) -> str:
         """Return a stable SHA-256 hex digest of a pending_changes dict."""
-        return hashlib.sha256(
-            json.dumps(pending, sort_keys=True).encode()
-        ).hexdigest()
+        return hashlib.sha256(json.dumps(pending, sort_keys=True).encode()).hexdigest()
 
     def _init_repo_states(self) -> None:
         """Initialize repo states with current HEAD."""
@@ -1299,11 +1306,17 @@ class ServiceRunner:
                             )
                         # Notify Slack only when remote has new commits (not already pulling)
                         # and only when the pending content has actually changed.
-                        if self._slack_bot and state.pending_changes and not self._pull_locks[name].locked():
+                        if (
+                            self._slack_bot
+                            and state.pending_changes
+                            and not self._pull_locks[name].locked()
+                        ):
                             content_hash = self._hash_pending(state.pending_changes)
                             if self._last_pending_hash.get(name) != content_hash:
                                 self._last_pending_hash[name] = content_hash
-                                self._slack_bot.notify_pending(name, state.pending_changes)
+                                self._slack_bot.notify_pending(
+                                    name, state.pending_changes
+                                )
                     else:
                         state.pending_changes = None
 

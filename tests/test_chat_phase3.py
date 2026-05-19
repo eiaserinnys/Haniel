@@ -236,9 +236,14 @@ class TestHashPending:
 def _make_service_runner(tmp_path: Path):
     """Minimal ServiceRunner with a single repo configured."""
     from haniel.config.model import HanielConfig, RepoConfig
+
     config = HanielConfig(
         poll_interval=60,
-        repos={"my-repo": RepoConfig(url="https://example.com/repo.git", path="my-repo", branch="main")},
+        repos={
+            "my-repo": RepoConfig(
+                url="https://example.com/repo.git", path="my-repo", branch="main"
+            )
+        },
         services={},
     )
     return ServiceRunner(config=config, config_dir=tmp_path)

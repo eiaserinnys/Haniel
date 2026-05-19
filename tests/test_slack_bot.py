@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from haniel.config.model import HanielConfig, SlackBotConfig, load_config
+from haniel.config.model import SlackBotConfig, load_config
 from haniel.integrations.slack_bot import SlackBot
 
 
@@ -206,11 +206,7 @@ def test_build_pending_blocks_truncates_commits(slack_bot):
     pending = {"commits": commits, "stat": ""}
     blocks = slack_bot._build_pending_blocks("repo", pending)
 
-    section_texts = [
-        b["text"]["text"]
-        for b in blocks
-        if b.get("type") == "section"
-    ]
+    section_texts = [b["text"]["text"] for b in blocks if b.get("type") == "section"]
     combined = " ".join(section_texts)
     assert "외 5개" in combined
 
@@ -222,9 +218,9 @@ def test_build_pending_blocks_truncates_long_stat(slack_bot):
     blocks = slack_bot._build_pending_blocks("repo", pending)
 
     stat_blocks = [
-        b for b in blocks
-        if b.get("type") == "section"
-        and "변경 통계" in b["text"]["text"]
+        b
+        for b in blocks
+        if b.get("type") == "section" and "변경 통계" in b["text"]["text"]
     ]
     assert len(stat_blocks) == 1
     assert len(stat_blocks[0]["text"]["text"]) <= 3000
@@ -297,12 +293,13 @@ def test_approve_action_spawns_thread():
             def decorator(fn):
                 registered_handlers[action_id] = fn
                 return fn
+
             return decorator
 
         mock_app_instance.action = mock_action
         MockApp.return_value = mock_app_instance
 
-        bot = SlackBot(config, approve_callback=fake_approve)
+        SlackBot(config, approve_callback=fake_approve)
 
     handler = registered_handlers.get("approve_update")
     assert handler is not None, "approve_update handler not registered"
@@ -332,12 +329,13 @@ def test_approve_action_no_callback_does_not_raise():
             def decorator(fn):
                 registered_handlers[action_id] = fn
                 return fn
+
             return decorator
 
         mock_app_instance.action = mock_action
         MockApp.return_value = mock_app_instance
 
-        bot = SlackBot(config, approve_callback=None)
+        SlackBot(config, approve_callback=None)
 
     handler = registered_handlers["approve_update"]
     ack_mock = MagicMock()
@@ -566,7 +564,9 @@ services: {}
 
     with (
         patch("haniel.core.runner.fetch_repo"),
-        patch("haniel.core.runner.get_head", return_value="NEW_HEAD"),  # externally pulled
+        patch(
+            "haniel.core.runner.get_head", return_value="NEW_HEAD"
+        ),  # externally pulled
         patch("haniel.core.runner.get_pending_changes", return_value=pending),
     ):
         runner = ServiceRunner(load_config(config_file), config_dir=tmp_path)

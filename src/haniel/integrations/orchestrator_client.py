@@ -118,9 +118,7 @@ class OrchestratorClient:
         }
 
         try:
-            asyncio.run_coroutine_threadsafe(
-                self._send_json(msg), self._loop
-            )
+            asyncio.run_coroutine_threadsafe(self._send_json(msg), self._loop)
         except Exception as e:
             logger.debug(f"Failed to queue change notification: {e}")
 
@@ -165,8 +163,7 @@ class OrchestratorClient:
                 await self._send_json(msg)
             except Exception as e:
                 logger.warning(
-                    f"Failed to send buffered deploy result "
-                    f"{msg.get('deploy_id')}: {e}"
+                    f"Failed to send buffered deploy result {msg.get('deploy_id')}: {e}"
                 )
                 # Re-queue this message and stop processing further messages
                 # to preserve order. The next connect will flush again.
@@ -188,7 +185,6 @@ class OrchestratorClient:
 
     async def _run(self) -> None:
         """Main loop: connect → listen → reconnect with backoff."""
-        import websockets
 
         while not self._stop_event.is_set():
             try:
@@ -230,7 +226,9 @@ class OrchestratorClient:
                 "os": platform.system(),
                 "arch": platform.machine(),
                 "haniel_version": self._haniel_version,
-                "services": self._get_services_info() if self._get_services_info else None,
+                "services": self._get_services_info()
+                if self._get_services_info
+                else None,
             }
             await ws.send(json.dumps(hello))
 
@@ -321,14 +319,16 @@ class OrchestratorClient:
         parsed = self._parse_deploy_id(deploy_id)
         if parsed is None:
             await self._send_deploy_result(
-                deploy_id, "failed",
+                deploy_id,
+                "failed",
                 error=f"invalid deploy_id format: {deploy_id!r}",
             )
             return
         node_id_in_id, repo, branch, _commit = parsed
         if node_id_in_id != self._config.node_id:
             await self._send_deploy_result(
-                deploy_id, "failed",
+                deploy_id,
+                "failed",
                 error=(
                     f"deploy_id node mismatch: "
                     f"{node_id_in_id} != {self._config.node_id}"
@@ -338,7 +338,8 @@ class OrchestratorClient:
 
         if self._deploy_approval_handler is None:
             await self._send_deploy_result(
-                deploy_id, "failed",
+                deploy_id,
+                "failed",
                 error="no deploy_approval handler registered",
             )
             return
@@ -355,7 +356,10 @@ class OrchestratorClient:
             duration_ms = int((time.monotonic() - started) * 1000)
             logger.warning(f"Deploy {deploy_id} failed: {e}")
             await self._send_deploy_result(
-                deploy_id, "failed", error=str(e), duration_ms=duration_ms,
+                deploy_id,
+                "failed",
+                error=str(e),
+                duration_ms=duration_ms,
             )
             return
 
@@ -368,7 +372,9 @@ class OrchestratorClient:
 
         duration_ms = int((time.monotonic() - started) * 1000)
         await self._send_deploy_result(
-            deploy_id, "success", duration_ms=duration_ms,
+            deploy_id,
+            "success",
+            duration_ms=duration_ms,
         )
 
     async def _send_deploy_result(
@@ -390,9 +396,7 @@ class OrchestratorClient:
         try:
             await self._send_json(result)
         except Exception as e:
-            logger.warning(
-                f"Failed to send deploy result {deploy_id}: {e}"
-            )
+            logger.warning(f"Failed to send deploy result {deploy_id}: {e}")
 
     @staticmethod
     def _parse_deploy_id(

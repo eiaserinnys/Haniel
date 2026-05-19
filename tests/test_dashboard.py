@@ -347,7 +347,8 @@ class TestDashboardWebSocket:
         assert mock_loop.call_soon_threadsafe.called
         # Find the self_update_completed call among scheduled ones
         completed_calls = [
-            c for c in mock_loop.call_soon_threadsafe.call_args_list
+            c
+            for c in mock_loop.call_soon_threadsafe.call_args_list
             if c[0][0].__defaults__[0].get("type") == "self_update_completed"
         ]
         assert len(completed_calls) == 1

@@ -78,9 +78,7 @@ class ChatWebSocket:
         """
         if self._token:
             client_token = websocket.query_params.get("token")
-            if not client_token or not hmac.compare_digest(
-                client_token, self._token
-            ):
+            if not client_token or not hmac.compare_digest(client_token, self._token):
                 await websocket.close(code=4001, reason="auth failed")
                 return
         await websocket.accept()
@@ -240,7 +238,9 @@ class ChatWebSocket:
                                 full_text,
                             )
                         except Exception as e:
-                            logger.warning("Slack assistant message relay failed: %s", e)
+                            logger.warning(
+                                "Slack assistant message relay failed: %s", e
+                            )
 
             elif evt_type == "compact_start":
                 if self._slack_bot and actual_session_id:
@@ -304,8 +304,7 @@ class ChatWebSocket:
             )
             if thread_ts:
                 channel_id = (
-                    self._slack_bot._dm_channel
-                    or self._slack_bot._config.notify_user
+                    self._slack_bot._dm_channel or self._slack_bot._config.notify_user
                 )
                 self._manager.update_slack_binding(session_id, thread_ts, channel_id)
         except Exception as e:

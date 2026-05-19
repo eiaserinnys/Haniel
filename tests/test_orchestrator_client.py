@@ -1,8 +1,6 @@
 """Tests for OrchestratorClient — connection, notify, backoff, graceful degradation."""
 
-import json
 import threading
-import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -101,8 +99,6 @@ class TestNotifyChange:
 
     def test_deploy_id_deterministic(self, config):
         """Same commits should produce same deploy_id."""
-        client = OrchestratorClient(config, haniel_version="0.1.0")
-
         # Build deploy_id manually to verify format
         commits = ["abc1234 fix: something"]
         first_hash = commits[0].split()[0]
@@ -251,16 +247,15 @@ class TestHandleDeployApproval:
             return None
 
         client = OrchestratorClient(
-            config, haniel_version="0.1.0",
+            config,
+            haniel_version="0.1.0",
             deploy_approval_handler=handler,
         )
         sent = self._capture_send_json(client)
         await client._handle_deploy_approval(
             {"deploy_id": f"{config.node_id}:repo:main:abc1234"}
         )
-        assert called == [
-            (f"{config.node_id}:repo:main:abc1234", "repo", "main")
-        ]
+        assert called == [(f"{config.node_id}:repo:main:abc1234", "repo", "main")]
         assert sent[0]["status"] == "success"
         assert sent[0]["error"] is None
         assert sent[0]["duration_ms"] is not None
@@ -271,7 +266,8 @@ class TestHandleDeployApproval:
             raise RuntimeError("boom")
 
         client = OrchestratorClient(
-            config, haniel_version="0.1.0",
+            config,
+            haniel_version="0.1.0",
             deploy_approval_handler=handler,
         )
         sent = self._capture_send_json(client)
@@ -287,7 +283,8 @@ class TestHandleDeployApproval:
             return "deferred"
 
         client = OrchestratorClient(
-            config, haniel_version="0.1.0",
+            config,
+            haniel_version="0.1.0",
             deploy_approval_handler=handler,
         )
         sent = self._capture_send_json(client)

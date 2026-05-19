@@ -163,7 +163,11 @@ class MechanicalInstaller:
                 )
                 version = result.stdout.strip().lstrip("v")
                 passes, msg = self._check_version(version, str(requirements["node"]))
-                error_hint = "" if passes else f" Install newer version via: {_node_install_hint}"
+                error_hint = (
+                    ""
+                    if passes
+                    else f" Install newer version via: {_node_install_hint}"
+                )
                 results.append(
                     {
                         "name": "node",
@@ -270,7 +274,9 @@ class MechanicalInstaller:
                                 f"Pulled latest for {name}: {result.stdout.strip()}"
                             )
                             if repo.hooks and repo.hooks.post_pull:
-                                self._run_repo_hook(name, "post_pull", repo.hooks.post_pull, repo_path)
+                                self._run_repo_hook(
+                                    name, "post_pull", repo.hooks.post_pull, repo_path
+                                )
                     except subprocess.TimeoutExpired:
                         logger.warning(
                             f"git pull timed out for {name}, continuing with existing code"
@@ -315,7 +321,9 @@ class MechanicalInstaller:
                 else:
                     logger.info(f"Successfully cloned {name}")
                     if repo.hooks and repo.hooks.post_pull:
-                        self._run_repo_hook(name, "post_pull", repo.hooks.post_pull, repo_path)
+                        self._run_repo_hook(
+                            name, "post_pull", repo.hooks.post_pull, repo_path
+                        )
             except subprocess.TimeoutExpired:
                 self.state.mark_failed(f"repos:{name}", "Clone timed out")
                 all_success = False

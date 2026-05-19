@@ -190,9 +190,7 @@ class DashboardWebSocket:
     def _schedule_coroutine(self, coro) -> None:
         """Thread-safe: schedule a coroutine on the event loop."""
         if self._loop and not self._loop.is_closed():
-            self._loop.call_soon_threadsafe(
-                lambda c=coro: self._loop.create_task(c)
-            )
+            self._loop.call_soon_threadsafe(lambda c=coro: self._loop.create_task(c))
 
     def _schedule_broadcast(self, event: dict) -> None:
         """Thread-safe: schedule broadcast on the event loop."""
@@ -319,9 +317,7 @@ class DashboardWebSocket:
         """
         if self._token:
             client_token = websocket.query_params.get("token")
-            if not client_token or not hmac.compare_digest(
-                client_token, self._token
-            ):
+            if not client_token or not hmac.compare_digest(client_token, self._token):
                 await websocket.close(code=4001, reason="auth failed")
                 return
         await websocket.accept()

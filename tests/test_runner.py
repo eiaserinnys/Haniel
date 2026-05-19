@@ -814,7 +814,12 @@ class TestServiceRunnerPollCycle:
     @patch("haniel.core.runner.fetch_repo")
     @patch("haniel.core.runner.get_head")
     def test_detect_changes_with_changes(
-        self, mock_head, mock_fetch, mock_remote_head, mock_pending, runner_with_mock_repo
+        self,
+        mock_head,
+        mock_fetch,
+        mock_remote_head,
+        mock_pending,
+        runner_with_mock_repo,
     ):
         """Test detecting changes in repos."""
         mock_fetch.return_value = True
@@ -1371,9 +1376,7 @@ class TestStartupUpdates:
 
     @patch("haniel.core.runner.pull_repo")
     @patch("haniel.core.runner.fetch_repo", return_value=False)
-    def test_skips_pull_when_no_changes(
-        self, mock_fetch, mock_pull, runner_with_repos
-    ):
+    def test_skips_pull_when_no_changes(self, mock_fetch, mock_pull, runner_with_repos):
         """Repos without remote changes should not be pulled."""
         runner_with_repos._apply_startup_updates()
 
@@ -1388,14 +1391,19 @@ class TestStartupUpdates:
         runner_with_repos._apply_startup_updates()
 
         # Verify haniel-repo was NOT fetched
-        fetched_paths = [call.kwargs.get("path") or call.args[0] for call in mock_fetch.call_args_list]
+        fetched_paths = [
+            call.kwargs.get("path") or call.args[0]
+            for call in mock_fetch.call_args_list
+        ]
         haniel_path = runner_with_repos.config_dir / "haniel-repo"
         assert haniel_path not in fetched_paths
 
     @patch("haniel.core.runner.get_head", return_value="new_hash")
     @patch("haniel.core.runner.pull_repo")
     @patch("haniel.core.runner.fetch_repo")
-    def test_failure_isolation(self, mock_fetch, mock_pull, mock_head, runner_with_repos):
+    def test_failure_isolation(
+        self, mock_fetch, mock_pull, mock_head, runner_with_repos
+    ):
         """Failure in one repo should not block others."""
         # First repo fails, second succeeds
         mock_fetch.side_effect = [
@@ -1410,7 +1418,8 @@ class TestStartupUpdates:
 
         # Verify fetch_error is set on the failed repo
         failed_repos = [
-            name for name, state in runner_with_repos._repo_states.items()
+            name
+            for name, state in runner_with_repos._repo_states.items()
             if state.fetch_error is not None and name != "haniel-repo"
         ]
         assert len(failed_repos) == 1
@@ -1477,7 +1486,6 @@ class TestStartupUpdates:
         self, mock_fetch, mock_pull, mock_head, tmp_path: Path
     ):
         """pull_strategy: force should be passed to pull_repo() during startup pull."""
-        from haniel.config import SelfUpdateConfig
 
         for name in ["repo-a"]:
             repo_path = tmp_path / name

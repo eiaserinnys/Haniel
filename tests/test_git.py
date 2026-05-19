@@ -302,9 +302,7 @@ class TestPullRepo:
         with pytest.raises(GitPullError):
             pull_repo(tmp_path, "master")
 
-    def test_force_pull_discards_local_changes(
-        self, git_repo: Path, bare_remote: Path
-    ):
+    def test_force_pull_discards_local_changes(self, git_repo: Path, bare_remote: Path):
         """Force strategy should discard local tracked changes and return their list."""
         readme = git_repo / "README.md"
         original_content = readme.read_text()

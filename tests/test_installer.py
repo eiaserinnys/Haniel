@@ -26,7 +26,7 @@ _WINDOWS_ONLY = pytest.mark.skipif(
     sys.platform != "win32", reason="Windows-specific installer behavior"
 )
 
-from haniel.config import (
+from haniel.config import (  # noqa: E402
     HanielConfig,
     InstallConfig,
     RepoConfig,
@@ -230,12 +230,11 @@ class TestMechanicalInstaller:
             # Check venv creation was called
             assert mock_run.called
 
-
     @patch("platform.system")
     def test_env_with_tool_paths_uses_os_pathsep(self, mock_system, sample_config):
         """Test that PATH is joined with os.pathsep, not a hard-coded semicolon."""
         import os
-        from haniel.installer.mechanical import MechanicalInstaller, detect_tool_paths
+        from haniel.installer.mechanical import MechanicalInstaller
         from haniel.installer.state import InstallState
 
         mock_system.return_value = "Linux"

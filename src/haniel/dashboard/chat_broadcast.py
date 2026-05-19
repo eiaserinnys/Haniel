@@ -1,17 +1,20 @@
 """
 ChatBroadcaster: WebSocket client registry for slack→dashboard relay.
 """
+
 import json
 import logging
 from starlette.websockets import WebSocket
 
 logger = logging.getLogger(__name__)
 
+
 class ChatBroadcaster:
     """Registry of dashboard WebSocket clients keyed by chat session ID.
 
     All methods must be called from the async event loop.
     """
+
     def __init__(self) -> None:
         self._watchers: dict[str, set[WebSocket]] = {}
 

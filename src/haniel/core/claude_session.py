@@ -206,11 +206,13 @@ class ClaudeSessionManager:
             }
 
             # Persist user message before sending to Claude
-            session["messages"].append({
-                "role": "user",
-                "content": text,
-                "ts": datetime.now(timezone.utc).isoformat(),
-            })
+            session["messages"].append(
+                {
+                    "role": "user",
+                    "content": text,
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
+            )
             self._save_sessions()
 
             await client.query(text)
@@ -536,10 +538,12 @@ class ClaudeSessionManager:
 
         # Persist assistant message (compaction 이후에도 messages는 유지됨)
         if last_text:
-            session["messages"].append({
-                "role": "assistant",
-                "content": last_text,
-                "ts": now,
-            })
+            session["messages"].append(
+                {
+                    "role": "assistant",
+                    "content": last_text,
+                    "ts": now,
+                }
+            )
 
         self._save_sessions()

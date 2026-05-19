@@ -285,7 +285,9 @@ class TestRunnerSelfUpdate:
 
         assert runner.self_update_requested is True
         assert "approved" in result.lower()
-        runner._ws_handler.broadcast_self_update_started.assert_called_once_with("haniel")
+        runner._ws_handler.broadcast_self_update_started.assert_called_once_with(
+            "haniel"
+        )
 
     def test_get_status_includes_last_result_when_loaded(self):
         """get_status should expose last_result when a marker was consumed."""
