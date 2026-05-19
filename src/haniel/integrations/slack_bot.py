@@ -47,6 +47,7 @@ STATE_ICONS: dict[str, str] = {
 
 # ── AppHomeController Protocol ───────────────────────────────────────────────
 
+
 @runtime_checkable
 class AppHomeController(Protocol):
     """Duck-typed interface for the runner, used by App Home dashboard.
@@ -204,9 +205,7 @@ class SlackBot:
             logger.warning("post_compaction_start failed: %s", e)
             return None
 
-    def update_compaction_done(
-        self, user_id: str, thread_ts: str, msg_ts: str
-    ) -> None:
+    def update_compaction_done(self, user_id: str, thread_ts: str, msg_ts: str) -> None:
         """Replace the compaction notice with a completion message."""
         try:
             self._client.chat_update(
@@ -603,9 +602,7 @@ class SlackBot:
         response = self._client.conversations_open(users=self._config.notify_user)
         return response["channel"]["id"]
 
-    def _post_blocks(
-        self, blocks: list[dict], text: str = ""
-    ) -> str | None:
+    def _post_blocks(self, blocks: list[dict], text: str = "") -> str | None:
         """Post a Block Kit message and return the message ts."""
         if not self._dm_channel:
             return None
@@ -766,7 +763,9 @@ class SlackBot:
             "text": {"type": "mrkdwn", "text": text},
         }
 
-        options = self._build_overflow_options("haniel", "running" if status.get("running") else "stopped")
+        options = self._build_overflow_options(
+            "haniel", "running" if status.get("running") else "stopped"
+        )
         if options:
             block["accessory"] = {
                 "type": "overflow",
@@ -813,34 +812,40 @@ class SlackBot:
 
         return blocks
 
-    def _build_overflow_options(
-        self, name: str, state: str
-    ) -> list[dict[str, Any]]:
+    def _build_overflow_options(self, name: str, state: str) -> list[dict[str, Any]]:
         """Build overflow menu options based on service state."""
         options: list[dict[str, Any]] = []
 
         if state in ("running", "ready", "starting", "stopping"):
-            options.append({
-                "text": {"type": "plain_text", "text": "🔄 재시작"},
-                "value": f"restart:{name}",
-            })
+            options.append(
+                {
+                    "text": {"type": "plain_text", "text": "🔄 재시작"},
+                    "value": f"restart:{name}",
+                }
+            )
             if name != "haniel":
-                options.append({
-                    "text": {"type": "plain_text", "text": "⏹️ 중지"},
-                    "value": f"stop:{name}",
-                })
+                options.append(
+                    {
+                        "text": {"type": "plain_text", "text": "⏹️ 중지"},
+                        "value": f"stop:{name}",
+                    }
+                )
 
         if state in ("stopped", "crashed", "circuit_open"):
-            options.append({
-                "text": {"type": "plain_text", "text": "▶️ 시작"},
-                "value": f"start:{name}",
-            })
+            options.append(
+                {
+                    "text": {"type": "plain_text", "text": "▶️ 시작"},
+                    "value": f"start:{name}",
+                }
+            )
 
         if state == "circuit_open":
-            options.append({
-                "text": {"type": "plain_text", "text": "🔓 서킷 리셋"},
-                "value": f"enable:{name}",
-            })
+            options.append(
+                {
+                    "text": {"type": "plain_text", "text": "🔓 서킷 리셋"},
+                    "value": f"enable:{name}",
+                }
+            )
 
         return options
 
@@ -867,14 +872,16 @@ class SlackBot:
         if not update_items:
             return blocks
 
-        blocks.append({
-            "type": "header",
-            "text": {
-                "type": "plain_text",
-                "text": "📦 업데이트 대기",
-                "emoji": True,
-            },
-        })
+        blocks.append(
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": "📦 업데이트 대기",
+                    "emoji": True,
+                },
+            }
+        )
 
         for repo_name, repo_info, is_self in update_items:
             pending = repo_info["pending_changes"]

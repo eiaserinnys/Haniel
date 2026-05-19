@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..config import (
     BackoffConfig,
@@ -44,12 +45,12 @@ from .self_update_marker import (
     read_and_consume as _read_self_update_marker,
 )
 from .orch_pending_deploy import (
-    OrchPendingDeploy,
     read_and_consume as _read_orch_pending_deploy,
     write as _write_orch_pending_deploy,
 )
 
-if __import__("typing").TYPE_CHECKING:
+if TYPE_CHECKING:
+    from ..integrations.orchestrator_client import OrchestratorClient
     from ..integrations.slack_bot import SlackBot
 
 logger = logging.getLogger(__name__)
@@ -589,15 +590,40 @@ class ServiceRunner:
             restart_time = time.time() + delay
             self._pending_restarts[name] = restart_time
 
-    def stop_services(self) -> None:
+    def _cancel_pending_restart(self, name: str) -> bool:
+        """Cancel a pending service restart if one is queued.
+
+        Returns:
+            True when a queued restart was removed.
+        """
+        with self._restart_lock:
+            if name not in self._pending_restarts:
+                return False
+            del self._pending_restarts[name]
+
+        logger.info("Cancelled pending restart for %s", name)
+        return True
+
+    def stop_services(self) -> bool:
         """Stop all services in reverse dependency order."""
         shutdown_order = self.get_shutdown_order()
         logger.info(f"Stopping services in order: {shutdown_order}")
+        all_stopped = True
 
         for name in shutdown_order:
+            self._cancel_pending_restart(name)
             if self.process_manager.is_running(name):
                 logger.info(f"Stopping service: {name}")
-                self.process_manager.stop_service(name)
+                if not self.process_manager.stop_service(name):
+                    logger.error("Failed to stop service: %s", name)
+                    all_stopped = False
+
+        return all_stopped
+
+    def _prepare_self_update_shutdown(self) -> None:
+        """Stop managed services before allowing Haniel itself to update."""
+        if not self.stop_services():
+            raise RuntimeError("Failed to stop all services for self-update")
 
     def start(self) -> None:
         """Start the runner (services + poll loop + MCP server)."""
@@ -785,20 +811,22 @@ class ServiceRunner:
             pid = self.process_manager.get_pid(name)
             process_status = "running" if pid is not None else "stopped"
             health_status = health.state.value
-            services.append({
-                "name": name,
-                "port": port,
-                "pid": pid,
-                "process_status": process_status,
-                "health_status": health_status,
-                "ready": (
-                    process_status == "running" and health_status == "ready"
-                ),
-                "role": svc_config.repo or "",
-                "uptime_ms": int(health.get_uptime() * 1000) if health.get_uptime() else 0,
-                "enabled": svc_config.enabled,
-                "deps": svc_config.after,
-            })
+            services.append(
+                {
+                    "name": name,
+                    "port": port,
+                    "pid": pid,
+                    "process_status": process_status,
+                    "health_status": health_status,
+                    "ready": (process_status == "running" and health_status == "ready"),
+                    "role": svc_config.repo or "",
+                    "uptime_ms": int(health.get_uptime() * 1000)
+                    if health.get_uptime()
+                    else 0,
+                    "enabled": svc_config.enabled,
+                    "deps": svc_config.after,
+                }
+            )
         return services
 
     def _handle_deploy_approval(
@@ -828,7 +856,9 @@ class ServiceRunner:
             logger.warning(
                 "Deploy approval branch %r differs from configured %r for repo %r — "
                 "using configured branch",
-                branch, configured_branch, repo,
+                branch,
+                configured_branch,
+                repo,
             )
 
         if self._self_repo and repo == self._self_repo:
@@ -950,7 +980,8 @@ class ServiceRunner:
         )
         logger.info(
             "Enqueued DeployResult for self-update: deploy_id=%s status=%s",
-            pending.deploy_id, status,
+            pending.deploy_id,
+            status,
         )
 
     def _handle_service_command(self, service_name: str, action: str) -> None:
@@ -1010,6 +1041,7 @@ class ServiceRunner:
             affected = self.get_affected_services(repo_name)
             shutdown_order = [s for s in self.get_shutdown_order() if s in affected]
             for svc in shutdown_order:
+                self._cancel_pending_restart(svc)
                 if self.process_manager.is_running(svc):
                     logger.info("Stopping %s for pull", svc)
                     self.process_manager.stop_service(svc)
@@ -1029,6 +1061,7 @@ class ServiceRunner:
             if self._self_repo and repo_name == self._self_repo:
                 # Self-update: signal wrapper to restart Haniel with new code.
                 # notify_done is skipped — startup notification fires after restart.
+                self._prepare_self_update_shutdown()
                 self._notify_self_update_approved()
                 self._self_update_requested.set()
                 self.stop()
@@ -1045,7 +1078,10 @@ class ServiceRunner:
         except Exception as e:
             if self._slack_bot:
                 self._slack_bot.notify_done(
-                    repo_name, success=False, pending_changes=captured_changes, error=str(e)
+                    repo_name,
+                    success=False,
+                    pending_changes=captured_changes,
+                    error=str(e),
                 )
             raise
         finally:
@@ -1059,9 +1095,7 @@ class ServiceRunner:
     @staticmethod
     def _hash_pending(pending: dict) -> str:
         """Return a stable SHA-256 hex digest of a pending_changes dict."""
-        return hashlib.sha256(
-            json.dumps(pending, sort_keys=True).encode()
-        ).hexdigest()
+        return hashlib.sha256(json.dumps(pending, sort_keys=True).encode()).hexdigest()
 
     def _init_repo_states(self) -> None:
         """Initialize repo states with current HEAD."""
@@ -1272,11 +1306,17 @@ class ServiceRunner:
                             )
                         # Notify Slack only when remote has new commits (not already pulling)
                         # and only when the pending content has actually changed.
-                        if self._slack_bot and state.pending_changes and not self._pull_locks[name].locked():
+                        if (
+                            self._slack_bot
+                            and state.pending_changes
+                            and not self._pull_locks[name].locked()
+                        ):
                             content_hash = self._hash_pending(state.pending_changes)
                             if self._last_pending_hash.get(name) != content_hash:
                                 self._last_pending_hash[name] = content_hash
-                                self._slack_bot.notify_pending(name, state.pending_changes)
+                                self._slack_bot.notify_pending(
+                                    name, state.pending_changes
+                                )
                     else:
                         state.pending_changes = None
 
@@ -1348,6 +1388,7 @@ class ServiceRunner:
         if self.config.self_update.auto_update:
             logger.info("Self-update: auto_update=true, exiting for update")
             self._notify_self_update_detected(auto=True)
+            self._prepare_self_update_shutdown()
             self._self_update_requested.set()
             self.stop()
             return
@@ -1381,6 +1422,7 @@ class ServiceRunner:
                 return "No self-update pending."
 
         logger.info("Self-update approved, shutting down for update")
+        self._prepare_self_update_shutdown()
         self._notify_self_update_approved()
         self._self_update_requested.set()
         # Notify dashboard that the update work is now starting (server about

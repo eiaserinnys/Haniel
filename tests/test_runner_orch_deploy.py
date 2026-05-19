@@ -1,4 +1,5 @@
 """Tests for ServiceRunner._handle_deploy_approval and self-update result mapping."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -9,9 +10,6 @@ import pytest
 
 from haniel.config.model import (
     HanielConfig,
-    RepoConfig,
-    SelfUpdateConfig,
-    ServiceConfig,
 )
 from haniel.core.orch_pending_deploy import (
     MARKER_RELPATH,
@@ -55,14 +53,17 @@ class TestHandleDeployApprovalNonSelf:
         runner = _build_runner(tmp_path)
         with pytest.raises(ValueError, match="Unknown repo"):
             runner._handle_deploy_approval(
-                "id", "missing", "main",
+                "id",
+                "missing",
+                "main",
             )
 
     def test_calls_trigger_pull_when_pending(self, tmp_path: Path) -> None:
         runner = _build_runner(tmp_path)
         # trigger_pull would skip if pending_changes is None — make sure it isn't
         runner._repo_states["appA"].pending_changes = {
-            "commits": ["abc1234 fix"], "stat": "+1 -0",
+            "commits": ["abc1234 fix"],
+            "stat": "+1 -0",
         }
         runner.trigger_pull = MagicMock()  # type: ignore[assignment]
         result = runner._handle_deploy_approval("id", "appA", "main")
@@ -70,7 +71,8 @@ class TestHandleDeployApprovalNonSelf:
         assert result is None
 
     def test_no_pending_changes_returns_success_noop(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """No pending_changes → trigger_pull NOT called, return None (success no-op)."""
         runner = _build_runner(tmp_path)
@@ -90,11 +92,14 @@ class TestHandleDeployApprovalNonSelf:
             runner._pull_locks["appA"].release()
 
     def test_branch_mismatch_warns_and_proceeds(
-        self, tmp_path: Path, caplog,
+        self,
+        tmp_path: Path,
+        caplog,
     ) -> None:
         runner = _build_runner(tmp_path)
         runner._repo_states["appA"].pending_changes = {
-            "commits": ["abc1234 fix"], "stat": "+1 -0",
+            "commits": ["abc1234 fix"],
+            "stat": "+1 -0",
         }
         runner.trigger_pull = MagicMock()  # type: ignore[assignment]
         with caplog.at_level("WARNING"):
@@ -105,13 +110,16 @@ class TestHandleDeployApprovalNonSelf:
 
 class TestHandleDeployApprovalSelfRepo:
     def test_writes_pending_and_returns_deferred(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         runner = _build_runner(tmp_path, with_self_repo=True)
         runner.approve_self_update = MagicMock(return_value="ok")  # type: ignore[assignment]
         runner._deferred_stop_for_self_update = MagicMock()  # type: ignore[assignment]
         result = runner._handle_deploy_approval(
-            "node:haniel:main:abc1234", "haniel", "main",
+            "node:haniel:main:abc1234",
+            "haniel",
+            "main",
         )
         assert result == "deferred"
         # Pending file written so next runner can correlate self-update result
@@ -140,7 +148,8 @@ class TestEnqueuePendingSelfDeployResult:
         runner = _build_runner(tmp_path)
         runner._orch_client = MagicMock()
         write_pending(
-            tmp_path, "d1",
+            tmp_path,
+            "d1",
             datetime(2026, 5, 5, 0, 0, 0, tzinfo=timezone.utc).isoformat(),
         )
         runner._last_self_update_result = SelfUpdateResult(
@@ -177,7 +186,8 @@ class TestEnqueuePendingSelfDeployResult:
         assert kwargs.get("error") == "git pull failed"
 
     def test_marker_with_failed_no_error_uses_default_message(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         runner = _build_runner(tmp_path)
         runner._orch_client = MagicMock()
@@ -196,7 +206,8 @@ class TestEnqueuePendingSelfDeployResult:
         assert "self-update reported failure" in kwargs.get("error", "")
 
     def test_marker_without_self_update_result_sends_failed(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         runner = _build_runner(tmp_path)
         runner._orch_client = MagicMock()

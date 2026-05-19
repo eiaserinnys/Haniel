@@ -273,30 +273,25 @@ class SlackBotConfig(BaseModel):
     """Configuration for the integrated Slack bot."""
 
     enabled: bool = Field(default=True, description="Whether to start the Slack bot")
-    bot_token: str = Field(
-        ..., description="Bot User OAuth Token (xoxb-...)"
-    )
+    bot_token: str = Field(..., description="Bot User OAuth Token (xoxb-...)")
     app_token: str = Field(
         ..., description="App-Level Token for Socket Mode (xapp-...)"
     )
-    notify_user: str = Field(
-        ..., description="Slack User ID to send DMs to (U...)"
-    )
+    notify_user: str = Field(..., description="Slack User ID to send DMs to (U...)")
 
 
 class OrchestratorClientConfig(BaseModel):
     """Configuration for connecting to a remote orchestrator server."""
 
-    enabled: bool = Field(default=True, description="Whether to connect to orchestrator")
-    url: str = Field(
-        ..., description="Orchestrator WebSocket URL (wss://host/ws/node)"
+    enabled: bool = Field(
+        default=True, description="Whether to connect to orchestrator"
     )
+    url: str = Field(..., description="Orchestrator WebSocket URL (wss://host/ws/node)")
     token: str = Field(
-        ..., description="Authentication token — shared secret with OrchestratorConfig.token"
+        ...,
+        description="Authentication token — shared secret with OrchestratorConfig.token",
     )
-    node_id: str = Field(
-        ..., description="This node's identifier"
-    )
+    node_id: str = Field(..., description="This node's identifier")
     reconnect_base: float = Field(
         default=1.0, description="Base reconnect delay in seconds"
     )

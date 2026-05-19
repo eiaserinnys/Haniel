@@ -1,4 +1,5 @@
 """Tests for orch_pending_deploy marker module."""
+
 from __future__ import annotations
 
 import json
@@ -37,7 +38,9 @@ class TestWriteAndRead:
     def test_dataclass_to_dict_roundtrip(self) -> None:
         item = OrchPendingDeploy(version=1, deploy_id="x", started_at="t")
         assert item.to_dict() == {
-            "version": 1, "deploy_id": "x", "started_at": "t",
+            "version": 1,
+            "deploy_id": "x",
+            "started_at": "t",
         }
 
 
@@ -54,9 +57,7 @@ class TestMalformedHandling:
         path = tmp_path / MARKER_RELPATH
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps(
-                {"version": 99, "deploy_id": "x", "started_at": "t"}
-            )
+            json.dumps({"version": 99, "deploy_id": "x", "started_at": "t"})
         )
         assert read_and_consume(tmp_path) is None
         assert not path.exists()

@@ -1,4 +1,5 @@
 """Tests for self_update_marker module."""
+
 from __future__ import annotations
 
 import json

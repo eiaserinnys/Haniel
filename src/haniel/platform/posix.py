@@ -81,6 +81,142 @@ class PosixHandler(PlatformHandler):
         finally:
             sock.close()
 
+    def is_port_owned_by_process_tree(self, port: int, root_pid: int) -> bool:
+        """Check whether a LISTEN port is owned by root_pid or its descendants."""
+        listener_pids = self._get_listening_pids(port)
+        if not listener_pids:
+            return False
+
+        process_tree = self._get_process_tree(root_pid)
+        return bool(listener_pids & process_tree)
+
+    def _get_listening_pids(self, port: int) -> set[int]:
+        """Return PIDs listening on a TCP port using common POSIX tools."""
+        proc_pids = self._get_listening_pids_from_proc(port)
+        if proc_pids:
+            return proc_pids
+        ss_pids = self._get_listening_pids_from_ss(port)
+        if ss_pids:
+            return ss_pids
+        return self._get_listening_pids_from_lsof(port)
+
+    @staticmethod
+    def _get_listening_pids_from_proc(port: int) -> set[int]:
+        proc = "/proc"
+        if not os.path.isdir(proc):
+            return set()
+
+        inodes: set[str] = set()
+        port_hex = f"{port:04X}"
+        for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+            try:
+                with open(table, encoding="ascii") as f:
+                    rows = f.readlines()[1:]
+            except OSError:
+                continue
+
+            for row in rows:
+                fields = row.split()
+                if len(fields) < 10:
+                    continue
+                local_addr = fields[1]
+                state = fields[3]
+                inode = fields[9]
+                if state == "0A" and local_addr.rsplit(":", 1)[-1] == port_hex:
+                    inodes.add(inode)
+
+        if not inodes:
+            return set()
+
+        pids: set[int] = set()
+        for pid_name in os.listdir(proc):
+            if not pid_name.isdigit():
+                continue
+            fd_dir = os.path.join(proc, pid_name, "fd")
+            try:
+                fd_names = os.listdir(fd_dir)
+            except OSError:
+                continue
+            for fd_name in fd_names:
+                try:
+                    target = os.readlink(os.path.join(fd_dir, fd_name))
+                except OSError:
+                    continue
+                if target.startswith("socket:[") and target[8:-1] in inodes:
+                    pids.add(int(pid_name))
+                    break
+        return pids
+
+    @staticmethod
+    def _get_listening_pids_from_ss(port: int) -> set[int]:
+        try:
+            result = subprocess.run(
+                ["ss", "-H", "-ltnp", f"sport = :{port}"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return set()
+
+        pids: set[int] = set()
+        for token in result.stdout.replace(",", " ").split():
+            if token.startswith("pid="):
+                try:
+                    pids.add(int(token.split("=", 1)[1]))
+                except ValueError:
+                    pass
+        return pids
+
+    @staticmethod
+    def _get_listening_pids_from_lsof(port: int) -> set[int]:
+        try:
+            result = subprocess.run(
+                ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return set()
+
+        pids: set[int] = set()
+        for line in result.stdout.splitlines():
+            try:
+                pids.add(int(line.strip()))
+            except ValueError:
+                pass
+        return pids
+
+    @staticmethod
+    def _get_process_tree(root_pid: int) -> set[int]:
+        tree = {root_pid}
+        frontier = [root_pid]
+        while frontier:
+            pid = frontier.pop()
+            try:
+                result = subprocess.run(
+                    ["ps", "-o", "pid=", "--ppid", str(pid)],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+
+            for line in result.stdout.splitlines():
+                try:
+                    child = int(line.strip())
+                except ValueError:
+                    continue
+                if child not in tree:
+                    tree.add(child)
+                    frontier.append(child)
+        return tree
+
     def setup_process_group(self, process: subprocess.Popen) -> None:
         """No additional setup needed on POSIX.
 

@@ -104,6 +104,38 @@ class WindowsHandler(PlatformHandler):
         finally:
             sock.close()
 
+    def is_port_owned_by_process_tree(self, port: int, root_pid: int) -> bool:
+        """Check whether a LISTEN port is owned by root_pid or its descendants."""
+        script = f"""
+$target = {root_pid}
+$listeners = @(Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
+foreach ($listener in $listeners) {{
+    $currentPid = [int]$listener
+    while ($currentPid -gt 0) {{
+        if ($currentPid -eq $target) {{
+            Write-Output "true"
+            exit 0
+        }}
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$currentPid" -ErrorAction SilentlyContinue
+        if ($null -eq $proc) {{ break }}
+        $currentPid = [int]$proc.ParentProcessId
+    }}
+}}
+Write-Output "false"
+"""
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", script],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+        return result.stdout.strip().lower() == "true"
+
     def setup_process_group(self, process: subprocess.Popen) -> None:
         """Set up Job Object for the process.
 

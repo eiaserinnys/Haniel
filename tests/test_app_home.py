@@ -8,9 +8,6 @@ Covers:
 - Edge cases: self_update absent, haniel stop excluded
 """
 
-import re
-import threading
-from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -58,7 +55,14 @@ def _make_service(state="running", uptime=3600.0, restart_count=0, ready="port:3
         "uptime": uptime,
         "restart_count": restart_count,
         "consecutive_failures": 0,
-        "config": {"run": "python ...", "cwd": None, "repo": None, "after": [], "ready": ready, "enabled": True},
+        "config": {
+            "run": "python ...",
+            "cwd": None,
+            "repo": None,
+            "after": [],
+            "ready": ready,
+            "enabled": True,
+        },
     }
 
 
@@ -108,8 +112,12 @@ def controller():
     """Default controller with some running services."""
     status = _make_status(
         services={
-            "bot": _make_service(state="running", uptime=7200, restart_count=1, ready="port:3106"),
-            "mcp-seosoyoung": _make_service(state="running", uptime=86400, ready="port:3104"),
+            "bot": _make_service(
+                state="running", uptime=7200, restart_count=1, ready="port:3106"
+            ),
+            "mcp-seosoyoung": _make_service(
+                state="running", uptime=86400, ready="port:3104"
+            ),
             "rescue-bot": _make_service(state="stopped", uptime=0, ready="port:3107"),
         },
         self_update={"repo": "haniel", "pending": False, "auto_update": False},
@@ -132,12 +140,16 @@ def bot_with_home(controller):
             def decorator(fn):
                 registered["events"][event_name] = fn
                 return fn
+
             return decorator
 
         def mock_action(action_id):
             def decorator(fn):
-                registered["actions"][action_id if isinstance(action_id, str) else action_id.pattern] = fn
+                registered["actions"][
+                    action_id if isinstance(action_id, str) else action_id.pattern
+                ] = fn
                 return fn
+
             return decorator
 
         mock_app.event = mock_event
@@ -167,7 +179,10 @@ class TestBuildHomeView:
         view = bot_with_home._build_home_view(controller.get_status())
         headers = [b for b in view["blocks"] if b["type"] == "header"]
         assert len(headers) >= 1
-        assert "하니엘" in headers[0]["text"]["text"] or "서비스" in headers[0]["text"]["text"]
+        assert (
+            "하니엘" in headers[0]["text"]["text"]
+            or "서비스" in headers[0]["text"]["text"]
+        )
 
     def test_haniel_block_is_first_service(self, bot_with_home, controller):
         """Haniel itself should appear as the first service row."""
@@ -190,7 +205,9 @@ class TestBuildHomeView:
         texts = {s["text"]["text"] for s in sections}
 
         # bot is running → 🟢
-        bot_texts = [t for t in texts if "bot" in t and "mcp" not in t and "rescue" not in t]
+        bot_texts = [
+            t for t in texts if "bot" in t and "mcp" not in t and "rescue" not in t
+        ]
         assert any("🟢" in t for t in bot_texts)
 
         # rescue-bot is stopped → ⚫
@@ -203,7 +220,9 @@ class TestBuildHomeView:
         )
         view = bot_with_home._build_home_view(status)
         sections = [b for b in view["blocks"] if b["type"] == "section"]
-        crasher_texts = [s["text"]["text"] for s in sections if "crasher" in s["text"]["text"]]
+        crasher_texts = [
+            s["text"]["text"] for s in sections if "crasher" in s["text"]["text"]
+        ]
         assert any("🔴" in t for t in crasher_texts)
 
     def test_starting_service_shows_orange(self, bot_with_home):
@@ -212,13 +231,21 @@ class TestBuildHomeView:
         )
         view = bot_with_home._build_home_view(status)
         sections = [b for b in view["blocks"] if b["type"] == "section"]
-        starter_texts = [s["text"]["text"] for s in sections if "starter" in s["text"]["text"]]
+        starter_texts = [
+            s["text"]["text"] for s in sections if "starter" in s["text"]["text"]
+        ]
         assert any("🟠" in t for t in starter_texts)
 
     def test_service_shows_port_and_uptime(self, bot_with_home, controller):
         view = bot_with_home._build_home_view(controller.get_status())
         sections = [b for b in view["blocks"] if b["type"] == "section"]
-        bot_section = [s for s in sections if "bot" in s["text"]["text"] and "rescue" not in s["text"]["text"] and "mcp" not in s["text"]["text"]]
+        bot_section = [
+            s
+            for s in sections
+            if "bot" in s["text"]["text"]
+            and "rescue" not in s["text"]["text"]
+            and "mcp" not in s["text"]["text"]
+        ]
         assert len(bot_section) >= 1
         text = bot_section[0]["text"]["text"]
         assert ":3106" in text
@@ -296,7 +323,12 @@ class TestUpdateSection:
     def test_self_update_pending_shows_haniel_update(self, bot_with_home):
         status = _make_status(
             self_update={"repo": "haniel", "pending": True},
-            repos={"haniel": {"pending_changes": {"commits": ["feat: new"], "stat": ""}, "pulling": False}},
+            repos={
+                "haniel": {
+                    "pending_changes": {"commits": ["feat: new"], "stat": ""},
+                    "pulling": False,
+                }
+            },
         )
         view = bot_with_home._build_home_view(status)
         buttons = []
@@ -470,7 +502,9 @@ class TestActionErrorHandling:
                 break
 
         # Make the controller raise
-        bot_with_home._app_home_controller.restart_service = MagicMock(side_effect=RuntimeError("oops"))
+        bot_with_home._app_home_controller.restart_service = MagicMock(
+            side_effect=RuntimeError("oops")
+        )
 
         ack = MagicMock()
         client = MagicMock()
@@ -503,12 +537,13 @@ class TestHandlerRegistration:
                 def decorator(fn):
                     registered_events.append(event_name)
                     return fn
+
                 return decorator
 
             mock_app.event = mock_event
             mock_app.action = MagicMock(return_value=lambda fn: fn)
             MockApp.return_value = mock_app
 
-            bot = SlackBot(config, approve_callback=None, app_home_controller=None)
+            SlackBot(config, approve_callback=None, app_home_controller=None)
 
         assert "app_home_opened" not in registered_events

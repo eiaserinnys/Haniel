@@ -534,7 +534,7 @@ class ProcessManager:
             if managed.process and managed.process.poll() is not None:
                 return  # Process exited
 
-            if self._check_ready_condition(condition):
+            if self._check_ready_condition(condition, managed):
                 if managed.ready_event:
                     managed.ready_event.set()
                 self.health_manager.record_ready(managed.name)
@@ -547,7 +547,11 @@ class ProcessManager:
         # Timeout - still mark as running but not ready
         # Service will continue, but ready wasn't detected
 
-    def _check_ready_condition(self, condition: ReadyCondition) -> bool:
+    def _check_ready_condition(
+        self,
+        condition: ReadyCondition,
+        managed: ManagedProcess | None = None,
+    ) -> bool:
         """Check if a ready condition is met.
 
         Args:
@@ -557,6 +561,8 @@ class ProcessManager:
             True if the condition is met
         """
         if condition.type == ReadyConditionType.PORT:
+            if managed is not None and managed.process is not None:
+                return self._check_port_ready(condition, managed)
             try:
                 port = int(condition.value)
                 return self.platform.is_port_listening(port)
@@ -575,6 +581,32 @@ class ProcessManager:
         elif condition.type == ReadyConditionType.HTTP:
             return self._check_http_ready(condition.value)
 
+        return False
+
+    def _check_port_ready(
+        self,
+        condition: ReadyCondition,
+        managed: ManagedProcess,
+    ) -> bool:
+        """Check that a ready port belongs to this managed process tree."""
+        try:
+            port = int(condition.value)
+        except ValueError:
+            return False
+
+        process = managed.process
+        if process is None or process.poll() is not None:
+            return False
+
+        if self.platform.is_port_owned_by_process_tree(port, process.pid):
+            return True
+
+        if self.platform.is_port_listening(port):
+            logger.debug(
+                "Port %s is listening but is not owned by %s process tree",
+                port,
+                managed.name,
+            )
         return False
 
     def _check_http_ready(self, url: str) -> bool:

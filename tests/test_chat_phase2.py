@@ -9,7 +9,6 @@ Covers:
 - SlackBot._handle_dm_async: new session, existing session, compaction, error
 """
 
-import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -245,7 +244,9 @@ class TestSlackBotChatMethods:
         call_kwargs = mock_web_client.chat_postMessage.call_args[1]
         assert "컴팩션" in call_kwargs["text"]
 
-    def test_post_compaction_start_returns_none_on_error(self, slack_bot, mock_web_client):
+    def test_post_compaction_start_returns_none_on_error(
+        self, slack_bot, mock_web_client
+    ):
         """post_compaction_start returns None on failure."""
         mock_web_client.chat_postMessage.side_effect = Exception("fail")
         ts = slack_bot.post_compaction_start("D_CHAN", "111.000")
@@ -346,7 +347,9 @@ class TestHandleDmAsync:
         assert streamed_session_ids == [session_id]
 
     @pytest.mark.asyncio
-    async def test_assistant_message_posted_to_slack(self, tmp_path, slack_bot, mock_web_client):
+    async def test_assistant_message_posted_to_slack(
+        self, tmp_path, slack_bot, mock_web_client
+    ):
         """Full text assembled from text_delta is posted to Slack at message_end."""
         session_manager = ClaudeSessionManager(_make_runner(tmp_path))
         broadcaster = ChatBroadcaster()
@@ -384,7 +387,12 @@ class TestHandleDmAsync:
             {"type": "message_end"},
         )
 
-        event = {"channel_type": "im", "channel": "D_CHAN", "ts": "400.001", "text": "go"}
+        event = {
+            "channel_type": "im",
+            "channel": "D_CHAN",
+            "ts": "400.001",
+            "text": "go",
+        }
         await slack_bot._handle_dm_async(session_manager, broadcaster, event)
 
         # compact_start: chat_postMessage with compaction text
@@ -394,7 +402,9 @@ class TestHandleDmAsync:
         assert update_kwargs["ts"] == "compaction-ts"
 
     @pytest.mark.asyncio
-    async def test_error_event_posts_to_slack(self, tmp_path, slack_bot, mock_web_client):
+    async def test_error_event_posts_to_slack(
+        self, tmp_path, slack_bot, mock_web_client
+    ):
         """error event posts error message to Slack thread."""
         session_manager = ClaudeSessionManager(_make_runner(tmp_path))
         broadcaster = ChatBroadcaster()
@@ -403,7 +413,12 @@ class TestHandleDmAsync:
             {"type": "error", "error": "Claude timeout"},
         )
 
-        event = {"channel_type": "im", "channel": "D_CHAN", "ts": "500.001", "text": "run"}
+        event = {
+            "channel_type": "im",
+            "channel": "D_CHAN",
+            "ts": "500.001",
+            "text": "run",
+        }
         await slack_bot._handle_dm_async(session_manager, broadcaster, event)
 
         last_call = mock_web_client.chat_postMessage.call_args_list[-1][1]
@@ -428,7 +443,12 @@ class TestHandleDmAsync:
             {"type": "message_end"},
         )
 
-        event = {"channel_type": "im", "channel": "D_CHAN", "ts": "600.001", "text": "test"}
+        event = {
+            "channel_type": "im",
+            "channel": "D_CHAN",
+            "ts": "600.001",
+            "text": "test",
+        }
         # Register ws for the session that will be created
         # We need to intercept session creation to register ws
         original_create = session_manager.create_session
@@ -452,7 +472,12 @@ class TestHandleDmAsync:
         session_manager = ClaudeSessionManager(_make_runner(tmp_path))
         broadcaster = ChatBroadcaster()
 
-        event = {"channel_type": "im", "channel": "D_CHAN", "ts": "700.001", "text": "  "}
+        event = {
+            "channel_type": "im",
+            "channel": "D_CHAN",
+            "ts": "700.001",
+            "text": "  ",
+        }
         await slack_bot._handle_dm_async(session_manager, broadcaster, event)
 
         # No session created, no message posted

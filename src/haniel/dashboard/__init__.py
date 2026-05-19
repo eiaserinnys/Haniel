@@ -70,9 +70,7 @@ class AuthMiddleware:
                 await self._app(scope, receive, send)
                 return
             # Token present but wrong — 403
-            response = JSONResponse(
-                {"error": "forbidden"}, status_code=403
-            )
+            response = JSONResponse({"error": "forbidden"}, status_code=403)
             await response(scope, receive, send)
             return
 

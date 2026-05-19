@@ -198,7 +198,11 @@ class TestChatWebSocketLoadHistory:
         session = manager._find_session(session_id)
         session["messages"] = [
             {"role": "user", "content": "Hi", "ts": "2026-01-01T00:00:00+00:00"},
-            {"role": "assistant", "content": "Hello!", "ts": "2026-01-01T00:00:01+00:00"},
+            {
+                "role": "assistant",
+                "content": "Hello!",
+                "ts": "2026-01-01T00:00:01+00:00",
+            },
         ]
 
         ws_handler = ChatWebSocket(manager)
@@ -258,7 +262,12 @@ class TestStreamMessageHistory:
             # Capture messages at the time of the first yield (before claude returns)
             session = manager._find_session(sid)
             user_msg_saved.extend(session.get("messages", []))
-            yield {"type": "session_start", "session_id": sid, "is_new": False, "resumed": True}
+            yield {
+                "type": "session_start",
+                "session_id": sid,
+                "is_new": False,
+                "resumed": True,
+            }
             yield {"type": "message_end", "session_id": sid}
 
         with patch.object(manager, "stream_message", side_effect=mock_stream):
@@ -279,11 +288,14 @@ class TestStreamMessageHistory:
 
         # Simulate what stream_message does before calling client.query
         from datetime import datetime, timezone
-        session["messages"].append({
-            "role": "user",
-            "content": "Test message",
-            "ts": datetime.now(timezone.utc).isoformat(),
-        })
+
+        session["messages"].append(
+            {
+                "role": "user",
+                "content": "Test message",
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+        )
         manager._save_sessions()
 
         # Reload and verify persistence

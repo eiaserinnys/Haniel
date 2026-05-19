@@ -814,7 +814,12 @@ class TestServiceRunnerPollCycle:
     @patch("haniel.core.runner.fetch_repo")
     @patch("haniel.core.runner.get_head")
     def test_detect_changes_with_changes(
-        self, mock_head, mock_fetch, mock_remote_head, mock_pending, runner_with_mock_repo
+        self,
+        mock_head,
+        mock_fetch,
+        mock_remote_head,
+        mock_pending,
+        runner_with_mock_repo,
     ):
         """Test detecting changes in repos."""
         mock_fetch.return_value = True
@@ -858,6 +863,41 @@ class TestServiceRunnerPollCycle:
 
         with runner._restart_lock:
             assert "test" in runner._pending_restarts
+
+    def test_cancel_pending_restart(self, tmp_path: Path):
+        """Test cancelling a queued service restart."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={
+                "test": ServiceConfig(run="sleep 100"),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        runner._pending_restarts["test"] = time.time() + 5
+
+        assert runner._cancel_pending_restart("test") is True
+        assert runner._cancel_pending_restart("test") is False
+        with runner._restart_lock:
+            assert "test" not in runner._pending_restarts
+
+    @patch("haniel.core.runner.ServiceRunner._start_service")
+    def test_trigger_pull_cancels_pending_restart_for_affected_service(
+        self,
+        mock_start,
+        runner_with_mock_repo,
+    ):
+        """Pull owns the restart timing, so stale scheduled restarts are removed."""
+        runner = runner_with_mock_repo
+        runner._repo_states["test-repo"].pending_changes = {"commits": ["a"]}
+        runner._pending_restarts["test-service"] = time.time() - 1
+
+        with patch.object(runner, "_pull_repo", return_value=(True, [])):
+            runner.trigger_pull("test-repo")
+
+        with runner._restart_lock:
+            assert "test-service" not in runner._pending_restarts
+        mock_start.assert_called_once_with("test-service")
 
     @patch("haniel.core.runner.ServiceRunner._start_service")
     def test_process_pending_restarts(self, mock_start, tmp_path: Path):
@@ -1336,9 +1376,7 @@ class TestStartupUpdates:
 
     @patch("haniel.core.runner.pull_repo")
     @patch("haniel.core.runner.fetch_repo", return_value=False)
-    def test_skips_pull_when_no_changes(
-        self, mock_fetch, mock_pull, runner_with_repos
-    ):
+    def test_skips_pull_when_no_changes(self, mock_fetch, mock_pull, runner_with_repos):
         """Repos without remote changes should not be pulled."""
         runner_with_repos._apply_startup_updates()
 
@@ -1353,14 +1391,19 @@ class TestStartupUpdates:
         runner_with_repos._apply_startup_updates()
 
         # Verify haniel-repo was NOT fetched
-        fetched_paths = [call.kwargs.get("path") or call.args[0] for call in mock_fetch.call_args_list]
+        fetched_paths = [
+            call.kwargs.get("path") or call.args[0]
+            for call in mock_fetch.call_args_list
+        ]
         haniel_path = runner_with_repos.config_dir / "haniel-repo"
         assert haniel_path not in fetched_paths
 
     @patch("haniel.core.runner.get_head", return_value="new_hash")
     @patch("haniel.core.runner.pull_repo")
     @patch("haniel.core.runner.fetch_repo")
-    def test_failure_isolation(self, mock_fetch, mock_pull, mock_head, runner_with_repos):
+    def test_failure_isolation(
+        self, mock_fetch, mock_pull, mock_head, runner_with_repos
+    ):
         """Failure in one repo should not block others."""
         # First repo fails, second succeeds
         mock_fetch.side_effect = [
@@ -1375,7 +1418,8 @@ class TestStartupUpdates:
 
         # Verify fetch_error is set on the failed repo
         failed_repos = [
-            name for name, state in runner_with_repos._repo_states.items()
+            name
+            for name, state in runner_with_repos._repo_states.items()
             if state.fetch_error is not None and name != "haniel-repo"
         ]
         assert len(failed_repos) == 1
@@ -1442,7 +1486,6 @@ class TestStartupUpdates:
         self, mock_fetch, mock_pull, mock_head, tmp_path: Path
     ):
         """pull_strategy: force should be passed to pull_repo() during startup pull."""
-        from haniel.config import SelfUpdateConfig
 
         for name in ["repo-a"]:
             repo_path = tmp_path / name
