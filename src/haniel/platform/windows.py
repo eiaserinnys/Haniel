@@ -110,15 +110,15 @@ class WindowsHandler(PlatformHandler):
 $target = {root_pid}
 $listeners = @(Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
 foreach ($listener in $listeners) {{
-    $pid = [int]$listener
-    while ($pid -gt 0) {{
-        if ($pid -eq $target) {{
+    $currentPid = [int]$listener
+    while ($currentPid -gt 0) {{
+        if ($currentPid -eq $target) {{
             Write-Output "true"
             exit 0
         }}
-        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$pid" -ErrorAction SilentlyContinue
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$currentPid" -ErrorAction SilentlyContinue
         if ($null -eq $proc) {{ break }}
-        $pid = [int]$proc.ParentProcessId
+        $currentPid = [int]$proc.ParentProcessId
     }}
 }}
 Write-Output "false"
