@@ -103,6 +103,39 @@ class TestSendToNode:
         msg = DeployApproval(deploy_id="d1")
         result = await hub.send_to_node("n1", msg)
         assert result is False
+        assert registry.get_node("n1") is None
+        ws.close.assert_awaited_once()
+        nodes = await store.get_nodes()
+        assert nodes[0]["connected"] == 0
+
+    async def test_send_error_broadcasts_disconnect(
+        self, hub: WebSocketHub, registry: NodeRegistry, store: EventStore
+    ):
+        ws = AsyncMock()
+        ws.send_text.side_effect = Exception("broken pipe")
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        await registry.register(
+            ws,
+            NodeHello(
+                node_id="n1",
+                token="t",
+                hostname="h",
+                os="Linux",
+                arch="x86_64",
+                haniel_version="0.1.0",
+            ),
+        )
+
+        result = await hub.send_to_node("n1", DeployApproval(deploy_id="d1"))
+
+        assert result is False
+        sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
+        assert {
+            "type": "node_disconnected",
+            "node_id": "n1",
+            "reason": "send_failed",
+        } in sent
 
 
 class TestHandleChangeNotification:
@@ -580,10 +613,7 @@ class TestDeployTimeout:
         assert len(failed) == 1 and failed[0]["deploy_id"] == "d_orphan"
 
     async def test_heartbeat_timeout_path_fails_deploys(self, store):
-        """Integration: registry.check_stale → unregister (no deploy fail) →
-        hub._cleanup_orphan_deploys → DEPLOYING events transition to FAILED.
-        Guards against accidental coupling between registry.unregister and
-        deploy cleanup."""
+        """Integration: heartbeat timeout goes through the hub disconnect policy."""
         registry = NodeRegistry(store, heartbeat_timeout=0.05)
         hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
         ws_dash = AsyncMock()
@@ -601,19 +631,20 @@ class TestDeployTimeout:
         # Force the heartbeat to be older than the timeout
         registry.get_node("n1").last_heartbeat = time.time() - 1.0
 
-        # `check_stale` calls `unregister` internally. After our refactor,
-        # `unregister` no longer touches DEPLOYING events; the hub's cleanup
-        # is the single source of truth.
         stale = await registry.check_stale()
         assert stale == ["n1"]
+        assert registry.get_node("n1") is not None
         ev_before = await store.get_deploy_event("d1")
-        assert ev_before["status"] == "deploying"  # registry didn't fail it
+        assert ev_before["status"] == "deploying"
 
-        # _check_loop would then call cleanup_orphan_deploys; simulate that.
-        await hub._cleanup_orphan_deploys(
-            "n1", error="node disconnected (heartbeat timeout)"
+        await hub._disconnect_node(
+            "n1",
+            reason="heartbeat_timeout",
+            error="node disconnected (heartbeat timeout)",
+            close_ws=False,
         )
 
+        assert registry.get_node("n1") is None
         ev_after = await store.get_deploy_event("d1")
         assert ev_after["status"] == "failed"
         assert ev_after["error"] == "node disconnected (heartbeat timeout)"

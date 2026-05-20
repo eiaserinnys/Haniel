@@ -147,12 +147,12 @@ class WebSocketHub:
             pass
         finally:
             # 5. Cleanup on disconnect
-            await self._registry.unregister(node_id)
-            await self.broadcast_to_dashboards(
-                {"type": "node_disconnected", "node_id": node_id, "reason": "ws_closed"}
+            await self._disconnect_node(
+                node_id,
+                reason="ws_closed",
+                error="node disconnected",
+                close_ws=False,
             )
-            await self._cleanup_orphan_commands(node_id, error="node disconnected")
-            await self._cleanup_orphan_deploys(node_id, error="node disconnected")
 
     async def _handle_change_notification(self, msg: ChangeNotification) -> None:
         """Process a ChangeNotification: store + supersede older PENDING + broadcast.
@@ -485,6 +485,12 @@ class WebSocketHub:
         """Send a message to a specific node. Returns False if node not connected."""
         node = self._registry.get_node(node_id)
         if node is None:
+            await self._disconnect_node(
+                node_id,
+                reason="not_registered",
+                error="node disconnected",
+                close_ws=False,
+            )
             return False
 
         try:
@@ -492,7 +498,36 @@ class WebSocketHub:
             return True
         except Exception as e:
             logger.warning(f"Failed to send to node {node_id}: {e}")
+            await self._disconnect_node(
+                node_id,
+                reason="send_failed",
+                error="node disconnected (send failed)",
+                close_ws=True,
+            )
             return False
+
+    async def _disconnect_node(
+        self,
+        node_id: str,
+        *,
+        reason: str,
+        error: str,
+        close_ws: bool,
+    ) -> None:
+        """Canonical node disconnect path for ws close, heartbeat, and send failure."""
+        node = self._registry.get_node(node_id)
+        if node is not None and close_ws:
+            try:
+                await node.websocket.close(code=1011, reason=reason)
+            except Exception as e:
+                logger.debug(f"Failed to close node {node_id} websocket: {e}")
+
+        await self._registry.unregister(node_id)
+        await self.broadcast_to_dashboards(
+            {"type": "node_disconnected", "node_id": node_id, "reason": reason}
+        )
+        await self._cleanup_orphan_commands(node_id, error=error)
+        await self._cleanup_orphan_deploys(node_id, error=error)
 
     async def start_heartbeat_checker(self) -> None:
         """Start periodic heartbeat check task (30s interval)."""
@@ -502,18 +537,11 @@ class WebSocketHub:
                 await asyncio.sleep(30)
                 stale_ids = await self._registry.check_stale()
                 for node_id in stale_ids:
-                    await self.broadcast_to_dashboards({
-                        "type": "node_disconnected",
-                        "node_id": node_id,
-                        "reason": "heartbeat_timeout",
-                    })
-                    # Mirror the ws-disconnect path so dashboards stop waiting on
-                    # buttons whose target node has gone silent.
-                    await self._cleanup_orphan_commands(
-                        node_id, error="node disconnected (heartbeat timeout)"
-                    )
-                    await self._cleanup_orphan_deploys(
-                        node_id, error="node disconnected (heartbeat timeout)"
+                    await self._disconnect_node(
+                        node_id,
+                        reason="heartbeat_timeout",
+                        error="node disconnected (heartbeat timeout)",
+                        close_ws=False,
                     )
 
         self._heartbeat_task = asyncio.create_task(_check_loop())

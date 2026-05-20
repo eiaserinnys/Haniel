@@ -80,6 +80,8 @@ class TestUnregister:
 
         nodes = await store.get_nodes()
         assert nodes[0]["connected"] == 0
+        assert nodes[0]["hostname"] == "host-n1"
+        assert nodes[0]["haniel_version"] == "0.14.2"
 
     # NOTE: in-flight deploy failure (DEPLOYING → FAILED on disconnect) is
     # the responsibility of WebSocketHub._cleanup_orphan_deploys. See
@@ -111,6 +113,19 @@ class TestHeartbeat:
         # Should not raise
         await registry.heartbeat("nonexistent")
 
+    async def test_heartbeat_nonexistent_does_not_mark_db_connected(
+        self, store: EventStore
+    ):
+        registry = NodeRegistry(store)
+        await store.upsert_node(
+            "n1", "host-n1", "Linux", "x86_64", "0.14.2", connected=False
+        )
+
+        await registry.heartbeat("n1")
+
+        nodes = await store.get_nodes()
+        assert nodes[0]["connected"] == 0
+
 
 class TestGetConnectedNodes:
     async def test_returns_all_connected(self, store: EventStore):
@@ -140,7 +155,7 @@ class TestCheckStale:
 
         stale = await registry.check_stale()
         assert stale == ["n1"]
-        assert registry.get_node("n1") is None
+        assert registry.get_node("n1") is not None
 
     async def test_keeps_fresh_nodes(self, store: EventStore):
         registry = NodeRegistry(store, heartbeat_timeout=90.0)
@@ -161,5 +176,5 @@ class TestCheckStale:
 
         stale = await registry.check_stale()
         assert stale == ["n1"]
-        assert registry.get_node("n1") is None
+        assert registry.get_node("n1") is not None
         assert registry.get_node("n2") is not None

@@ -43,6 +43,7 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         nodes = await store.get_nodes()
         for node in nodes:
             connected_node = hub.registry.get_node(node["node_id"])
+            node["connected"] = 1 if connected_node is not None else 0
             if connected_node is not None and connected_node.services is not None:
                 node["services"] = connected_node.services
         return JSONResponse({"nodes": nodes})

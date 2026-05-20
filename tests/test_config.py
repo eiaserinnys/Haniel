@@ -290,6 +290,8 @@ class TestOrchestratorClientConfig:
         assert cfg.enabled is True
         assert cfg.reconnect_base == 1.0
         assert cfg.reconnect_max == 60.0
+        assert cfg.ping_interval == 10.0
+        assert cfg.ping_timeout == 10.0
 
     def test_missing_url_raises(self):
         with pytest.raises(ValidationError):

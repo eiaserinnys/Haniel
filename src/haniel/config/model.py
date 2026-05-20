@@ -298,6 +298,12 @@ class OrchestratorClientConfig(BaseModel):
     reconnect_max: float = Field(
         default=60.0, description="Max reconnect delay in seconds"
     )
+    ping_interval: float = Field(
+        default=10.0, description="WebSocket ping interval in seconds"
+    )
+    ping_timeout: float = Field(
+        default=10.0, description="Seconds to wait for a WebSocket pong"
+    )
 
 
 class HanielConfig(BaseModel):

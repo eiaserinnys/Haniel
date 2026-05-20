@@ -365,6 +365,14 @@ class EventStore:
         )
         await self._db.commit()
 
+    async def mark_node_disconnected(self, node_id: str) -> None:
+        """Mark an existing node disconnected without clobbering its metadata."""
+        await self._db.execute(
+            "UPDATE nodes SET connected = 0, last_seen = ? WHERE node_id = ?",
+            (_now_iso(), node_id),
+        )
+        await self._db.commit()
+
     async def get_nodes(self) -> list[dict[str, Any]]:
         """Get all nodes (connected and disconnected)."""
         cursor = await self._db.execute(

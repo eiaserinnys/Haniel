@@ -76,10 +76,12 @@ class TestNotifyChange:
         def mock_run_coroutine(coro, loop_arg):
             # Run the coroutine to capture what was sent
             result = MagicMock()
+            coro.close()
             sent_messages.append(coro)
             return result
 
         with patch("asyncio.run_coroutine_threadsafe") as mock_rct:
+            mock_rct.side_effect = mock_run_coroutine
             client.notify_change(
                 repo="myrepo",
                 branch="main",

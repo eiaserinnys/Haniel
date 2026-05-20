@@ -131,6 +131,34 @@ class TestGetNodes:
         assert resp.status_code == 200
         assert len(resp.json()["nodes"]) == 1
 
+    async def test_connected_reflects_runtime_registry(self, hub, registry, store, routes):
+        await store.upsert_node("n1", "host-1", "Linux", "x86_64", "0.14.2")
+        await store.upsert_node("n2", "host-2", "Linux", "x86_64", "0.14.2")
+        await registry.register(
+            AsyncMock(),
+            NodeHello(
+                node_id="n2",
+                token="t",
+                hostname="host-2",
+                os="Linux",
+                arch="x86_64",
+                haniel_version="0.14.2",
+            ),
+        )
+
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        app = Starlette(routes=routes)
+        client = TestClient(app)
+
+        resp = client.get("/api/orch/nodes")
+
+        assert resp.status_code == 200
+        nodes = {node["node_id"]: node for node in resp.json()["nodes"]}
+        assert nodes["n1"]["connected"] == 0
+        assert nodes["n2"]["connected"] == 1
+
 
 class TestGetHistory:
     async def test_returns_history_with_limit(self, hub, store, routes):

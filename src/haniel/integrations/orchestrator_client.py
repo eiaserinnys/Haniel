@@ -214,7 +214,11 @@ class OrchestratorClient:
         """Connect to orchestrator, send NodeHello, and listen for messages."""
         import websockets
 
-        async with websockets.connect(self._config.url) as ws:
+        async with websockets.connect(
+            self._config.url,
+            ping_interval=self._config.ping_interval,
+            ping_timeout=self._config.ping_timeout,
+        ) as ws:
             self._ws = ws
 
             # Send NodeHello
@@ -283,7 +287,7 @@ class OrchestratorClient:
             try:
                 await self._send_heartbeat()
             except Exception as e:
-                logger.debug(f"Heartbeat send failed: {e}")
+                logger.warning(f"Heartbeat send failed: {e}")
                 break
 
     async def _handle_server_message(self, msg: dict) -> None:
@@ -448,8 +452,9 @@ class OrchestratorClient:
 
     async def _send_json(self, data: dict) -> None:
         """Send a JSON message to the orchestrator."""
-        if self._ws:
-            await self._ws.send(json.dumps(data))
+        if self._ws is None:
+            raise ConnectionError("orchestrator websocket is not connected")
+        await self._ws.send(json.dumps(data))
 
     async def _send_heartbeat(self) -> None:
         """Send a heartbeat message with current service state."""

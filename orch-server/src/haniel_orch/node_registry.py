@@ -65,25 +65,20 @@ class NodeRegistry:
         """
         self._nodes.pop(node_id, None)
 
-        # Mark node as disconnected in DB
-        await self._store.upsert_node(
-            node_id=node_id,
-            hostname="",
-            os="",
-            arch="",
-            haniel_version="",
-            connected=False,
-        )
+        # Mark node as disconnected in DB without erasing the last known
+        # hostname/version shown in the dashboard.
+        await self._store.mark_node_disconnected(node_id)
 
         logger.info(f"Node unregistered: {node_id}")
 
     async def heartbeat(self, node_id: str, services: list[dict] | None = None) -> None:
         """Update heartbeat timestamp and optionally service state for a node."""
         node = self._nodes.get(node_id)
-        if node:
-            node.last_heartbeat = time.time()
-            if services is not None:
-                node.services = services
+        if node is None:
+            return
+        node.last_heartbeat = time.time()
+        if services is not None:
+            node.services = services
         await self._store.update_node_heartbeat(node_id)
 
     def get_node(self, node_id: str) -> ConnectedNode | None:
@@ -95,9 +90,10 @@ class NodeRegistry:
         return list(self._nodes.values())
 
     async def check_stale(self) -> list[str]:
-        """Identify and unregister nodes that exceeded heartbeat timeout.
+        """Identify nodes that exceeded heartbeat timeout.
 
-        Returns list of node_ids that were unregistered.
+        The hub owns disconnect side effects so WebSocket close, heartbeat
+        timeout, and outbound send failure share one cleanup path.
         """
         now = time.time()
         stale_ids = [
@@ -107,7 +103,6 @@ class NodeRegistry:
         ]
 
         for node_id in stale_ids:
-            logger.warning(f"Node {node_id} heartbeat timeout, unregistering")
-            await self.unregister(node_id)
+            logger.warning(f"Node {node_id} heartbeat timeout")
 
         return stale_ids
