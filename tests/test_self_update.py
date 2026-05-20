@@ -211,6 +211,18 @@ class TestRunnerSelfUpdate:
         runner.process_manager.is_running.assert_called_with("web")
         assert "approved" in result.lower()
 
+    def test_approve_self_update_clears_slack_pending_button(self):
+        """Approving a self-update should replace the Slack pending DM."""
+        config = self._make_config()
+        runner = self._make_runner(config)
+        runner._state.self_update_pending = True
+        runner._slack_bot = MagicMock()
+
+        result = runner.approve_self_update()
+
+        assert "approved" in result.lower()
+        runner._slack_bot.notify_pulling.assert_called_once_with("haniel", auto=False)
+
     def test_approve_self_update_blocks_when_service_stop_fails(self):
         """Self-update should not proceed if a managed service cannot stop."""
         config = self._make_config()

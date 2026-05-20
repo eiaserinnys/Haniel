@@ -1423,6 +1423,9 @@ class ServiceRunner:
 
         logger.info("Self-update approved, shutting down for update")
         self._prepare_self_update_shutdown()
+        slack_bot = getattr(self, "_slack_bot", None)
+        if slack_bot is not None and self._self_repo:
+            slack_bot.notify_pulling(self._self_repo, auto=False)
         self._notify_self_update_approved()
         self._self_update_requested.set()
         # Notify dashboard that the update work is now starting (server about
