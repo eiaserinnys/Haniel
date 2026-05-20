@@ -160,8 +160,6 @@ export default function App() {
   // ── Derived values ─────────────────────────────────────────────────────────
 
   const availableRepos = status ? Object.keys(status.repos) : []
-  const availableServices = status ? Object.keys(status.services) : []
-
   return (
     <div className="h-screen flex flex-col bg-zinc-900 text-zinc-100">
       {/* Header */}
@@ -413,7 +411,6 @@ export default function App() {
           editName={svcEditor.editName}
           editConfig={svcEditor.editConfig}
           availableRepos={availableRepos}
-          availableServices={availableServices}
           onSave={handleSaveService}
           onCancel={() => setSvcEditor({ open: false })}
         />

@@ -19,7 +19,11 @@ export function useWebSocket({ onEvent, url = "/ws" }: UseWebSocketOptions) {
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
   const onEventRef = useRef(onEvent);
-  onEventRef.current = onEvent;
+  const connectRef = useRef<() => void>(() => {});
+
+  useEffect(() => {
+    onEventRef.current = onEvent;
+  }, [onEvent]);
 
   const connect = useCallback(() => {
     if (!mountedRef.current) return;
@@ -66,14 +70,17 @@ export function useWebSocket({ onEvent, url = "/ws" }: UseWebSocketOptions) {
       retryDelayRef.current = Math.min(delay * BACKOFF_FACTOR, MAX_DELAY);
 
       retryTimerRef.current = setTimeout(() => {
-        if (mountedRef.current) connect();
+        if (mountedRef.current) connectRef.current();
       }, delay);
     };
   }, [url]);
 
   useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
+
+  useEffect(() => {
     mountedRef.current = true;
-    setConnectionState("connecting");
     connect();
 
     return () => {

@@ -11,7 +11,17 @@ import type {
   WsRepoPullingEvent,
 } from '@/lib/types'
 import { api } from '@/lib/api'
+import { scheduleDashboardReload } from '@/lib/dashboardReload'
+import {
+  isHandledSelfUpdateResult,
+  markHandledSelfUpdateResult,
+} from '@/lib/selfUpdateResult'
 import { useWebSocket } from './useWebSocket'
+
+type SelfUpdateApproveResponse = {
+  ok: boolean
+  message: string
+}
 
 export function useServices() {
   const [status, setStatus] = useState<RunnerStatus | null>(null)
@@ -19,6 +29,7 @@ export function useServices() {
   const [error, setError] = useState<string | null>(null)
   const [updating, setUpdating] = useState(false)
   const [updateResult, setUpdateResult] = useState<SelfUpdateResult | null>(null)
+  const [pullingRepos, setPullingRepos] = useState<Set<string>>(new Set())
   // Track when overlay opened. null until self_update_started arrives.
   // Used to filter stale last_result in self_update_completed events
   // (e.g. duplicate broadcasts within the same runner instance) and to
@@ -26,10 +37,12 @@ export function useServices() {
   const updateStartedAtRef = useRef<number | null>(null)
 
   const applyResultOutcome = useCallback((result: SelfUpdateResult) => {
+    if (isHandledSelfUpdateResult(result)) return
+    markHandledSelfUpdateResult(result)
     setUpdateResult(result)
     if (result.ok) {
       // Defer reload slightly so React commits state before navigation.
-      window.setTimeout(() => window.location.reload(), 200)
+      scheduleDashboardReload()
     } else {
       const msg = result.error ?? 'Self-update failed (no error message).'
       setError(`Self-update failed: ${msg}`)
@@ -138,7 +151,11 @@ export function useServices() {
         const e = event as WsRepoPullingEvent
         setPullingRepos(prev => {
           const next = new Set(prev)
-          e.is_pulling ? next.add(e.repo) : next.delete(e.repo)
+          if (e.is_pulling) {
+            next.add(e.repo)
+          } else {
+            next.delete(e.repo)
+          }
           return next
         })
         // Pull complete: refresh full status to sync pending_changes etc.
@@ -172,8 +189,6 @@ export function useServices() {
     [],
   )
 
-  const [pullingRepos, setPullingRepos] = useState<Set<string>>(new Set())
-
   // pullRepo only triggers the REST call — pulling state is managed
   // exclusively via WS repo_pulling events (single source of truth).
   // This ensures consistent UI whether pull is triggered from dashboard,
@@ -187,14 +202,23 @@ export function useServices() {
   }, [])
 
   const approveSelfUpdate = useCallback(async () => {
+    updateStartedAtRef.current = Date.now()
+    setUpdating(true)
+    setUpdateResult(null)
     try {
-      await api.approveSelfUpdate()
-      // Overlay is opened by the WS self_update_started event
-      // (canonical 'work in progress' signal). API response alone
-      // is insufficient — see ADR-0002 result propagation.
+      const response = await api.approveSelfUpdate() as SelfUpdateApproveResponse
+      if (response.message?.startsWith('No self-update pending')) {
+        updateStartedAtRef.current = null
+        setUpdating(false)
+      }
+      // Overlay is opened optimistically above, then reinforced by the
+      // WS self_update_started event. The optimistic open covers the narrow
+      // shutdown race where the broadcast is lost before the socket receives it.
       // If the broadcast is lost (rare), init-time last_result recovery
       // (case 'init') will surface success/failure when WS reconnects.
     } catch (e) {
+      updateStartedAtRef.current = null
+      setUpdating(false)
       setError(e instanceof Error ? e.message : String(e))
     }
   }, [])

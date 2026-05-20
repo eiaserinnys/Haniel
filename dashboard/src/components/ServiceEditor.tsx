@@ -14,7 +14,6 @@ interface ServiceEditorProps {
   editName?: string
   editConfig?: ServiceConfig
   availableRepos: string[]
-  availableServices: string[]
   onSave: (name: string, config: ServiceConfigInput) => Promise<void>
   onCancel: () => void
 }
@@ -23,7 +22,6 @@ export function ServiceEditor({
   editName,
   editConfig,
   availableRepos,
-  availableServices: _availableServices,
   onSave,
   onCancel,
 }: ServiceEditorProps) {

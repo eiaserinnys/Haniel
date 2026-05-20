@@ -48,6 +48,7 @@ export function useChatWebSocket(): UseChatWebSocket {
   const mountedRef = useRef(true);
   const connectionIdRef = useRef(0);
   const handleServerMessageRef = useRef<(raw: string) => void>(() => {});
+  const connectRef = useRef<() => void>(() => {});
 
   const sendRaw = useCallback((data: object) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -225,10 +226,14 @@ export function useChatWebSocket(): UseChatWebSocket {
       const delay = retryDelayRef.current;
       retryDelayRef.current = Math.min(delay * BACKOFF_FACTOR, MAX_DELAY);
       retryTimerRef.current = setTimeout(() => {
-        if (mountedRef.current) connect();
+        if (mountedRef.current) connectRef.current();
       }, delay);
     };
   }, []); // stable — no deps needed; uses refs for latest values
+
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -238,7 +243,7 @@ export function useChatWebSocket(): UseChatWebSocket {
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
       wsRef.current?.close();
     };
-  }, []); // connect is stable, so [] is correct
+  }, [connect]);
 
   const sendMessage = useCallback(
     (text: string) => {
