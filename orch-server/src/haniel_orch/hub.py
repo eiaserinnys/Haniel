@@ -353,8 +353,7 @@ class WebSocketHub:
 
         On timeout (after `deploy_timeout_sec`), marks status=FAILED with
         error='timeout' in the store and broadcasts status_change. Cancelled
-        when DeployResult arrives, the node disconnects, or the deploy is
-        superseded.
+        when DeployResult arrives or the deploy is superseded.
         """
         timeout_task = asyncio.create_task(self._deploy_timeout(deploy_id))
         self._pending_deploys[deploy_id] = PendingDeploy(
@@ -386,31 +385,37 @@ class WebSocketHub:
         })
 
     async def _cleanup_orphan_deploys(self, node_id: str, *, error: str) -> None:
-        """Fail in-flight deploys for a disconnected node + broadcast status_change.
+        """Handle DEPLOYING rows for a disconnected node.
 
         Single source of truth for in-flight deploy cleanup (replaces the
         former NodeRegistry.unregister DEPLOYING→FAILED path). Called from
         handle_node_ws.finally, _check_loop, and shutdown so that ws-disconnect,
         heartbeat-timeout, and graceful shutdown all flow through the same code.
 
-        Two responsibilities:
-        1. Cancel any outstanding _pending_deploys timeout tasks for this node.
-        2. Mark all DEPLOYING events for this node as FAILED + broadcast
-           status_change. Covers both deploys we registered and any DEPLOYING
-           rows from a previous server lifecycle.
+        A tracked deploy keeps its timeout after disconnect. Haniel self-update
+        deliberately drops the node connection while the wrapper restarts, then
+        reports DeployResult on the next startup. Failing that deploy here
+        creates a false negative. If no DeployResult arrives, _deploy_timeout
+        remains the failure path.
+
+        DEPLOYING rows that are not tracked in _pending_deploys are still
+        failed here; those rows have no timeout owner in this hub process.
         """
-        # 1. Cancel in-flight (post-approval) deploys for this node.
-        orphan_ids = [
+        tracked_ids = {
             did for did, pending in self._pending_deploys.items()
             if pending.node_id == node_id
-        ]
-        for did in orphan_ids:
-            pending = self._pending_deploys.pop(did)
-            pending.timeout_task.cancel()
+        }
 
-        # 2. FAIL + broadcast for all DEPLOYING events on this node.
         deploying = await self._store.get_deploying_events_for_node(node_id)
         for event in deploying:
+            if event["deploy_id"] in tracked_ids:
+                logger.info(
+                    "Deploy %s is still tracked after node %s disconnected; "
+                    "waiting for DeployResult or timeout",
+                    event["deploy_id"],
+                    node_id,
+                )
+                continue
             await self._store.update_deploy_status(
                 event["deploy_id"], DeployStatus.FAILED, error=error
             )

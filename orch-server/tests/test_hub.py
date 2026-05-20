@@ -567,8 +567,15 @@ class TestDeployTimeout:
         statuses = [p["status"] for p in sent if p.get("type") == "status_change"]
         assert statuses == ["success"]
 
-    async def test_cleanup_orphan_deploys_via_pending(self, registry, store):
-        """orphan deploys tracked in _pending_deploys are cancelled + broadcast on disconnect."""
+    async def test_cleanup_keeps_tracked_deploys_until_result_or_timeout(
+        self, registry, store
+    ):
+        """Tracked deploys survive node disconnect.
+
+        Self-update intentionally disconnects the node while the wrapper
+        restarts. The server must keep DEPLOYING until the next startup sends
+        DeployResult or the deploy timeout fires.
+        """
         hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
         ws_dash = AsyncMock()
         hub._dashboard_connections = {ws_dash}
@@ -576,20 +583,31 @@ class TestDeployTimeout:
         await self._seed_deploying(store, "d_b", node_id="n2")
         await hub.register_pending_deploy("d_a", "n1", "r", "main")
         await hub.register_pending_deploy("d_b", "n2", "r", "main")
+        timeout_task = hub._pending_deploys["d_a"].timeout_task
 
         await hub._cleanup_orphan_deploys("n1", error="node disconnected")
 
-        assert "d_a" not in hub._pending_deploys
+        assert "d_a" in hub._pending_deploys
         assert "d_b" in hub._pending_deploys
         sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
         failed = [
             p for p in sent
             if p.get("type") == "status_change" and p.get("status") == "failed"
         ]
-        assert len(failed) == 1 and failed[0]["deploy_id"] == "d_a"
+        assert failed == []
         ev = await store.get_deploy_event("d_a")
-        assert ev["status"] == "failed"
-        assert ev["error"] == "node disconnected"
+        assert ev["status"] == "deploying"
+        assert not timeout_task.cancelled()
+
+        await hub._handle_deploy_result(
+            DeployResult(deploy_id="d_a", node_id="n1", status="success")
+        )
+        assert "d_a" not in hub._pending_deploys
+        with contextlib.suppress(asyncio.CancelledError):
+            await timeout_task
+        assert timeout_task.done()
+        ev = await store.get_deploy_event("d_a")
+        assert ev["status"] == "success"
 
     async def test_cleanup_orphan_deploys_via_store(self, registry, store):
         """DEPLOYING events that were never registered (e.g., previous server lifecycle)
@@ -612,7 +630,7 @@ class TestDeployTimeout:
         ]
         assert len(failed) == 1 and failed[0]["deploy_id"] == "d_orphan"
 
-    async def test_heartbeat_timeout_path_fails_deploys(self, store):
+    async def test_heartbeat_timeout_path_keeps_tracked_deploys(self, store):
         """Integration: heartbeat timeout goes through the hub disconnect policy."""
         registry = NodeRegistry(store, heartbeat_timeout=0.05)
         hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
@@ -646,8 +664,8 @@ class TestDeployTimeout:
 
         assert registry.get_node("n1") is None
         ev_after = await store.get_deploy_event("d1")
-        assert ev_after["status"] == "failed"
-        assert ev_after["error"] == "node disconnected (heartbeat timeout)"
+        assert ev_after["status"] == "deploying"
+        assert "d1" in hub._pending_deploys
 
 
 class TestSupersedePending:
