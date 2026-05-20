@@ -23,6 +23,8 @@ import type {
   ApproveResponse,
 } from '@/types';
 
+const DASHBOARD_SYNC_INTERVAL_MS = 10_000;
+
 function App() {
   const [page, setPageRaw] = useState<Page>('pending');
   const [pending, setPending] = useState<Deploy[]>([]);
@@ -67,27 +69,52 @@ function App() {
     setTimeout(() => setToasts(ts => ts.filter(x => x.id !== id)), 4200);
   }, []);
 
+  const deploySyncSeq = useRef(0);
+  const nodeSyncSeq = useRef(0);
+
+  const refreshDeploys = useCallback(() => {
+    const seq = ++deploySyncSeq.current;
+    void Promise.allSettled([
+      api.fetchPending(),
+      api.fetchHistory({ includeSuperseded: includeSupersededHistory }),
+    ]).then(([pendingResult, historyResult]) => {
+      if (seq !== deploySyncSeq.current) return;
+      if (pendingResult.status === 'fulfilled') setPending(pendingResult.value.deploys);
+      if (historyResult.status === 'fulfilled') setHistory(historyResult.value.deploys);
+    });
+  }, [includeSupersededHistory]);
+
+  const refreshNodes = useCallback(() => {
+    const seq = ++nodeSyncSeq.current;
+    void api.fetchNodes()
+      .then(r => {
+        if (seq === nodeSyncSeq.current) setNodes(r.nodes);
+      })
+      .catch(() => {});
+  }, []);
+
+  const refreshAll = useCallback(() => {
+    refreshDeploys();
+    refreshNodes();
+  }, [refreshDeploys, refreshNodes]);
+
   // WebSocket event handler
   const handleWsEvent = useCallback((event: WsEvent) => {
     switch (event.type) {
       case 'new_pending':
-        // Refetch full pending list (event doesn't include commits/services)
-        api.fetchPending().then(r => setPending(r.deploys)).catch(() => {});
+        // Refetch full deploy lists (event doesn't include commits/services).
+        refreshDeploys();
         pushToast(`New pending: ${event.repo} on ${event.node_id}`, 'amber');
         break;
       case 'status_change':
         // Pending and deploying are both shown in PendingView — keep the
         // card visible. Refetch the active list so its status (and any
         // newly attached fields) is in sync with the server.
-        if (event.status === 'pending' || event.status === 'deploying') {
-          api.fetchPending().then(r => setPending(r.deploys)).catch(() => {});
-        } else {
-          // Terminal — remove from PendingView. HistoryView refetch picks it up.
+        if (event.status !== 'pending' && event.status !== 'deploying') {
+          // Terminal — remove immediately; refreshDeploys reconciles with server state.
           setPending(ps => ps.filter(p => p.deploy_id !== event.deploy_id));
         }
-        // Refetch history to get latest (with current superseded toggle).
-        api.fetchHistory({ includeSuperseded: includeSupersededHistory })
-          .then(r => setHistory(r.deploys)).catch(() => {});
+        refreshDeploys();
         if (event.status === 'deploying') {
           pushToast(`Deploying ${event.deploy_id.split(':')[1] || ''}`, 'amber');
         } else if (event.status === 'success') {
@@ -111,12 +138,12 @@ function App() {
         }
         break;
       case 'node_connected':
-        // Refetch nodes
-        api.fetchNodes().then(r => setNodes(r.nodes)).catch(() => {});
+        refreshNodes();
         pushToast(`Node connected: ${event.hostname}`, 'info');
         break;
       case 'node_disconnected':
-        api.fetchNodes().then(r => setNodes(r.nodes)).catch(() => {});
+        refreshNodes();
+        refreshDeploys();
         pushToast(`Node disconnected: ${event.node_id}`, 'amber');
         break;
       case 'service_command_result':
@@ -130,11 +157,10 @@ function App() {
           // error includes 'timeout', 'node disconnected', or node-reported error.
           pushToast(`${event.action} ${event.service_name}: ${event.error || 'failed'}`, 'error');
         }
-        // Refetch nodes to update service status
-        api.fetchNodes().then(r => setNodes(r.nodes)).catch(() => {});
+        refreshNodes();
         break;
     }
-  }, [pushToast, removeWithMinDelay, includeSupersededHistory]);
+  }, [pushToast, refreshDeploys, refreshNodes, removeWithMinDelay]);
 
   const { status: wsStatus } = useWebSocket(handleWsEvent);
 
@@ -146,8 +172,14 @@ function App() {
   // before a real disconnected transition is observed.
   const prevWsStatus = useRef(wsStatus);
   const inFlightRef = useRef(inFlight);
-  inFlightRef.current = inFlight;
   useEffect(() => {
+    inFlightRef.current = inFlight;
+  }, [inFlight]);
+
+  useEffect(() => {
+    if (prevWsStatus.current !== 'connected' && wsStatus === 'connected') {
+      refreshAll();
+    }
     if (prevWsStatus.current !== 'disconnected' && wsStatus === 'disconnected') {
       const n = inFlightRef.current.size;
       if (n > 0) {
@@ -156,10 +188,7 @@ function App() {
       }
     }
     prevWsStatus.current = wsStatus;
-  }, [wsStatus, clearInFlight, pushToast]);
-
-  // Auto-close mobile drawer when crossing to desktop
-  useEffect(() => { if (!isMobile) setMobileMenuOpen(false); }, [isMobile]);
+  }, [wsStatus, clearInFlight, pushToast, refreshAll]);
 
   // Apply theme to <html>
   useEffect(() => {
@@ -167,20 +196,27 @@ function App() {
     localStorage.setItem('haniel-theme', theme);
   }, [theme]);
 
-  // Initial data fetch
+  // Initial data fetch, and history refetch when the superseded toggle changes.
   useEffect(() => {
-    api.fetchPending().then(r => setPending(r.deploys)).catch(() => {});
-    api.fetchNodes().then(r => setNodes(r.nodes)).catch(() => {});
-    // History fetch is driven by the toggle effect below — no double fetch.
-  }, []);
+    refreshAll();
+  }, [refreshAll]);
 
-  // History: refetch whenever the include-superseded toggle changes (and on
-  // mount). Keeping this in its own effect keeps the dependency surface small
-  // and ensures the response shape always matches the checkbox state.
+  // WebSocket is the fast path; polling and focus refresh are the repair path
+  // for events missed during reconnects, background tabs, or another dashboard's action.
   useEffect(() => {
-    api.fetchHistory({ includeSuperseded: includeSupersededHistory })
-      .then(r => setHistory(r.deploys)).catch(() => {});
-  }, [includeSupersededHistory]);
+    const syncIfVisible = () => {
+      if (document.visibilityState === 'visible') refreshAll();
+    };
+    const intervalId = window.setInterval(syncIfVisible, DASHBOARD_SYNC_INTERVAL_MS);
+    window.addEventListener('focus', refreshAll);
+    document.addEventListener('visibilitychange', syncIfVisible);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', refreshAll);
+      document.removeEventListener('visibilitychange', syncIfVisible);
+    };
+  }, [refreshAll]);
 
   // Page navigation
   const setPage = useCallback((p: Page) => { setPageRaw(p); setMobileMenuOpen(false); }, []);
@@ -201,8 +237,10 @@ function App() {
       }
     } catch (e) {
       pushToast(`Approve failed: ${e instanceof api.ApiError ? e.body : 'Unknown error'}`, 'error');
+    } finally {
+      refreshDeploys();
     }
-  }, [pushToast]);
+  }, [pushToast, refreshDeploys]);
 
   const handleReject = useCallback(async (deployId: string, reason: string) => {
     try {
@@ -211,8 +249,10 @@ function App() {
       pushToast(`Rejected deploy`, 'info');
     } catch (e) {
       pushToast(`Reject failed: ${e instanceof api.ApiError ? e.body : 'Unknown error'}`, 'error');
+    } finally {
+      refreshDeploys();
     }
-  }, [pushToast]);
+  }, [pushToast, refreshDeploys]);
 
   const handleServiceCommand = useCallback(async (nodeId: string, serviceName: string, action: 'restart' | 'stop') => {
     try {
@@ -262,6 +302,7 @@ function App() {
         const tail = firstFailureReason ? ` (first failure: ${firstFailureReason})` : '';
         pushToast(`Approved ${succeeded}, deferred ${deferred}, failed ${failed}${tail}`, 'amber');
       }
+      refreshDeploys();
     } else {
       // Approve all via server API
       try {
@@ -280,9 +321,11 @@ function App() {
         }
       } catch (e) {
         pushToast(`Approve all failed: ${e instanceof api.ApiError ? e.body : 'Unknown error'}`, 'error');
+      } finally {
+        refreshDeploys();
       }
     }
-  }, [pushToast]);
+  }, [pushToast, refreshDeploys]);
 
   // Toggle theme
   const toggleTheme = useCallback(() => {
@@ -296,10 +339,12 @@ function App() {
   }, [isMobile]);
 
   const nodesConnected = nodes.filter(n => n.connected === 1).length;
+  const drawerOpen = isMobile && mobileMenuOpen;
+  const sidebarVisible = isMobile ? drawerOpen : showSidebar;
 
   return (
-    <div className={cn('app', mobileMenuOpen && 'is-drawer-open')}>
-      {(isMobile ? mobileMenuOpen : showSidebar) && (
+    <div className={cn('app', drawerOpen && 'is-drawer-open')}>
+      {sidebarVisible && (
         <Sidebar
           page={page}
           setPage={setPage}
@@ -310,7 +355,7 @@ function App() {
         />
       )}
 
-      {isMobile && mobileMenuOpen && (
+      {drawerOpen && (
         <button className="sidebar-scrim" aria-label="Close menu" onClick={() => setMobileMenuOpen(false)} />
       )}
 
