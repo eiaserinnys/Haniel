@@ -336,6 +336,45 @@ class EventStore:
             results.append(d)
         return results
 
+    async def reject_pending_deploys_for_nodes(
+        self, node_ids: list[str], reject_reason: str
+    ) -> list[dict[str, Any]]:
+        """Reject all PENDING deploys for the given nodes and return them."""
+        if not node_ids:
+            return []
+
+        placeholders = ", ".join("?" for _ in node_ids)
+        cursor = await self._db.execute(
+            f"SELECT * FROM deploy_events "
+            f"WHERE status = ? AND node_id IN ({placeholders})",
+            (DeployStatus.PENDING.value, *node_ids),
+        )
+        rows = await cursor.fetchall()
+        rejected = []
+        for row in rows:
+            d = _row_to_dict(cursor, row)
+            d["commits"] = json.loads(d.pop("commits_json"))
+            d["affected_services"] = json.loads(d.pop("affected_services_json"))
+            rejected.append(d)
+
+        if not rejected:
+            return []
+
+        await self._db.execute(
+            f"UPDATE deploy_events "
+            f"SET status = ?, reject_reason = ?, updated_at = ? "
+            f"WHERE status = ? AND node_id IN ({placeholders})",
+            (
+                DeployStatus.REJECTED.value,
+                reject_reason,
+                _now_iso(),
+                DeployStatus.PENDING.value,
+                *node_ids,
+            ),
+        )
+        await self._db.commit()
+        return rejected
+
     # --- nodes CRUD ---
 
     async def upsert_node(
@@ -380,3 +419,12 @@ class EventStore:
         )
         rows = await cursor.fetchall()
         return [_row_to_dict(cursor, row) for row in rows]
+
+    async def get_node_ids_by_hostname(self, hostname: str) -> list[str]:
+        """Return node IDs that have reported the given hostname."""
+        cursor = await self._db.execute(
+            "SELECT node_id FROM nodes WHERE hostname = ?",
+            (hostname,),
+        )
+        rows = await cursor.fetchall()
+        return [row[0] for row in rows]

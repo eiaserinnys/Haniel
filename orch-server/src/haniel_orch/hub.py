@@ -123,6 +123,7 @@ class WebSocketHub:
         await self.broadcast_to_dashboards(
             {"type": "node_connected", "node_id": node_id, "hostname": msg.hostname}
         )
+        await self.cleanup_pending_for_renamed_nodes()
 
         # 4. Message loop
         try:
@@ -467,6 +468,53 @@ class WebSocketHub:
             })
             superseded.append(did)
         return superseded
+
+    async def cleanup_pending_for_renamed_nodes(self) -> list[str]:
+        """Reject PENDING deploys for stale node IDs replaced by a new name.
+
+        A node rename changes the configured node_id, so deploy_id changes too
+        and normal (node, repo, branch) supersede cannot connect the old and
+        new rows. If exactly one connected node reports a hostname, any other
+        stored node_id for that hostname is treated as a stale previous name.
+        """
+        by_hostname: dict[str, list[str]] = {}
+        for node in self._registry.get_connected_nodes():
+            hostname = node.hello.hostname
+            if not hostname:
+                continue
+            by_hostname.setdefault(hostname, []).append(node.node_id)
+
+        rejected_ids: list[str] = []
+        for hostname, connected_ids in by_hostname.items():
+            if len(connected_ids) != 1:
+                continue
+            active_node_id = connected_ids[0]
+            known_node_ids = await self._store.get_node_ids_by_hostname(hostname)
+            stale_node_ids = [
+                node_id for node_id in known_node_ids
+                if node_id != active_node_id and node_id not in connected_ids
+            ]
+            if not stale_node_ids:
+                continue
+
+            reason = f"node renamed to {active_node_id}"
+            rejected = await self._store.reject_pending_deploys_for_nodes(
+                stale_node_ids, reason
+            )
+            for event in rejected:
+                pending = self._pending_deploys.pop(event["deploy_id"], None)
+                if pending is not None:
+                    pending.timeout_task.cancel()
+                await self.broadcast_to_dashboards({
+                    "type": "status_change",
+                    "deploy_id": event["deploy_id"],
+                    "status": DeployStatus.REJECTED.value,
+                    "node_id": event["node_id"],
+                    "reject_reason": reason,
+                })
+                rejected_ids.append(event["deploy_id"])
+
+        return rejected_ids
 
     async def broadcast_to_dashboards(self, event: dict[str, Any]) -> None:
         """Send event to all connected dashboards. Individual failures are logged and ignored."""

@@ -26,6 +26,7 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         PendingView shows both states so that a deploy stays visible after
         approval (DEPLOYING) until the node reports a terminal result.
         """
+        await hub.cleanup_pending_for_renamed_nodes()
         deploys = await store.get_active_deploys()
         return JSONResponse({"deploys": deploys})
 

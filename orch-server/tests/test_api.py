@@ -116,6 +116,58 @@ class TestGetPending:
         ids = {d["deploy_id"] for d in resp.json()["deploys"]}
         assert ids == {"d_pending", "d_deploying"}
 
+    async def test_rejects_pending_for_renamed_node(
+        self, hub, registry, store, routes
+    ):
+        """A disconnected node_id with the same hostname as a connected node
+        is a renamed node; its stale pending deploys should not keep asking
+        for approval."""
+        await store.upsert_node(
+            "old-node", "same-host", "Linux", "x86_64", "0.14.2", connected=False
+        )
+        await registry.register(
+            AsyncMock(),
+            NodeHello(
+                node_id="new-node",
+                token="t",
+                hostname="same-host",
+                os="Linux",
+                arch="x86_64",
+                haniel_version="0.14.2",
+            ),
+        )
+        await _seed_pending(
+            store,
+            "old-node:myrepo:main:aaaaaaa",
+            node_id="old-node",
+            repo="myrepo",
+            branch="main",
+        )
+        await asyncio.sleep(0.005)
+        await _seed_pending(
+            store,
+            "new-node:myrepo:main:bbbbbbb",
+            node_id="new-node",
+            repo="myrepo",
+            branch="main",
+        )
+
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        app = Starlette(routes=routes)
+        client = TestClient(app)
+
+        resp = client.get("/api/orch/pending")
+        assert resp.status_code == 200
+        assert [d["deploy_id"] for d in resp.json()["deploys"]] == [
+            "new-node:myrepo:main:bbbbbbb"
+        ]
+
+        old = await store.get_deploy_event("old-node:myrepo:main:aaaaaaa")
+        assert old["status"] == "rejected"
+        assert old["reject_reason"] == "node renamed to new-node"
+
 
 class TestGetNodes:
     async def test_returns_registered_nodes(self, hub, store, routes):
