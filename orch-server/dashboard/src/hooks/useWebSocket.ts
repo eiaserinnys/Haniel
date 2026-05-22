@@ -18,7 +18,11 @@ export function useWebSocket(onEvent: (event: WsEvent) => void): {
   const retriesRef = useRef(0);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const onEventRef = useRef(onEvent);
-  onEventRef.current = onEvent;
+  const connectRef = useRef<() => void>(() => undefined);
+
+  useEffect(() => {
+    onEventRef.current = onEvent;
+  }, [onEvent]);
 
   const connect = useCallback(() => {
     // Clean up existing connection
@@ -60,7 +64,7 @@ export function useWebSocket(onEvent: (event: WsEvent) => void): {
           setStatus('reconnecting');
           const delay = Math.min(INITIAL_DELAY * Math.pow(2, retriesRef.current), MAX_DELAY);
           retriesRef.current++;
-          timeoutRef.current = setTimeout(connect, delay);
+          timeoutRef.current = setTimeout(() => connectRef.current(), delay);
         } else {
           setStatus('disconnected');
         }
@@ -74,12 +78,17 @@ export function useWebSocket(onEvent: (event: WsEvent) => void): {
     }
   }, []);
 
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
+
   const reconnect = useCallback(() => {
     retriesRef.current = 0;
     connect();
   }, [connect]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- connect synchronizes an external WebSocket subscription on mount.
     connect();
     return () => {
       if (timeoutRef.current) clearTimeout(timeoutRef.current);

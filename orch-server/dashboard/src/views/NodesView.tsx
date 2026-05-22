@@ -228,8 +228,9 @@ function NodeCard({ node, isExpanded, onToggleExpand, onServiceCommand, lookupIn
                                         data-in-flight={isInFlight ? inFlightCmd.action : undefined}
                                         onClick={() => onServiceCommand!(node.node_id, svc.name, 'restart')}
                                         title={isInFlight ? `${inFlightCmd.action} in progress…` : 'Restart'}
+                                        aria-label={`Restart ${svc.name}`}
                                       >
-                                        <Icon name={isInFlight && inFlightCmd.action === 'restart' ? 'loader' : 'refresh'} size={12} />
+                                        <Icon name={isInFlight && inFlightCmd.action === 'restart' ? 'loader' : 'refresh'} size={15} />
                                       </button>
                                       <button
                                         className="svc-btn svc-btn-danger"
@@ -237,8 +238,9 @@ function NodeCard({ node, isExpanded, onToggleExpand, onServiceCommand, lookupIn
                                         data-in-flight={isInFlight ? inFlightCmd.action : undefined}
                                         onClick={() => onServiceCommand!(node.node_id, svc.name, 'stop')}
                                         title={isInFlight ? `${inFlightCmd.action} in progress…` : 'Stop'}
+                                        aria-label={`Stop ${svc.name}`}
                                       >
-                                        <Icon name={isInFlight && inFlightCmd.action === 'stop' ? 'loader' : 'stop'} size={12} />
+                                        <Icon name={isInFlight && inFlightCmd.action === 'stop' ? 'loader' : 'stop'} size={15} />
                                       </button>
                                     </>
                                   );
@@ -251,8 +253,9 @@ function NodeCard({ node, isExpanded, onToggleExpand, onServiceCommand, lookupIn
                                       data-in-flight={isInFlight ? inFlightCmd.action : undefined}
                                       onClick={() => onServiceCommand!(node.node_id, svc.name, 'restart')}
                                       title={isInFlight ? `${inFlightCmd.action} in progress…` : 'Start'}
+                                      aria-label={`Start ${svc.name}`}
                                     >
-                                      <Icon name={isInFlight ? 'loader' : 'play'} size={12} />
+                                      <Icon name={isInFlight ? 'loader' : 'play'} size={15} />
                                     </button>
                                   );
                                 }

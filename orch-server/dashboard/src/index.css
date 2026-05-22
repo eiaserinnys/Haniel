@@ -1011,6 +1011,39 @@ h1 {
   font-family: var(--font-mono);
   font-size: 12px;
 }
+.services-table td.svc-actions {
+  min-width: 84px;
+  white-space: nowrap;
+}
+.svc-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 32px;
+  padding: 0;
+  vertical-align: middle;
+  border-radius: 6px;
+  border: 1px solid var(--border-2);
+  background: color-mix(in oklab, var(--surface-2) 82%, transparent);
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.svc-btn + .svc-btn { margin-left: 8px; }
+.svc-btn:hover {
+  background: var(--hover-tint-strong);
+  color: var(--fg);
+  border-color: var(--border-2);
+}
+.svc-btn-danger:hover {
+  color: var(--red);
+  border-color: color-mix(in oklab, var(--red) 60%, var(--border-2));
+  background: color-mix(in oklab, var(--red) 12%, transparent);
+}
+.svc-btn svg {
+  width: 15px;
+  height: 15px;
+}
 
 /* ── Responsive adjustments ─────────────────────────── */
 @media (max-width: 760px) {

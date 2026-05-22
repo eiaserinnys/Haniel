@@ -32,7 +32,9 @@ export function useInFlightCommands() {
   // identity stable across re-renders, so dependent hooks (e.g. handleWsEvent)
   // don't re-create themselves on every state change.
   const inFlightRef = useRef(inFlight);
-  inFlightRef.current = inFlight;
+  useEffect(() => {
+    inFlightRef.current = inFlight;
+  }, [inFlight]);
 
   // Active deferred-removal timers, keyed by commandId. Tracked so we can
   // cancel them on clear() / unmount and so removeWithMinDelay can avoid
@@ -44,6 +46,7 @@ export function useInFlightCommands() {
       setInFlight((prev) => {
         const next = new Map(prev);
         next.set(cmd.commandId, { ...cmd, addedAt: cmd.addedAt ?? Date.now() });
+        inFlightRef.current = next;
         return next;
       });
     },
@@ -55,6 +58,7 @@ export function useInFlightCommands() {
       if (!prev.has(commandId)) return prev;
       const next = new Map(prev);
       next.delete(commandId);
+      inFlightRef.current = next;
       return next;
     });
   }, []);
@@ -73,6 +77,7 @@ export function useInFlightCommands() {
           if (!prev.has(commandId)) return prev;
           const next = new Map(prev);
           next.delete(commandId);
+          inFlightRef.current = next;
           return next;
         });
         return;
@@ -85,6 +90,7 @@ export function useInFlightCommands() {
           if (!p.has(commandId)) return p;
           const n = new Map(p);
           n.delete(commandId);
+          inFlightRef.current = n;
           return n;
         });
       }, remaining);
@@ -96,7 +102,12 @@ export function useInFlightCommands() {
   const clear = useCallback(() => {
     for (const tid of pendingTimers.current.values()) window.clearTimeout(tid);
     pendingTimers.current.clear();
-    setInFlight((prev) => (prev.size === 0 ? prev : new Map()));
+    setInFlight((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Map<string, InFlightCommand>();
+      inFlightRef.current = next;
+      return next;
+    });
   }, []);
 
   // Unmount safety — clear any outstanding deferred-removal timers.

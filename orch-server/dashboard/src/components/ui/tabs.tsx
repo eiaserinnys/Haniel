@@ -79,4 +79,5 @@ function TabsContent({ className, ...props }: TabsPrimitive.Panel.Props) {
   )
 }
 
+// eslint-disable-next-line react-refresh/only-export-components -- shadcn variant helper.
 export { Tabs, TabsList, TabsTrigger, TabsContent, tabsListVariants }
