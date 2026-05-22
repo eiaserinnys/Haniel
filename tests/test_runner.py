@@ -1118,10 +1118,10 @@ class TestServiceRunnerServices:
         assert mock_start.call_count == 2
 
     @patch("haniel.core.process.ProcessManager.start_service")
-    def test_start_services_runs_startup_hook_for_auto_apply_false_repo(
+    def test_start_services_runs_startup_hook_only_for_updated_repos(
         self, mock_start, tmp_path: Path
     ):
-        """Startup post_pull hooks should run even for manually controlled repos."""
+        """Startup post_pull hooks should run only for repos pulled at startup."""
         config = HanielConfig(
             poll_interval=5,
             repos={
@@ -1149,6 +1149,7 @@ class TestServiceRunnerServices:
             },
         )
         runner = ServiceRunner(config, config_dir=tmp_path)
+        runner._startup_updated_repos = {"manual-repo"}
 
         with patch.object(runner, "execute_hook", return_value=True) as mock_hook:
             runner.start_services()
@@ -1157,10 +1158,41 @@ class TestServiceRunnerServices:
             call.args for call in mock_hook.call_args_list if call.args[1] == "post_pull"
         ]
         assert post_pull_calls == [
-            ("auto-service", "post_pull"),
             ("manual-service", "post_pull"),
         ]
         assert mock_start.call_count == 2
+
+    @patch("haniel.core.process.ProcessManager.start_service")
+    def test_start_services_skips_startup_hooks_when_no_repos_updated(
+        self, mock_start, tmp_path: Path
+    ):
+        """Unchanged repos should not rebuild on Haniel restart."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={
+                "app-repo": RepoConfig(
+                    url="git@github.com:test/app.git",
+                    path="./app-repo",
+                ),
+            },
+            services={
+                "app": ServiceConfig(
+                    run="echo app",
+                    repo="app-repo",
+                    hooks={"post_pull": "echo build"},
+                ),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        with patch.object(runner, "execute_hook", return_value=True) as mock_hook:
+            runner.start_services()
+
+        post_pull_calls = [
+            call.args for call in mock_hook.call_args_list if call.args[1] == "post_pull"
+        ]
+        assert post_pull_calls == []
+        assert mock_start.call_count == 1
 
     @patch("haniel.core.process.ProcessManager.stop_service")
     @patch("haniel.core.process.ProcessManager.is_running")
@@ -1459,6 +1491,7 @@ class TestStartupUpdates:
         assert mock_fetch.call_count == 2
         # Should pull both since fetch returns True
         assert mock_pull.call_count == 2
+        assert runner_with_repos._startup_updated_repos == {"service-repo", "dev-repo"}
 
     @patch("haniel.core.runner.get_head", return_value="new_head")
     @patch("haniel.core.runner.pull_repo")
@@ -1510,6 +1543,7 @@ class TestStartupUpdates:
 
         assert mock_fetch.call_count == 2  # Still fetches to check
         mock_pull.assert_not_called()  # But no pull needed
+        assert runner_with_repos._startup_updated_repos == set()
 
     @patch("haniel.core.runner.fetch_repo")
     def test_excludes_self_update_repo(self, mock_fetch, runner_with_repos):

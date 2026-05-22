@@ -328,8 +328,9 @@ class ServiceRunner:
         # to avoid spamming Slack on every poll when content hasn't changed.
         self._last_pending_hash: dict[str, str] = {}
 
-        # Track whether post_pull hooks have been run on first start
+        # Track whether startup post_pull hooks have been considered.
         self._post_pull_executed = False
+        self._startup_updated_repos: set[str] = set()
 
         # Self-update (see ADR-0002)
         self._self_repo: str | None = (
@@ -509,20 +510,21 @@ class ServiceRunner:
     def start_services(self) -> None:
         """Start all enabled services in dependency order.
 
-        On first start, executes post_pull hooks for all services before
-        starting them. This ensures build steps (npm build, pip install -e, etc.)
-        run after initial clone, just as they would after a git pull update.
-        Repo-level auto_apply only controls poll-cycle apply; startup is already
-        a controlled downtime window.
+        On first start, executes post_pull hooks only for services whose repos
+        were actually updated during the startup pull pass. Restarting Haniel is
+        a controlled downtime window for pulling all repos, but unchanged repos
+        should not pay rebuild cost.
         """
         startup_order = self.get_startup_order()
         logger.info(f"Starting services in order: {startup_order}")
 
-        # Run post_pull hooks on first start (initial install has same semantics as pull)
+        # Run post_pull hooks on first start only for repos updated at startup.
         if not self._post_pull_executed:
             self._post_pull_executed = True
             for name in startup_order:
-                self.execute_hook(name, "post_pull")
+                service = self._enabled_services[name]
+                if service.repo in self._startup_updated_repos:
+                    self.execute_hook(name, "post_pull")
 
         for name in startup_order:
             self._start_service(name)
@@ -1123,6 +1125,7 @@ class ServiceRunner:
         logger.info("Checking for pending updates on startup...")
         updated: list[str] = []
         failed: list[str] = []
+        self._startup_updated_repos.clear()
 
         for name, state in self._repo_states.items():
             # Skip self-update repo (haniel-runner.ps1 handles it)
@@ -1154,6 +1157,7 @@ class ServiceRunner:
                     state.last_head = get_head(repo_path)
                     state.pending_changes = None
                     updated.append(name)
+                    self._startup_updated_repos.add(name)
                 else:
                     logger.debug("Startup update: %s is up to date", name)
 
