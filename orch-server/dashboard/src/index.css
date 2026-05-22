@@ -597,6 +597,30 @@ h1 {
   background: var(--inset-tint);
   color: var(--fg-2);
 }
+.diff-stat-block {
+  padding: 10px 0 2px;
+}
+.diff-stat-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: var(--t-xs);
+  color: var(--dim);
+}
+.diff-stat {
+  margin: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--inset-tint);
+  color: var(--fg-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
 
 /* Commit timeline */
 .commit-timeline { padding-top: 8px; }

@@ -146,9 +146,12 @@ function PendingCard({
   const commits = deploy.commits.map(parseCommit);
   const visibleCommits = showAllCommits ? commits : commits.slice(0, 3);
   const hiddenCount = commits.length - 3;
-
-  // Parse diff_stat: "+123 −45" or "3 files"
-  const diffLabel = deploy.diff_stat || '';
+  const diffStatLines = (deploy.diff_stat ?? '')
+    .split(/\r?\n/)
+    .map(line => line.trimEnd())
+    .filter(Boolean);
+  const diffStatText = diffStatLines.join('\n');
+  const diffSummary = diffStatLines[diffStatLines.length - 1] ?? '';
 
   return (
     <div
@@ -184,7 +187,7 @@ function PendingCard({
           </div>
           <div className="pending-card-meta">
             <span>{commits.length} commit{commits.length !== 1 ? 's' : ''}</span>
-            {diffLabel && <><span className="pending-sep">·</span><span>{diffLabel}</span></>}
+            {diffSummary && <><span className="pending-sep">·</span><span>{diffSummary}</span></>}
             <span className="pending-sep">·</span>
             <span>detected {relTime(deploy.detected_at)}</span>
           </div>
@@ -218,6 +221,13 @@ function PendingCard({
                   <span key={svc} className="service-chip">{svc}</span>
                 ))}
               </div>
+            </div>
+          )}
+
+          {diffStatText && (
+            <div className="diff-stat-block">
+              <span className="diff-stat-label">Git changes</span>
+              <pre className="diff-stat" aria-label="Git changes">{diffStatText}</pre>
             </div>
           )}
 
