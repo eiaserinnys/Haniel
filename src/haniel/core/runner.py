@@ -512,6 +512,8 @@ class ServiceRunner:
         On first start, executes post_pull hooks for all services before
         starting them. This ensures build steps (npm build, pip install -e, etc.)
         run after initial clone, just as they would after a git pull update.
+        Repo-level auto_apply only controls poll-cycle apply; startup is already
+        a controlled downtime window.
         """
         startup_order = self.get_startup_order()
         logger.info(f"Starting services in order: {startup_order}")
@@ -1113,6 +1115,9 @@ class ServiceRunner:
 
         Called once during start(), before start_services().
         Self-update repo is excluded (handled by haniel-runner.ps1).
+        Repo-level auto_apply is intentionally ignored here: when Haniel
+        restarts, all services are already down, so pulling every managed repo is
+        the least surprising recovery/deploy behavior.
         Individual repo failures are logged but do not block other repos.
         """
         logger.info("Checking for pending updates on startup...")
@@ -1347,6 +1352,26 @@ class ServiceRunner:
         # auto_apply=false: detection only, skip stop→pull→restart
         if not self.config.auto_apply:
             logger.info("auto_apply=false, skipping apply for: %s", changed_repos)
+            return
+
+        manual_repos = [
+            repo
+            for repo in changed_repos
+            if self._repo_states.get(repo) is not None
+            and not self._repo_states[repo].config.auto_apply
+        ]
+        changed_repos = [
+            repo
+            for repo in changed_repos
+            if self._repo_states.get(repo) is None
+            or self._repo_states[repo].config.auto_apply
+        ]
+        if manual_repos:
+            logger.info(
+                "repo auto_apply=false, pending manual approval for: %s",
+                manual_repos,
+            )
+        if not changed_repos:
             return
 
         # Collect all affected services

@@ -43,6 +43,23 @@ class TestHanielConfigParsing:
         assert repo.url == "git@github.com:example/test.git"
         assert repo.branch == "main"
         assert repo.path == "./projects/test"
+        assert repo.auto_apply is True
+
+    def test_repo_auto_apply_can_be_disabled(self):
+        """Repo auto_apply should support per-repo automatic update opt-out."""
+        config = HanielConfig.model_validate(
+            {
+                "repos": {
+                    "manual": {
+                        "url": "git@github.com:example/manual.git",
+                        "path": "./manual",
+                        "auto_apply": False,
+                    }
+                },
+                "services": {},
+            }
+        )
+        assert config.repos["manual"].auto_apply is False
 
     def test_services_parsing(self):
         """Should parse services section correctly."""

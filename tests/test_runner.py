@@ -848,6 +848,47 @@ class TestServiceRunnerPollCycle:
         state = runner_with_mock_repo._repo_states["test-repo"]
         assert state.fetch_error is not None
 
+    @patch("haniel.core.runner.get_pending_changes", return_value=None)
+    @patch("haniel.core.runner.get_remote_head")
+    @patch("haniel.core.runner.fetch_repo")
+    @patch("haniel.core.runner.get_head")
+    def test_detect_changes_includes_repo_with_auto_apply_false(
+        self, mock_head, mock_fetch, mock_remote_head, mock_pending, tmp_path: Path
+    ):
+        """Repos with auto_apply=false should still be detected for manual approval."""
+        repo_path = tmp_path / "manual-repo"
+        repo_path.mkdir()
+        (repo_path / ".git").mkdir()
+
+        config = HanielConfig(
+            poll_interval=5,
+            repos={
+                "manual-repo": RepoConfig(
+                    url="git@github.com:test/manual.git",
+                    branch="main",
+                    path="./manual-repo",
+                    auto_apply=False,
+                ),
+            },
+            services={
+                "manual-service": ServiceConfig(
+                    run="echo hello",
+                    repo="manual-repo",
+                    enabled=True,
+                ),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        runner._init_repo_states()
+        mock_fetch.return_value = True
+        mock_head.return_value = "abc1234"
+        mock_remote_head.return_value = "def5678"
+
+        changed = runner._detect_changes()
+
+        assert changed == ["manual-repo"]
+        mock_fetch.assert_called_once()
+
     def test_schedule_restart(self, tmp_path: Path):
         """Test scheduling a service restart."""
         config = HanielConfig(
@@ -1074,6 +1115,51 @@ class TestServiceRunnerServices:
         runner.start_services()
 
         # Should be called for both services
+        assert mock_start.call_count == 2
+
+    @patch("haniel.core.process.ProcessManager.start_service")
+    def test_start_services_runs_startup_hook_for_auto_apply_false_repo(
+        self, mock_start, tmp_path: Path
+    ):
+        """Startup post_pull hooks should run even for manually controlled repos."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={
+                "auto-repo": RepoConfig(
+                    url="git@github.com:test/auto.git",
+                    path="./auto-repo",
+                ),
+                "manual-repo": RepoConfig(
+                    url="git@github.com:test/manual.git",
+                    path="./manual-repo",
+                    auto_apply=False,
+                ),
+            },
+            services={
+                "auto-service": ServiceConfig(
+                    run="echo auto",
+                    repo="auto-repo",
+                    hooks={"post_pull": "echo auto build"},
+                ),
+                "manual-service": ServiceConfig(
+                    run="echo manual",
+                    repo="manual-repo",
+                    hooks={"post_pull": "echo manual build"},
+                ),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        with patch.object(runner, "execute_hook", return_value=True) as mock_hook:
+            runner.start_services()
+
+        post_pull_calls = [
+            call.args for call in mock_hook.call_args_list if call.args[1] == "post_pull"
+        ]
+        assert post_pull_calls == [
+            ("auto-service", "post_pull"),
+            ("manual-service", "post_pull"),
+        ]
         assert mock_start.call_count == 2
 
     @patch("haniel.core.process.ProcessManager.stop_service")
@@ -1372,6 +1458,48 @@ class TestStartupUpdates:
         # Should fetch service-repo and dev-repo (not haniel-repo)
         assert mock_fetch.call_count == 2
         # Should pull both since fetch returns True
+        assert mock_pull.call_count == 2
+
+    @patch("haniel.core.runner.get_head", return_value="new_head")
+    @patch("haniel.core.runner.pull_repo")
+    @patch("haniel.core.runner.fetch_repo")
+    def test_startup_update_pulls_repo_with_auto_apply_false(
+        self, mock_fetch, mock_pull, mock_head, tmp_path: Path
+    ):
+        """Startup update should pull all repos, including auto_apply=false repos."""
+        for name in ["auto-repo", "manual-repo"]:
+            repo_path = tmp_path / name
+            repo_path.mkdir()
+            (repo_path / ".git").mkdir()
+
+        config = HanielConfig(
+            poll_interval=5,
+            repos={
+                "auto-repo": RepoConfig(
+                    url="git@github.com:test/auto.git",
+                    branch="main",
+                    path="./auto-repo",
+                ),
+                "manual-repo": RepoConfig(
+                    url="git@github.com:test/manual.git",
+                    branch="main",
+                    path="./manual-repo",
+                    auto_apply=False,
+                ),
+            },
+            services={},
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        mock_fetch.return_value = True
+
+        runner._apply_startup_updates()
+
+        fetched_paths = [
+            call.kwargs.get("path") or call.args[0]
+            for call in mock_fetch.call_args_list
+        ]
+        assert tmp_path / "auto-repo" in fetched_paths
+        assert tmp_path / "manual-repo" in fetched_paths
         assert mock_pull.call_count == 2
 
     @patch("haniel.core.runner.pull_repo")

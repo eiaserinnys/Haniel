@@ -106,6 +106,10 @@ class RepoConfig(BaseModel):
     branch: str = Field(default="main", description="Branch to track")
     path: str = Field(..., description="Local path for the repository")
     hooks: HooksConfig | None = Field(default=None, description="Lifecycle hooks")
+    auto_apply: bool = Field(
+        default=True,
+        description="Whether Haniel should automatically fetch/apply updates for this repo",
+    )
     pull_strategy: Literal["merge", "force"] | None = Field(
         default=None,
         description="Pull 전략. 'force'이면 git reset --hard로 로컬 변경을 드롭. 기본값 None은 'merge'(기존 git pull)와 동일.",
