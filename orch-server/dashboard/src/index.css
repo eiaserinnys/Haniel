@@ -993,23 +993,34 @@ h1 {
 .services-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: var(--t-sm);
+  font-size: var(--t-md);
+  line-height: 1.25;
 }
 .services-table th {
   text-align: left;
-  padding: 6px 10px;
+  padding: 5px 10px;
   font-size: var(--t-xs);
   font-weight: 500;
   color: var(--dim);
   border-bottom: 1px solid var(--border);
 }
 .services-table td {
-  padding: 6px 10px;
+  height: 40px;
+  padding: 4px 10px;
   color: var(--fg-2);
+  vertical-align: middle;
 }
 .services-table .svc-name {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
+  line-height: 1.25;
+}
+.services-table .svc-deps {
+  display: block;
+  margin-top: 2px;
+  font-size: 11.5px;
+  line-height: 1.2;
+  color: var(--dim);
 }
 .services-table td.svc-actions {
   min-width: 84px;
