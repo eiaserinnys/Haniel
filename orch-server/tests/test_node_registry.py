@@ -1,12 +1,11 @@
 """Tests for NodeRegistry — register, unregister, heartbeat, stale detection."""
 
 import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
-import pytest
 
 from haniel_orch.event_store import EventStore
-from haniel_orch.node_registry import ConnectedNode, NodeRegistry
+from haniel_orch.node_registry import NodeRegistry
 from haniel_orch.protocol import NodeHello
 
 
@@ -92,6 +91,24 @@ class TestUnregister:
         # Should not raise
         await registry.unregister("nonexistent")
 
+    async def test_stale_unregister_does_not_remove_replacement(
+        self, store: EventStore
+    ):
+        registry = NodeRegistry(store)
+        old_ws = MagicMock()
+        new_ws = MagicMock()
+        await registry.register(old_ws, _make_hello("n1"))
+        await registry.register(new_ws, _make_hello("n1"))
+
+        removed = await registry.unregister("n1", websocket=old_ws)
+
+        assert removed is False
+        node = registry.get_node("n1")
+        assert node is not None
+        assert node.websocket is new_ws
+        nodes = await store.get_nodes()
+        assert nodes[0]["connected"] == 1
+
 
 class TestHeartbeat:
     async def test_updates_last_heartbeat(self, store: EventStore):
@@ -125,6 +142,28 @@ class TestHeartbeat:
 
         nodes = await store.get_nodes()
         assert nodes[0]["connected"] == 0
+
+    async def test_stale_heartbeat_does_not_update_replacement(self, store: EventStore):
+        registry = NodeRegistry(store)
+        old_ws = MagicMock()
+        new_ws = MagicMock()
+        await registry.register(old_ws, _make_hello("n1"))
+        await registry.register(new_ws, _make_hello("n1"))
+
+        node = registry.get_node("n1")
+        assert node is not None
+        old_heartbeat = node.last_heartbeat
+        await registry.heartbeat(
+            "n1",
+            services=[{"name": "stale", "ready": False}],
+            websocket=old_ws,
+        )
+
+        node = registry.get_node("n1")
+        assert node is not None
+        assert node.websocket is new_ws
+        assert node.services is None
+        assert node.last_heartbeat == old_heartbeat
 
 
 class TestGetConnectedNodes:

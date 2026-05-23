@@ -1,5 +1,6 @@
 """Tests for OrchestratorClient — connection, notify, backoff, graceful degradation."""
 
+import asyncio
 import threading
 from unittest.mock import MagicMock, patch
 
@@ -367,3 +368,18 @@ class TestEnqueueDeployResult:
         client._send_json = fake_send_json  # type: ignore[assignment]
         await client._flush_pending_deploy_results()
         assert sent == []
+
+
+class TestSendJson:
+    async def test_send_json_times_out_using_ping_timeout(self, config):
+        config.ping_timeout = 0.01
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+
+        class SlowWebSocket:
+            async def send(self, payload):
+                await asyncio.sleep(0.2)
+
+        client._ws = SlowWebSocket()
+
+        with pytest.raises(asyncio.TimeoutError):
+            await client._send_json({"type": "node_status"})

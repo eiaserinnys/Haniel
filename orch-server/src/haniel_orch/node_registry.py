@@ -53,8 +53,19 @@ class NodeRegistry:
         )
         logger.info(f"Node registered: {hello.node_id} ({hello.hostname})")
 
-    async def unregister(self, node_id: str) -> None:
+    def is_current_connection(self, node_id: str, websocket: WebSocket) -> bool:
+        """Return True when websocket is the active connection for node_id."""
+        node = self._nodes.get(node_id)
+        return node is not None and node.websocket is websocket
+
+    async def unregister(
+        self, node_id: str, websocket: WebSocket | None = None
+    ) -> bool:
         """Unregister a node. Marks as disconnected.
+
+        When websocket is provided, unregister only if that exact connection is
+        still current. This prevents a late close from a superseded connection
+        from deleting a freshly reconnected node with the same node_id.
 
         NOTE: in-flight deploy failure (DEPLOYING → FAILED) is handled by
         :meth:`WebSocketHub._cleanup_orphan_deploys` — single source of truth
@@ -63,6 +74,11 @@ class NodeRegistry:
         observing a disconnect, so DEPLOYING events still transition to
         FAILED + broadcast.
         """
+        node = self._nodes.get(node_id)
+        if websocket is not None and (node is None or node.websocket is not websocket):
+            logger.debug("Ignoring stale unregister for node: %s", node_id)
+            return False
+
         self._nodes.pop(node_id, None)
 
         # Mark node as disconnected in DB without erasing the last known
@@ -70,11 +86,20 @@ class NodeRegistry:
         await self._store.mark_node_disconnected(node_id)
 
         logger.info(f"Node unregistered: {node_id}")
+        return True
 
-    async def heartbeat(self, node_id: str, services: list[dict] | None = None) -> None:
+    async def heartbeat(
+        self,
+        node_id: str,
+        services: list[dict] | None = None,
+        websocket: WebSocket | None = None,
+    ) -> None:
         """Update heartbeat timestamp and optionally service state for a node."""
         node = self._nodes.get(node_id)
         if node is None:
+            return
+        if websocket is not None and node.websocket is not websocket:
+            logger.debug("Ignoring stale heartbeat for node: %s", node_id)
             return
         node.last_heartbeat = time.time()
         if services is not None:
@@ -95,14 +120,19 @@ class NodeRegistry:
         The hub owns disconnect side effects so WebSocket close, heartbeat
         timeout, and outbound send failure share one cleanup path.
         """
+        stale_nodes = await self.check_stale_connections()
+        return [node.node_id for node in stale_nodes]
+
+    async def check_stale_connections(self) -> list[ConnectedNode]:
+        """Return stale node records with their exact WebSocket connection."""
         now = time.time()
-        stale_ids = [
-            node_id
-            for node_id, node in self._nodes.items()
+        stale_nodes = [
+            node
+            for node in self._nodes.values()
             if (now - node.last_heartbeat) > self._heartbeat_timeout
         ]
 
-        for node_id in stale_ids:
-            logger.warning(f"Node {node_id} heartbeat timeout")
+        for node in stale_nodes:
+            logger.warning(f"Node {node.node_id} heartbeat timeout")
 
-        return stale_ids
+        return stale_nodes

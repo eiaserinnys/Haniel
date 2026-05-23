@@ -216,8 +216,10 @@ class OrchestratorClient:
 
         async with websockets.connect(
             self._config.url,
+            open_timeout=self._config.ping_timeout,
             ping_interval=self._config.ping_interval,
             ping_timeout=self._config.ping_timeout,
+            close_timeout=self._config.ping_timeout,
         ) as ws:
             self._ws = ws
 
@@ -234,7 +236,7 @@ class OrchestratorClient:
                 if self._get_services_info
                 else None,
             }
-            await ws.send(json.dumps(hello))
+            await self._send_json(hello)
 
             self._connected = True
             self._reset_backoff()
@@ -454,7 +456,10 @@ class OrchestratorClient:
         """Send a JSON message to the orchestrator."""
         if self._ws is None:
             raise ConnectionError("orchestrator websocket is not connected")
-        await self._ws.send(json.dumps(data))
+        await asyncio.wait_for(
+            self._ws.send(json.dumps(data)),
+            timeout=self._config.ping_timeout,
+        )
 
     async def _send_heartbeat(self) -> None:
         """Send a heartbeat message with current service state."""

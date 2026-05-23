@@ -1155,7 +1155,9 @@ class TestServiceRunnerServices:
             runner.start_services()
 
         post_pull_calls = [
-            call.args for call in mock_hook.call_args_list if call.args[1] == "post_pull"
+            call.args
+            for call in mock_hook.call_args_list
+            if call.args[1] == "post_pull"
         ]
         assert post_pull_calls == [
             ("manual-service", "post_pull"),
@@ -1189,7 +1191,9 @@ class TestServiceRunnerServices:
             runner.start_services()
 
         post_pull_calls = [
-            call.args for call in mock_hook.call_args_list if call.args[1] == "post_pull"
+            call.args
+            for call in mock_hook.call_args_list
+            if call.args[1] == "post_pull"
         ]
         assert post_pull_calls == []
         assert mock_start.call_count == 1
