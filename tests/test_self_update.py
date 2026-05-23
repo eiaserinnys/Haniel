@@ -136,7 +136,7 @@ class TestRunnerSelfUpdate:
         )
 
     def _make_runner(self, config):
-        from haniel.core.runner import ServiceRunner
+        from haniel.core.runner import RepoState, ServiceRunner
 
         with patch.object(ServiceRunner, "__init__", lambda self, *a, **kw: None):
             runner = ServiceRunner.__new__(ServiceRunner)
@@ -155,6 +155,10 @@ class TestRunnerSelfUpdate:
         runner._last_self_update_result = None
         runner._pending_restarts = {}
         runner._enabled_services = config.services
+        runner._repo_states = {
+            name: RepoState(name=name, config=repo)
+            for name, repo in config.repos.items()
+        }
         runner.process_manager = MagicMock()
         runner.process_manager.is_running.return_value = False
         runner._dependency_graph = MagicMock()

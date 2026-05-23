@@ -116,8 +116,16 @@ class WebSocketHub:
             return
 
         # 2. Register node
+        previous = self._registry.get_node(msg.node_id)
         await self._registry.register(websocket, msg)
         node_id = msg.node_id
+        if previous is not None and previous.websocket is not websocket:
+            try:
+                await previous.websocket.close(code=4000, reason="node reconnected")
+            except Exception as e:
+                logger.debug(
+                    "Failed to close replaced node %s websocket: %s", node_id, e
+                )
 
         # 3. Broadcast node_connected
         await self.broadcast_to_dashboards(
@@ -129,6 +137,11 @@ class WebSocketHub:
         try:
             while True:
                 raw = await websocket.receive_text()
+                if not self._registry.is_current_connection(node_id, websocket):
+                    logger.debug(
+                        "Ignoring message from stale node connection: %s", node_id
+                    )
+                    break
                 try:
                     incoming = parse_node_message(raw)
                 except Exception as e:
@@ -138,7 +151,11 @@ class WebSocketHub:
                 if isinstance(incoming, ChangeNotification):
                     await self._handle_change_notification(incoming)
                 elif isinstance(incoming, NodeStatus):
-                    await self._registry.heartbeat(incoming.node_id, services=incoming.services)
+                    await self._registry.heartbeat(
+                        incoming.node_id,
+                        services=incoming.services,
+                        websocket=websocket,
+                    )
                 elif isinstance(incoming, DeployResult):
                     await self._handle_deploy_result(incoming)
                 elif isinstance(incoming, ServiceCommandResult):
@@ -153,6 +170,7 @@ class WebSocketHub:
                 reason="ws_closed",
                 error="node disconnected",
                 close_ws=False,
+                websocket=websocket,
             )
 
     async def _handle_change_notification(self, msg: ChangeNotification) -> None:
@@ -187,20 +205,26 @@ class WebSocketHub:
         await self.supersede_pending(
             msg.node_id, msg.repo, msg.branch, kept_deploy_id=msg.deploy_id
         )
-        await self.broadcast_to_dashboards({
-            "type": "new_pending",
-            "deploy_id": msg.deploy_id,
-            "node_id": msg.node_id,
-            "repo": msg.repo,
-            "branch": msg.branch,
-            "detected_at": msg.detected_at,
-        })
+        await self.broadcast_to_dashboards(
+            {
+                "type": "new_pending",
+                "deploy_id": msg.deploy_id,
+                "node_id": msg.node_id,
+                "repo": msg.repo,
+                "branch": msg.branch,
+                "detected_at": msg.detected_at,
+            }
+        )
 
         # Fire-and-forget push notification
         self._spawn_push(
             title=f"배포 대기: {msg.repo}",
             body=f"{msg.node_id}에서 {msg.repo} ({msg.branch}) 변경 감지",
-            data={"deploy_id": msg.deploy_id, "type": "new_pending", "node_id": msg.node_id},
+            data={
+                "deploy_id": msg.deploy_id,
+                "type": "new_pending",
+                "node_id": msg.node_id,
+            },
         )
 
     async def _handle_deploy_result(self, msg: DeployResult) -> None:
@@ -216,12 +240,14 @@ class WebSocketHub:
             error=msg.error,
             duration_ms=msg.duration_ms,
         )
-        await self.broadcast_to_dashboards({
-            "type": "status_change",
-            "deploy_id": msg.deploy_id,
-            "status": status.value,
-            "node_id": msg.node_id,
-        })
+        await self.broadcast_to_dashboards(
+            {
+                "type": "status_change",
+                "deploy_id": msg.deploy_id,
+                "status": status.value,
+                "node_id": msg.node_id,
+            }
+        )
 
         # Fire-and-forget push for terminal states
         if status in (DeployStatus.SUCCESS, DeployStatus.FAILED):
@@ -229,7 +255,11 @@ class WebSocketHub:
             self._spawn_push(
                 title=f"배포 {status_text}: {msg.node_id}",
                 body=f"{msg.node_id}의 배포가 {status_text}했습니다",
-                data={"deploy_id": msg.deploy_id, "type": "status_change", "status": status.value},
+                data={
+                    "deploy_id": msg.deploy_id,
+                    "type": "status_change",
+                    "status": status.value,
+                },
             )
 
     async def _handle_service_command_result(self, msg: ServiceCommandResult) -> None:
@@ -238,15 +268,17 @@ class WebSocketHub:
         pending = self._pending_commands.pop(msg.command_id, None)
         if pending is not None:
             pending.timeout_task.cancel()
-        await self.broadcast_to_dashboards({
-            "type": "service_command_result",
-            "command_id": msg.command_id,
-            "node_id": msg.node_id,
-            "service_name": msg.service_name,
-            "action": msg.action,
-            "success": msg.success,
-            "error": msg.error,
-        })
+        await self.broadcast_to_dashboards(
+            {
+                "type": "service_command_result",
+                "command_id": msg.command_id,
+                "node_id": msg.node_id,
+                "service_name": msg.service_name,
+                "action": msg.action,
+                "success": msg.success,
+                "error": msg.error,
+            }
+        )
 
     def _spawn_push(self, title: str, body: str, data: dict[str, Any]) -> None:
         """Spawn a fire-and-forget push task. Task ref is held to prevent GC."""
@@ -280,7 +312,9 @@ class WebSocketHub:
             pass
         finally:
             self._dashboard_connections.discard(websocket)
-            logger.info(f"Dashboard disconnected ({len(self._dashboard_connections)} total)")
+            logger.info(
+                f"Dashboard disconnected ({len(self._dashboard_connections)} total)"
+            )
 
     async def register_pending_command(
         self,
@@ -313,15 +347,17 @@ class WebSocketHub:
         pending = self._pending_commands.pop(command_id, None)
         if pending is None:
             return
-        await self.broadcast_to_dashboards({
-            "type": "service_command_result",
-            "command_id": command_id,
-            "node_id": pending.node_id,
-            "service_name": pending.service_name,
-            "action": pending.action,
-            "success": False,
-            "error": "timeout",
-        })
+        await self.broadcast_to_dashboards(
+            {
+                "type": "service_command_result",
+                "command_id": command_id,
+                "node_id": pending.node_id,
+                "service_name": pending.service_name,
+                "action": pending.action,
+                "success": False,
+                "error": "timeout",
+            }
+        )
 
     async def _cleanup_orphan_commands(self, node_id: str, *, error: str) -> None:
         """Cancel & broadcast for any in-flight commands targeted at the given node.
@@ -331,21 +367,24 @@ class WebSocketHub:
         matching button rather than waiting for the per-command timeout.
         """
         orphans = [
-            cid for cid, pending in self._pending_commands.items()
+            cid
+            for cid, pending in self._pending_commands.items()
             if pending.node_id == node_id
         ]
         for cid in orphans:
             pending = self._pending_commands.pop(cid)
             pending.timeout_task.cancel()
-            await self.broadcast_to_dashboards({
-                "type": "service_command_result",
-                "command_id": cid,
-                "node_id": node_id,
-                "service_name": pending.service_name,
-                "action": pending.action,
-                "success": False,
-                "error": error,
-            })
+            await self.broadcast_to_dashboards(
+                {
+                    "type": "service_command_result",
+                    "command_id": cid,
+                    "node_id": node_id,
+                    "service_name": pending.service_name,
+                    "action": pending.action,
+                    "success": False,
+                    "error": error,
+                }
+            )
 
     async def register_pending_deploy(
         self, deploy_id: str, node_id: str, repo: str, branch: str
@@ -378,12 +417,14 @@ class WebSocketHub:
         await self._store.update_deploy_status(
             deploy_id, DeployStatus.FAILED, error="timeout"
         )
-        await self.broadcast_to_dashboards({
-            "type": "status_change",
-            "deploy_id": deploy_id,
-            "status": DeployStatus.FAILED.value,
-            "node_id": pending.node_id,
-        })
+        await self.broadcast_to_dashboards(
+            {
+                "type": "status_change",
+                "deploy_id": deploy_id,
+                "status": DeployStatus.FAILED.value,
+                "node_id": pending.node_id,
+            }
+        )
 
     async def _cleanup_orphan_deploys(self, node_id: str, *, error: str) -> None:
         """Handle DEPLOYING rows for a disconnected node.
@@ -403,7 +444,8 @@ class WebSocketHub:
         failed here; those rows have no timeout owner in this hub process.
         """
         tracked_ids = {
-            did for did, pending in self._pending_deploys.items()
+            did
+            for did, pending in self._pending_deploys.items()
             if pending.node_id == node_id
         }
 
@@ -420,12 +462,14 @@ class WebSocketHub:
             await self._store.update_deploy_status(
                 event["deploy_id"], DeployStatus.FAILED, error=error
             )
-            await self.broadcast_to_dashboards({
-                "type": "status_change",
-                "deploy_id": event["deploy_id"],
-                "status": DeployStatus.FAILED.value,
-                "node_id": node_id,
-            })
+            await self.broadcast_to_dashboards(
+                {
+                    "type": "status_change",
+                    "deploy_id": event["deploy_id"],
+                    "status": DeployStatus.FAILED.value,
+                    "node_id": node_id,
+                }
+            )
 
     async def supersede_pending(
         self, node_id: str, repo: str, branch: str, kept_deploy_id: str
@@ -459,13 +503,15 @@ class WebSocketHub:
             pending = self._pending_deploys.pop(did, None)
             if pending is not None:
                 pending.timeout_task.cancel()
-            await self.broadcast_to_dashboards({
-                "type": "status_change",
-                "deploy_id": did,
-                "status": DeployStatus.REJECTED.value,
-                "node_id": node_id,
-                "reject_reason": reason,
-            })
+            await self.broadcast_to_dashboards(
+                {
+                    "type": "status_change",
+                    "deploy_id": did,
+                    "status": DeployStatus.REJECTED.value,
+                    "node_id": node_id,
+                    "reject_reason": reason,
+                }
+            )
             superseded.append(did)
         return superseded
 
@@ -491,7 +537,8 @@ class WebSocketHub:
             active_node_id = connected_ids[0]
             known_node_ids = await self._store.get_node_ids_by_hostname(hostname)
             stale_node_ids = [
-                node_id for node_id in known_node_ids
+                node_id
+                for node_id in known_node_ids
                 if node_id != active_node_id and node_id not in connected_ids
             ]
             if not stale_node_ids:
@@ -505,13 +552,15 @@ class WebSocketHub:
                 pending = self._pending_deploys.pop(event["deploy_id"], None)
                 if pending is not None:
                     pending.timeout_task.cancel()
-                await self.broadcast_to_dashboards({
-                    "type": "status_change",
-                    "deploy_id": event["deploy_id"],
-                    "status": DeployStatus.REJECTED.value,
-                    "node_id": event["node_id"],
-                    "reject_reason": reason,
-                })
+                await self.broadcast_to_dashboards(
+                    {
+                        "type": "status_change",
+                        "deploy_id": event["deploy_id"],
+                        "status": DeployStatus.REJECTED.value,
+                        "node_id": event["node_id"],
+                        "reject_reason": reason,
+                    }
+                )
                 rejected_ids.append(event["deploy_id"])
 
         return rejected_ids
@@ -556,6 +605,7 @@ class WebSocketHub:
                 reason="send_failed",
                 error="node disconnected (send failed)",
                 close_ws=True,
+                websocket=node.websocket,
             )
             return False
 
@@ -566,16 +616,22 @@ class WebSocketHub:
         reason: str,
         error: str,
         close_ws: bool,
+        websocket: WebSocket | None = None,
     ) -> None:
         """Canonical node disconnect path for ws close, heartbeat, and send failure."""
         node = self._registry.get_node(node_id)
+        if websocket is not None and (node is None or node.websocket is not websocket):
+            logger.debug("Ignoring stale disconnect for node: %s", node_id)
+            return
         if node is not None and close_ws:
             try:
                 await node.websocket.close(code=1011, reason=reason)
             except Exception as e:
                 logger.debug(f"Failed to close node {node_id} websocket: {e}")
 
-        await self._registry.unregister(node_id)
+        removed = await self._registry.unregister(node_id, websocket=websocket)
+        if not removed:
+            return
         await self.broadcast_to_dashboards(
             {"type": "node_disconnected", "node_id": node_id, "reason": reason}
         )
@@ -588,13 +644,14 @@ class WebSocketHub:
         async def _check_loop() -> None:
             while True:
                 await asyncio.sleep(30)
-                stale_ids = await self._registry.check_stale()
-                for node_id in stale_ids:
+                stale_nodes = await self._registry.check_stale_connections()
+                for node in stale_nodes:
                     await self._disconnect_node(
-                        node_id,
+                        node.node_id,
                         reason="heartbeat_timeout",
                         error="node disconnected (heartbeat timeout)",
                         close_ws=False,
+                        websocket=node.websocket,
                     )
 
         self._heartbeat_task = asyncio.create_task(_check_loop())
@@ -603,8 +660,12 @@ class WebSocketHub:
         """Graceful shutdown: cancel pending timeouts, close all connections."""
         # Cancel pending timeout tasks first; await for graceful unwind to avoid
         # RuntimeWarning: "coroutine was never awaited" on event-loop teardown.
-        pending_tasks = [pending.timeout_task for pending in self._pending_commands.values()]
-        pending_tasks += [pending.timeout_task for pending in self._pending_deploys.values()]
+        pending_tasks = [
+            pending.timeout_task for pending in self._pending_commands.values()
+        ]
+        pending_tasks += [
+            pending.timeout_task for pending in self._pending_deploys.values()
+        ]
         for t in pending_tasks:
             t.cancel()
         if pending_tasks:

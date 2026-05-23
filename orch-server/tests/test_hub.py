@@ -4,20 +4,20 @@ import asyncio
 import contextlib
 import json
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
+from starlette.websockets import WebSocketDisconnect
 
 from haniel_orch.event_store import EventStore
 from haniel_orch.hub import WebSocketHub
-from haniel_orch.node_registry import ConnectedNode, NodeRegistry
+from haniel_orch.node_registry import NodeRegistry
 from haniel_orch.protocol import (
     ChangeNotification,
     DeployApproval,
     DeployResult,
     DeployStatus,
     NodeHello,
-    NodeStatus,
 )
 
 
@@ -138,6 +138,65 @@ class TestSendToNode:
         } in sent
 
 
+class TestReconnectReplacement:
+    async def test_reconnect_closes_replaced_socket(
+        self, hub: WebSocketHub, registry: NodeRegistry
+    ):
+        old_ws = AsyncMock()
+        hello = NodeHello(
+            node_id="n1",
+            token="test-token",
+            hostname="h",
+            os="Linux",
+            arch="x86_64",
+            haniel_version="0.1.0",
+        )
+        await registry.register(old_ws, hello)
+
+        new_ws = AsyncMock()
+        new_ws.receive_text.side_effect = [
+            hello.model_dump_json(),
+            WebSocketDisconnect(code=1000),
+        ]
+
+        await hub.handle_node_ws(new_ws)
+
+        old_ws.close.assert_awaited_once_with(code=4000, reason="node reconnected")
+
+    async def test_stale_disconnect_does_not_remove_reconnected_node(
+        self, hub: WebSocketHub, registry: NodeRegistry, store: EventStore
+    ):
+        old_ws = AsyncMock()
+        new_ws = AsyncMock()
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        hello = NodeHello(
+            node_id="n1",
+            token="t",
+            hostname="h",
+            os="Linux",
+            arch="x86_64",
+            haniel_version="0.1.0",
+        )
+        await registry.register(old_ws, hello)
+        await registry.register(new_ws, hello)
+
+        await hub._disconnect_node(
+            "n1",
+            reason="ws_closed",
+            error="node disconnected",
+            close_ws=False,
+            websocket=old_ws,
+        )
+
+        node = registry.get_node("n1")
+        assert node is not None
+        assert node.websocket is new_ws
+        ws_dash.send_text.assert_not_called()
+        nodes = await store.get_nodes()
+        assert nodes[0]["connected"] == 1
+
+
 class TestHandleChangeNotification:
     async def test_stores_and_broadcasts(self, hub: WebSocketHub, store: EventStore):
         ws_dash = AsyncMock()
@@ -186,8 +245,13 @@ class TestHandleChangeNotificationSupersede:
         branch: str = "main",
     ) -> None:
         await store.create_deploy_event(
-            deploy_id=deploy_id, node_id=node_id, repo=repo, branch=branch,
-            commits=["h msg"], affected_services=[], diff_stat=None,
+            deploy_id=deploy_id,
+            node_id=node_id,
+            repo=repo,
+            branch=branch,
+            commits=["h msg"],
+            affected_services=[],
+            diff_stat=None,
             detected_at="2026-01-01T00:00:00Z",
         )
 
@@ -199,8 +263,13 @@ class TestHandleChangeNotificationSupersede:
         branch: str = "main",
     ) -> ChangeNotification:
         return ChangeNotification(
-            deploy_id=deploy_id, node_id=node_id, repo=repo, branch=branch,
-            commits=["hN msgN"], affected_services=[], diff_stat=None,
+            deploy_id=deploy_id,
+            node_id=node_id,
+            repo=repo,
+            branch=branch,
+            commits=["hN msgN"],
+            affected_services=[],
+            diff_stat=None,
             detected_at="2026-05-19T00:00:00Z",
         )
 
@@ -219,15 +288,11 @@ class TestHandleChangeNotificationSupersede:
         assert ev_old["reject_reason"] == "superseded by d_new"
         assert ev_new["status"] == "pending"
 
-    async def test_does_not_touch_deploying(
-        self, hub: WebSocketHub, store: EventStore
-    ):
+    async def test_does_not_touch_deploying(self, hub: WebSocketHub, store: EventStore):
         """d_running DEPLOYING + d_new change_notification → d_running 그대로
         (이미 실행 중인 작업은 보호)."""
         await self._seed_pending(store, "d_running")
-        await store.update_deploy_status(
-            "d_running", DeployStatus.DEPLOYING
-        )
+        await store.update_deploy_status("d_running", DeployStatus.DEPLOYING)
 
         await hub._handle_change_notification(self._notification("d_new"))
 
@@ -237,9 +302,7 @@ class TestHandleChangeNotificationSupersede:
         assert ev_running["reject_reason"] is None
         assert ev_new["status"] == "pending"
 
-    async def test_other_branch_untouched(
-        self, hub: WebSocketHub, store: EventStore
-    ):
+    async def test_other_branch_untouched(self, hub: WebSocketHub, store: EventStore):
         """다른 branch의 PENDING은 영향 없음."""
         await self._seed_pending(store, "d_dev", branch="dev")
 
@@ -265,9 +328,9 @@ class TestHandleChangeNotificationSupersede:
 
         sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
         rejected = [
-            p for p in sent
-            if p.get("type") == "status_change"
-            and p.get("status") == "rejected"
+            p
+            for p in sent
+            if p.get("type") == "status_change" and p.get("status") == "rejected"
         ]
         assert len(rejected) == 1
         assert rejected[0]["deploy_id"] == "d_old"
@@ -431,13 +494,20 @@ class TestPushIntegration:
         hub = WebSocketHub(registry, store, token="t", push_service=push)
 
         await store.create_deploy_event(
-            deploy_id="d1", node_id="n1", repo="r", branch="main",
-            commits=["h msg"], affected_services=[], diff_stat=None,
+            deploy_id="d1",
+            node_id="n1",
+            repo="r",
+            branch="main",
+            commits=["h msg"],
+            affected_services=[],
+            diff_stat=None,
             detected_at="2026-01-01T00:00:00Z",
         )
         await store.update_deploy_status("d1", DeployStatus.DEPLOYING)
 
-        result = DeployResult(deploy_id="d1", node_id="n1", status="success", duration_ms=5000)
+        result = DeployResult(
+            deploy_id="d1", node_id="n1", status="success", duration_ms=5000
+        )
         await hub._handle_deploy_result(result)
         await asyncio.sleep(0.05)
 
@@ -453,13 +523,20 @@ class TestPushIntegration:
         hub = WebSocketHub(registry, store, token="t", push_service=push)
 
         await store.create_deploy_event(
-            deploy_id="d2", node_id="n1", repo="r", branch="main",
-            commits=["h msg"], affected_services=[], diff_stat=None,
+            deploy_id="d2",
+            node_id="n1",
+            repo="r",
+            branch="main",
+            commits=["h msg"],
+            affected_services=[],
+            diff_stat=None,
             detected_at="2026-01-01T00:00:00Z",
         )
         await store.update_deploy_status("d2", DeployStatus.DEPLOYING)
 
-        result = DeployResult(deploy_id="d2", node_id="n1", status="failed", error="exit 1")
+        result = DeployResult(
+            deploy_id="d2", node_id="n1", status="failed", error="exit 1"
+        )
         await hub._handle_deploy_result(result)
         await asyncio.sleep(0.05)
 
@@ -494,7 +571,9 @@ class TestPushIntegration:
         # Dashboard broadcast should succeed even if push fails
         ws_dash.send_text.assert_called_once()
 
-    async def test_null_push_service_is_noop(self, hub: WebSocketHub, store: EventStore):
+    async def test_null_push_service_is_noop(
+        self, hub: WebSocketHub, store: EventStore
+    ):
         """Default hub (no push_service arg) uses NullPushService — no errors."""
         # hub fixture has push_service=None → auto-injected NullPushService
         notification = ChangeNotification(
@@ -518,8 +597,13 @@ class TestDeployTimeout:
         self, store: EventStore, deploy_id: str, node_id: str = "n1"
     ) -> None:
         await store.create_deploy_event(
-            deploy_id=deploy_id, node_id=node_id, repo="r", branch="main",
-            commits=["h msg"], affected_services=[], diff_stat=None,
+            deploy_id=deploy_id,
+            node_id=node_id,
+            repo="r",
+            branch="main",
+            commits=["h msg"],
+            affected_services=[],
+            diff_stat=None,
             detected_at="2026-01-01T00:00:00Z",
         )
         await store.update_deploy_status(deploy_id, DeployStatus.DEPLOYING)
@@ -534,7 +618,8 @@ class TestDeployTimeout:
 
         sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
         timeouts = [
-            p for p in sent
+            p
+            for p in sent
             if p.get("type") == "status_change" and p.get("status") == "failed"
         ]
         assert len(timeouts) == 1
@@ -554,7 +639,10 @@ class TestDeployTimeout:
         timeout_task = hub._pending_deploys["d1"].timeout_task
 
         result = DeployResult(
-            deploy_id="d1", node_id="n1", status="success", duration_ms=500,
+            deploy_id="d1",
+            node_id="n1",
+            status="success",
+            duration_ms=500,
         )
         await hub._handle_deploy_result(result)
 
@@ -591,7 +679,8 @@ class TestDeployTimeout:
         assert "d_b" in hub._pending_deploys
         sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
         failed = [
-            p for p in sent
+            p
+            for p in sent
             if p.get("type") == "status_change" and p.get("status") == "failed"
         ]
         assert failed == []
@@ -625,7 +714,8 @@ class TestDeployTimeout:
         assert ev["error"] == "node disconnected"
         sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
         failed = [
-            p for p in sent
+            p
+            for p in sent
             if p.get("type") == "status_change" and p.get("status") == "failed"
         ]
         assert len(failed) == 1 and failed[0]["deploy_id"] == "d_orphan"
@@ -639,8 +729,12 @@ class TestDeployTimeout:
 
         ws = AsyncMock()
         hello = NodeHello(
-            node_id="n1", token="t", hostname="h",
-            os="Linux", arch="x86_64", haniel_version="0.1.0",
+            node_id="n1",
+            token="t",
+            hostname="h",
+            os="Linux",
+            arch="x86_64",
+            haniel_version="0.1.0",
         )
         await registry.register(ws, hello)
         await self._seed_deploying(store, "d1", node_id="n1")
@@ -680,8 +774,13 @@ class TestSupersedePending:
         branch: str = "main",
     ) -> None:
         await store.create_deploy_event(
-            deploy_id=deploy_id, node_id=node_id, repo=repo, branch=branch,
-            commits=["h"], affected_services=[], diff_stat=None,
+            deploy_id=deploy_id,
+            node_id=node_id,
+            repo=repo,
+            branch=branch,
+            commits=["h"],
+            affected_services=[],
+            diff_stat=None,
             detected_at="2026-01-01T00:00:00Z",
         )
 
@@ -706,7 +805,8 @@ class TestSupersedePending:
 
         sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
         rejected = [
-            p for p in sent
+            p
+            for p in sent
             if p.get("type") == "status_change" and p.get("status") == "rejected"
         ]
         assert {p["deploy_id"] for p in rejected} == {"d1", "d2"}
