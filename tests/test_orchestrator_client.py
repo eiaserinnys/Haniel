@@ -34,6 +34,34 @@ class TestOrchestratorClientInit:
         assert client._config is config
         assert client._haniel_version == "0.1.0"
 
+    def test_node_hello_uses_configured_hostname(self):
+        cfg = OrchestratorClientConfig(
+            url="ws://localhost:9300/ws/node",
+            token="test-token",
+            node_id="test-node-1",
+            hostname="eias-linegames",
+        )
+        client = OrchestratorClient(cfg, haniel_version="0.1.0")
+
+        with patch(
+            "haniel.integrations.orchestrator_client.platform.node",
+            return_value="AD02028236",
+        ):
+            hello = client._build_node_hello()
+
+        assert hello["hostname"] == "eias-linegames"
+
+    def test_node_hello_falls_back_to_os_hostname(self, config):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+
+        with patch(
+            "haniel.integrations.orchestrator_client.platform.node",
+            return_value="AD02028236",
+        ):
+            hello = client._build_node_hello()
+
+        assert hello["hostname"] == "AD02028236"
+
 
 class TestNotifyChange:
     def test_noop_when_not_connected(self, config):

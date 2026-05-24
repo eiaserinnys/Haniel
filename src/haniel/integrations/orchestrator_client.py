@@ -122,6 +122,19 @@ class OrchestratorClient:
         except Exception as e:
             logger.debug(f"Failed to queue change notification: {e}")
 
+    def _build_node_hello(self) -> dict:
+        """Build the NodeHello payload sent after connecting."""
+        return {
+            "type": "node_hello",
+            "node_id": self._config.node_id,
+            "token": self._config.token,
+            "hostname": self._config.hostname or platform.node(),
+            "os": platform.system(),
+            "arch": platform.machine(),
+            "haniel_version": self._haniel_version,
+            "services": self._get_services_info() if self._get_services_info else None,
+        }
+
     def enqueue_deploy_result(
         self,
         deploy_id: str,
@@ -224,19 +237,7 @@ class OrchestratorClient:
             self._ws = ws
 
             # Send NodeHello
-            hello = {
-                "type": "node_hello",
-                "node_id": self._config.node_id,
-                "token": self._config.token,
-                "hostname": platform.node(),
-                "os": platform.system(),
-                "arch": platform.machine(),
-                "haniel_version": self._haniel_version,
-                "services": self._get_services_info()
-                if self._get_services_info
-                else None,
-            }
-            await self._send_json(hello)
+            await self._send_json(self._build_node_hello())
 
             self._connected = True
             self._reset_backoff()

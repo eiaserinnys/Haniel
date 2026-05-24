@@ -296,6 +296,10 @@ class OrchestratorClientConfig(BaseModel):
         description="Authentication token — shared secret with OrchestratorConfig.token",
     )
     node_id: str = Field(..., description="This node's identifier")
+    hostname: str | None = Field(
+        default=None,
+        description="Hostname reported to the orchestrator. Defaults to the OS hostname.",
+    )
     reconnect_base: float = Field(
         default=1.0, description="Base reconnect delay in seconds"
     )

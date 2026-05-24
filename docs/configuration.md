@@ -35,6 +35,7 @@ This is enough to run haniel with self-update only. See [`haniel.yaml.example`](
 | `repos` | map | `{}` | Git repositories to track |
 | `services` | map | `{}` | Processes to manage |
 | `self` | object | — | Self-update mechanism |
+| `orchestrator_client` | object | — | Remote orchestrator node connection |
 | `install` | object | — | Installation phase (used only by `haniel install`) |
 
 ## `shutdown`
@@ -256,7 +257,32 @@ When changes are detected:
 - `auto_update: true` — Shuts down all services and exits with code 10
 - `auto_update: false` — Sends webhook notification, waits for `haniel_approve_update()` MCP tool call or dashboard approval
 
-The wrapper script (`haniel-runner.ps1`) interprets exit code 10 as "update me," runs `git pull` + `pip install`, and relaunches. See [ADR-0002](adr/0002-self-update-architecture.md).
+The wrapper script (`haniel-runner.ps1` on Windows, `haniel-runner.sh` on Linux) interprets exit code 10 as "update me," runs `git pull` + `pip install`, and relaunches. See [ADR-0002](adr/0002-self-update-architecture.md).
+
+## `orchestrator_client`
+
+Connects this node to a remote Haniel orchestrator.
+
+```yaml
+orchestrator_client:
+  enabled: true
+  url: wss://haniel.example.com/ws/node
+  token: secret
+  node_id: eias-linegames-wsl
+  hostname: eias-linegames-wsl
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Whether to connect to the orchestrator |
+| `url` | string | *required* | Orchestrator WebSocket URL |
+| `token` | string | *required* | Authentication token shared with the orchestrator |
+| `node_id` | string | *required* | Stable node identifier used in deploy IDs |
+| `hostname` | string | OS hostname | Hostname reported to the orchestrator. Set this when multiple Haniel nodes share the same physical machine |
+| `reconnect_base` | float | `1.0` | Initial reconnect delay in seconds |
+| `reconnect_max` | float | `60.0` | Maximum reconnect delay in seconds |
+| `ping_interval` | float | `10.0` | WebSocket ping interval in seconds |
+| `ping_timeout` | float | `10.0` | WebSocket ping timeout in seconds |
 
 ## `install`
 

@@ -297,6 +297,16 @@ class TestOrchestratorClientConfig:
         assert cfg.url == "wss://orch.example.com/ws/node"
         assert cfg.token == "secret"
         assert cfg.node_id == "node-1"
+        assert cfg.hostname is None
+
+    def test_hostname_override(self):
+        cfg = OrchestratorClientConfig(
+            url="wss://orch.example.com/ws/node",
+            token="secret",
+            node_id="node-1",
+            hostname="eias-linegames",
+        )
+        assert cfg.hostname == "eias-linegames"
 
     def test_defaults(self):
         cfg = OrchestratorClientConfig(
