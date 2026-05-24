@@ -153,6 +153,7 @@ class TestRunnerSelfUpdate:
         runner._stop_event = threading.Event()
         runner._self_update_requested = threading.Event()
         runner._last_self_update_result = None
+        runner._last_pending_hash = {}
         runner._pending_restarts = {}
         runner._enabled_services = config.services
         runner._repo_states = {
@@ -214,6 +215,24 @@ class TestRunnerSelfUpdate:
         assert runner.self_update_requested is True
         runner.process_manager.is_running.assert_called_with("web")
         assert "approved" in result.lower()
+
+    def test_approve_self_update_clears_pending_state_before_restart(self):
+        """Approval should clear visible pending state before wrapper restart."""
+        config = self._make_config()
+        runner = self._make_runner(config)
+        runner._state.self_update_pending = True
+        runner._repo_states["haniel"].pending_changes = {
+            "commits": ["abc123 fix: update haniel"],
+            "stat": "1 file changed",
+        }
+        runner._last_pending_hash["haniel"] = "stale"
+
+        result = runner.approve_self_update()
+
+        assert "approved" in result.lower()
+        assert runner._state.self_update_pending is False
+        assert runner._repo_states["haniel"].pending_changes is None
+        assert "haniel" not in runner._last_pending_hash
 
     def test_approve_self_update_clears_slack_pending_button(self):
         """Approving a self-update should replace the Slack pending DM."""
@@ -516,3 +535,17 @@ class TestWrapperModeInstaller:
             assert "CONFIG=haniel.yaml" in content
             assert "WEBHOOK_URL=https://hooks.example.com/test" in content
             assert "MAX_GIT_FAILURES=3" in content
+
+    def test_runner_script_writes_marker_only_after_self_update_exit(self):
+        """Wrapper result marker should not be rewritten on ordinary restarts."""
+        script_path = Path(__file__).resolve().parents[1] / "haniel-runner.ps1"
+        script = script_path.read_text(encoding="utf-8-sig")
+
+        marker_write = script.index("Write-SelfUpdateMarker -Ok $updateOk")
+        guard = script.rfind("if ($writeSelfUpdateMarker)", 0, marker_write)
+        assert guard != -1
+
+        self_update_branch = script.index("elseif ($exitCode -eq $EXIT_SELF_UPDATE)")
+        restart_branch = script.index("elseif ($exitCode -eq $EXIT_RESTART)")
+        flag_set = script.index("$writeSelfUpdateMarker = $true", self_update_branch)
+        assert flag_set < restart_branch

@@ -618,6 +618,51 @@ services: {}
     slack_bot.notify_pending.assert_called_once_with("haniel", pending)
 
 
+def test_detect_changes_skips_self_repo_after_update_requested(tmp_path: Path):
+    """In-flight self-update must not re-announce the same pending change."""
+    from haniel.config.model import load_config
+    from haniel.core.runner import ServiceRunner
+
+    yaml_content = """\
+poll_interval: 60
+repos:
+  haniel:
+    url: https://github.com/eiaserinnys/Haniel.git
+    branch: main
+    path: ./haniel-src
+self:
+  repo: haniel
+  auto_update: false
+services: {}
+"""
+    config_file = tmp_path / "haniel.yaml"
+    config_file.write_text(yaml_content)
+    (tmp_path / "haniel-src").mkdir()
+
+    slack_bot = MagicMock()
+    pending = {"commits": ["abc fix"], "stat": ""}
+
+    with (
+        patch("haniel.core.runner.fetch_repo") as fetch_repo,
+        patch("haniel.core.runner.get_head", return_value="CURRENT_HEAD"),
+        patch("haniel.core.runner.get_pending_changes", return_value=pending),
+    ):
+        runner = ServiceRunner(load_config(config_file), config_dir=tmp_path)
+        runner._repo_states["haniel"].last_head = "OLD_HEAD"
+        runner._repo_states["haniel"].pending_changes = pending
+        runner._last_pending_hash["haniel"] = "stale"
+        runner._slack_bot = slack_bot
+        runner._self_update_requested.set()
+
+        changed = runner._detect_changes()
+
+    assert changed == []
+    fetch_repo.assert_not_called()
+    slack_bot.notify_pending.assert_not_called()
+    assert runner._repo_states["haniel"].pending_changes is None
+    assert "haniel" not in runner._last_pending_hash
+
+
 def test_trigger_pull_self_repo_signals_restart(tmp_path: Path):
     """trigger_pull for self-repo signals self-update restart after pull."""
     from haniel.config.model import load_config

@@ -1,7 +1,8 @@
 """Self-update result marker (read/write/consume). See ADR-0002.
 
-Written by haniel-runner.ps1 after Update-HanielRepo, consumed by
-the new runner on start() and exposed via /api/status + WS broadcast.
+Written by haniel-runner.ps1 after an approved self-update loop finishes
+Update-HanielRepo, then consumed by the new runner on start() and exposed
+via /api/status + WS broadcast.
 """
 
 from __future__ import annotations

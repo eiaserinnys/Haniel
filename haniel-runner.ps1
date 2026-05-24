@@ -240,6 +240,7 @@ if (-not (Test-Path $RepoPath)) {
 $EXIT_SELF_UPDATE = 10
 $EXIT_RESTART = 11
 $skipUpdate = $false
+$writeSelfUpdateMarker = $false
 
 while ($true) {
     if (-not $skipUpdate) {
@@ -251,7 +252,10 @@ while ($true) {
         Update-HanielRepo | Out-Null
         $script:LastUpdateFinishedAt = (Get-Date).ToString('o')
         $updateOk = ($null -eq $script:LastUpdateError)
-        Write-SelfUpdateMarker -Ok $updateOk
+        if ($writeSelfUpdateMarker) {
+            Write-SelfUpdateMarker -Ok $updateOk
+        }
+        $writeSelfUpdateMarker = $false
     }
     $skipUpdate = $false
 
@@ -270,6 +274,7 @@ while ($true) {
         # Self-update approved — loop again to fetch + reinstall + restart
         Write-Host "[haniel-runner] Self-update requested. Looping..."
         Send-Webhook "Self-update initiated. Updating and restarting..." "info"
+        $writeSelfUpdateMarker = $true
         Start-Sleep -Seconds 5
     }
     elseif ($exitCode -eq $EXIT_RESTART) {

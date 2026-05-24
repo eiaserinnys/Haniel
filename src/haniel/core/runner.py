@@ -1112,6 +1112,7 @@ class ServiceRunner:
                 self._prepare_self_update_shutdown()
                 self._notify_self_update_approved()
                 self._self_update_requested.set()
+                self._clear_self_update_pending_state()
                 self.stop()
                 return
 
@@ -1155,6 +1156,24 @@ class ServiceRunner:
                     logger.info(f"Repo {name} at HEAD: {state.last_head[:8]}")
                 except GitError as e:
                     logger.warning(f"Failed to get HEAD for {name}: {e}")
+
+    def _clear_self_update_pending_state(self) -> None:
+        """Clear user-visible self-update pending state.
+
+        After approval the wrapper owns the update. The old process can still
+        live long enough to run another poll cycle, so pending UI/Slack state
+        must be cleared before the process actually exits.
+        """
+        with self._state_lock:
+            self._state.self_update_pending = False
+
+        if self._self_repo is None:
+            return
+
+        state = self._repo_states.get(self._self_repo)
+        if state is not None:
+            state.pending_changes = None
+        self._last_pending_hash.pop(self._self_repo, None)
 
     def _apply_startup_updates(self) -> None:
         """Fetch and pull all repos that have pending remote changes.
@@ -1275,6 +1294,10 @@ class ServiceRunner:
 
         for name, state in self._repo_states.items():
             repo_path = self.config_dir / state.config.path
+
+            if name == self._self_repo and self._self_update_requested.is_set():
+                self._clear_self_update_pending_state()
+                continue
 
             if not repo_path.exists():
                 logger.warning(f"Repo {name} path does not exist: {repo_path}")
@@ -1501,6 +1524,7 @@ class ServiceRunner:
             slack_bot.notify_pulling(self._self_repo, auto=False)
         self._notify_self_update_approved()
         self._self_update_requested.set()
+        self._clear_self_update_pending_state()
         # Notify dashboard that the update work is now starting (server about
         # to shut down). This is the canonical signal for the dashboard's
         # 'Updating…' overlay — the API response alone is insufficient.
