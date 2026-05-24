@@ -303,6 +303,31 @@ class TestProcessManager:
         assert result is True
         assert not process_manager.is_running("test")
 
+    def test_stop_process_does_not_report_intentional_stop_as_crash(
+        self, process_manager: ProcessManager, tmp_path: Path
+    ):
+        """Intentional stops should not invoke crash handling."""
+        config = ServiceConfig(
+            run=f'{sys.executable} -c "import time; time.sleep(60)"',
+        )
+        crash_codes: list[int | None] = []
+
+        process_manager.start_service(
+            "test",
+            config,
+            on_crash=crash_codes.append,
+        )
+        assert process_manager.is_running("test")
+
+        result = process_manager.stop_service("test", timeout=2)
+        time.sleep(0.2)
+
+        health = process_manager.health_manager.get_health("test")
+        assert result is True
+        assert crash_codes == []
+        assert health.restart_count == 0
+        assert health.state == ServiceState.STOPPED
+
     def test_ready_condition_delay(self, process_manager: ProcessManager):
         """Should wait for delay condition."""
         config = ServiceConfig(

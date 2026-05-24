@@ -86,6 +86,10 @@ class ServiceHealth:
         self.state = ServiceState.STOPPED
         self.start_time = None
 
+    def record_stopping(self) -> None:
+        """Record that the service is intentionally stopping."""
+        self.state = ServiceState.STOPPING
+
     def record_crash(self, exit_code: int | None, reason: str = "") -> None:
         """Record that the service crashed.
 
@@ -249,6 +253,13 @@ class HealthManager:
         health = self.get_health(service_name)
         old_state = health.state
         health.record_stop()
+        self._notify_state_change(service_name, old_state, health.state)
+
+    def record_stopping(self, service_name: str) -> None:
+        """Record that a service is being intentionally stopped."""
+        health = self.get_health(service_name)
+        old_state = health.state
+        health.record_stopping()
         self._notify_state_change(service_name, old_state, health.state)
 
     def record_crash(

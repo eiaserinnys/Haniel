@@ -85,6 +85,7 @@ class ManagedProcess:
     stdout_reader: StreamReader | None = None
     stderr_reader: StreamReader | None = None
     ready_event: threading.Event | None = None
+    intentional_stop: bool = False
     _ready_callback_added: bool = False
 
 
@@ -307,6 +308,9 @@ class ProcessManager:
             # Already stopped
             self._cleanup_managed(managed)
             return True
+
+        managed.intentional_stop = True
+        self.health_manager.record_stopping(name)
 
         config = managed.config
         shutdown_timeout = timeout
@@ -686,8 +690,8 @@ class ProcessManager:
 
         # Check if this was a graceful stop
         health = self.health_manager.get_health(managed.name)
-        if health.state == ServiceState.STOPPING:
-            # Graceful stop, not a crash
+        if managed.intentional_stop or health.state == ServiceState.STOPPING:
+            # Intentional stop, not a crash
             return
 
         # This is a crash

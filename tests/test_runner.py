@@ -941,6 +941,78 @@ class TestServiceRunnerPollCycle:
         mock_start.assert_called_once_with("test-service")
 
     @patch("haniel.core.runner.ServiceRunner._start_service")
+    def test_trigger_pull_blocks_restart_until_post_pull_finishes(
+        self,
+        mock_start,
+        runner_with_mock_repo,
+    ):
+        """Pull owns restart timing even when a stale restart matures mid-hook."""
+        runner = runner_with_mock_repo
+        runner._repo_states["test-repo"].pending_changes = {"commits": ["a"]}
+        running = {"test-service": True}
+
+        def is_running(name: str) -> bool:
+            return running[name]
+
+        def stop_service(name: str) -> bool:
+            running[name] = False
+            with runner._restart_lock:
+                runner._pending_restarts[name] = time.time() - 1
+            return True
+
+        def execute_hook(name: str, hook: str) -> bool:
+            if hook == "post_pull":
+                runner._process_pending_restarts()
+                assert mock_start.call_count == 0
+            return True
+
+        runner.process_manager.is_running = MagicMock(side_effect=is_running)
+        runner.process_manager.stop_service = MagicMock(side_effect=stop_service)
+        runner.execute_hook = MagicMock(side_effect=execute_hook)
+        mock_start.return_value = True
+
+        with patch.object(runner, "_pull_repo", return_value=(True, [])):
+            runner.trigger_pull("test-repo")
+
+        with runner._restart_lock:
+            assert "test-service" not in runner._pending_restarts
+        mock_start.assert_called_once_with("test-service")
+
+    @patch("haniel.core.runner.ServiceRunner._start_service")
+    def test_trigger_pull_replaces_service_that_started_before_post_pull_restart(
+        self,
+        mock_start,
+        runner_with_mock_repo,
+    ):
+        """A raced old process must be stopped before starting the new artifact."""
+        runner = runner_with_mock_repo
+        runner._repo_states["test-repo"].pending_changes = {"commits": ["a"]}
+        running = {"test-service": True}
+
+        def is_running(name: str) -> bool:
+            return running[name]
+
+        def stop_service(name: str) -> bool:
+            running[name] = False
+            return True
+
+        def execute_hook(name: str, hook: str) -> bool:
+            if hook == "post_pull":
+                running[name] = True
+            return True
+
+        runner.process_manager.is_running = MagicMock(side_effect=is_running)
+        runner.process_manager.stop_service = MagicMock(side_effect=stop_service)
+        runner.execute_hook = MagicMock(side_effect=execute_hook)
+        mock_start.return_value = True
+
+        with patch.object(runner, "_pull_repo", return_value=(True, [])):
+            runner.trigger_pull("test-repo")
+
+        assert runner.process_manager.stop_service.call_count == 2
+        mock_start.assert_called_once_with("test-service")
+
+    @patch("haniel.core.runner.ServiceRunner._start_service")
     def test_process_pending_restarts(self, mock_start, tmp_path: Path):
         """Test processing pending restarts."""
         config = HanielConfig(

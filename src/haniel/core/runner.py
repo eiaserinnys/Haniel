@@ -38,7 +38,7 @@ from .git import (
     get_remote_head,
     pull_repo,
 )
-from .health import HealthManager
+from .health import HealthManager, ServiceState
 from .process import ProcessManager
 from .self_update_marker import (
     SelfUpdateResult,
@@ -305,6 +305,7 @@ class ServiceRunner:
 
         # Restart scheduling
         self._pending_restarts: dict[str, float] = {}  # service -> restart_time
+        self._restart_suppressed: set[str] = set()
         self._restart_lock = threading.Lock()
 
         # MCP server (lazy initialized)
@@ -572,6 +573,10 @@ class ServiceRunner:
         """
         logger.warning(f"Service {name} crashed with exit code {exit_code}")
 
+        if self.health_manager.get_health(name).state == ServiceState.STOPPING:
+            logger.info("Skipping restart schedule for intentionally stopping %s", name)
+            return
+
         # record_crash returns the delay and handles circuit breaker atomically
         # Note: The crash is already recorded by ProcessManager's crash monitor,
         # so we just need to check if we should restart
@@ -607,6 +612,25 @@ class ServiceRunner:
 
         logger.info("Cancelled pending restart for %s", name)
         return True
+
+    def _suppress_pending_restarts(self, names: list[str]) -> None:
+        """Prevent scheduled restarts from racing a pull-owned restart."""
+        if not names:
+            return
+
+        with self._restart_lock:
+            for name in names:
+                self._pending_restarts.pop(name, None)
+            self._restart_suppressed.update(names)
+
+    def _release_restart_suppression(self, names: list[str]) -> None:
+        """Allow scheduled restarts again after pull restart ownership ends."""
+        if not names:
+            return
+
+        with self._restart_lock:
+            for name in names:
+                self._restart_suppressed.discard(name)
 
     def stop_services(self) -> bool:
         """Stop all services in reverse dependency order."""
@@ -1043,24 +1067,44 @@ class ServiceRunner:
                 self._slack_bot.notify_pulling(repo_name, auto=auto)
 
             affected = self.get_affected_services(repo_name)
-            shutdown_order = [s for s in self.get_shutdown_order() if s in affected]
-            for svc in shutdown_order:
-                self._cancel_pending_restart(svc)
-                if self.process_manager.is_running(svc):
-                    logger.info("Stopping %s for pull", svc)
-                    self.process_manager.stop_service(svc)
+            self._suppress_pending_restarts(affected)
+            try:
+                shutdown_order = [s for s in self.get_shutdown_order() if s in affected]
+                for svc in shutdown_order:
+                    self._cancel_pending_restart(svc)
+                    if self.process_manager.is_running(svc):
+                        logger.info("Stopping %s for pull", svc)
+                        if not self.process_manager.stop_service(svc):
+                            raise RuntimeError(f"failed to stop {svc} before pull")
+                    self._cancel_pending_restart(svc)
 
-            success, discarded = self._pull_repo(repo_name)
-            if not success:
-                raise RuntimeError(f"git pull failed for {repo_name}")
+                success, discarded = self._pull_repo(repo_name)
+                if not success:
+                    raise RuntimeError(f"git pull failed for {repo_name}")
 
-            for svc in affected:
-                self.execute_hook(svc, "post_pull")
+                for svc in affected:
+                    self.execute_hook(svc, "post_pull")
 
-            startup_order = [s for s in self.get_startup_order() if s in affected]
-            for svc in startup_order:
-                logger.info("Restarting %s after pull", svc)
-                self._start_service(svc)
+                startup_order = [s for s in self.get_startup_order() if s in affected]
+                for svc in startup_order:
+                    self._cancel_pending_restart(svc)
+                    if self.process_manager.is_running(svc):
+                        logger.warning(
+                            "%s is already running before post-pull restart; "
+                            "stopping it so the new artifacts are started",
+                            svc,
+                        )
+                        if not self.process_manager.stop_service(svc):
+                            raise RuntimeError(
+                                f"failed to stop already-running {svc} after pull"
+                            )
+                        self._cancel_pending_restart(svc)
+
+                    logger.info("Restarting %s after pull", svc)
+                    if not self._start_service(svc):
+                        raise RuntimeError(f"failed to restart {svc} after pull")
+            finally:
+                self._release_restart_suppression(affected)
 
             if self._self_repo and repo_name == self._self_repo:
                 # Self-update: signal wrapper to restart Haniel with new code.
@@ -1616,7 +1660,7 @@ class ServiceRunner:
             ready = [
                 name
                 for name, restart_time in self._pending_restarts.items()
-                if restart_time <= now
+                if restart_time <= now and name not in self._restart_suppressed
             ]
 
             for name in ready:
