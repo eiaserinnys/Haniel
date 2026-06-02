@@ -104,22 +104,156 @@ class WindowsHandler(PlatformHandler):
         finally:
             sock.close()
 
+    def get_listening_pids(self, port: int) -> set[int]:
+        """Return PIDs listening on a TCP port."""
+        pids = self._get_listening_pids_from_netstat(port)
+        if pids:
+            return pids
+
+        script = f"""
+$listeners = @(Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
+$listeners | ForEach-Object {{ Write-Output $_ }}
+"""
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", script],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return set()
+
+        pids: set[int] = set()
+        for line in result.stdout.splitlines():
+            try:
+                pids.add(int(line.strip()))
+            except ValueError:
+                pass
+        return pids
+
+    @staticmethod
+    def _get_listening_pids_from_netstat(port: int) -> set[int]:
+        try:
+            result = subprocess.run(
+                ["netstat", "-ano", "-p", "tcp"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return set()
+
+        pids: set[int] = set()
+        target_port = str(port)
+        for line in result.stdout.splitlines():
+            columns = line.split()
+            if len(columns) < 5 or columns[0].upper() != "TCP":
+                continue
+            local_address = columns[1]
+            state = columns[3].upper()
+            pid = columns[4]
+            if state != "LISTENING":
+                continue
+            if local_address.rsplit(":", 1)[-1] != target_port:
+                continue
+            try:
+                pids.add(int(pid))
+            except ValueError:
+                pass
+        return pids
+
+    def get_process_command_line(self, pid: int) -> str | None:
+        """Return a process command line using CIM."""
+        script = (
+            f"$proc = Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\" "
+            "-ErrorAction SilentlyContinue; "
+            "if ($null -ne $proc) { Write-Output $proc.CommandLine }"
+        )
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", script],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+        command = result.stdout.strip()
+        return command or None
+
+    def is_pid_running(self, pid: int) -> bool:
+        """Return True when a PID exists."""
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", f"Get-Process -Id {pid} -ErrorAction SilentlyContinue"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+        return result.returncode == 0 and bool(result.stdout.strip())
+
+    def terminate_pid(self, pid: int) -> None:
+        """Ask a process tree to terminate without force."""
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    def kill_pid(self, pid: int) -> None:
+        """Forcefully terminate a process tree."""
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+
     def is_port_owned_by_process_tree(self, port: int, root_pid: int) -> bool:
         """Check whether a LISTEN port is owned by root_pid or its descendants."""
+        listener_pids = self.get_listening_pids(port)
+        if not listener_pids:
+            return False
+
+        return any(
+            self._is_descendant_pid(listener_pid, root_pid)
+            for listener_pid in listener_pids
+        )
+
+    @staticmethod
+    def _is_descendant_pid(pid: int, root_pid: int) -> bool:
+        if pid == root_pid:
+            return True
+
         script = f"""
-$target = {root_pid}
-$listeners = @(Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
-foreach ($listener in $listeners) {{
-    $currentPid = [int]$listener
-    while ($currentPid -gt 0) {{
-        if ($currentPid -eq $target) {{
-            Write-Output "true"
-            exit 0
-        }}
-        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$currentPid" -ErrorAction SilentlyContinue
-        if ($null -eq $proc) {{ break }}
-        $currentPid = [int]$proc.ParentProcessId
+$targetPid = {root_pid}
+$currentPid = {pid}
+while ($currentPid -gt 0) {{
+    if ($currentPid -eq $targetPid) {{
+        Write-Output "true"
+        exit 0
     }}
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$currentPid" -ErrorAction SilentlyContinue
+    if ($null -eq $proc) {{ break }}
+    $currentPid = [int]$proc.ParentProcessId
 }}
 Write-Output "false"
 """

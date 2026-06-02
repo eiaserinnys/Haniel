@@ -272,6 +272,25 @@ class TestHealthManager:
 class TestProcessManager:
     """Tests for ProcessManager."""
 
+    @staticmethod
+    def _mock_running_process(pid: int = 1000) -> MagicMock:
+        process = MagicMock()
+        process.pid = pid
+        process.poll.return_value = None
+        process.stdout = None
+        process.stderr = None
+        return process
+
+    @staticmethod
+    def _mock_exited_process(pid: int = 1000, exit_code: int = 1) -> MagicMock:
+        process = MagicMock()
+        process.pid = pid
+        process.poll.return_value = exit_code
+        process.communicate.return_value = ("", "Error: EADDRINUSE")
+        process.stdout = None
+        process.stderr = None
+        return process
+
     def test_start_simple_process(
         self, process_manager: ProcessManager, tmp_path: Path
     ):
@@ -598,6 +617,121 @@ while True:
                 process_manager.start_service("test", config)
         finally:
             process_manager.stop_service("test", force=True)
+
+    @patch("haniel.core.process.subprocess.Popen")
+    def test_start_service_terminates_stale_port_owner_before_spawn(
+        self,
+        mock_popen: MagicMock,
+        process_manager: ProcessManager,
+    ):
+        """A same-service external PID on the ready port is cleaned first."""
+        mock_popen.return_value = self._mock_running_process()
+        process_manager.stale_instance_grace_timeout = 0.01
+        process_manager.platform = MagicMock()
+        process_manager.platform.get_subprocess_kwargs.return_value = {}
+        process_manager.platform.get_listening_pids.side_effect = [{4321}, set()]
+        process_manager.platform.get_process_command_line.return_value = (
+            f"{sys.executable} -m my_app.server --port 4306"
+        )
+        process_manager.platform.is_pid_running.return_value = False
+        config = ServiceConfig(
+            run=f"{sys.executable} -m my_app.server --port 4306",
+            ready="port:4306",
+        )
+
+        process_manager.start_service("test", config)
+
+        process_manager.platform.terminate_pid.assert_called_once_with(4321)
+        process_manager.platform.kill_pid.assert_not_called()
+        mock_popen.assert_called_once()
+
+    @patch("haniel.core.process.subprocess.Popen")
+    def test_start_service_kills_stale_port_owner_after_grace_timeout(
+        self,
+        mock_popen: MagicMock,
+        process_manager: ProcessManager,
+    ):
+        """A stale PID that survives graceful termination is force-killed."""
+        mock_popen.return_value = self._mock_running_process()
+        process_manager.stale_instance_grace_timeout = 0
+        process_manager.platform = MagicMock()
+        process_manager.platform.get_subprocess_kwargs.return_value = {}
+        process_manager.platform.get_listening_pids.side_effect = [{4321}, set()]
+        process_manager.platform.get_process_command_line.return_value = (
+            f"{sys.executable} -m my_app.server --port 4306"
+        )
+        process_manager.platform.is_pid_running.return_value = True
+        config = ServiceConfig(
+            run=f"{sys.executable} -m my_app.server --port 4306",
+            ready="port:4306",
+        )
+
+        process_manager.start_service("test", config)
+
+        process_manager.platform.terminate_pid.assert_called_once_with(4321)
+        process_manager.platform.kill_pid.assert_called_once_with(4321)
+        mock_popen.assert_called_once()
+
+    @patch("haniel.core.process.subprocess.Popen")
+    def test_start_service_refuses_unrelated_port_owner(
+        self,
+        mock_popen: MagicMock,
+        process_manager: ProcessManager,
+    ):
+        """A third-party listener on the ready port must not be killed."""
+        process_manager.platform = MagicMock()
+        process_manager.platform.get_subprocess_kwargs.return_value = {}
+        process_manager.platform.get_listening_pids.return_value = {9876}
+        process_manager.platform.get_process_command_line.return_value = (
+            "python -m unrelated.server --port 4306"
+        )
+        config = ServiceConfig(
+            run=f"{sys.executable} -m my_app.server --port 4306",
+            ready="port:4306",
+        )
+
+        with pytest.raises(RuntimeError, match="unrelated PID"):
+            process_manager.start_service("test", config)
+
+        process_manager.platform.terminate_pid.assert_not_called()
+        process_manager.platform.kill_pid.assert_not_called()
+        mock_popen.assert_not_called()
+
+    @patch("haniel.core.process.subprocess.Popen")
+    def test_start_service_retries_immediate_port_exit_after_cleanup(
+        self,
+        mock_popen: MagicMock,
+        process_manager: ProcessManager,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        """Immediate EADDRINUSE-style exit cleans stale PID and retries once."""
+        first = self._mock_exited_process(pid=1000, exit_code=1)
+        second = self._mock_running_process(pid=1001)
+        mock_popen.side_effect = [first, second]
+        process_manager.stale_instance_grace_timeout = 0.01
+        process_manager.immediate_exit_window = 0.01
+        process_manager.platform = MagicMock()
+        process_manager.platform.get_subprocess_kwargs.return_value = {}
+        process_manager.platform.get_listening_pids.side_effect = [
+            set(),
+            {4321},
+            {4321},
+            set(),
+        ]
+        process_manager.platform.get_process_command_line.return_value = (
+            f"{sys.executable} -m my_app.server --port 4306"
+        )
+        process_manager.platform.is_pid_running.return_value = False
+        config = ServiceConfig(
+            run=f"{sys.executable} -m my_app.server --port 4306",
+            ready="port:4306",
+        )
+
+        process_manager.start_service("test", config)
+
+        assert mock_popen.call_count == 2
+        process_manager.platform.terminate_pid.assert_called_once_with(4321)
+        assert "EADDRINUSE" in caplog.text
 
 
 class TestLogManager:

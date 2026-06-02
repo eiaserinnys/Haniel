@@ -28,6 +28,7 @@ from typing import Callable
 from ..config import ServiceConfig, ShutdownConfig
 from .health import HealthManager, ServiceState
 from .logs import LogCapture, LogManager, StreamReader
+from .stale_instance import PortInUseError, StaleInstanceCleaner, extract_ready_port
 from ..platform import get_platform_handler
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,8 @@ class ProcessManager:
     DEFAULT_READY_TIMEOUT = 60  # seconds
     DEFAULT_SHUTDOWN_TIMEOUT = 10  # seconds
     DEFAULT_KILL_TIMEOUT = 30  # seconds
+    STALE_INSTANCE_GRACE_TIMEOUT = 5  # seconds
+    IMMEDIATE_EXIT_WINDOW = 1.0  # seconds
     POLL_INTERVAL = 0.1  # seconds
 
     def __init__(
@@ -125,6 +128,8 @@ class ProcessManager:
         self.health_manager = health_manager or HealthManager()
         self.log_manager = LogManager(self.log_dir)
         self.platform = get_platform_handler()
+        self.stale_instance_grace_timeout = self.STALE_INSTANCE_GRACE_TIMEOUT
+        self.immediate_exit_window = self.IMMEDIATE_EXIT_WINDOW
 
         self._processes: dict[str, ManagedProcess] = {}
         self._lock = threading.Lock()
@@ -162,6 +167,12 @@ class ProcessManager:
         if config.cwd:
             cwd = self.config_dir / config.cwd
 
+        try:
+            self._cleanup_stale_instance_before_start(name, config, cwd)
+        except PortInUseError as e:
+            logger.error(str(e))
+            raise RuntimeError(str(e)) from e
+
         # Start log capture
         log_capture = self.log_manager.start_capture(name)
 
@@ -189,59 +200,20 @@ class ProcessManager:
             if resolved and resolved.lower().endswith((".cmd", ".bat")):
                 popen_kwargs["shell"] = True
 
-        # Start the process
-        try:
-            process = subprocess.Popen(
-                cmd,
-                cwd=cwd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                **popen_kwargs,
-            )
-        except PermissionError:
-            # CREATE_BREAKAWAY_FROM_JOB requires specific Job Object
-            # permissions. Retry without breakaway flag if denied.
-            if os.name == "nt" and "creationflags" in popen_kwargs:
-                from haniel.platform.windows import (
-                    CREATE_BREAKAWAY_FROM_JOB,
-                )
-
-                flags = popen_kwargs["creationflags"]
-                if flags & CREATE_BREAKAWAY_FROM_JOB:
-                    popen_kwargs["creationflags"] = flags & ~CREATE_BREAKAWAY_FROM_JOB
-                    logger.debug("Retrying %s without CREATE_BREAKAWAY_FROM_JOB", name)
-                    try:
-                        process = subprocess.Popen(
-                            cmd,
-                            cwd=cwd,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            text=True,
-                            **popen_kwargs,
-                        )
-                    except (OSError, subprocess.SubprocessError) as e:
-                        self.health_manager.record_crash(
-                            name, exit_code=None, reason=str(e)
-                        )
-                        raise RuntimeError(
-                            f"Failed to start service {name}: {e}"
-                        ) from e
-                else:
-                    self.health_manager.record_crash(
-                        name, exit_code=None, reason="PermissionError"
-                    )
-                    raise RuntimeError(
-                        f"Failed to start service {name}: PermissionError"
-                    )
-            else:
-                raise
-        except (OSError, subprocess.SubprocessError) as e:
-            self.health_manager.record_crash(name, exit_code=None, reason=str(e))
-            raise RuntimeError(f"Failed to start service {name}: {e}") from e
+        process = self._spawn_process(name, cmd, cwd, popen_kwargs)
 
         # Set up process group
         self.platform.setup_process_group(process)
+
+        process = self._retry_after_immediate_port_exit(
+            name=name,
+            config=config,
+            cwd=cwd,
+            cmd=cmd,
+            popen_kwargs=popen_kwargs,
+            process=process,
+            log_capture=log_capture,
+        )
 
         # Create managed process
         managed = ManagedProcess(
@@ -281,6 +253,150 @@ class ProcessManager:
         self._start_crash_monitor(managed, on_crash)
 
         return managed
+
+    def _spawn_process(
+        self,
+        name: str,
+        cmd: str | list[str],
+        cwd: Path,
+        popen_kwargs: dict,
+    ) -> subprocess.Popen:
+        """Spawn a process, preserving Windows breakaway fallback behavior."""
+        try:
+            return subprocess.Popen(
+                cmd,
+                cwd=cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                **popen_kwargs,
+            )
+        except PermissionError:
+            # CREATE_BREAKAWAY_FROM_JOB requires specific Job Object
+            # permissions. Retry without breakaway flag if denied.
+            if os.name == "nt" and "creationflags" in popen_kwargs:
+                from haniel.platform.windows import (
+                    CREATE_BREAKAWAY_FROM_JOB,
+                )
+
+                flags = popen_kwargs["creationflags"]
+                if flags & CREATE_BREAKAWAY_FROM_JOB:
+                    retry_kwargs = dict(popen_kwargs)
+                    retry_kwargs["creationflags"] = flags & ~CREATE_BREAKAWAY_FROM_JOB
+                    logger.debug("Retrying %s without CREATE_BREAKAWAY_FROM_JOB", name)
+                    try:
+                        return subprocess.Popen(
+                            cmd,
+                            cwd=cwd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            **retry_kwargs,
+                        )
+                    except (OSError, subprocess.SubprocessError) as e:
+                        self.health_manager.record_crash(
+                            name, exit_code=None, reason=str(e)
+                        )
+                        raise RuntimeError(
+                            f"Failed to start service {name}: {e}"
+                        ) from e
+
+            self.health_manager.record_crash(
+                name, exit_code=None, reason="PermissionError"
+            )
+            raise RuntimeError(f"Failed to start service {name}: PermissionError")
+        except (OSError, subprocess.SubprocessError) as e:
+            self.health_manager.record_crash(name, exit_code=None, reason=str(e))
+            raise RuntimeError(f"Failed to start service {name}: {e}") from e
+
+    def _cleanup_stale_instance_before_start(
+        self,
+        name: str,
+        config: ServiceConfig,
+        cwd: Path,
+    ) -> None:
+        StaleInstanceCleaner(self.platform).cleanup_before_start(
+            service_name=name,
+            config=config,
+            grace_timeout=self._shutdown_timeout_for(config),
+        )
+
+    def _shutdown_timeout_for(self, config: ServiceConfig) -> float:
+        if config.shutdown:
+            return float(config.shutdown.timeout)
+        if self.stale_instance_grace_timeout is not None:
+            return float(self.stale_instance_grace_timeout)
+        return float(self.shutdown_config.timeout)
+
+    def _retry_after_immediate_port_exit(
+        self,
+        *,
+        name: str,
+        config: ServiceConfig,
+        cwd: Path,
+        cmd: str | list[str],
+        popen_kwargs: dict,
+        process: subprocess.Popen,
+        log_capture: LogCapture,
+    ) -> subprocess.Popen:
+        if extract_ready_port(config) is None:
+            return process
+
+        exit_code = self._wait_for_immediate_exit(process)
+        if exit_code is None:
+            return process
+
+        self._capture_exited_process_output(process, log_capture)
+        cleaner = StaleInstanceCleaner(self.platform)
+        if not cleaner.has_ready_port_occupants(config):
+            return process
+
+        logger.warning(
+            "Service %s exited within %.1fs while its ready port remains in use; "
+            "diagnosing as possible EADDRINUSE and retrying after stale cleanup",
+            name,
+            self.immediate_exit_window,
+        )
+        self.health_manager.record_crash(
+            name,
+            exit_code=exit_code,
+            reason="immediate exit with ready port still in use",
+        )
+
+        try:
+            self._cleanup_stale_instance_before_start(name, config, cwd)
+        except PortInUseError as e:
+            logger.error(str(e))
+            raise RuntimeError(str(e)) from e
+
+        retry = self._spawn_process(name, cmd, cwd, popen_kwargs)
+        self.platform.setup_process_group(retry)
+        return retry
+
+    def _wait_for_immediate_exit(self, process: subprocess.Popen) -> int | None:
+        deadline = time.monotonic() + max(self.immediate_exit_window, 0)
+        while True:
+            exit_code = process.poll()
+            if exit_code is not None:
+                return exit_code
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(min(self.POLL_INTERVAL, max(deadline - time.monotonic(), 0)))
+
+    @staticmethod
+    def _capture_exited_process_output(
+        process: subprocess.Popen,
+        log_capture: LogCapture,
+    ) -> None:
+        try:
+            stdout, stderr = process.communicate(timeout=0)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return
+
+        for line in (stdout or "").splitlines():
+            log_capture.write_line(line, "stdout")
+        for line in (stderr or "").splitlines():
+            log_capture.write_line(line, "stderr")
 
     def stop_service(
         self,
