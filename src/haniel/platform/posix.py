@@ -81,6 +81,60 @@ class PosixHandler(PlatformHandler):
         finally:
             sock.close()
 
+    def get_listening_pids(self, port: int) -> set[int]:
+        """Return PIDs listening on a TCP port."""
+        return self._get_listening_pids(port)
+
+    def get_process_command_line(self, pid: int) -> str | None:
+        """Return process command line from procfs or ps."""
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                raw = f.read()
+            if raw:
+                return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace")
+        except OSError:
+            pass
+
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "command=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+        command = result.stdout.strip()
+        return command or None
+
+    def is_pid_running(self, pid: int) -> bool:
+        """Return True when a PID exists."""
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+
+    def terminate_pid(self, pid: int) -> None:
+        """Send SIGTERM to a PID."""
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            pass
+
+    def kill_pid(self, pid: int) -> None:
+        """Send SIGKILL to a PID."""
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+
     def is_port_owned_by_process_tree(self, port: int, root_pid: int) -> bool:
         """Check whether a LISTEN port is owned by root_pid or its descendants."""
         listener_pids = self._get_listening_pids(port)

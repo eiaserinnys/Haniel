@@ -56,6 +56,31 @@ class PlatformHandler(ABC):
         pass
 
     @abstractmethod
+    def get_listening_pids(self, port: int) -> set[int]:
+        """Return PIDs listening on a TCP port."""
+        pass
+
+    @abstractmethod
+    def get_process_command_line(self, pid: int) -> str | None:
+        """Return the command line for a process, if available."""
+        pass
+
+    @abstractmethod
+    def is_pid_running(self, pid: int) -> bool:
+        """Return True when the process still exists."""
+        pass
+
+    @abstractmethod
+    def terminate_pid(self, pid: int) -> None:
+        """Ask an arbitrary process to terminate gracefully."""
+        pass
+
+    @abstractmethod
+    def kill_pid(self, pid: int) -> None:
+        """Forcefully kill an arbitrary process."""
+        pass
+
+    @abstractmethod
     def is_port_owned_by_process_tree(self, port: int, root_pid: int) -> bool:
         """Check whether a LISTEN port is owned by a process tree.
 

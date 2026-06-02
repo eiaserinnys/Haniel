@@ -246,22 +246,23 @@ class TestWindowsPortCheck:
             assert result is False
 
     def test_is_port_owned_by_process_tree_true(self, mock_windll):
-        """Should return True when PowerShell reports ownership."""
+        """Should return True when the listener PID is the root PID."""
         from haniel.platform.windows import WindowsHandler
 
         handler = WindowsHandler()
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value.stdout = "true\n"
+        with patch.object(handler, "get_listening_pids", return_value={12345}):
 
             assert handler.is_port_owned_by_process_tree(4306, 12345) is True
 
     def test_is_port_owned_by_process_tree_false(self, mock_windll):
-        """Should return False when PowerShell reports a different owner."""
+        """Should return False when the listener PID is outside the process tree."""
         from haniel.platform.windows import WindowsHandler
 
         handler = WindowsHandler()
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value.stdout = "false\n"
+        with (
+            patch.object(handler, "get_listening_pids", return_value={54321}),
+            patch.object(handler, "_is_descendant_pid", return_value=False),
+        ):
 
             assert handler.is_port_owned_by_process_tree(4306, 12345) is False
 
