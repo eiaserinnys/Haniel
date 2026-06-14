@@ -14,6 +14,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from ..core.logs import get_log_tail
+from ..core.service_lifecycle import disable_service, reload_service_definition
 
 if TYPE_CHECKING:
     from ..core.runner import ServiceRunner
@@ -127,6 +128,47 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
         except Exception as e:
             return _error(str(e))
 
+    # ── POST /api/services/{name}/disable ────────────────────────────────────
+
+    async def service_disable(request: Request) -> JSONResponse:
+        name = request.path_params["name"]
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, disable_service, runner, name)
+            return JSONResponse(result)
+        except KeyError as e:
+            return _error(str(e), status=404)
+        except ValueError as e:
+            return _error(str(e), status=400)
+        except RuntimeError as e:
+            return _error(str(e), status=500)
+        except Exception as e:
+            logger.error("Failed to disable %s: %s", name, e)
+            return _error(str(e), status=500)
+
+    # ── POST /api/services/{name}/reload ─────────────────────────────────────
+
+    async def service_reload(request: Request) -> JSONResponse:
+        name = request.path_params["name"]
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None,
+                reload_service_definition,
+                runner,
+                name,
+            )
+            return JSONResponse(result)
+        except KeyError as e:
+            return _error(str(e), status=404)
+        except ValueError as e:
+            return _error(str(e), status=400)
+        except RuntimeError as e:
+            return _error(str(e), status=500)
+        except Exception as e:
+            logger.error("Failed to reload %s: %s", name, e)
+            return _error(str(e), status=500)
+
     # ── GET /api/services/{name}/logs ─────────────────────────────────────────
 
     async def service_logs(request: Request) -> JSONResponse:
@@ -239,6 +281,8 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
         Route("/api/services/{name}/stop", service_stop, methods=["POST"]),
         Route("/api/services/{name}/restart", service_restart, methods=["POST"]),
         Route("/api/services/{name}/enable", service_enable, methods=["POST"]),
+        Route("/api/services/{name}/disable", service_disable, methods=["POST"]),
+        Route("/api/services/{name}/reload", service_reload, methods=["POST"]),
         Route("/api/services/{name}/logs", service_logs, methods=["GET"]),
         Route("/api/repos", get_repos, methods=["GET"]),
         Route("/api/repos/{name}/pull", repo_pull, methods=["POST"]),

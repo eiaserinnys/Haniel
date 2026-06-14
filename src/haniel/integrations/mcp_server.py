@@ -19,6 +19,14 @@ from typing import Any, TYPE_CHECKING, Optional
 
 from urllib.parse import parse_qs, urlparse
 
+from ..core.service_lifecycle import (
+    CONFIG_WRITE_LOCK,
+    delete_service_config,
+    disable_service,
+    register_service,
+    reload_service_definition,
+)
+
 if TYPE_CHECKING:
     from ..core.runner import ServiceRunner
 
@@ -206,11 +214,66 @@ class HanielMcpServer:
                 },
             },
             {
+                "name": "haniel_disable",
+                "description": "Persistently disable a service and stop it if running",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "service": {
+                            "type": "string",
+                            "description": "Name of the service to disable",
+                        },
+                    },
+                    "required": ["service"],
+                },
+            },
+            {
                 "name": "haniel_reload",
                 "description": "Reload haniel.yaml configuration (processes continue running)",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
+                },
+            },
+            {
+                "name": "haniel_reload_service",
+                "description": "Reload one service definition from haniel.yaml and restart only that service",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "service": {
+                            "type": "string",
+                            "description": "Name of the service definition to reload and restart",
+                        },
+                    },
+                    "required": ["service"],
+                },
+            },
+            {
+                "name": "haniel_register_service",
+                "description": "Add a service config, ensure its repo clone exists, run initial build hook, and start it",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "New service name"},
+                        "service_config": {
+                            "type": "object",
+                            "description": "Service config object",
+                        },
+                        "repo": {
+                            "type": "string",
+                            "description": "Optional repo name; defaults to service_config.repo",
+                        },
+                        "repo_config": {
+                            "type": "object",
+                            "description": "Repo config object when the repo does not exist yet",
+                        },
+                        "start": {
+                            "type": "boolean",
+                            "description": "Whether to start the service after registration",
+                        },
+                    },
+                    "required": ["name", "service_config"],
                 },
             },
             {
@@ -296,6 +359,10 @@ class HanielMcpServer:
                         "service": {
                             "type": "string",
                             "description": "Service name to delete",
+                        },
+                        "purge": {
+                            "type": "boolean",
+                            "description": "If true, delete the unshared cloned source directory too",
                         },
                     },
                     "required": ["service"],
@@ -425,8 +492,14 @@ class HanielMcpServer:
             return await self._pull_repo(arguments.get("repo", ""))
         elif name == "haniel_enable":
             return await self._enable_service(arguments.get("service", ""))
+        elif name == "haniel_disable":
+            return await self._disable_service(arguments.get("service", ""))
         elif name == "haniel_reload":
             return await self._reload_config()
+        elif name == "haniel_reload_service":
+            return await self._reload_service(arguments.get("service", ""))
+        elif name == "haniel_register_service":
+            return await self._register_service(arguments)
         elif name == "haniel_update":
             return await self._update_service(arguments)
         elif name == "haniel_check_updates":
@@ -628,6 +701,18 @@ class HanielMcpServer:
             logger.error(f"Failed to enable {service}: {e}")
             return json.dumps({"error": f"Failed to enable '{service}': {e}"})
 
+    async def _disable_service(self, service: str) -> str:
+        """Persistently disable a service and stop it if running."""
+        if not service:
+            return json.dumps({"error": "Service name is required"})
+
+        try:
+            result = await asyncio.to_thread(disable_service, self.runner, service)
+            return json.dumps(result, ensure_ascii=False)
+        except Exception as e:
+            logger.error("Failed to disable %s: %s", service, e)
+            return json.dumps({"error": f"Failed to disable '{service}': {e}"})
+
     async def _reload_config(self) -> str:
         """Reload configuration."""
         try:
@@ -637,6 +722,46 @@ class HanielMcpServer:
         except Exception as e:
             logger.error(f"Failed to reload config: {e}")
             return json.dumps({"error": f"Failed to reload configuration: {e}"})
+
+    async def _reload_service(self, service: str) -> str:
+        """Reload one service definition and restart only that service."""
+        if not service:
+            return json.dumps({"error": "Service name is required"})
+
+        try:
+            result = await asyncio.to_thread(
+                reload_service_definition,
+                self.runner,
+                service,
+            )
+            return json.dumps(result, ensure_ascii=False)
+        except Exception as e:
+            logger.error("Failed to reload service %s: %s", service, e)
+            return json.dumps({"error": f"Failed to reload service '{service}': {e}"})
+
+    async def _register_service(self, arguments: dict[str, Any]) -> str:
+        """Register a service, ensure checkout/build, then start it."""
+        name = arguments.get("name", "")
+        service_config = arguments.get("service_config", arguments.get("config"))
+        if not name:
+            return json.dumps({"error": "Service name is required"})
+        if service_config is None:
+            return json.dumps({"error": "service_config is required"})
+
+        try:
+            result = await asyncio.to_thread(
+                register_service,
+                self.runner,
+                name=name,
+                service_config=service_config,
+                repo=arguments.get("repo"),
+                repo_config=arguments.get("repo_config"),
+                start=arguments.get("start", True),
+            )
+            return json.dumps(result, ensure_ascii=False)
+        except Exception as e:
+            logger.error("Failed to register service %s: %s", name, e)
+            return json.dumps({"error": f"Failed to register service '{name}': {e}"})
 
     async def _update_service(self, arguments: dict[str, Any]) -> str:
         """Update a service: pull its repo, then restart."""
@@ -708,7 +833,7 @@ class HanielMcpServer:
     # --- Config resource handlers ---
 
     async def _get_config(self) -> str:
-        from ..dashboard.config_io import read_config
+        from ..config.io import read_config
 
         config = read_config(self.runner.config_path)
         return json.dumps(
@@ -716,14 +841,14 @@ class HanielMcpServer:
         )
 
     async def _get_config_services(self) -> str:
-        from ..dashboard.config_io import read_config
+        from ..config.io import read_config
 
         config = read_config(self.runner.config_path)
         data = config.model_dump(by_alias=True, mode="json")
         return json.dumps(data.get("services", {}), indent=2, ensure_ascii=False)
 
     async def _get_config_repos(self) -> str:
-        from ..dashboard.config_io import read_config
+        from ..config.io import read_config
 
         config = read_config(self.runner.config_path)
         data = config.model_dump(by_alias=True, mode="json")
@@ -731,17 +856,13 @@ class HanielMcpServer:
 
     # --- Config CRUD tool handlers ---
 
-    _config_lock = None  # Lazy-init threading.Lock
+    _config_lock = CONFIG_WRITE_LOCK
 
     def _get_config_lock(self):
-        if self._config_lock is None:
-            import threading
-
-            self._config_lock = threading.Lock()
         return self._config_lock
 
     async def _update_service_config(self, arguments: dict[str, Any]) -> str:
-        from ..dashboard.config_io import (
+        from ..config.io import (
             read_config,
             write_config,
             backup_config,
@@ -780,7 +901,7 @@ class HanielMcpServer:
             return json.dumps({"error": str(e)})
 
     async def _create_service_config(self, arguments: dict[str, Any]) -> str:
-        from ..dashboard.config_io import (
+        from ..config.io import (
             read_config,
             write_config,
             backup_config,
@@ -819,50 +940,21 @@ class HanielMcpServer:
             return json.dumps({"error": str(e)})
 
     async def _delete_service_config(self, arguments: dict[str, Any]) -> str:
-        from ..dashboard.config_io import (
-            read_config,
-            write_config,
-            backup_config,
-            restore_config,
-        )
-        from ..config.validators import validate_config
-
         service = arguments["service"]
-        config_path = self.runner.config_path
-        loop = asyncio.get_running_loop()
-
-        def _do():
-            with self._get_config_lock():
-                config = read_config(config_path)
-                if service not in config.services:
-                    raise KeyError(f"Service not found: {service}")
-                dependents = [
-                    n
-                    for n, s in config.services.items()
-                    if n != service and service in s.after
-                ]
-                if dependents:
-                    raise ValueError(f"Cannot delete: referenced by {dependents}")
-                del config.services[service]
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
-                backup_config(config_path)
-                try:
-                    write_config(config_path, config)
-                except Exception:
-                    restore_config(config_path)
-                    raise
-                self.runner.reload_config()
 
         try:
-            await loop.run_in_executor(None, _do)
-            return json.dumps({"ok": True})
+            result = await asyncio.to_thread(
+                delete_service_config,
+                self.runner,
+                service,
+                purge=arguments.get("purge", False),
+            )
+            return json.dumps(result, ensure_ascii=False)
         except (KeyError, ValueError) as e:
             return json.dumps({"error": str(e)})
 
     async def _update_repo_config(self, arguments: dict[str, Any]) -> str:
-        from ..dashboard.config_io import (
+        from ..config.io import (
             read_config,
             write_config,
             backup_config,
@@ -901,7 +993,7 @@ class HanielMcpServer:
             return json.dumps({"error": str(e)})
 
     async def _create_repo_config(self, arguments: dict[str, Any]) -> str:
-        from ..dashboard.config_io import (
+        from ..config.io import (
             read_config,
             write_config,
             backup_config,
@@ -940,7 +1032,7 @@ class HanielMcpServer:
             return json.dumps({"error": str(e)})
 
     async def _delete_repo_config(self, arguments: dict[str, Any]) -> str:
-        from ..dashboard.config_io import (
+        from ..config.io import (
             read_config,
             write_config,
             backup_config,
