@@ -168,7 +168,7 @@ $listeners | ForEach-Object {{ Write-Output $_ }}
     def get_process_command_line(self, pid: int) -> str | None:
         """Return a process command line using CIM."""
         script = (
-            f"$proc = Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\" "
+            f'$proc = Get-CimInstance Win32_Process -Filter "ProcessId={pid}" '
             "-ErrorAction SilentlyContinue; "
             "if ($null -ne $proc) { Write-Output $proc.CommandLine }"
         )
@@ -190,7 +190,12 @@ $listeners | ForEach-Object {{ Write-Output $_ }}
         """Return True when a PID exists."""
         try:
             result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", f"Get-Process -Id {pid} -ErrorAction SilentlyContinue"],
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    f"Get-Process -Id {pid} -ErrorAction SilentlyContinue",
+                ],
                 capture_output=True,
                 text=True,
                 timeout=5,

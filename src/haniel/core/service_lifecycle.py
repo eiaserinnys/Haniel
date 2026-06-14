@@ -84,7 +84,9 @@ def _ensure_repo_clone(repo_name: str, repo_config: RepoConfig, path: Path) -> s
     return "created"
 
 
-def _run_shell_hook(name: str, hook_name: str, command: str, cwd: Path, root: Path) -> None:
+def _run_shell_hook(
+    name: str, hook_name: str, command: str, cwd: Path, root: Path
+) -> None:
     command = command.replace("{root}", str(root))
     if os.name == "nt":
         config_prefix = str(root).replace("\\", "/") + "/"
