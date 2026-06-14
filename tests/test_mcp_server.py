@@ -9,7 +9,7 @@ Tests the MCP server that provides Claude Code integration:
 import json
 import pytest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from haniel.config import HanielConfig, McpConfig, ServiceConfig, RepoConfig
 from haniel.core.health import ServiceState
@@ -440,7 +440,10 @@ class TestMcpServerIntegration:
         assert "haniel_start" in tool_names
         assert "haniel_pull" in tool_names
         assert "haniel_enable" in tool_names
+        assert "haniel_disable" in tool_names
         assert "haniel_reload" in tool_names
+        assert "haniel_reload_service" in tool_names
+        assert "haniel_register_service" in tool_names
 
 
 class TestMcpServerExtended:
@@ -549,6 +552,82 @@ class TestMcpServerExtended:
     async def test_enable_empty_service_name(self, mcp_server):
         """Test enable with empty service name."""
         result = await mcp_server.call_tool("haniel_enable", {"service": ""})
+        assert "error" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_disable_service_tool(self, mcp_server, mock_runner):
+        """Test haniel_disable delegates to service lifecycle core."""
+        with patch("haniel.integrations.mcp_server.disable_service") as disable:
+            disable.return_value = {"ok": True, "service": "web", "enabled": False}
+            result = await mcp_server.call_tool("haniel_disable", {"service": "web"})
+
+        assert json.loads(result)["enabled"] is False
+        disable.assert_called_once_with(mock_runner, "web")
+
+    @pytest.mark.asyncio
+    async def test_reload_service_tool(self, mcp_server, mock_runner):
+        """Test haniel_reload_service delegates to service lifecycle core."""
+        with patch(
+            "haniel.integrations.mcp_server.reload_service_definition"
+        ) as reload_service:
+            reload_service.return_value = {
+                "ok": True,
+                "service": "web",
+                "restarted": True,
+            }
+            result = await mcp_server.call_tool(
+                "haniel_reload_service", {"service": "web"}
+            )
+
+        assert json.loads(result)["restarted"] is True
+        reload_service.assert_called_once_with(mock_runner, "web")
+
+    @pytest.mark.asyncio
+    async def test_register_service_tool(self, mcp_server, mock_runner):
+        """Test haniel_register_service delegates to service lifecycle core."""
+        with patch("haniel.integrations.mcp_server.register_service") as register:
+            register.return_value = {"ok": True, "service": "api", "started": True}
+            result = await mcp_server.call_tool(
+                "haniel_register_service",
+                {
+                    "name": "api",
+                    "service_config": {"run": "python api.py"},
+                    "start": True,
+                },
+            )
+
+        assert json.loads(result)["started"] is True
+        register.assert_called_once_with(
+            mock_runner,
+            name="api",
+            service_config={"run": "python api.py"},
+            repo=None,
+            repo_config=None,
+            start=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_delete_service_config_accepts_purge(self, mcp_server, mock_runner):
+        """Test haniel_delete_service_config passes purge to common deletion."""
+        with patch("haniel.integrations.mcp_server.delete_service_config") as delete:
+            delete.return_value = {"ok": True, "service": "web", "purged": True}
+            result = await mcp_server.call_tool(
+                "haniel_delete_service_config", {"service": "web", "purge": True}
+            )
+
+        assert json.loads(result)["purged"] is True
+        delete.assert_called_once_with(mock_runner, "web", purge=True)
+
+    @pytest.mark.asyncio
+    async def test_disable_empty_service_name(self, mcp_server):
+        """Test disable with empty service name."""
+        result = await mcp_server.call_tool("haniel_disable", {"service": ""})
+        assert "error" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_reload_service_empty_name(self, mcp_server):
+        """Test reload_service with empty service name."""
+        result = await mcp_server.call_tool("haniel_reload_service", {"service": ""})
         assert "error" in result.lower()
 
     @pytest.mark.asyncio

@@ -15,7 +15,7 @@ Covers:
 
 import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -307,6 +307,50 @@ class TestPostService:
         assert resp.status_code == 501
 
 
+# ── POST /api/config/services/register ───────────────────────────────────────
+
+
+class TestRegisterService:
+    def test_registers_service_via_lifecycle_core(self, dashboard_app, mock_runner):
+        """POST /api/config/services/register runs the one-call e2e flow."""
+        payload = {
+            "name": "api",
+            "service_config": {"run": "python api.py", "repo": "api"},
+            "repo": "api",
+            "repo_config": {
+                "url": "git@github.com:test/api.git",
+                "path": "./api",
+            },
+        }
+        client = TestClient(dashboard_app)
+        with patch("haniel.dashboard.config_api.register_service") as register:
+            register.return_value = {"ok": True, "service": "api", "started": True}
+            resp = client.post("/api/config/services/register", json=payload)
+
+        assert resp.status_code == 200
+        assert resp.json()["started"] is True
+        register.assert_called_once_with(
+            mock_runner,
+            name="api",
+            service_config={"run": "python api.py", "repo": "api"},
+            repo="api",
+            repo_config={
+                "url": "git@github.com:test/api.git",
+                "path": "./api",
+            },
+            start=True,
+        )
+
+    def test_register_returns_501_when_no_config_path(self, dashboard_app, mock_runner):
+        mock_runner.config_path = None
+        client = TestClient(dashboard_app)
+        resp = client.post(
+            "/api/config/services/register",
+            json={"name": "api", "service_config": {"run": "python api.py"}},
+        )
+        assert resp.status_code == 501
+
+
 # ── DELETE /api/config/services/{name} ───────────────────────────────────────
 
 
@@ -321,6 +365,19 @@ class TestDeleteService:
         assert data["ok"] is True
 
         mock_runner.reload_config.assert_called()
+
+    def test_delete_service_passes_purge_to_lifecycle_core(
+        self, dashboard_app, mock_runner
+    ):
+        """DELETE /api/config/services/{name}?purge=true purges via common core."""
+        client = TestClient(dashboard_app)
+        with patch("haniel.dashboard.config_api.delete_service_config") as delete:
+            delete.return_value = {"ok": True, "service": "worker", "purged": True}
+            resp = client.delete("/api/config/services/worker?purge=true")
+
+        assert resp.status_code == 200
+        assert resp.json()["purged"] is True
+        delete.assert_called_once_with(mock_runner, "worker", purge=True)
 
     def test_returns_400_when_has_dependents(self, dashboard_app, mock_runner):
         """DELETE /api/config/services/web returns 400 because worker depends on it."""

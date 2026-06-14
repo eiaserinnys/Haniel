@@ -251,7 +251,6 @@ class TestWindowsPortCheck:
 
         handler = WindowsHandler()
         with patch.object(handler, "get_listening_pids", return_value={12345}):
-
             assert handler.is_port_owned_by_process_tree(4306, 12345) is True
 
     def test_is_port_owned_by_process_tree_false(self, mock_windll):
@@ -263,7 +262,6 @@ class TestWindowsPortCheck:
             patch.object(handler, "get_listening_pids", return_value={54321}),
             patch.object(handler, "_is_descendant_pid", return_value=False),
         ):
-
             assert handler.is_port_owned_by_process_tree(4306, 12345) is False
 
 

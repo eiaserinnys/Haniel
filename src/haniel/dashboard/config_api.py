@@ -8,7 +8,6 @@ at runtime. All mutating operations follow the pattern:
 
 import asyncio
 import logging
-import threading
 from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
@@ -18,7 +17,12 @@ from starlette.routing import Route
 
 from ..config.model import HanielConfig, RepoConfig, ServiceConfig
 from ..config.validators import validate_config
-from .config_io import backup_config, read_config, restore_config, write_config
+from ..config.io import backup_config, read_config, restore_config, write_config
+from ..core.service_lifecycle import (
+    CONFIG_WRITE_LOCK,
+    delete_service_config,
+    register_service,
+)
 
 if TYPE_CHECKING:
     from ..core.runner import ServiceRunner
@@ -27,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 # Module-level write lock — shared across all config mutation requests.
 # Prevents concurrent read-modify-write races on the YAML file.
-_write_lock = threading.Lock()
+_write_lock = CONFIG_WRITE_LOCK
 
 
 def _error(message: str, status: int = 400) -> JSONResponse:
@@ -214,6 +218,47 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
             logger.error("POST /api/config/services failed: %s", e)
             return _error(str(e), status=500)
 
+    # ── POST /api/config/services/register ───────────────────────────────────
+
+    async def register_service_route(request: Request) -> JSONResponse:
+        config_path = _get_config_path()
+        if not config_path:
+            return _error("config_path not set", status=501)
+
+        try:
+            body = await request.json()
+        except Exception:
+            return _error("Invalid JSON body")
+
+        name = body.get("name")
+        service_config = body.get("service_config", body.get("config"))
+        if not name or service_config is None:
+            return _error("Body must contain 'name' and 'service_config' fields")
+
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: register_service(
+                    runner,
+                    name=name,
+                    service_config=service_config,
+                    repo=body.get("repo"),
+                    repo_config=body.get("repo_config"),
+                    start=body.get("start", True),
+                ),
+            )
+            return JSONResponse(result)
+        except KeyError as e:
+            return _error(str(e), status=404)
+        except ValueError as e:
+            return _error(str(e), status=400)
+        except RuntimeError as e:
+            return _error(str(e), status=500)
+        except Exception as e:
+            logger.error("POST /api/config/services/register failed: %s", e)
+            return _error(str(e), status=500)
+
     # ── DELETE /api/config/services/{name} ────────────────────────────────────
 
     async def delete_service(request: Request) -> JSONResponse:
@@ -222,41 +267,15 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
             return _error("config_path not set", status=501)
 
         name = request.path_params["name"]
+        purge = request.query_params.get("purge", "").lower() == "true"
         loop = asyncio.get_running_loop()
 
-        def _do_delete():
-            with _write_lock:
-                config = read_config(config_path)
-
-                if name not in config.services:
-                    raise KeyError(f"Service not found: {name}")
-
-                # Dependency check: other services whose `after` list contains this name
-                dependents = [
-                    svc_name
-                    for svc_name, svc_cfg in config.services.items()
-                    if svc_name != name and name in svc_cfg.after
-                ]
-                if dependents:
-                    raise ValueError(
-                        f"Cannot delete service '{name}': referenced by {dependents}"
-                    )
-
-                # Stop service if currently running
-                if runner.process_manager.is_running(name):
-                    runner.process_manager.stop_service(name)
-
-                del config.services[name]
-
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
-
-                _commit_config(config_path, config, runner)
-
         try:
-            await loop.run_in_executor(None, _do_delete)
-            return JSONResponse({"ok": True})
+            result = await loop.run_in_executor(
+                None,
+                lambda: delete_service_config(runner, name, purge=purge),
+            )
+            return JSONResponse(result)
         except KeyError as e:
             return _error(str(e), status=404)
         except ValueError as e:
@@ -418,6 +437,11 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
         Route("/api/config/repos", get_config_repos, methods=["GET"]),
         Route("/api/config/services/{name}", put_service, methods=["PUT"]),
         Route("/api/config/services", post_service, methods=["POST"]),
+        Route(
+            "/api/config/services/register",
+            register_service_route,
+            methods=["POST"],
+        ),
         Route("/api/config/services/{name}", delete_service, methods=["DELETE"]),
         Route("/api/config/repos/{name}", put_repo, methods=["PUT"]),
         Route("/api/config/repos", post_repo, methods=["POST"]),

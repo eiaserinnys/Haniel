@@ -182,6 +182,32 @@ class TestDashboardApi:
         assert data["ok"] is True
         mock_runner.health_manager.reset_circuit.assert_called_once_with("web")
 
+    def test_service_disable_calls_lifecycle_core(self, dashboard_app, mock_runner):
+        """POST /api/services/{name}/disable disables and stops via common core."""
+        client = TestClient(dashboard_app)
+        with patch("haniel.dashboard.api.disable_service") as disable:
+            disable.return_value = {"ok": True, "service": "web", "enabled": False}
+            resp = client.post("/api/services/web/disable")
+
+        assert resp.status_code == 200
+        assert resp.json()["enabled"] is False
+        disable.assert_called_once_with(mock_runner, "web")
+
+    def test_service_reload_calls_lifecycle_core(self, dashboard_app, mock_runner):
+        """POST /api/services/{name}/reload reloads and restarts one service."""
+        client = TestClient(dashboard_app)
+        with patch("haniel.dashboard.api.reload_service_definition") as reload_service:
+            reload_service.return_value = {
+                "ok": True,
+                "service": "web",
+                "restarted": True,
+            }
+            resp = client.post("/api/services/web/reload")
+
+        assert resp.status_code == 200
+        assert resp.json()["restarted"] is True
+        reload_service.assert_called_once_with(mock_runner, "web")
+
     def test_service_logs(self, dashboard_app, mock_runner):
         """GET /api/services/{name}/logs returns log lines."""
         client = TestClient(dashboard_app)
