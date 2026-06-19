@@ -286,6 +286,29 @@ def register_service(
     }
 
 
+def register_repo(
+    runner: "ServiceRunner",
+    *,
+    name: str,
+    repo_config: dict[str, Any],
+) -> dict[str, Any]:
+    """Add a repo definition to config and reload runner state."""
+    if not name:
+        raise ValueError("Repo name is required")
+
+    config_path = _require_config_path(runner)
+    with CONFIG_WRITE_LOCK:
+        config = read_config(config_path)
+        if name in config.repos:
+            raise ValueError(f"Repo already exists: {name}")
+
+        config.repos[name] = RepoConfig.model_validate(repo_config)
+        _validate_or_raise(config)
+        _commit_config(config_path, config, runner)
+
+    return {"ok": True, "repo": name}
+
+
 def reload_service_definition(runner: "ServiceRunner", service: str) -> dict[str, Any]:
     """Reload one service definition from disk and restart only that service."""
     if not service:

@@ -1012,17 +1012,67 @@ class ServiceRunner:
             status,
         )
 
-    def _handle_service_command(self, service_name: str, action: str) -> None:
+    def _handle_service_command(
+        self,
+        service_name: str,
+        action: str,
+        payload: dict | None = None,
+    ) -> dict | str | None:
         """Handle remote service command from orchestrator.
 
         Raises ValueError for unknown service or action (caught by OrchestratorClient).
         """
+        payload = payload or {}
+        if action == "reload-config":
+            self.reload_config()
+            return {"ok": True, "action": action}
+        if action == "register-service":
+            from .service_lifecycle import register_service
+
+            name = payload.get("name") or service_name
+            service_config = payload.get("service_config", payload.get("config"))
+            if not name:
+                raise ValueError("Service name is required")
+            if service_config is None:
+                raise ValueError("service_config is required")
+            return register_service(
+                self,
+                name=name,
+                service_config=service_config,
+                repo=payload.get("repo"),
+                repo_config=payload.get("repo_config"),
+                start=payload.get("start", True),
+            )
+        if action == "register-repo":
+            from .service_lifecycle import register_repo
+
+            name = payload.get("name") or service_name
+            repo_config = payload.get("repo_config", payload.get("config"))
+            if not name:
+                raise ValueError("Repo name is required")
+            if repo_config is None:
+                raise ValueError("repo_config is required")
+            return register_repo(self, name=name, repo_config=repo_config)
+
+        if not service_name:
+            raise ValueError("Service name is required")
         if service_name not in self.config.services:
             raise ValueError(f"Unknown service: {service_name}")
+
         if action == "restart":
-            self.restart_service(service_name)
+            message = self.restart_service(service_name)
+            return {"ok": True, "service": service_name, "message": message}
         elif action == "stop":
             self.stop_service(service_name)
+            return {"ok": True, "service": service_name, "action": action}
+        elif action == "start":
+            if not self._start_service(service_name):
+                raise RuntimeError(f"Failed to start service: {service_name}")
+            return {"ok": True, "service": service_name, "action": action}
+        elif action == "reload":
+            from .service_lifecycle import reload_service_definition
+
+            return reload_service_definition(self, service_name)
         else:
             raise ValueError(f"Unknown action: {action}")
 

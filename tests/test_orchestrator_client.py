@@ -325,6 +325,85 @@ class TestHandleDeployApproval:
         assert sent == []
 
 
+class TestHandleServiceCommand:
+    @staticmethod
+    def _capture_send_json(client):
+        sent = []
+
+        async def fake_send_json(msg):
+            sent.append(msg)
+
+        client._send_json = fake_send_json  # type: ignore[assignment]
+        return sent
+
+    async def test_handler_receives_payload_and_result_is_sent(self, config):
+        called = []
+
+        def handler(service_name, action, payload):
+            called.append((service_name, action, payload))
+            return {"ok": True, "restarted": True}
+
+        client = OrchestratorClient(
+            config,
+            haniel_version="0.1.0",
+            service_command_handler=handler,
+        )
+        sent = self._capture_send_json(client)
+
+        await client._handle_service_command(
+            {
+                "command_id": "cmd-1",
+                "service_name": "web",
+                "action": "reload",
+                "payload": {"reason": "config changed"},
+            }
+        )
+
+        assert called == [("web", "reload", {"reason": "config changed"})]
+        assert sent == [
+            {
+                "type": "service_command_result",
+                "command_id": "cmd-1",
+                "node_id": config.node_id,
+                "service_name": "web",
+                "action": "reload",
+                "success": True,
+                "error": None,
+                "result": {"ok": True, "restarted": True},
+            }
+        ]
+
+    async def test_handler_error_sends_failed_result(self, config):
+        def handler(service_name, action, payload):
+            raise RuntimeError("boom")
+
+        client = OrchestratorClient(
+            config,
+            haniel_version="0.1.0",
+            service_command_handler=handler,
+        )
+        sent = self._capture_send_json(client)
+
+        await client._handle_service_command(
+            {"command_id": "cmd-2", "service_name": "web", "action": "start"}
+        )
+
+        assert sent[0]["success"] is False
+        assert sent[0]["error"] == "boom"
+        assert sent[0]["result"] is None
+
+    async def test_no_handler_sends_failed_result(self, config):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+        sent = self._capture_send_json(client)
+
+        await client._handle_service_command(
+            {"command_id": "cmd-3", "service_name": "web", "action": "start"}
+        )
+
+        assert sent[0]["success"] is False
+        assert sent[0]["error"] == "no handler registered"
+
+
 class TestEnqueueDeployResult:
     def test_buffers_when_disconnected(self, config):
         client = OrchestratorClient(config, haniel_version="0.1.0")

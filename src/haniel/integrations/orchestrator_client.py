@@ -17,7 +17,7 @@ import platform
 import threading
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from ..config.model import OrchestratorClientConfig
@@ -38,7 +38,9 @@ class OrchestratorClient:
         config: "OrchestratorClientConfig",
         haniel_version: str,
         get_services_info: "Callable[[], list[dict]] | None" = None,
-        service_command_handler: "Callable[[str, str], None] | None" = None,
+        service_command_handler: (
+            "Callable[[str, str, dict[str, Any] | None], Any] | None"
+        ) = None,
         deploy_approval_handler: "Callable[[str, str, str], str | None] | None" = None,
     ) -> None:
         self._config = config
@@ -428,13 +430,20 @@ class OrchestratorClient:
         command_id = msg.get("command_id", "")
         service_name = msg.get("service_name", "")
         action = msg.get("action", "")
+        payload = msg.get("payload")
         logger.info(f"Service command: {action} {service_name} (cmd={command_id})")
 
         success = True
         error = None
+        result_data = None
         if self._service_command_handler:
             try:
-                self._service_command_handler(service_name, action)
+                result_data = await asyncio.to_thread(
+                    self._service_command_handler,
+                    service_name,
+                    action,
+                    payload if isinstance(payload, dict) else None,
+                )
             except Exception as e:
                 success = False
                 error = str(e)
@@ -450,6 +459,7 @@ class OrchestratorClient:
             "action": action,
             "success": success,
             "error": error,
+            "result": result_data,
         }
         await self._send_json(result)
 

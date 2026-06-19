@@ -106,6 +106,54 @@ def test_register_service_reuses_existing_clone_without_cloning(tmp_path: Path):
     runner._start_service.assert_called_once_with("web")
 
 
+def test_register_repo_updates_config_and_reloads_runner(tmp_path: Path):
+    from haniel.core.service_lifecycle import register_repo
+
+    runner = _runner(HanielConfig(poll_interval=60, services={}, repos={}), tmp_path)
+    runner.reload_config = MagicMock()
+
+    result = register_repo(
+        runner,
+        name="main",
+        repo_config={
+            "url": "git@github.com:test/repo.git",
+            "branch": "main",
+            "path": "./repo",
+        },
+    )
+
+    assert result == {"ok": True, "repo": "main"}
+    runner.reload_config.assert_called_once()
+    raw = _read_raw(runner.config_path)
+    assert raw["repos"]["main"]["url"] == "git@github.com:test/repo.git"
+
+
+def test_register_repo_rejects_existing_repo(tmp_path: Path):
+    from haniel.core.service_lifecycle import register_repo
+
+    config = HanielConfig(
+        poll_interval=60,
+        services={},
+        repos={
+            "main": RepoConfig(
+                url="git@github.com:test/repo.git",
+                path="./repo",
+            )
+        },
+    )
+    runner = _runner(config, tmp_path)
+
+    with pytest.raises(ValueError, match="Repo already exists"):
+        register_repo(
+            runner,
+            name="main",
+            repo_config={
+                "url": "git@github.com:test/repo-2.git",
+                "path": "./repo-2",
+            },
+        )
+
+
 def test_register_service_rolls_back_config_and_partial_clone_on_clone_failure(
     tmp_path: Path,
 ):

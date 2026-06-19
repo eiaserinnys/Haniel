@@ -277,6 +277,7 @@ class WebSocketHub:
                 "action": msg.action,
                 "success": msg.success,
                 "error": msg.error,
+                "result": msg.result,
             }
         )
 

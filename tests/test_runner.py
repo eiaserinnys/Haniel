@@ -1507,6 +1507,116 @@ class TestReloadConfig:
         assert runner._repo_states["main"].config.branch == "develop"
 
 
+class TestRemoteServiceCommandHandler:
+    """Tests for runner handling of orchestrator service-command actions."""
+
+    def _runner(self, tmp_path: Path) -> ServiceRunner:
+        config = HanielConfig(
+            poll_interval=60,
+            repos={},
+            services={"web": ServiceConfig(run="python app.py")},
+        )
+        return ServiceRunner(config, config_dir=tmp_path)
+
+    def test_start_action_starts_enabled_service(self, tmp_path: Path):
+        runner = self._runner(tmp_path)
+        runner._start_service = MagicMock(return_value=True)
+
+        result = runner._handle_service_command("web", "start")
+
+        assert result == {"ok": True, "service": "web", "action": "start"}
+        runner._start_service.assert_called_once_with("web")
+
+    def test_reload_config_action_does_not_require_service(self, tmp_path: Path):
+        runner = self._runner(tmp_path)
+        runner.reload_config = MagicMock()
+
+        result = runner._handle_service_command("config", "reload-config")
+
+        assert result == {"ok": True, "action": "reload-config"}
+        runner.reload_config.assert_called_once()
+
+    def test_reload_action_delegates_to_service_lifecycle(
+        self, tmp_path: Path, monkeypatch
+    ):
+        runner = self._runner(tmp_path)
+        reload_service = MagicMock(return_value={"ok": True, "service": "web"})
+
+        import haniel.core.service_lifecycle as lifecycle
+
+        monkeypatch.setattr(lifecycle, "reload_service_definition", reload_service)
+
+        result = runner._handle_service_command("web", "reload")
+
+        assert result == {"ok": True, "service": "web"}
+        reload_service.assert_called_once_with(runner, "web")
+
+    def test_register_service_action_delegates_to_service_lifecycle(
+        self, tmp_path: Path, monkeypatch
+    ):
+        runner = self._runner(tmp_path)
+        register = MagicMock(return_value={"ok": True, "service": "flux"})
+
+        import haniel.core.service_lifecycle as lifecycle
+
+        monkeypatch.setattr(lifecycle, "register_service", register)
+
+        result = runner._handle_service_command(
+            "",
+            "register-service",
+            {
+                "name": "flux",
+                "service_config": {"run": "node dist/index.js"},
+                "start": False,
+            },
+        )
+
+        assert result == {"ok": True, "service": "flux"}
+        register.assert_called_once_with(
+            runner,
+            name="flux",
+            service_config={"run": "node dist/index.js"},
+            repo=None,
+            repo_config=None,
+            start=False,
+        )
+
+    def test_register_repo_action_delegates_to_service_lifecycle(
+        self, tmp_path: Path, monkeypatch
+    ):
+        runner = self._runner(tmp_path)
+        register = MagicMock(return_value={"ok": True, "repo": "flux"})
+
+        import haniel.core.service_lifecycle as lifecycle
+
+        monkeypatch.setattr(lifecycle, "register_repo", register)
+
+        result = runner._handle_service_command(
+            "",
+            "register-repo",
+            {
+                "name": "flux",
+                "repo_config": {
+                    "url": "git@github.com:test/flux.git",
+                    "path": "./flux",
+                },
+            },
+        )
+
+        assert result == {"ok": True, "repo": "flux"}
+        register.assert_called_once_with(
+            runner,
+            name="flux",
+            repo_config={"url": "git@github.com:test/flux.git", "path": "./flux"},
+        )
+
+    def test_service_scoped_action_rejects_unknown_service(self, tmp_path: Path):
+        runner = self._runner(tmp_path)
+
+        with pytest.raises(ValueError, match="Unknown service"):
+            runner._handle_service_command("missing", "start")
+
+
 # --- Startup Updates Tests ---
 
 

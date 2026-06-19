@@ -21,6 +21,7 @@ from ..config.io import backup_config, read_config, restore_config, write_config
 from ..core.service_lifecycle import (
     CONFIG_WRITE_LOCK,
     delete_service_config,
+    register_repo,
     register_service,
 )
 
@@ -353,27 +354,13 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
                 raise ValueError("Body must contain 'name' and 'config' fields")
 
             try:
-                new_repo = RepoConfig.model_validate(repo_data)
+                return register_repo(runner, name=repo_name, repo_config=repo_data)
             except ValidationError as e:
                 raise ValueError(str(e)) from e
 
-            with _write_lock:
-                config = read_config(config_path)
-
-                if repo_name in config.repos:
-                    raise ValueError(f"Repo already exists: {repo_name}")
-
-                config.repos[repo_name] = new_repo
-
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
-
-                _commit_config(config_path, config, runner)
-
         try:
-            await loop.run_in_executor(None, _do_post)
-            return JSONResponse({"ok": True})
+            result = await loop.run_in_executor(None, _do_post)
+            return JSONResponse(result)
         except ValueError as e:
             return _error(str(e), status=400)
         except RuntimeError as e:

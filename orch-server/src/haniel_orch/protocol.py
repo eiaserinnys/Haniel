@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from enum import Enum
-from typing import Union
+from typing import Any, Union
 
 from pydantic import BaseModel
 
@@ -89,12 +89,13 @@ class DeployReject(BaseModel):
 
 
 class ServiceCommand(BaseModel):
-    """Server instructs node to restart/stop a service."""
+    """Server instructs node to run a service/config lifecycle command."""
 
     type: str = "service_command"
     command_id: str  # unique ID for tracking
     service_name: str
-    action: str  # "restart" | "stop"
+    action: str
+    payload: dict[str, Any] | None = None
 
 
 # --- Node → Server messages (additional) ---
@@ -110,6 +111,7 @@ class ServiceCommandResult(BaseModel):
     action: str
     success: bool
     error: str | None = None
+    result: Any = None
 
 
 # Union types

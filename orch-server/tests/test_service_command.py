@@ -122,6 +122,127 @@ class TestServiceCommandEndpoint:
         sent_msg = json.loads(ws.send_text.call_args[0][0])
         assert sent_msg["action"] == "stop"
 
+    async def test_start_action(self, app, registry):
+        ws = AsyncMock()
+        hello = NodeHello(
+            node_id="n1",
+            token="t",
+            hostname="h",
+            os="Linux",
+            arch="x86_64",
+            haniel_version="0.1.0",
+        )
+        await registry.register(ws, hello)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/orch/service-command",
+            json={"node_id": "n1", "service_name": "svc1", "action": "start"},
+        )
+
+        assert resp.status_code == 200
+        sent_msg = json.loads(ws.send_text.call_args[0][0])
+        assert sent_msg["action"] == "start"
+        assert sent_msg["service_name"] == "svc1"
+
+    async def test_reload_config_without_service_name(self, app, registry):
+        ws = AsyncMock()
+        hello = NodeHello(
+            node_id="n1",
+            token="t",
+            hostname="h",
+            os="Linux",
+            arch="x86_64",
+            haniel_version="0.1.0",
+        )
+        await registry.register(ws, hello)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/orch/service-command",
+            json={"node_id": "n1", "action": "reload-config"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "n1:config:reload-config:" in data["command_id"]
+        sent_msg = json.loads(ws.send_text.call_args[0][0])
+        assert sent_msg["action"] == "reload-config"
+        assert sent_msg["service_name"] == "config"
+
+    async def test_register_service_action_sends_payload(self, app, registry):
+        ws = AsyncMock()
+        hello = NodeHello(
+            node_id="n1",
+            token="t",
+            hostname="h",
+            os="Linux",
+            arch="x86_64",
+            haniel_version="0.1.0",
+        )
+        await registry.register(ws, hello)
+
+        payload = {
+            "name": "flux",
+            "service_config": {"run": "node dist/index.js"},
+            "start": False,
+        }
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/orch/service-command",
+            json={"node_id": "n1", "action": "register-service", "payload": payload},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "n1:flux:register-service:" in data["command_id"]
+        sent_msg = json.loads(ws.send_text.call_args[0][0])
+        assert sent_msg["service_name"] == "flux"
+        assert sent_msg["payload"] == payload
+
+    async def test_register_service_requires_payload_config(self, app):
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/orch/service-command",
+            json={
+                "node_id": "n1",
+                "action": "register-service",
+                "payload": {"name": "flux"},
+            },
+        )
+        assert resp.status_code == 400
+        assert "service_config" in resp.json()["error"]
+
+    async def test_register_repo_action_sends_payload(self, app, registry):
+        ws = AsyncMock()
+        hello = NodeHello(
+            node_id="n1",
+            token="t",
+            hostname="h",
+            os="Linux",
+            arch="x86_64",
+            haniel_version="0.1.0",
+        )
+        await registry.register(ws, hello)
+
+        payload = {
+            "name": "flux",
+            "repo_config": {
+                "url": "git@github.com:test/flux.git",
+                "path": "./flux",
+            },
+        }
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/orch/service-command",
+            json={"node_id": "n1", "action": "register-repo", "payload": payload},
+        )
+
+        assert resp.status_code == 200
+        sent_msg = json.loads(ws.send_text.call_args[0][0])
+        assert sent_msg["service_name"] == "flux"
+        assert sent_msg["payload"] == payload
+
 
 class TestServiceCommandResultBroadcast:
     """Hub broadcasts ServiceCommandResult to dashboards."""
@@ -136,6 +257,7 @@ class TestServiceCommandResultBroadcast:
             service_name="bot",
             action="restart",
             success=True,
+            result={"ok": True},
         )
         await hub._handle_service_command_result(result)
 
@@ -145,6 +267,7 @@ class TestServiceCommandResultBroadcast:
         assert data["success"] is True
         assert data["service_name"] == "bot"
         assert data["node_id"] == "n1"
+        assert data["result"] == {"ok": True}
 
     async def test_broadcasts_failure(self, hub: WebSocketHub):
         ws_dash = AsyncMock()
@@ -173,10 +296,12 @@ class TestServiceCommandProtocol:
             command_id="n1:bot:restart:123",
             service_name="bot",
             action="restart",
+            payload={"dry_run": True},
         )
         data = json.loads(cmd.model_dump_json())
         assert data["type"] == "service_command"
         assert data["service_name"] == "bot"
+        assert data["payload"] == {"dry_run": True}
 
     def test_service_command_result_model(self):
         result = ServiceCommandResult(
@@ -185,10 +310,12 @@ class TestServiceCommandProtocol:
             service_name="bot",
             action="restart",
             success=True,
+            result={"ok": True},
         )
         data = json.loads(result.model_dump_json())
         assert data["type"] == "service_command_result"
         assert data["success"] is True
+        assert data["result"] == {"ok": True}
 
     def test_parse_service_command_result(self):
         raw = json.dumps({
@@ -199,6 +326,7 @@ class TestServiceCommandProtocol:
             "action": "restart",
             "success": False,
             "error": "service crashed",
+            "result": None,
         })
         msg = parse_node_message(raw)
         assert isinstance(msg, ServiceCommandResult)

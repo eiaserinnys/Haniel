@@ -16,6 +16,10 @@ from .protocol import DeployApproval, DeployReject, DeployStatus, ServiceCommand
 
 logger = logging.getLogger(__name__)
 
+SERVICE_SCOPED_COMMANDS = {"start", "restart", "stop", "reload"}
+CONFIG_COMMANDS = {"reload-config", "register-service", "register-repo"}
+SERVICE_COMMAND_ACTIONS = SERVICE_SCOPED_COMMANDS | CONFIG_COMMANDS
+
 
 def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
     """Create REST API routes bound to the given hub and store."""
@@ -276,24 +280,76 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         return JSONResponse(response)
 
     async def service_command(request: Request) -> JSONResponse:
-        """POST /api/orch/service-command — send restart/stop to a node's service."""
+        """POST /api/orch/service-command — send lifecycle command to a node."""
         body = await request.json()
         node_id = body.get("node_id")
-        service_name = body.get("service_name")
+        service_name = body.get("service_name") or ""
         action = body.get("action")
+        payload = body.get("payload")
 
-        if not all([node_id, service_name, action]):
+        if not all([node_id, action]):
             return JSONResponse(
-                {"error": "node_id, service_name, action required"}, status_code=400
+                {"error": "node_id and action required"}, status_code=400
             )
-        if action not in ("restart", "stop"):
+        if action not in SERVICE_COMMAND_ACTIONS:
             return JSONResponse(
-                {"error": "action must be 'restart' or 'stop'"}, status_code=400
+                {
+                    "error": (
+                        "action must be one of "
+                        f"{', '.join(sorted(SERVICE_COMMAND_ACTIONS))}"
+                    )
+                },
+                status_code=400,
+            )
+        if payload is not None and not isinstance(payload, dict):
+            return JSONResponse(
+                {"error": "payload must be an object"}, status_code=400
             )
 
-        command_id = f"{node_id}:{service_name}:{action}:{int(time.time())}"
+        payload = payload or {}
+        command_target = service_name
+
+        if action in SERVICE_SCOPED_COMMANDS and not service_name:
+            return JSONResponse(
+                {"error": f"service_name is required for action '{action}'"},
+                status_code=400,
+            )
+        if action == "reload-config":
+            command_target = service_name or "config"
+            service_name = command_target
+        elif action == "register-service":
+            command_target = service_name or payload.get("name", "")
+            if not command_target:
+                return JSONResponse(
+                    {"error": "service_name or payload.name is required"},
+                    status_code=400,
+                )
+            if payload.get("service_config", payload.get("config")) is None:
+                return JSONResponse(
+                    {"error": "payload.service_config is required"},
+                    status_code=400,
+                )
+            service_name = command_target
+        elif action == "register-repo":
+            command_target = service_name or payload.get("name", "")
+            if not command_target:
+                return JSONResponse(
+                    {"error": "service_name or payload.name is required"},
+                    status_code=400,
+                )
+            if payload.get("repo_config", payload.get("config")) is None:
+                return JSONResponse(
+                    {"error": "payload.repo_config is required"},
+                    status_code=400,
+                )
+            service_name = command_target
+
+        command_id = f"{node_id}:{command_target}:{action}:{int(time.time())}"
         msg = ServiceCommand(
-            command_id=command_id, service_name=service_name, action=action
+            command_id=command_id,
+            service_name=service_name,
+            action=action,
+            payload=payload or None,
         )
         sent = await hub.send_to_node(node_id, msg)
 
@@ -303,7 +359,9 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
             )
 
         # Track in-flight command for timeout/disconnect handling.
-        await hub.register_pending_command(command_id, node_id, service_name, action)
+        await hub.register_pending_command(
+            command_id, node_id, command_target, action
+        )
 
         return JSONResponse({"command_id": command_id, "status": "sent"})
 

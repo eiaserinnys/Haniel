@@ -102,6 +102,7 @@ export interface ServiceCommandResultEvent {
   action: string;
   success: boolean;
   error: string | null;
+  result?: unknown;
 }
 
 export type WsEvent = NewPendingEvent | StatusChangeEvent | NodeConnectedEvent | NodeDisconnectedEvent | ServiceCommandResultEvent;
