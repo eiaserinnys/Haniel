@@ -1119,21 +1119,36 @@ class ServiceRunner:
             affected = self.get_affected_services(repo_name)
             self._suppress_pending_restarts(affected)
             try:
-                shutdown_order = [s for s in self.get_shutdown_order() if s in affected]
-                for svc in shutdown_order:
-                    self._cancel_pending_restart(svc)
-                    if self.process_manager.is_running(svc):
-                        logger.info("Stopping %s for pull", svc)
-                        if not self.process_manager.stop_service(svc):
-                            raise RuntimeError(f"failed to stop {svc} before pull")
+                for svc in affected:
                     self._cancel_pending_restart(svc)
 
                 success, discarded = self._pull_repo(repo_name)
                 if not success:
                     raise RuntimeError(f"git pull failed for {repo_name}")
 
+                failed_hooks: list[str] = []
                 for svc in affected:
-                    self.execute_hook(svc, "post_pull")
+                    if not self.execute_hook(svc, "post_pull"):
+                        failed_hooks.append(svc)
+
+                if failed_hooks:
+                    failed = ", ".join(sorted(failed_hooks))
+                    logger.error(
+                        "Skipping restart after pull for repo %s because post_pull "
+                        "failed for: %s. Existing service processes were left running.",
+                        repo_name,
+                        failed,
+                    )
+                    raise RuntimeError(f"post_pull hook failed for: {failed}")
+
+                shutdown_order = [s for s in self.get_shutdown_order() if s in affected]
+                for svc in shutdown_order:
+                    self._cancel_pending_restart(svc)
+                    if self.process_manager.is_running(svc):
+                        logger.info("Stopping %s for post-pull restart", svc)
+                        if not self.process_manager.stop_service(svc):
+                            raise RuntimeError(f"failed to stop {svc} after pull")
+                    self._cancel_pending_restart(svc)
 
                 startup_order = [s for s in self.get_startup_order() if s in affected]
                 for svc in startup_order:

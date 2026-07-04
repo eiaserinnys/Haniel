@@ -962,6 +962,7 @@ class TestServiceRunnerPollCycle:
 
         def execute_hook(name: str, hook: str) -> bool:
             if hook == "post_pull":
+                assert running[name] is True
                 runner._process_pending_restarts()
                 assert mock_start.call_count == 0
             return True
@@ -1009,8 +1010,28 @@ class TestServiceRunnerPollCycle:
         with patch.object(runner, "_pull_repo", return_value=(True, [])):
             runner.trigger_pull("test-repo")
 
-        assert runner.process_manager.stop_service.call_count == 2
+        assert runner.process_manager.stop_service.call_count == 1
         mock_start.assert_called_once_with("test-service")
+
+    @patch("haniel.core.runner.ServiceRunner._start_service")
+    def test_trigger_pull_keeps_running_service_when_post_pull_fails(
+        self,
+        mock_start,
+        runner_with_mock_repo,
+    ):
+        """A failed post_pull hook must not replace a still-running service."""
+        runner = runner_with_mock_repo
+        runner._repo_states["test-repo"].pending_changes = {"commits": ["a"]}
+        runner.process_manager.is_running = MagicMock(return_value=True)
+        runner.process_manager.stop_service = MagicMock(return_value=True)
+        runner.execute_hook = MagicMock(return_value=False)
+
+        with patch.object(runner, "_pull_repo", return_value=(True, [])):
+            with pytest.raises(RuntimeError, match="post_pull hook failed"):
+                runner.trigger_pull("test-repo")
+
+        runner.process_manager.stop_service.assert_not_called()
+        mock_start.assert_not_called()
 
     @patch("haniel.core.runner.ServiceRunner._start_service")
     def test_process_pending_restarts(self, mock_start, tmp_path: Path):
