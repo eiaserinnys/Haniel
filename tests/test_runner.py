@@ -15,6 +15,7 @@ from haniel.config import (
     HooksConfig,
 )
 from haniel.core.git import GitError
+from haniel.core.health import ServiceState
 from haniel.core.runner import (
     ServiceRunner,
     DependencyGraph,
@@ -408,6 +409,11 @@ class TestHookExecution:
 
         mock_start.assert_not_called()
         assert result is False
+        health = runner.health_manager.get_health("test-service")
+        assert health.state == ServiceState.CRASHED
+        assert health.consecutive_failures == 1
+        with runner._restart_lock:
+            assert "test-service" in runner._pending_restarts
 
     @patch("haniel.core.process.ProcessManager.start_service")
     def test_no_pre_start_hook_starts_normally(
@@ -1032,6 +1038,76 @@ class TestServiceRunnerPollCycle:
 
         runner.process_manager.stop_service.assert_not_called()
         mock_start.assert_not_called()
+
+    def test_trigger_pull_continues_restart_after_pre_start_failure(
+        self,
+        tmp_path: Path,
+    ):
+        """A failed service must not leave independent stopped services down."""
+        config = HanielConfig(
+            poll_interval=5,
+            repos={
+                "main": RepoConfig(
+                    url="git@github.com:test/main.git",
+                    branch="main",
+                    path="./main",
+                ),
+                "bot": RepoConfig(
+                    url="git@github.com:test/bot.git",
+                    branch="main",
+                    path="./bot",
+                ),
+            },
+            services={
+                "soulstream-server": ServiceConfig(run="server", repo="main"),
+                "independent": ServiceConfig(run="independent", repo="main"),
+                "bot": ServiceConfig(run="bot", repo="bot", after=["soulstream-server"]),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        runner._repo_states["main"].pending_changes = {"commits": ["a"]}
+        running = {
+            "soulstream-server": True,
+            "independent": True,
+            "bot": True,
+        }
+
+        def is_running(name: str) -> bool:
+            return running[name]
+
+        def stop_service(name: str) -> bool:
+            running[name] = False
+            return True
+
+        def execute_hook(name: str, hook_name: str) -> bool:
+            return not (name == "soulstream-server" and hook_name == "pre_start")
+
+        def start_service(*, name: str, **_kwargs) -> None:
+            running[name] = True
+
+        runner.process_manager.is_running = MagicMock(side_effect=is_running)
+        runner.process_manager.stop_service = MagicMock(side_effect=stop_service)
+        runner.process_manager.start_service = MagicMock(side_effect=start_service)
+        runner.execute_hook = MagicMock(side_effect=execute_hook)
+
+        with patch.object(runner, "_pull_repo", return_value=(True, [])):
+            with pytest.raises(RuntimeError, match="failed to restart services after pull"):
+                runner.trigger_pull("main")
+
+        runner.execute_hook.assert_any_call("soulstream-server", "pre_start")
+        runner.execute_hook.assert_any_call("independent", "pre_start")
+        started = [
+            kwargs["name"]
+            for _, _args, kwargs in runner.process_manager.start_service.mock_calls
+        ]
+        assert started == ["independent"]
+        assert running == {
+            "soulstream-server": False,
+            "independent": True,
+            "bot": False,
+        }
+        with runner._restart_lock:
+            assert "bot" in runner._pending_restarts
 
     @patch("haniel.core.runner.ServiceRunner._start_service")
     def test_process_pending_restarts(self, mock_start, tmp_path: Path):

@@ -548,6 +548,7 @@ class ServiceRunner:
         try:
             if not self.execute_hook(name, "pre_start"):
                 logger.error(f"pre_start hook failed for {name}, aborting start")
+                self._record_start_failure(name, "pre_start hook failed")
                 return False
             self.process_manager.start_service(
                 name=name,
@@ -558,11 +559,99 @@ class ServiceRunner:
             return True
         except Exception as e:
             logger.error(f"Failed to start service {name}: {e}")
+            self._schedule_start_failure_retry(name, str(e))
             return False
 
     def _on_service_ready(self, name: str) -> None:
         """Called when a service becomes ready."""
         logger.info(f"Service {name} is ready")
+
+    def _record_start_failure(self, name: str, reason: str) -> None:
+        """Record a pre-process start failure and schedule retry via backoff."""
+        delay = self.health_manager.record_crash(name, exit_code=None, reason=reason)
+        if delay > 0 and self.health_manager.should_restart(name):
+            logger.info(
+                "Scheduling restart of %s in %ss after start failure",
+                name,
+                delay,
+            )
+            self._schedule_restart(name, delay)
+        else:
+            logger.error("Circuit breaker open for %s, not restarting", name)
+
+    def _schedule_start_failure_retry(self, name: str, reason: str) -> None:
+        health = self.health_manager.get_health(name)
+        if health.state != ServiceState.CRASHED:
+            self._record_start_failure(name, reason)
+            return
+
+        if self.health_manager.should_restart(name):
+            delay = health.get_restart_delay()
+            logger.info(
+                "Scheduling restart of %s in %ss after start failure",
+                name,
+                delay,
+            )
+            self._schedule_restart(name, delay)
+        else:
+            logger.error("Circuit breaker open for %s, not restarting", name)
+
+    def _blocked_start_dependencies(self, name: str) -> list[str]:
+        blockers = []
+        for dependency in self._dependency_graph.get_dependencies(name):
+            if dependency in self._enabled_services and not self.process_manager.is_running(
+                dependency
+            ):
+                blockers.append(dependency)
+        return sorted(blockers)
+
+    def _schedule_restart_after_dependency_block(
+        self,
+        name: str,
+        blockers: list[str],
+    ) -> None:
+        circuit_open = []
+        for dependency in blockers:
+            health = self.health_manager.get_health(dependency)
+            if health.state == ServiceState.CIRCUIT_OPEN:
+                circuit_open.append(dependency)
+        if circuit_open:
+            logger.error(
+                "Skipping restart of %s because dependency circuit is open: %s",
+                name,
+                ", ".join(circuit_open),
+            )
+            return
+
+        with self._restart_lock:
+            pending_recovery = [
+                dependency
+                for dependency in blockers
+                if dependency in self._pending_restarts
+                or dependency in self._restart_suppressed
+            ]
+
+        if not pending_recovery:
+            logger.error(
+                "Skipping restart of %s because dependencies are not running and "
+                "not queued for recovery: %s",
+                name,
+                ", ".join(blockers),
+            )
+            return
+
+        dependency_delays = [
+            self.health_manager.get_health(dependency).get_restart_delay()
+            for dependency in pending_recovery
+        ]
+        delay = max([self.health_manager.base_delay, *dependency_delays])
+        logger.warning(
+            "Skipping restart of %s until dependencies recover: %s. Retrying in %ss",
+            name,
+            ", ".join(blockers),
+            delay,
+        )
+        self._schedule_restart(name, delay)
 
     def _on_service_crash(self, name: str, exit_code: int | None) -> None:
         """Called when a service crashes.
@@ -1150,9 +1239,23 @@ class ServiceRunner:
                             raise RuntimeError(f"failed to stop {svc} after pull")
                     self._cancel_pending_restart(svc)
 
+                failed_starts: list[str] = []
+                skipped_starts: dict[str, list[str]] = {}
                 startup_order = [s for s in self.get_startup_order() if s in affected]
                 for svc in startup_order:
                     self._cancel_pending_restart(svc)
+                    blockers = self._blocked_start_dependencies(svc)
+                    if blockers:
+                        logger.error(
+                            "Skipping restart of %s after pull because dependencies "
+                            "are not running: %s",
+                            svc,
+                            ", ".join(blockers),
+                        )
+                        skipped_starts[svc] = blockers
+                        self._schedule_restart_after_dependency_block(svc, blockers)
+                        continue
+
                     if self.process_manager.is_running(svc):
                         logger.warning(
                             "%s is already running before post-pull restart; "
@@ -1167,7 +1270,22 @@ class ServiceRunner:
 
                     logger.info("Restarting %s after pull", svc)
                     if not self._start_service(svc):
-                        raise RuntimeError(f"failed to restart {svc} after pull")
+                        failed_starts.append(svc)
+
+                if failed_starts or skipped_starts:
+                    details = []
+                    if failed_starts:
+                        details.append(f"failed: {', '.join(sorted(failed_starts))}")
+                    if skipped_starts:
+                        skipped = ", ".join(
+                            f"{svc} blocked by {', '.join(blockers)}"
+                            for svc, blockers in sorted(skipped_starts.items())
+                        )
+                        details.append(f"skipped: {skipped}")
+                    raise RuntimeError(
+                        "failed to restart services after pull for "
+                        f"{repo_name}: {'; '.join(details)}"
+                    )
             finally:
                 self._release_restart_suppression(affected)
 
@@ -1757,8 +1875,13 @@ class ServiceRunner:
 
         for name in ready:
             if not self.process_manager.is_running(name):
+                blockers = self._blocked_start_dependencies(name)
+                if blockers:
+                    self._schedule_restart_after_dependency_block(name, blockers)
+                    continue
                 logger.info(f"Executing scheduled restart for {name}")
-                self._start_service(name)
+                if not self._start_service(name):
+                    logger.error("Scheduled restart for %s failed", name)
 
     def get_status(self) -> dict:
         """Get current status of the runner.
