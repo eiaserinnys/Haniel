@@ -12,6 +12,8 @@ import threading
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from .child_env import sanitized_child_env
+
 from ..config.io import backup_config, read_config, restore_config, write_config
 from ..config.model import HanielConfig, RepoConfig, ServiceConfig
 from ..config.validators import validate_config
@@ -109,6 +111,7 @@ def _run_shell_hook(
             text=True,
             timeout=300,
             shell=shell,
+            env=sanitized_child_env(),
         )
     except subprocess.CalledProcessError as e:
         raise RuntimeError(

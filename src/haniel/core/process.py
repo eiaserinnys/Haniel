@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..config import ServiceConfig, ShutdownConfig
+from .child_env import sanitized_child_env
 from .health import HealthManager, ServiceState
 from .logs import LogCapture, LogManager, StreamReader
 from .stale_instance import PortInUseError, StaleInstanceCleaner, extract_ready_port
@@ -269,6 +270,7 @@ class ProcessManager:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                env=sanitized_child_env(),
                 **popen_kwargs,
             )
         except PermissionError:
@@ -291,6 +293,7 @@ class ProcessManager:
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE,
                             text=True,
+                            env=sanitized_child_env(),
                             **retry_kwargs,
                         )
                     except (OSError, subprocess.SubprocessError) as e:

@@ -30,6 +30,7 @@ from ..config import (
     ServiceConfig,
     ShutdownConfig,
 )
+from .child_env import sanitized_child_env
 from .git import (
     GitError,
     fetch_repo,
@@ -493,6 +494,7 @@ class ServiceRunner:
                 text=True,
                 timeout=300,  # 5 minute timeout for hooks
                 shell=shell,
+                env=sanitized_child_env(),
             )
             logger.info(f"Hook {hook_name} for {service_name} completed successfully")
             return True
