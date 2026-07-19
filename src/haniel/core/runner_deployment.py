@@ -32,12 +32,14 @@ class RunnerDeploymentAdapter:
         affected: list[str],
         repo_path: Path,
         previous_head: str,
+        desired_running: set[str] | None = None,
     ) -> None:
         self.runner = runner
         self.repo_name = repo_name
         self.affected = affected
         self.repo_path = repo_path
         self.previous_head = previous_head
+        self.desired_running = desired_running
         self.handover_started = False
         self.originally_running = {
             name for name in affected if runner.process_manager.is_running(name)
@@ -114,8 +116,13 @@ class RunnerDeploymentAdapter:
         state = self.runner._repo_states[self.repo_name]
         state.last_head = get_head(self.repo_path)
         self.build()
-        if self.handover_started:
-            self.start_and_wait(self.originally_running)
+        recovery_services = (
+            self.desired_running
+            if self.desired_running is not None
+            else self.originally_running
+        )
+        if self.handover_started or self.desired_running is not None:
+            self.start_and_wait(recovery_services)
 
     def prepare_roll_forward(self) -> None:
         self.handover_started = True
@@ -140,6 +147,8 @@ def run_manifest_deployment(
     repo_name: str,
     affected: list[str],
     previous_head: str,
+    *,
+    desired_running: set[str] | None = None,
 ) -> None:
     """Load the pulled release manifest and run the auditable handover."""
 
@@ -152,7 +161,12 @@ def run_manifest_deployment(
         raise ValueError(f"release manifest escapes repository: {manifest_path}")
 
     adapter = RunnerDeploymentAdapter(
-        runner, repo_name, affected, repo_path, previous_head
+        runner,
+        repo_name,
+        affected,
+        repo_path,
+        previous_head,
+        desired_running,
     )
     state_store = DeploymentStateStore(runner.config_dir / ".haniel" / "deployments")
     target_head = get_head(repo_path)

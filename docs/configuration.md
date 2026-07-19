@@ -159,13 +159,12 @@ repos:
 
 ### Migration-aware release manifests
 
-A repository that changes persistent data should own an explicit release contract. The manifest keeps the old processes available through build and migration preflight. Haniel then stops affected processes before the final backup so a later restore cannot lose writes made between backup completion and handover.
+A repository that changes persistent data should own an explicit release contract. The manifest keeps the old processes available through build and migration preflight. Haniel stops the affected local processes before any declared backup. A repository that shares its database with writers on other nodes must prove cluster-wide write fencing in its own preflight before it may declare a destructive restore; stopping local services alone is not a quiescence guarantee.
 
 ```json
 {
   "schema_version": "haniel.release.v1",
   "release_id": "2026-07-19-task-migration",
-  "environment_service": "api",
   "migration": {
     "destructive": true,
     "preflight": {
@@ -205,9 +204,18 @@ A repository that changes persistent data should own an explicit release contrac
 }
 ```
 
-Every command runs without a shell in the repository root. Commands receive `HANIEL_DEPLOY_REPO`, `HANIEL_RELEASE_ID`, `HANIEL_PREVIOUS_HEAD`, and `HANIEL_TARGET_HEAD`. When `environment_service` names an affected service, commands also receive `HANIEL_SERVICE_CWD`; the repository can load its own environment file without exposing secrets to Haniel. A destructive migration is rejected unless both backup commands are present. When roll-forward recovery itself fails, the optional `fallback` command runs before Haniel rolls code and processes back to the previous release. Use it to restore the verified backup; omitting it leaves a persistent recovery failure as an explicit failed state.
+Every command runs without a shell in the repository root. Commands receive `HANIEL_DEPLOY_REPO`, `HANIEL_RELEASE_ID`, `HANIEL_PREVIOUS_HEAD`, and `HANIEL_TARGET_HEAD`. `environment_service` is optional and must only be used when a manifest truly targets one stable Haniel service key; deployment-specific service names should stay out of repository manifests. A destructive migration is rejected unless both backup commands are present. When roll-forward recovery itself fails, the optional `fallback` command runs before Haniel rolls code and processes back to the previous release. A database restore fallback is safe only when the repository verifies a cluster-wide write fence; otherwise omit it and fail explicitly instead of deleting writes made after the backup.
 
-The journal under `.haniel/deployments/` records `build`, `preflight`, `backing_up`, `migrating`, `starting`, `verifying`, `recovering`, and the terminal state. A repeated approval of the same successful target commit and release ID is a no-op. Haniel reports success only after every affected service is ready and every post-start verification succeeds. A recovered deployment still reports failure, preserving the distinction between release success and restored availability.
+The conventional path is `deploy/release-manifest.json`. If a fetched remote branch introduces a valid manifest at that path while `haniel.yaml` has no `release_manifest`, Haniel atomically adds the one field before pulling any new code, preserves a checksum-addressed backup of the previous config, and immediately uses the manifest state machine. If Haniel was started without a writable `config_path`, it blocks the pull and keeps the previous checkout.
+
+The transition can also be inspected or applied out of band. `check` is read-only and exits 2 while activation is required. `apply` requires the fresh checksum printed by `check`, so a concurrent config edit cannot be overwritten.
+
+```bash
+python -m haniel.config.release_activation check --config /path/to/haniel.yaml --repo soulstream
+python -m haniel.config.release_activation apply --config /path/to/haniel.yaml --repo soulstream --expected-sha256 <sha256-from-check>
+```
+
+The same state machine is used by an approved pull and by Haniel startup updates. Startup does not rerun legacy `post_pull` or start calls for manifest-owned services; the handover starts and verifies those services exactly once, then the remaining services continue in dependency order. The journal under `.haniel/deployments/` records `build`, `preflight`, `backing_up`, `migrating`, `starting`, `verifying`, `recovering`, and the terminal state. A repeated approval of the same successful target commit and release ID is a no-op. Haniel reports success only after every affected service is ready and every post-start verification succeeds. A recovered deployment still reports failure, preserving the distinction between release success and restored availability.
 
 ## `services`
 

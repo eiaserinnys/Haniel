@@ -422,7 +422,7 @@ repos:
     release_manifest: {path}       # Optional. Repository-relative haniel.release.v1 contract
 ```
 
-Repositories with a release manifest use the migration-aware deployment state machine. Build and migration preflight complete while the old processes remain available. Haniel then stops affected processes, creates and verifies the final backup from a quiesced data state, performs migration and process handover, waits for every affected service readiness condition, executes the manifest's post-start verification commands, and only then reports success. Failures enter the manifest's declared automatic recovery path and remain a failed deployment even when availability is restored. A roll-forward recovery may declare a `fallback` command that restores persistent state before Haniel rolls code and processes back to the previous release.
+Repositories with a release manifest use the migration-aware deployment state machine during both approved pulls and startup updates. Build and migration preflight complete while old processes remain available during a live handover. Haniel then stops affected local processes, runs any declared backup gate, performs migration and process handover, waits for every affected service readiness condition, executes the manifest's post-start verification commands, and only then reports success. Stopping local services does not prove that a shared database is quiescent; a destructive restore fallback requires repository-owned cluster-wide write-fence evidence. Failures enter the manifest's declared automatic recovery path and remain a failed deployment even when availability is restored.
 
 **Auto-clone flow (install):**
 1. Check if `path` exists
