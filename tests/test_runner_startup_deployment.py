@@ -35,6 +35,7 @@ def manifest() -> dict[str, object]:
         "recovery": {
             "strategy": "roll_forward",
             "command": command("recover"),
+            "fallback": command("prepare-previous-release"),
         },
     }
 

@@ -57,6 +57,14 @@ class RecoverySpec(BaseModel):
     command: CommandSpec
     fallback: CommandSpec | None = None
 
+    @model_validator(mode="after")
+    def validate_availability_fallback(self) -> "RecoverySpec":
+        if self.strategy == "roll_forward" and self.fallback is None:
+            raise ValueError(
+                "roll_forward recovery requires a previous-release fallback"
+            )
+        return self
+
 
 class ReleaseManifest(BaseModel):
     """Repository-provided contract consumed by Haniel."""

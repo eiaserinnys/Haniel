@@ -102,6 +102,26 @@ def test_destructive_manifest_requires_backup_verify_and_recovery() -> None:
         )
 
 
+def test_roll_forward_manifest_requires_previous_release_fallback() -> None:
+    with pytest.raises(ValidationError, match="previous-release fallback"):
+        ReleaseManifest.model_validate(
+            {
+                "schema_version": "haniel.release.v1",
+                "release_id": "unavailable-on-persistent-failure",
+                "migration": {
+                    "destructive": False,
+                    "preflight": command("preflight"),
+                    "apply": command("migrate"),
+                },
+                "post_start_verify": [command("verify")],
+                "recovery": {
+                    "strategy": "roll_forward",
+                    "command": command("recover"),
+                },
+            }
+        )
+
+
 def test_load_manifest_rejects_unknown_schema(tmp_path: Path) -> None:
     path = tmp_path / "release.json"
     path.write_text(
