@@ -143,6 +143,7 @@ repos:
     url: git@github.com:org/my-app.git
     branch: main
     path: ./.services/my-app
+    release_manifest: deploy/release-manifest.json
 ```
 
 | Field | Type | Default | Description |
@@ -150,10 +151,63 @@ repos:
 | `url` | string | *required* | Git clone URL (HTTPS or SSH) |
 | `branch` | string | `main` | Branch to track |
 | `path` | string | *required* | Local path, relative to `haniel.yaml` location |
+| `release_manifest` | string | — | Repository-relative path to a `haniel.release.v1` deployment contract |
 
 **Poll behavior**: Every `poll_interval` seconds, haniel runs `git fetch` and compares local HEAD with remote. If they differ, changes are detected.
 
 **Auto-clone**: During `haniel install` or first `haniel run`, missing repos are cloned automatically.
+
+### Migration-aware release manifests
+
+A repository that changes persistent data should own an explicit release contract. The manifest keeps the old processes available through build and migration preflight. Haniel then stops affected processes before the final backup so a later restore cannot lose writes made between backup completion and handover.
+
+```json
+{
+  "schema_version": "haniel.release.v1",
+  "release_id": "2026-07-19-task-migration",
+  "environment_service": "api",
+  "migration": {
+    "destructive": true,
+    "preflight": {
+      "name": "migration-preflight",
+      "command": "node scripts/migrate.mjs preflight"
+    },
+    "backup": {
+      "name": "database-backup",
+      "command": "node scripts/migrate.mjs backup"
+    },
+    "verify_backup": {
+      "name": "verify-database-backup",
+      "command": "node scripts/migrate.mjs verify-backup"
+    },
+    "apply": {
+      "name": "apply-migrations",
+      "command": "node scripts/migrate.mjs apply"
+    }
+  },
+  "post_start_verify": [
+    {
+      "name": "release-health",
+      "command": "node scripts/release-health.mjs"
+    }
+  ],
+  "recovery": {
+    "strategy": "roll_forward",
+    "command": {
+      "name": "migration-recovery",
+      "command": "node scripts/migrate.mjs recover"
+    },
+    "fallback": {
+      "name": "restore-database-backup",
+      "command": "node scripts/migrate.mjs restore-backup"
+    }
+  }
+}
+```
+
+Every command runs without a shell in the repository root. Commands receive `HANIEL_DEPLOY_REPO`, `HANIEL_RELEASE_ID`, `HANIEL_PREVIOUS_HEAD`, and `HANIEL_TARGET_HEAD`. When `environment_service` names an affected service, commands also receive `HANIEL_SERVICE_CWD`; the repository can load its own environment file without exposing secrets to Haniel. A destructive migration is rejected unless both backup commands are present. When roll-forward recovery itself fails, the optional `fallback` command runs before Haniel rolls code and processes back to the previous release. Use it to restore the verified backup; omitting it leaves a persistent recovery failure as an explicit failed state.
+
+The journal under `.haniel/deployments/` records `build`, `preflight`, `backing_up`, `migrating`, `starting`, `verifying`, `recovering`, and the terminal state. A repeated approval of the same successful target commit and release ID is a no-op. Haniel reports success only after every affected service is ready and every post-start verification succeeds. A recovered deployment still reports failure, preserving the distinction between release success and restored availability.
 
 ## `services`
 
@@ -228,7 +282,7 @@ Services without `after` start immediately in YAML order.
 ```yaml
 hooks:
   post_pull: pip install -r requirements.txt   # After git pull
-  pre_start: ./scripts/migrate.sh              # Before service start
+  pre_start: ./scripts/check-prerequisites.sh  # Before service start
 ```
 
 | Field | Type | Description |
@@ -237,6 +291,8 @@ hooks:
 | `pre_start` | string | Command to run before service start |
 
 Non-zero exit codes trigger a webhook notification. Service startup continues regardless.
+
+Do not place destructive schema migrations in `pre_start`: it is a per-service lifecycle hook and is not a release transaction. Use the repository `release_manifest` so migration, recovery, readiness, and final verification share one auditable control path.
 
 ## `self`
 

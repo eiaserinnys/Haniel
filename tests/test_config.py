@@ -61,6 +61,34 @@ class TestHanielConfigParsing:
         )
         assert config.repos["manual"].auto_apply is False
 
+    def test_repo_release_manifest_is_repo_relative(self):
+        repo = RepoConfig(
+            url="git@github.com:example/app.git",
+            path="./app",
+            release_manifest="deploy/release-manifest.json",
+        )
+
+        assert repo.release_manifest == "deploy/release-manifest.json"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "/etc/release.json",
+            "../release.json",
+            "deploy/../../release.json",
+            r"C:\release.json",
+            r"\\server\share\release.json",
+            r"deploy\..\release.json",
+        ],
+    )
+    def test_repo_release_manifest_rejects_escape_paths(self, value: str):
+        with pytest.raises(ValidationError, match="repo-relative"):
+            RepoConfig(
+                url="git@github.com:example/app.git",
+                path="./app",
+                release_manifest=value,
+            )
+
     def test_services_parsing(self):
         """Should parse services section correctly."""
         config = load_config(FIXTURES_DIR / "valid_config.yaml")

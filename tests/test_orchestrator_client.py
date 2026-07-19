@@ -292,6 +292,37 @@ class TestHandleDeployApproval:
         assert sent[0]["duration_ms"] is not None
         assert sent[0]["duration_ms"] >= 0
 
+    async def test_success_is_not_sent_until_handler_finishes_verification(
+        self, config
+    ):
+        import asyncio
+        import threading
+
+        verification_done = threading.Event()
+
+        def handler(_deploy_id, _repo, _branch):
+            verification_done.wait(timeout=2)
+            return None
+
+        client = OrchestratorClient(
+            config,
+            haniel_version="0.1.0",
+            deploy_approval_handler=handler,
+        )
+        sent = self._capture_send_json(client)
+        pending = asyncio.create_task(
+            client._handle_deploy_approval(
+                {"deploy_id": f"{config.node_id}:repo:main:abc1234"}
+            )
+        )
+        await asyncio.sleep(0.02)
+        assert sent == []
+
+        verification_done.set()
+        await pending
+
+        assert sent[0]["status"] == "success"
+
     async def test_handler_raises_sends_failed(self, config):
         def handler(deploy_id, repo, branch):
             raise RuntimeError("boom")

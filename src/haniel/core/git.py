@@ -404,6 +404,24 @@ def pull_repo(
         return []
 
 
+def reset_repo_to(path: Path, revision: str) -> None:
+    """Restore tracked repository content to one previously recorded revision."""
+
+    if not path.exists() or not (path / ".git").is_dir():
+        raise GitPullError(f"Not a git repository: {path}", path=path)
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+        raise GitPullError(f"Invalid recovery revision: {revision}", path=path)
+    try:
+        _run_git(["reset", "--hard", revision], cwd=path)
+    except subprocess.CalledProcessError as exc:
+        raise GitPullError(
+            f"Failed to restore repository to {revision}",
+            path=path,
+            stderr=exc.stderr.strip(),
+            returncode=exc.returncode,
+        ) from exc
+
+
 def get_pending_changes(path: Path, branch: str, remote: str = "origin") -> dict:
     """Get details of pending changes between local and remote.
 

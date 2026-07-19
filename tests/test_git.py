@@ -20,6 +20,7 @@ from haniel.core.git import (
     clone_repo,
     fetch_repo,
     pull_repo,
+    reset_repo_to,
     has_changes,
     _validate_git_url,
 )
@@ -325,6 +326,17 @@ class TestPullRepo:
         """Force strategy should raise GitPullError for non-existent path."""
         with pytest.raises(GitPullError):
             pull_repo(Path("/nonexistent"), "master", strategy="force")
+
+    def test_reset_repo_to_restores_known_commit(self, git_repo: Path):
+        previous_head = get_head(git_repo)
+        (git_repo / "new.txt").write_text("new")
+        subprocess.run(["git", "add", "."], cwd=git_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "new"], cwd=git_repo, check=True)
+
+        reset_repo_to(git_repo, previous_head)
+
+        assert get_head(git_repo) == previous_head
+        assert not (git_repo / "new.txt").exists()
 
 
 class TestHasChanges:

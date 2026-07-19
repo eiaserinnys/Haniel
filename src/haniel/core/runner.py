@@ -41,6 +41,7 @@ from .git import (
 )
 from .health import HealthManager, ServiceState
 from .process import ProcessManager
+from .runner_deployment import run_manifest_deployment
 from .self_update_marker import (
     SelfUpdateResult,
     read_and_consume as _read_self_update_marker,
@@ -601,8 +602,9 @@ class ServiceRunner:
     def _blocked_start_dependencies(self, name: str) -> list[str]:
         blockers = []
         for dependency in self._dependency_graph.get_dependencies(name):
-            if dependency in self._enabled_services and not self.process_manager.is_running(
-                dependency
+            if (
+                dependency in self._enabled_services
+                and not self.process_manager.is_running(dependency)
             ):
                 blockers.append(dependency)
         return sorted(blockers)
@@ -1213,81 +1215,19 @@ class ServiceRunner:
                 for svc in affected:
                     self._cancel_pending_restart(svc)
 
+                previous_head = None
+                if state.config.release_manifest:
+                    repo_path = self.config_dir / state.config.path
+                    previous_head = get_head(repo_path)
                 success, discarded = self._pull_repo(repo_name)
                 if not success:
                     raise RuntimeError(f"git pull failed for {repo_name}")
 
-                failed_hooks: list[str] = []
-                for svc in affected:
-                    if not self.execute_hook(svc, "post_pull"):
-                        failed_hooks.append(svc)
-
-                if failed_hooks:
-                    failed = ", ".join(sorted(failed_hooks))
-                    logger.error(
-                        "Skipping restart after pull for repo %s because post_pull "
-                        "failed for: %s. Existing service processes were left running.",
-                        repo_name,
-                        failed,
-                    )
-                    raise RuntimeError(f"post_pull hook failed for: {failed}")
-
-                shutdown_order = [s for s in self.get_shutdown_order() if s in affected]
-                for svc in shutdown_order:
-                    self._cancel_pending_restart(svc)
-                    if self.process_manager.is_running(svc):
-                        logger.info("Stopping %s for post-pull restart", svc)
-                        if not self.process_manager.stop_service(svc):
-                            raise RuntimeError(f"failed to stop {svc} after pull")
-                    self._cancel_pending_restart(svc)
-
-                failed_starts: list[str] = []
-                skipped_starts: dict[str, list[str]] = {}
-                startup_order = [s for s in self.get_startup_order() if s in affected]
-                for svc in startup_order:
-                    self._cancel_pending_restart(svc)
-                    blockers = self._blocked_start_dependencies(svc)
-                    if blockers:
-                        logger.error(
-                            "Skipping restart of %s after pull because dependencies "
-                            "are not running: %s",
-                            svc,
-                            ", ".join(blockers),
-                        )
-                        skipped_starts[svc] = blockers
-                        self._schedule_restart_after_dependency_block(svc, blockers)
-                        continue
-
-                    if self.process_manager.is_running(svc):
-                        logger.warning(
-                            "%s is already running before post-pull restart; "
-                            "stopping it so the new artifacts are started",
-                            svc,
-                        )
-                        if not self.process_manager.stop_service(svc):
-                            raise RuntimeError(
-                                f"failed to stop already-running {svc} after pull"
-                            )
-                        self._cancel_pending_restart(svc)
-
-                    logger.info("Restarting %s after pull", svc)
-                    if not self._start_service(svc):
-                        failed_starts.append(svc)
-
-                if failed_starts or skipped_starts:
-                    details = []
-                    if failed_starts:
-                        details.append(f"failed: {', '.join(sorted(failed_starts))}")
-                    if skipped_starts:
-                        skipped = ", ".join(
-                            f"{svc} blocked by {', '.join(blockers)}"
-                            for svc, blockers in sorted(skipped_starts.items())
-                        )
-                        details.append(f"skipped: {skipped}")
-                    raise RuntimeError(
-                        "failed to restart services after pull for "
-                        f"{repo_name}: {'; '.join(details)}"
-                    )
+                if state.config.release_manifest:
+                    assert previous_head is not None
+                    run_manifest_deployment(self, repo_name, affected, previous_head)
+                else:
+                    self._restart_after_pull_legacy(repo_name, affected)
             finally:
                 self._release_restart_suppression(affected)
 
@@ -1325,6 +1265,81 @@ class ServiceRunner:
             # Clear pending hash so new changes after this pull trigger fresh notifications
             self._last_pending_hash.pop(repo_name, None)
             self._pull_locks[repo_name].release()
+
+    def _restart_after_pull_legacy(self, repo_name: str, affected: list[str]) -> None:
+        """Preserve the pre-manifest restart contract for unrelated repositories."""
+
+        failed_hooks = [
+            service
+            for service in affected
+            if not self.execute_hook(service, "post_pull")
+        ]
+        if failed_hooks:
+            failed = ", ".join(sorted(failed_hooks))
+            logger.error(
+                "Skipping restart after pull for repo %s because post_pull "
+                "failed for: %s. Existing service processes were left running.",
+                repo_name,
+                failed,
+            )
+            raise RuntimeError(f"post_pull hook failed for: {failed}")
+
+        shutdown_order = [s for s in self.get_shutdown_order() if s in affected]
+        for service in shutdown_order:
+            self._cancel_pending_restart(service)
+            if self.process_manager.is_running(service):
+                logger.info("Stopping %s for post-pull restart", service)
+                if not self.process_manager.stop_service(service):
+                    raise RuntimeError(f"failed to stop {service} after pull")
+            self._cancel_pending_restart(service)
+
+        failed_starts: list[str] = []
+        skipped_starts: dict[str, list[str]] = {}
+        startup_order = [s for s in self.get_startup_order() if s in affected]
+        for service in startup_order:
+            self._cancel_pending_restart(service)
+            blockers = self._blocked_start_dependencies(service)
+            if blockers:
+                logger.error(
+                    "Skipping restart of %s after pull because dependencies "
+                    "are not running: %s",
+                    service,
+                    ", ".join(blockers),
+                )
+                skipped_starts[service] = blockers
+                self._schedule_restart_after_dependency_block(service, blockers)
+                continue
+
+            if self.process_manager.is_running(service):
+                logger.warning(
+                    "%s is already running before post-pull restart; "
+                    "stopping it so the new artifacts are started",
+                    service,
+                )
+                if not self.process_manager.stop_service(service):
+                    raise RuntimeError(
+                        f"failed to stop already-running {service} after pull"
+                    )
+                self._cancel_pending_restart(service)
+
+            logger.info("Restarting %s after pull", service)
+            if not self._start_service(service):
+                failed_starts.append(service)
+
+        if failed_starts or skipped_starts:
+            details = []
+            if failed_starts:
+                details.append(f"failed: {', '.join(sorted(failed_starts))}")
+            if skipped_starts:
+                skipped = ", ".join(
+                    f"{service} blocked by {', '.join(blockers)}"
+                    for service, blockers in sorted(skipped_starts.items())
+                )
+                details.append(f"skipped: {skipped}")
+            raise RuntimeError(
+                "failed to restart services after pull for "
+                f"{repo_name}: {'; '.join(details)}"
+            )
 
     @staticmethod
     def _hash_pending(pending: dict) -> str:
