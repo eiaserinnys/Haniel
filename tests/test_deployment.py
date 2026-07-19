@@ -81,6 +81,93 @@ def coordinator(
     )
 
 
+@pytest.mark.parametrize(
+    "active_state",
+    [
+        "build",
+        "preflight",
+        "backing_up",
+        "migrating",
+        "starting",
+        "verifying",
+        "recovering",
+    ],
+)
+def test_nonterminal_attempt_is_closed_as_interrupted(
+    tmp_path: Path, active_state: str
+) -> None:
+    store = DeploymentStateStore(tmp_path / "state")
+    store.begin("soulstream", "old", "new", "release-042")
+    if active_state != "build":
+        store.transition("soulstream", active_state, message="preserved detail")
+    before = store.read("soulstream")
+    assert before is not None
+
+    changed = store.mark_interrupted(
+        "soulstream", reason="runner restarted before deployment completed"
+    )
+    after = store.read("soulstream")
+
+    assert changed is True
+    assert after is not None
+    assert after["state"] == "interrupted"
+    assert after["interrupted_from"] == active_state
+    assert after["interruption_reason"] == (
+        "runner restarted before deployment completed"
+    )
+    assert after["release_id"] == before["release_id"]
+    assert after["previous_head"] == before["previous_head"]
+    assert after["target_head"] == before["target_head"]
+    assert after["history"][:-1] == before["history"]
+    assert after["history"][-1]["state"] == "interrupted"
+
+    history = list(after["history"])
+    assert store.mark_interrupted("soulstream", reason="duplicate startup") is False
+    assert store.read("soulstream")["history"] == history
+
+
+def test_new_attempt_preserves_interrupted_attempt_with_distinct_identity(
+    tmp_path: Path,
+) -> None:
+    store = DeploymentStateStore(tmp_path / "state")
+    store.begin("soulstream", "old", "first-target", "release-042")
+    first = store.read("soulstream")
+    assert first is not None
+    store.transition("soulstream", "migrating", message="migration began")
+    store.mark_interrupted("soulstream", reason="process stopped")
+    interrupted = store.read("soulstream")
+    assert interrupted is not None
+
+    store.begin("soulstream", "old", "second-target", "release-043")
+    current = store.read("soulstream")
+
+    assert current is not None
+    assert current["state"] == "build"
+    assert current["attempt_id"] != first["attempt_id"]
+    assert current["target_head"] == "second-target"
+    previous = current["previous_attempts"][-1]
+    assert previous["attempt_id"] == first["attempt_id"]
+    assert previous["state"] == "interrupted"
+    assert previous["interrupted_from"] == "migrating"
+    assert previous["interruption_reason"] == "process stopped"
+
+
+def test_new_begin_aborts_unfinished_live_intent_before_archiving(
+    tmp_path: Path,
+) -> None:
+    store = DeploymentStateStore(tmp_path / "state")
+    store.begin("soulstream", "old", "old", "approved-pull-pending")
+
+    store.begin("soulstream", "old", "new", "release-042")
+    current = store.read("soulstream")
+
+    assert current is not None
+    previous = current["previous_attempts"][-1]
+    assert previous["state"] == "aborted"
+    assert previous["aborted_from"] == "build"
+    assert previous["history"][-1]["state"] == "aborted"
+
+
 def test_destructive_manifest_requires_backup_verify_and_recovery() -> None:
     with pytest.raises(ValidationError, match="verify_backup"):
         ReleaseManifest.model_validate(

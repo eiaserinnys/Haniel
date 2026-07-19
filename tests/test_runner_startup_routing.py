@@ -278,3 +278,39 @@ def test_startup_activation_without_new_commits_still_runs_manifest_once(
     )
     assert journal is not None
     assert journal["release_id"] == "startup-activation-pending"
+
+
+def test_runner_start_closes_nonterminal_manifest_journal_before_startup_work(
+    tmp_path: Path,
+) -> None:
+    config = HanielConfig(
+        repos={
+            "soulstream": RepoConfig(
+                url="git@test/soulstream",
+                path="./soulstream",
+                release_manifest=DEFAULT_RELEASE_MANIFEST,
+            )
+        },
+        services={},
+    )
+    store = DeploymentStateStore(tmp_path / ".haniel" / "deployments")
+    store.begin("soulstream", "old", "new", "release-042")
+    store.transition("soulstream", "verifying", message="health probe running")
+    runner = ServiceRunner(config, config_dir=tmp_path)
+
+    with (
+        patch.object(runner, "_init_repo_states"),
+        patch.object(runner, "_start_mcp_server"),
+        patch.object(runner, "_start_slack_bot"),
+        patch.object(runner, "_start_orch_client"),
+        patch.object(runner, "_apply_startup_updates"),
+        patch.object(runner, "start_services"),
+        patch("haniel.core.runner.threading.Thread"),
+    ):
+        runner.start()
+
+    journal = store.read("soulstream")
+    assert journal is not None
+    assert journal["state"] == "interrupted"
+    assert journal["interrupted_from"] == "verifying"
+    assert "runner restarted" in journal["interruption_reason"]

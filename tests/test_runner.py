@@ -907,6 +907,104 @@ class TestServiceRunnerPollCycle:
         assert changed == ["manual-repo"]
         mock_fetch.assert_called_once()
 
+    @patch(
+        "haniel.core.runner.get_applied_change_evidence",
+        return_value={"commits": ["new-head External self update"], "stat": "1 file"},
+    )
+    @patch(
+        "haniel.core.runner.get_pending_changes",
+        return_value={"commits": [], "stat": None},
+    )
+    @patch("haniel.core.runner.get_remote_head", return_value="new-head")
+    @patch("haniel.core.runner.get_head", return_value="new-head")
+    @patch("haniel.core.runner.fetch_repo", return_value=False)
+    def test_external_self_pull_notifies_orchestrator_once_without_local_surfaces(
+        self,
+        mock_fetch,
+        mock_head,
+        mock_remote_head,
+        mock_pending,
+        mock_between,
+        tmp_path: Path,
+    ):
+        repo_path = tmp_path / "haniel"
+        repo_path.mkdir()
+        (repo_path / ".git").mkdir()
+        config = HanielConfig.model_validate(
+            {
+                "poll_interval": 1,
+                "repos": {
+                    "haniel": {
+                        "url": "git@github.com:test/haniel.git",
+                        "branch": "main",
+                        "path": "./haniel",
+                    }
+                },
+                "services": {},
+                "self": {"repo": "haniel", "auto_update": False},
+            }
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        runner._repo_states["haniel"].last_head = "old-head"
+        runner._orch_client = MagicMock()
+
+        runner._poll_cycle()
+        runner._poll_cycle()
+
+        runner._orch_client.notify_change.assert_called_once_with(
+            repo="haniel",
+            branch="main",
+            commits=["new-head External self update"],
+            affected_services=[],
+            diff_stat="1 file",
+        )
+        assert runner._state.self_update_pending is True
+        assert runner._ws_handler is None
+        assert runner._slack_bot is None
+        mock_between.assert_called_once_with(repo_path, "old-head", "new-head")
+
+        runner._self_update_requested.set()
+        runner._repo_states["haniel"].last_head = "older-head"
+        assert runner._detect_changes() == []
+        runner._orch_client.notify_change.assert_called_once()
+
+    @patch(
+        "haniel.core.runner.get_pending_changes",
+        return_value={"commits": [], "stat": None},
+    )
+    @patch("haniel.core.runner.get_remote_head", return_value="new-head")
+    @patch("haniel.core.runner.get_head", return_value="new-head")
+    @patch("haniel.core.runner.fetch_repo", return_value=False)
+    def test_external_pull_of_regular_repo_does_not_create_approval_event(
+        self,
+        mock_fetch,
+        mock_head,
+        mock_remote_head,
+        mock_pending,
+        tmp_path: Path,
+    ):
+        repo_path = tmp_path / "regular"
+        repo_path.mkdir()
+        (repo_path / ".git").mkdir()
+        config = HanielConfig(
+            repos={
+                "regular": RepoConfig(
+                    url="git@github.com:test/regular.git",
+                    branch="main",
+                    path="./regular",
+                )
+            },
+            services={},
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        runner._repo_states["regular"].last_head = "old-head"
+        runner._orch_client = MagicMock()
+
+        assert runner._detect_changes() == ["regular"]
+
+        runner._orch_client.notify_change.assert_not_called()
+        mock_remote_head.assert_not_called()
+
     def test_schedule_restart(self, tmp_path: Path):
         """Test scheduling a service restart."""
         config = HanielConfig(

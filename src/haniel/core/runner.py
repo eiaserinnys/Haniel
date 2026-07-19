@@ -37,6 +37,7 @@ from ..config.release_activation import (
     plan_release_manifest_activation,
 )
 from .child_env import sanitized_child_env
+from .change_evidence import get_applied_change_evidence
 from .git import (
     GitError,
     fetch_repo,
@@ -799,6 +800,7 @@ class ServiceRunner:
 
         # Initialize repo states (get current HEAD)
         self._init_repo_states()
+        self._recover_interrupted_deployment_journals()
 
         # Consume self-update result from previous wrapper iteration (if any).
         # Done before MCP server starts so ws_handler.setup(loop) can broadcast it.
@@ -1536,6 +1538,24 @@ class ServiceRunner:
     def _deployment_state_store(self) -> DeploymentStateStore:
         return DeploymentStateStore(self.config_dir / ".haniel" / "deployments")
 
+    def _recover_interrupted_deployment_journals(self) -> None:
+        """Close attempts left nonterminal by a previous runner process."""
+        store = self._deployment_state_store()
+        reason = "runner restarted before deployment completed"
+        for repo_name, state in self._repo_states.items():
+            if not state.config.release_manifest:
+                continue
+            journal = store.read(repo_name)
+            if journal is None:
+                continue
+            prior_state = journal.get("state")
+            if store.mark_interrupted(repo_name, reason=reason):
+                logger.warning(
+                    "Closed interrupted deployment journal for %s from %s",
+                    repo_name,
+                    prior_state,
+                )
+
     def _record_manifest_deployment_intent(
         self, repo_name: str, previous_head: str, release_id: str
     ) -> None:
@@ -1649,6 +1669,11 @@ class ServiceRunner:
 
                 if current_head != state.last_head:
                     # External pull or other process advanced HEAD
+                    previous_head = state.last_head
+                    self_checkout_matches_remote = False
+                    if name == self._self_repo and previous_head:
+                        remote_head = get_remote_head(repo_path, state.config.branch)
+                        self_checkout_matches_remote = current_head == remote_head
                     last_short = state.last_head[:8] if state.last_head else "None"
                     logger.info(
                         f"Changes detected in repo: {name} "
@@ -1656,21 +1681,20 @@ class ServiceRunner:
                     )
                     changed.append(name)
                     state.last_head = current_head
-                    state.pending_changes = get_pending_changes(
-                        path=repo_path,
-                        branch=state.config.branch,
-                    )
-                    # Notify orchestrator (if connected)
-                    if self._orch_client and state.pending_changes:
-                        commits = state.pending_changes.get("commits", [])
-                        if commits:
-                            self._orch_client.notify_change(
-                                repo=name,
-                                branch=state.config.branch,
-                                commits=commits,
-                                affected_services=self.get_affected_services(name),
-                                diff_stat=state.pending_changes.get("stat"),
-                            )
+                    if (
+                        name == self._self_repo
+                        and previous_head
+                        and self_checkout_matches_remote
+                    ):
+                        state.pending_changes = get_applied_change_evidence(
+                            repo_path, previous_head, current_head
+                        )
+                    else:
+                        state.pending_changes = get_pending_changes(
+                            path=repo_path,
+                            branch=state.config.branch,
+                        )
+                    self._notify_orchestrator_change(name, state)
                     if self._ws_handler is not None:
                         self._ws_handler.broadcast_repo_change(
                             name, state.pending_changes or {}
@@ -1697,17 +1721,7 @@ class ServiceRunner:
                             path=repo_path,
                             branch=state.config.branch,
                         )
-                        # Notify orchestrator (if connected)
-                        if self._orch_client and state.pending_changes:
-                            commits = state.pending_changes.get("commits", [])
-                            if commits:
-                                self._orch_client.notify_change(
-                                    repo=name,
-                                    branch=state.config.branch,
-                                    commits=commits,
-                                    affected_services=self.get_affected_services(name),
-                                    diff_stat=state.pending_changes.get("stat"),
-                                )
+                        self._notify_orchestrator_change(name, state)
                         if self._ws_handler is not None:
                             self._ws_handler.broadcast_repo_change(
                                 name, state.pending_changes or {}
@@ -1733,6 +1747,20 @@ class ServiceRunner:
                 state.fetch_error = str(e)
 
         return changed
+
+    def _notify_orchestrator_change(self, name: str, state: RepoState) -> None:
+        if not self._orch_client or not state.pending_changes:
+            return
+        commits = state.pending_changes.get("commits", [])
+        if not commits:
+            return
+        self._orch_client.notify_change(
+            repo=name,
+            branch=state.config.branch,
+            commits=commits,
+            affected_services=self.get_affected_services(name),
+            diff_stat=state.pending_changes.get("stat"),
+        )
 
     def _apply_changes(self, changed_repos: list[str]) -> None:
         """Apply changes from the specified repositories.

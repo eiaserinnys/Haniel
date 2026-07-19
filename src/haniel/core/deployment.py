@@ -8,10 +8,12 @@ import re
 import shlex
 import subprocess
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -125,6 +127,8 @@ class DeploymentError(RuntimeError):
 class DeploymentStateStore:
     """Repo-scoped deployment journal with atomic replacement writes."""
 
+    TERMINAL_STATES = frozenset({"success", "failed", "interrupted", "aborted"})
+
     def __init__(self, directory: Path) -> None:
         self.directory = directory
 
@@ -148,18 +152,39 @@ class DeploymentStateStore:
         target_head: str,
         release_id: str,
     ) -> None:
-        self._write(
-            repo_name,
-            {
-                "repo": repo_name,
-                "release_id": release_id,
-                "previous_head": previous_head,
-                "target_head": target_head,
-                "state": "build",
-                "recovered": False,
-                "history": [self._entry("build")],
-            },
-        )
+        previous_attempts: list[dict[str, Any]] = []
+        existing = self.read(repo_name)
+        if existing is not None:
+            previous_attempts = deepcopy(existing.get("previous_attempts", []))
+            archived = {
+                key: deepcopy(value)
+                for key, value in existing.items()
+                if key != "previous_attempts"
+            }
+            if archived.get("state") not in self.TERMINAL_STATES:
+                prior_state = str(archived.get("state", "unknown"))
+                archived["state"] = "aborted"
+                archived["aborted_from"] = prior_state
+                message = f"superseded by a new deployment attempt from {prior_state}"
+                archived["abort_reason"] = message
+                archived.setdefault("history", []).append(
+                    self._entry("aborted", message)
+                )
+            previous_attempts.append(archived)
+
+        current: dict[str, Any] = {
+            "repo": repo_name,
+            "attempt_id": str(uuid4()),
+            "release_id": release_id,
+            "previous_head": previous_head,
+            "target_head": target_head,
+            "state": "build",
+            "recovered": False,
+            "history": [self._entry("build")],
+        }
+        if previous_attempts:
+            current["previous_attempts"] = previous_attempts
+        self._write(repo_name, current)
 
     def transition(
         self,
@@ -186,6 +211,20 @@ class DeploymentStateStore:
             and current.get("target_head") == target_head
             and current.get("release_id") == release_id
         )
+
+    def mark_interrupted(self, repo_name: str, *, reason: str) -> bool:
+        """Close a stale nonterminal attempt while preserving its evidence."""
+        current = self.read(repo_name)
+        if current is None or current.get("state") in self.TERMINAL_STATES:
+            return False
+
+        prior_state = str(current.get("state", "unknown"))
+        current["state"] = "interrupted"
+        current["interrupted_from"] = prior_state
+        current["interruption_reason"] = reason
+        current.setdefault("history", []).append(self._entry("interrupted", reason))
+        self._write(repo_name, current)
+        return True
 
     @staticmethod
     def _entry(state: str, message: str | None = None) -> dict[str, str]:

@@ -606,7 +606,8 @@ services: {}
     with (
         patch("haniel.core.runner.fetch_repo"),
         patch("haniel.core.runner.get_head", return_value="NEW_HEAD"),
-        patch("haniel.core.runner.get_pending_changes", return_value=pending),
+        patch("haniel.core.runner.get_remote_head", return_value="NEW_HEAD"),
+        patch("haniel.core.runner.get_applied_change_evidence", return_value=pending),
     ):
         runner = ServiceRunner(load_config(config_file), config_dir=tmp_path)
         runner._repo_states["haniel"].last_head = "OLD_HEAD"  # externally pulled
