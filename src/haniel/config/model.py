@@ -5,7 +5,7 @@ This module defines Pydantic models for haniel.yaml configuration files.
 haniel doesn't care what it runs - it just parses the config and validates structure.
 """
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 
 import yaml
@@ -114,6 +114,26 @@ class RepoConfig(BaseModel):
         default=None,
         description="Pull 전략. 'force'이면 git reset --hard로 로컬 변경을 드롭. 기본값 None은 'merge'(기존 git pull)와 동일.",
     )
+    release_manifest: str | None = Field(
+        default=None,
+        description="Repository-relative haniel.release.v1 manifest path",
+    )
+
+    @field_validator("release_manifest")
+    @classmethod
+    def validate_release_manifest_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        posix_path = PurePosixPath(value)
+        windows_path = PureWindowsPath(value)
+        if (
+            posix_path.is_absolute()
+            or bool(windows_path.anchor)
+            or ".." in posix_path.parts
+            or ".." in windows_path.parts
+        ):
+            raise ValueError("release_manifest must be a repo-relative path")
+        return value
 
 
 class ServiceShutdownConfig(BaseModel):

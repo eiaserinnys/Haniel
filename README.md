@@ -51,6 +51,7 @@ repos:
     url: https://github.com/you/backend.git
     branch: main
     path: ./.services/backend
+    release_manifest: deploy/release-manifest.json
 
 services:
   api:
@@ -61,13 +62,14 @@ services:
       post_pull: pip install -r requirements.txt
 ```
 
-That's it. haniel watches the repo, pulls changes, runs the hook, and restarts the service.
+Haniel watches the repo, pulls changes, runs the build hook, and restarts the service. Repositories with migrations can add a [versioned release manifest](docs/configuration.md#migration-aware-release-manifests) so one approval covers preflight, backup, migration, readiness, verification, and automatic recovery.
 
 ## Features
 
 - **Git polling** — watches repositories, pulls on new commits
 - **Process management** — start, stop, restart with dependency ordering
-- **Lifecycle hooks** — `pre_start` and `post_pull` (installs, builds, migrations)
+- **Lifecycle hooks** — `pre_start` and `post_pull` for prerequisites and builds
+- **Migration-aware releases** — versioned manifests with backup gates, readiness verification, and automatic recovery
 - **Health monitoring** — crash detection, exponential backoff, circuit breaker
 - **MCP server** — full control surface via Streamable HTTP
 - **Web dashboard** — real-time UI with Claude Code chat panel

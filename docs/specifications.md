@@ -122,6 +122,7 @@ repos:
     url: git@github.com:org/my-app.git
     branch: main
     path: ./.services/my-app
+    release_manifest: deploy/release-manifest.json
 
   my-lib:
     url: git@github.com:org/my-lib.git
@@ -418,7 +419,10 @@ repos:
     url: {git clone URL}           # Required. Clone and fetch target
     branch: {branch name}          # Default: main. Branch to track
     path: {local path}             # Required. Local path (relative to haniel.yaml)
+    release_manifest: {path}       # Optional. Repository-relative haniel.release.v1 contract
 ```
+
+Repositories with a release manifest use the migration-aware deployment state machine during both approved pulls and startup updates. Build and migration preflight complete while old processes remain available during a live handover. Haniel then stops affected local processes, runs any declared backup gate, performs migration and process handover, waits for every affected service readiness condition, executes the manifest's post-start verification commands, and only then reports success. Stopping local services does not prove that a shared database is quiescent; a destructive restore fallback requires repository-owned cluster-wide write-fence evidence. Failures enter the manifest's declared automatic recovery path and remain a failed deployment even when availability is restored.
 
 **Auto-clone flow (install):**
 1. Check if `path` exists

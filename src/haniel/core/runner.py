@@ -30,6 +30,12 @@ from ..config import (
     ServiceConfig,
     ShutdownConfig,
 )
+from ..config.release_activation import (
+    ReleaseManifestActivationRequired,
+    activate_release_manifest,
+    discover_remote_release_manifest,
+    plan_release_manifest_activation,
+)
 from .child_env import sanitized_child_env
 from .git import (
     GitError,
@@ -41,6 +47,8 @@ from .git import (
 )
 from .health import HealthManager, ServiceState
 from .process import ProcessManager
+from .deployment import DeploymentError, DeploymentStateStore
+from .runner_deployment import run_manifest_deployment
 from .self_update_marker import (
     SelfUpdateResult,
     read_and_consume as _read_self_update_marker,
@@ -333,6 +341,7 @@ class ServiceRunner:
         # Track whether startup post_pull hooks have been considered.
         self._post_pull_executed = False
         self._startup_updated_repos: set[str] = set()
+        self._startup_manifest_updates: dict[str, str] = {}
 
         # Self-update (see ADR-0002)
         self._self_repo: str | None = (
@@ -521,7 +530,7 @@ class ServiceRunner:
         startup_order = self.get_startup_order()
         logger.info(f"Starting services in order: {startup_order}")
 
-        # Run post_pull hooks on first start only for repos updated at startup.
+        # Run legacy post_pull hooks on first start only for repos updated at startup.
         if not self._post_pull_executed:
             self._post_pull_executed = True
             for name in startup_order:
@@ -529,8 +538,41 @@ class ServiceRunner:
                 if service.repo in self._startup_updated_repos:
                     self.execute_hook(name, "post_pull")
 
+        manifest_services: dict[str, list[str]] = {}
+        for repo_name in self._startup_manifest_updates:
+            manifest_services[repo_name] = [
+                name
+                for name in startup_order
+                if self._enabled_services[name].repo == repo_name
+            ]
+
+        handled_manifest_services: set[str] = set()
         for name in startup_order:
-            self._start_service(name)
+            if name in handled_manifest_services:
+                continue
+            repo_name = self._enabled_services[name].repo
+            if repo_name not in self._startup_manifest_updates:
+                self._start_service(name)
+                continue
+
+            affected = manifest_services[repo_name]
+            handled_manifest_services.update(affected)
+            try:
+                run_manifest_deployment(
+                    self,
+                    repo_name,
+                    affected,
+                    self._startup_manifest_updates[repo_name],
+                    desired_running=set(affected),
+                )
+            except DeploymentError as error:
+                if not error.recovered:
+                    raise
+                logger.error(
+                    "Startup deployment failed for %s but availability recovered: %s",
+                    repo_name,
+                    error,
+                )
 
     def _start_service(self, name: str) -> bool:
         """Start a single service.
@@ -601,8 +643,9 @@ class ServiceRunner:
     def _blocked_start_dependencies(self, name: str) -> list[str]:
         blockers = []
         for dependency in self._dependency_graph.get_dependencies(name):
-            if dependency in self._enabled_services and not self.process_manager.is_running(
-                dependency
+            if (
+                dependency in self._enabled_services
+                and not self.process_manager.is_running(dependency)
             ):
                 blockers.append(dependency)
         return sorted(blockers)
@@ -1213,81 +1256,23 @@ class ServiceRunner:
                 for svc in affected:
                     self._cancel_pending_restart(svc)
 
+                self._ensure_release_manifest_activation(repo_name)
+                previous_head = None
+                if state.config.release_manifest:
+                    repo_path = self.config_dir / state.config.path
+                    previous_head = get_head(repo_path)
+                    self._record_manifest_deployment_intent(
+                        repo_name, previous_head, "approved-pull-pending"
+                    )
                 success, discarded = self._pull_repo(repo_name)
                 if not success:
                     raise RuntimeError(f"git pull failed for {repo_name}")
 
-                failed_hooks: list[str] = []
-                for svc in affected:
-                    if not self.execute_hook(svc, "post_pull"):
-                        failed_hooks.append(svc)
-
-                if failed_hooks:
-                    failed = ", ".join(sorted(failed_hooks))
-                    logger.error(
-                        "Skipping restart after pull for repo %s because post_pull "
-                        "failed for: %s. Existing service processes were left running.",
-                        repo_name,
-                        failed,
-                    )
-                    raise RuntimeError(f"post_pull hook failed for: {failed}")
-
-                shutdown_order = [s for s in self.get_shutdown_order() if s in affected]
-                for svc in shutdown_order:
-                    self._cancel_pending_restart(svc)
-                    if self.process_manager.is_running(svc):
-                        logger.info("Stopping %s for post-pull restart", svc)
-                        if not self.process_manager.stop_service(svc):
-                            raise RuntimeError(f"failed to stop {svc} after pull")
-                    self._cancel_pending_restart(svc)
-
-                failed_starts: list[str] = []
-                skipped_starts: dict[str, list[str]] = {}
-                startup_order = [s for s in self.get_startup_order() if s in affected]
-                for svc in startup_order:
-                    self._cancel_pending_restart(svc)
-                    blockers = self._blocked_start_dependencies(svc)
-                    if blockers:
-                        logger.error(
-                            "Skipping restart of %s after pull because dependencies "
-                            "are not running: %s",
-                            svc,
-                            ", ".join(blockers),
-                        )
-                        skipped_starts[svc] = blockers
-                        self._schedule_restart_after_dependency_block(svc, blockers)
-                        continue
-
-                    if self.process_manager.is_running(svc):
-                        logger.warning(
-                            "%s is already running before post-pull restart; "
-                            "stopping it so the new artifacts are started",
-                            svc,
-                        )
-                        if not self.process_manager.stop_service(svc):
-                            raise RuntimeError(
-                                f"failed to stop already-running {svc} after pull"
-                            )
-                        self._cancel_pending_restart(svc)
-
-                    logger.info("Restarting %s after pull", svc)
-                    if not self._start_service(svc):
-                        failed_starts.append(svc)
-
-                if failed_starts or skipped_starts:
-                    details = []
-                    if failed_starts:
-                        details.append(f"failed: {', '.join(sorted(failed_starts))}")
-                    if skipped_starts:
-                        skipped = ", ".join(
-                            f"{svc} blocked by {', '.join(blockers)}"
-                            for svc, blockers in sorted(skipped_starts.items())
-                        )
-                        details.append(f"skipped: {skipped}")
-                    raise RuntimeError(
-                        "failed to restart services after pull for "
-                        f"{repo_name}: {'; '.join(details)}"
-                    )
+                if state.config.release_manifest:
+                    assert previous_head is not None
+                    run_manifest_deployment(self, repo_name, affected, previous_head)
+                else:
+                    self._restart_after_pull_legacy(repo_name, affected)
             finally:
                 self._release_restart_suppression(affected)
 
@@ -1325,6 +1310,81 @@ class ServiceRunner:
             # Clear pending hash so new changes after this pull trigger fresh notifications
             self._last_pending_hash.pop(repo_name, None)
             self._pull_locks[repo_name].release()
+
+    def _restart_after_pull_legacy(self, repo_name: str, affected: list[str]) -> None:
+        """Preserve the pre-manifest restart contract for unrelated repositories."""
+
+        failed_hooks = [
+            service
+            for service in affected
+            if not self.execute_hook(service, "post_pull")
+        ]
+        if failed_hooks:
+            failed = ", ".join(sorted(failed_hooks))
+            logger.error(
+                "Skipping restart after pull for repo %s because post_pull "
+                "failed for: %s. Existing service processes were left running.",
+                repo_name,
+                failed,
+            )
+            raise RuntimeError(f"post_pull hook failed for: {failed}")
+
+        shutdown_order = [s for s in self.get_shutdown_order() if s in affected]
+        for service in shutdown_order:
+            self._cancel_pending_restart(service)
+            if self.process_manager.is_running(service):
+                logger.info("Stopping %s for post-pull restart", service)
+                if not self.process_manager.stop_service(service):
+                    raise RuntimeError(f"failed to stop {service} after pull")
+            self._cancel_pending_restart(service)
+
+        failed_starts: list[str] = []
+        skipped_starts: dict[str, list[str]] = {}
+        startup_order = [s for s in self.get_startup_order() if s in affected]
+        for service in startup_order:
+            self._cancel_pending_restart(service)
+            blockers = self._blocked_start_dependencies(service)
+            if blockers:
+                logger.error(
+                    "Skipping restart of %s after pull because dependencies "
+                    "are not running: %s",
+                    service,
+                    ", ".join(blockers),
+                )
+                skipped_starts[service] = blockers
+                self._schedule_restart_after_dependency_block(service, blockers)
+                continue
+
+            if self.process_manager.is_running(service):
+                logger.warning(
+                    "%s is already running before post-pull restart; "
+                    "stopping it so the new artifacts are started",
+                    service,
+                )
+                if not self.process_manager.stop_service(service):
+                    raise RuntimeError(
+                        f"failed to stop already-running {service} after pull"
+                    )
+                self._cancel_pending_restart(service)
+
+            logger.info("Restarting %s after pull", service)
+            if not self._start_service(service):
+                failed_starts.append(service)
+
+        if failed_starts or skipped_starts:
+            details = []
+            if failed_starts:
+                details.append(f"failed: {', '.join(sorted(failed_starts))}")
+            if skipped_starts:
+                skipped = ", ".join(
+                    f"{service} blocked by {', '.join(blockers)}"
+                    for service, blockers in sorted(skipped_starts.items())
+                )
+                details.append(f"skipped: {skipped}")
+            raise RuntimeError(
+                "failed to restart services after pull for "
+                f"{repo_name}: {'; '.join(details)}"
+            )
 
     @staticmethod
     def _hash_pending(pending: dict) -> str:
@@ -1374,6 +1434,7 @@ class ServiceRunner:
         updated: list[str] = []
         failed: list[str] = []
         self._startup_updated_repos.clear()
+        self._startup_manifest_updates.clear()
 
         for name, state in self._repo_states.items():
             # Skip self-update repo (haniel-runner.ps1 handles it)
@@ -1395,8 +1456,16 @@ class ServiceRunner:
                 state.last_fetch = datetime.now()
                 state.fetch_error = None
 
+                activated = self._ensure_release_manifest_activation(name)
                 if has_updates:
                     logger.info("Startup update: pulling %s", name)
+                    previous_head = (
+                        get_head(repo_path) if state.config.release_manifest else None
+                    )
+                    if previous_head is not None:
+                        self._record_manifest_deployment_intent(
+                            name, previous_head, "startup-pull-pending"
+                        )
                     pull_repo(
                         path=repo_path,
                         branch=state.config.branch,
@@ -1405,11 +1474,16 @@ class ServiceRunner:
                     state.last_head = get_head(repo_path)
                     state.pending_changes = None
                     updated.append(name)
-                    self._startup_updated_repos.add(name)
+                    if state.config.release_manifest:
+                        assert previous_head is not None
+                        self._startup_manifest_updates[name] = previous_head
+                    else:
+                        self._startup_updated_repos.add(name)
                 else:
                     logger.debug("Startup update: %s is up to date", name)
+                    self._queue_interrupted_manifest_deployment(name, activated)
 
-            except GitError as e:
+            except (GitError, ReleaseManifestActivationRequired) as e:
                 logger.error("Startup update failed for %s: %s", name, e)
                 state.fetch_error = str(e)
                 failed.append(name)
@@ -1429,6 +1503,79 @@ class ServiceRunner:
                 len(failed),
                 ", ".join(failed),
             )
+
+    def _ensure_release_manifest_activation(self, repo_name: str) -> bool:
+        """Activate a conventional remote manifest before any new code is pulled."""
+        state = self._repo_states[repo_name]
+        if state.config.release_manifest:
+            return False
+        repo_path = self.config_dir / state.config.path
+        discovered = discover_remote_release_manifest(repo_path, state.config.branch)
+        if discovered is None:
+            return False
+        if self.config_path is None:
+            raise ReleaseManifestActivationRequired(
+                f"release manifest discovered for {repo_name}, but config_path is unavailable"
+            )
+        plan = plan_release_manifest_activation(self.config_path, repo_name, discovered)
+        result = activate_release_manifest(
+            self.config_path,
+            repo_name,
+            discovered,
+            expected_sha256=plan.config_sha256,
+        )
+        state.config.release_manifest = discovered
+        logger.warning(
+            "Activated release manifest for %s before pull (changed=%s, backup=%s)",
+            repo_name,
+            result.changed,
+            result.backup_path,
+        )
+        return result.changed
+
+    def _deployment_state_store(self) -> DeploymentStateStore:
+        return DeploymentStateStore(self.config_dir / ".haniel" / "deployments")
+
+    def _record_manifest_deployment_intent(
+        self, repo_name: str, previous_head: str, release_id: str
+    ) -> None:
+        """Persist the rollback head before a pull can make startup resumable."""
+        self._deployment_state_store().begin(
+            repo_name,
+            previous_head,
+            previous_head,
+            release_id,
+        )
+
+    def _queue_interrupted_manifest_deployment(
+        self, repo_name: str, activated: bool
+    ) -> None:
+        state = self._repo_states[repo_name]
+        if not state.config.release_manifest:
+            return
+        repo_path = self.config_dir / state.config.path
+        current_head = get_head(repo_path)
+        journal = self._deployment_state_store().read(repo_name)
+        if activated:
+            self._record_manifest_deployment_intent(
+                repo_name, current_head, "startup-activation-pending"
+            )
+            self._startup_manifest_updates[repo_name] = current_head
+            return
+        if journal is None or journal.get("state") == "success":
+            return
+        previous_head = journal.get("previous_head")
+        release_id = journal.get("release_id")
+        activation_pending = release_id == "startup-activation-pending"
+        if isinstance(previous_head, str) and (
+            activation_pending or current_head != previous_head
+        ):
+            logger.warning(
+                "Resuming interrupted manifest deployment for %s from %s",
+                repo_name,
+                previous_head[:8],
+            )
+            self._startup_manifest_updates[repo_name] = previous_head
 
     def _poll_loop(self) -> None:
         """Main poll loop."""
@@ -1843,6 +1990,7 @@ class ServiceRunner:
             return False, []
 
         state = self._repo_states[repo_name]
+        self._ensure_release_manifest_activation(repo_name)
         repo_path = self.config_dir / state.config.path
         strategy = state.config.pull_strategy or "merge"
 
