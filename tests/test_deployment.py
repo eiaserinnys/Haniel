@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
@@ -15,6 +17,7 @@ from haniel.core.deployment import (
     DeploymentError,
     DeploymentStateStore,
     ReleaseManifest,
+    subprocess_command_runner,
 )
 
 
@@ -305,6 +308,48 @@ def test_failure_before_migration_commit_restores_previous_release(
     journal = DeploymentStateStore(tmp_path / "state").read("soulstream")
     assert journal["state"] == "failed"
     assert journal["recovered"] is True
+
+
+def test_failed_command_persists_bounded_stderr_and_stdout_in_journal(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    stderr = "s" * 9000 + "Error: DATABASE_URL is required"
+    stdout = "o" * 5000 + "preflight context"
+    deploy = DeploymentCoordinator(
+        state_store=DeploymentStateStore(tmp_path / "state"),
+        command_runner=subprocess_command_runner(tmp_path),
+    )
+
+    with patch("haniel.core.deployment.subprocess.run") as run:
+        run.side_effect = subprocess.CalledProcessError(
+            1,
+            ["run-preflight"],
+            output=stdout,
+            stderr=stderr,
+        )
+        with pytest.raises(DeploymentError):
+            deploy.execute(
+                repo_name="soulstream",
+                previous_head="old",
+                target_head="new",
+                manifest=manifest(),
+                callbacks=callbacks(events),
+            )
+
+    journal = DeploymentStateStore(tmp_path / "state").read("soulstream")
+    recovering = next(
+        entry for entry in journal["history"] if entry["state"] == "recovering"
+    )
+    message = recovering["message"]
+
+    assert "command 'preflight' failed with exit code 1" in message
+    assert "stderr (last 8192 chars):" in message
+    assert "Error: DATABASE_URL is required" in message
+    assert "stdout (last 4096 chars):" in message
+    assert "preflight context" in message
+    assert stderr not in message
+    assert stdout not in message
 
 
 def test_migration_failure_enters_declared_recovery_and_rolls_forward(
