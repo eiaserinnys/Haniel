@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from haniel.config import HanielConfig, RepoConfig, ServiceConfig
-from haniel.core.deployment import DeploymentError
+from haniel.core.deployment import CommandSpec, DeploymentCoordinator, DeploymentError
 from haniel.core.git import get_head
 from haniel.core.runner import ServiceRunner
 from haniel.core.runner_deployment import run_manifest_deployment
@@ -98,6 +98,182 @@ def configure_processes(runner: ServiceRunner, events: list[str]) -> dict[str, b
     )
     runner._start_service = MagicMock(side_effect=start)
     return running
+
+
+def write_manifest_without_environment_service(repo: Path) -> None:
+    payload = release_manifest()
+    payload.pop("environment_service")
+    (repo / "deploy" / "release.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+
+def runner_with_services(
+    runner: ServiceRunner, services: dict[str, ServiceConfig]
+) -> ServiceRunner:
+    config = runner.config.model_copy(update={"services": services})
+    return ServiceRunner(config, config_dir=runner.config_dir)
+
+
+def capture_manifest_command_environment(
+    runner: ServiceRunner,
+    previous_head: str,
+    affected: list[str],
+) -> dict[str, str]:
+    captured: dict[str, str] = {}
+
+    def run_command(_spec: CommandSpec, environment: dict[str, str]) -> None:
+        captured.update(environment)
+
+    def execute_one(coordinator: DeploymentCoordinator, **_kwargs) -> None:
+        coordinator.command_runner(
+            CommandSpec(name="preflight", command="run-preflight"), {}
+        )
+
+    with (
+        patch(
+            "haniel.core.runner_deployment.subprocess_command_runner",
+            return_value=run_command,
+        ),
+        patch.object(
+            DeploymentCoordinator,
+            "execute",
+            autospec=True,
+            side_effect=execute_one,
+        ),
+    ):
+        run_manifest_deployment(runner, "app", affected, previous_head)
+
+    return captured
+
+
+def test_manifest_command_infers_single_repo_service_cwd(
+    manifest_runner: tuple[ServiceRunner, Path, str],
+) -> None:
+    original, repo, previous_head = manifest_runner
+    write_manifest_without_environment_service(repo)
+    runner = runner_with_services(
+        original,
+        {
+            "node-service": ServiceConfig(
+                run="node", repo="app", cwd="./services/app"
+            )
+        },
+    )
+
+    environment = capture_manifest_command_environment(
+        runner, previous_head, ["node-service"]
+    )
+
+    assert environment["HANIEL_SERVICE_CWD"] == str(
+        (runner.config_dir / "services" / "app").resolve()
+    )
+
+
+def test_manifest_command_infers_shared_cwd_for_multiple_repo_services(
+    manifest_runner: tuple[ServiceRunner, Path, str],
+) -> None:
+    original, repo, previous_head = manifest_runner
+    write_manifest_without_environment_service(repo)
+    runner = runner_with_services(
+        original,
+        {
+            "orch": ServiceConfig(run="orch", repo="app", cwd="./services/app"),
+            "soul": ServiceConfig(run="soul", repo="app", cwd="./services/app"),
+            "disabled": ServiceConfig(
+                run="disabled",
+                repo="app",
+                cwd="./services/disabled",
+                enabled=False,
+            ),
+            "dependent": ServiceConfig(
+                run="dependent",
+                repo="other-repo",
+                cwd="./services/dependent",
+                after=["orch"],
+            ),
+        },
+    )
+
+    environment = capture_manifest_command_environment(
+        runner, previous_head, ["orch", "soul", "dependent"]
+    )
+
+    assert environment["HANIEL_SERVICE_CWD"] == str(
+        (runner.config_dir / "services" / "app").resolve()
+    )
+
+
+def test_manifest_command_omits_service_cwd_without_repo_services(
+    manifest_runner: tuple[ServiceRunner, Path, str],
+) -> None:
+    original, repo, previous_head = manifest_runner
+    write_manifest_without_environment_service(repo)
+    runner = runner_with_services(original, {})
+
+    environment = capture_manifest_command_environment(runner, previous_head, [])
+
+    assert "HANIEL_SERVICE_CWD" not in environment
+
+
+def test_manifest_command_omits_service_cwd_when_repo_services_disagree(
+    manifest_runner: tuple[ServiceRunner, Path, str],
+) -> None:
+    original, repo, previous_head = manifest_runner
+    write_manifest_without_environment_service(repo)
+    runner = runner_with_services(
+        original,
+        {
+            "orch": ServiceConfig(run="orch", repo="app", cwd="./services/orch"),
+            "soul": ServiceConfig(run="soul", repo="app", cwd="./services/soul"),
+        },
+    )
+
+    environment = capture_manifest_command_environment(
+        runner, previous_head, ["orch", "soul"]
+    )
+
+    assert "HANIEL_SERVICE_CWD" not in environment
+
+
+@pytest.mark.parametrize(
+    ("services", "affected", "environment_service", "expected_error"),
+    [
+        (
+            {"other": ServiceConfig(run="other", repo="other-repo")},
+            [],
+            "other",
+            "manifest environment_service is not affected: other",
+        ),
+        (
+            {
+                "disabled": ServiceConfig(
+                    run="disabled", repo="app", enabled=False
+                )
+            },
+            ["disabled"],
+            "disabled",
+            "manifest environment_service is not enabled: disabled",
+        ),
+    ],
+)
+def test_explicit_environment_service_keeps_strict_validation(
+    manifest_runner: tuple[ServiceRunner, Path, str],
+    services: dict[str, ServiceConfig],
+    affected: list[str],
+    environment_service: str,
+    expected_error: str,
+) -> None:
+    original, repo, previous_head = manifest_runner
+    payload = release_manifest()
+    payload["environment_service"] = environment_service
+    (repo / "deploy" / "release.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+    runner = runner_with_services(original, services)
+
+    with pytest.raises(ValueError, match=expected_error):
+        capture_manifest_command_environment(runner, previous_head, affected)
 
 
 def test_manifest_handover_waits_for_readiness_and_post_verify(

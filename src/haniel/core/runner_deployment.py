@@ -17,6 +17,7 @@ from .deployment import (
 from .git import get_head, reset_repo_to
 
 if TYPE_CHECKING:
+    from ..config import ServiceConfig
     from .runner import ServiceRunner
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,19 @@ class RunnerDeploymentAdapter:
             raise ValueError(
                 f"manifest environment_service is not enabled: {service_name}"
             )
+        return self._resolve_service_cwd(service)
+
+    def derive_service_cwd(self) -> Path | None:
+        service_cwds = {
+            self._resolve_service_cwd(service)
+            for service in self.runner._enabled_services.values()
+            if service.repo == self.repo_name
+        }
+        if len(service_cwds) != 1:
+            return None
+        return next(iter(service_cwds))
+
+    def _resolve_service_cwd(self, service: "ServiceConfig") -> Path:
         return (
             (self.runner.config_dir / service.cwd).resolve()
             if service.cwd
@@ -212,10 +226,13 @@ def run_manifest_deployment(
             **environment,
             "HANIEL_BACKUP_DIR": str(backup_dir),
         }
-        if manifest.environment_service:
-            command_environment["HANIEL_SERVICE_CWD"] = str(
-                adapter.service_cwd(manifest.environment_service)
-            )
+        service_cwd = (
+            adapter.service_cwd(manifest.environment_service)
+            if manifest.environment_service
+            else adapter.derive_service_cwd()
+        )
+        if service_cwd is not None:
+            command_environment["HANIEL_SERVICE_CWD"] = str(service_cwd)
         base_runner(
             command,
             command_environment,
