@@ -22,7 +22,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 MARKER_RELPATH = Path(".local") / "orch_pending_deploy.json"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -30,6 +30,11 @@ class OrchPendingDeploy:
     version: int
     deploy_id: str
     started_at: str  # ISO 8601 timestamp
+    orchestrator_attempt_id: str
+    connection_generation: str
+    execution_mode: str
+    probe_id: str | None
+    preflight_fingerprint: str | None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -60,6 +65,11 @@ def read_and_consume(config_dir: Path) -> OrchPendingDeploy | None:
             version=version,
             deploy_id=str(data["deploy_id"]),
             started_at=str(data["started_at"]),
+            orchestrator_attempt_id=str(data["orchestrator_attempt_id"]),
+            connection_generation=str(data["connection_generation"]),
+            execution_mode=str(data["execution_mode"]),
+            probe_id=data.get("probe_id"),
+            preflight_fingerprint=data.get("preflight_fingerprint"),
         )
     except Exception as e:
         logger.warning("Orch pending deploy marker malformed at %s: %s", path, e)
@@ -72,7 +82,17 @@ def read_and_consume(config_dir: Path) -> OrchPendingDeploy | None:
     return result
 
 
-def write(config_dir: Path, deploy_id: str, started_at: str) -> None:
+def write(
+    config_dir: Path,
+    deploy_id: str,
+    started_at: str,
+    *,
+    orchestrator_attempt_id: str,
+    connection_generation: str,
+    execution_mode: str,
+    probe_id: str | None,
+    preflight_fingerprint: str | None,
+) -> None:
     """Write marker (called by deploy_approval handler before self-update).
 
     Args:
@@ -86,6 +106,11 @@ def write(config_dir: Path, deploy_id: str, started_at: str) -> None:
         version=SCHEMA_VERSION,
         deploy_id=deploy_id,
         started_at=started_at,
+        orchestrator_attempt_id=orchestrator_attempt_id,
+        connection_generation=connection_generation,
+        execution_mode=execution_mode,
+        probe_id=probe_id,
+        preflight_fingerprint=preflight_fingerprint,
     ).to_dict()
     path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),

@@ -6,14 +6,20 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
-from ..core.repo_reconciliation import RepoReconciliationSnapshot
+if TYPE_CHECKING:
+    from ..core.repo_reconciliation import RepoReconciliationSnapshot
 
 logger = logging.getLogger(__name__)
 
-ApprovalHandler = Callable[[str, str, str], str | None]
-SnapshotHandler = Callable[[str, str, str], RepoReconciliationSnapshot]
+ApprovalHandler = Callable[[dict], str | dict | None]
+SnapshotHandler = Callable[[str, str, str], "RepoReconciliationSnapshot"]
 SendJson = Callable[[dict], Awaitable[None]]
+
+
+class ApprovalRevalidationError(RuntimeError):
+    """Node-local evidence changed after the server fixed the execution mode."""
 
 
 def parse_deploy_id(deploy_id: str) -> tuple[str, str, str, str] | None:
@@ -59,16 +65,24 @@ class DeployReporter:
 
     async def handle_approval(self, msg: dict) -> None:
         deploy_id = msg.get("deploy_id", "")
+        orchestrator_attempt_id = msg.get("orchestrator_attempt_id", "")
+        connection_generation = msg.get("connection_generation", "")
         parsed = parse_deploy_id(deploy_id)
         if parsed is None:
             await self.send_result(
-                deploy_id, "failed", error=f"invalid deploy_id format: {deploy_id!r}"
+                deploy_id,
+                orchestrator_attempt_id,
+                connection_generation,
+                "failed",
+                error=f"invalid deploy_id format: {deploy_id!r}",
             )
             return
         node_id, repo, branch, _remote_head = parsed
         if node_id != self._node_id:
             await self.send_result(
                 deploy_id,
+                orchestrator_attempt_id,
+                connection_generation,
                 "failed",
                 error=f"deploy_id node mismatch: {node_id} != {self._node_id}",
             )
@@ -76,6 +90,8 @@ class DeployReporter:
         if self._approval_handler is None:
             await self.send_result(
                 deploy_id,
+                orchestrator_attempt_id,
+                connection_generation,
                 "failed",
                 error="no deploy_approval handler registered",
             )
@@ -84,9 +100,21 @@ class DeployReporter:
         started = time.monotonic()
         operation_error: str | None = None
         try:
-            result = await asyncio.to_thread(
-                self._approval_handler, deploy_id, repo, branch
+            result = await asyncio.to_thread(self._approval_handler, msg)
+        except ApprovalRevalidationError as exc:
+            await self._send_json(
+                {
+                    "type": "deploy_attempt_terminal",
+                    "kind": "approval_revalidation_failed",
+                    "deploy_id": deploy_id,
+                    "orchestrator_attempt_id": orchestrator_attempt_id,
+                    "connection_generation": connection_generation,
+                    "stage": "approval_revalidation",
+                    "reason": "approval_revalidation_failed",
+                    "error": str(exc),
+                }
             )
+            return
         except Exception as exc:
             operation_error = str(exc)
             logger.warning("Deploy %s failed: %s", deploy_id, exc)
@@ -96,10 +124,18 @@ class DeployReporter:
                 "Deploy %s deferred; result will be sent after restart", deploy_id
             )
             return
+        if (
+            isinstance(result, dict)
+            and result.get("type") == "manifest_recovery_evidence"
+        ):
+            await self._send_json(result)
+            return
 
         if self._snapshot_handler is None:
             await self.send_result(
                 deploy_id,
+                orchestrator_attempt_id,
+                connection_generation,
                 "failed",
                 error="no repository snapshot handler registered",
             )
@@ -117,29 +153,52 @@ class DeployReporter:
                 else (f"snapshot failed: {exc}")
             )
             await self.send_result(
-                deploy_id, "failed", error=error, duration_ms=duration_ms
+                deploy_id,
+                orchestrator_attempt_id,
+                connection_generation,
+                "failed",
+                error=error,
+                duration_ms=duration_ms,
             )
             return
-        await self.send_settled_result(snapshot, operation_error, duration_ms)
+        await self.send_settled_result(
+            snapshot,
+            operation_error,
+            duration_ms,
+            orchestrator_attempt_id,
+            connection_generation,
+        )
 
     async def send_settled_result(
         self,
         snapshot: RepoReconciliationSnapshot,
         operation_error: str | None,
         duration_ms: int,
+        orchestrator_attempt_id: str,
+        connection_generation: str,
     ) -> None:
-        status, error = classify_deploy_result(snapshot, operation_error)
+        status = "failed" if operation_error else "success"
+        error = operation_error
         await self.send_result(
             snapshot.deploy_id,
+            orchestrator_attempt_id,
+            connection_generation,
             status,
             error=error,
             duration_ms=duration_ms,
         )
-        await self.send_reconciliation(snapshot, "settled")
+        await self.send_reconciliation(
+            snapshot,
+            "settled",
+            orchestrator_attempt_id=orchestrator_attempt_id,
+            connection_generation=connection_generation,
+        )
 
     async def send_result(
         self,
         deploy_id: str,
+        orchestrator_attempt_id: str,
+        connection_generation: str,
         status: str,
         *,
         error: str | None = None,
@@ -153,6 +212,8 @@ class DeployReporter:
                 "status": status,
                 "error": error,
                 "duration_ms": duration_ms,
+                "orchestrator_attempt_id": orchestrator_attempt_id,
+                "connection_generation": connection_generation,
             }
         )
 
@@ -160,18 +221,23 @@ class DeployReporter:
         self,
         snapshot: RepoReconciliationSnapshot,
         phase: str,
+        *,
+        orchestrator_attempt_id: str | None = None,
+        connection_generation: str | None = None,
     ) -> None:
         if snapshot.deploy_id.startswith("attempt:"):
             raise ValueError("attempt snapshot IDs are server-only")
-        await self._send_json(
-            {
-                "type": "repo_reconciliation",
-                "phase": phase,
-                "deploy_id": snapshot.deploy_id,
-                "node_id": snapshot.node_id,
-                "repo": snapshot.repo,
-                "branch": snapshot.branch,
-                "local_head": snapshot.local_head,
-                "remote_head": snapshot.remote_head,
-            }
-        )
+        payload = {
+            "type": "repo_reconciliation",
+            "phase": phase,
+            "deploy_id": snapshot.deploy_id,
+            "node_id": snapshot.node_id,
+            "repo": snapshot.repo,
+            "branch": snapshot.branch,
+            "local_head": snapshot.local_head,
+            "remote_head": snapshot.remote_head,
+            "orchestrator_attempt_id": orchestrator_attempt_id,
+        }
+        if connection_generation is not None:
+            payload["connection_generation"] = connection_generation
+        await self._send_json(payload)

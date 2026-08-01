@@ -199,6 +199,8 @@ def test_startup_atomically_activates_remote_manifest_before_pull(
     mock_pull.assert_called_once()
 
 
+@patch("haniel.core.runner.read_file_at_commit", return_value=b"manifest")
+@patch("haniel.core.runner.get_remote_head", return_value="new-head")
 @patch("haniel.core.runner.run_manifest_deployment")
 @patch(
     "haniel.core.runner.discover_remote_release_manifest",
@@ -207,7 +209,13 @@ def test_startup_atomically_activates_remote_manifest_before_pull(
 @patch("haniel.core.runner.get_head", side_effect=["old-head", "new-head"])
 @patch("haniel.core.runner.pull_repo", return_value=[])
 def test_approved_pull_activates_before_capturing_previous_head(
-    mock_pull, mock_head, mock_discover, mock_deploy, tmp_path: Path
+    mock_pull,
+    mock_head,
+    mock_discover,
+    mock_deploy,
+    mock_remote_head,
+    mock_read_manifest,
+    tmp_path: Path,
 ) -> None:
     make_repo(tmp_path)
     config_path = tmp_path / "haniel.yaml"
@@ -219,12 +227,17 @@ def test_approved_pull_activates_before_capturing_previous_head(
 
     runner.trigger_pull("soulstream")
 
-    mock_deploy.assert_called_once_with(
+    args, kwargs = mock_deploy.call_args
+    assert args == (
         runner,
         "soulstream",
         ["soulstream-orch-server"],
         "old-head",
     )
+    assert kwargs["branch"] == "main"
+    assert kwargs["journal_attempt_id"]
+    mock_remote_head.assert_called_once()
+    mock_read_manifest.assert_called_once()
 
 
 @patch("haniel.core.runner.get_head", return_value="new-head")

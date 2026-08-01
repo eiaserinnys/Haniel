@@ -44,6 +44,8 @@ from .git import (
     get_head,
     get_pending_changes,
     get_remote_head,
+    read_file_at_commit,
+    reset_repo_to,
     pull_repo,
 )
 from .health import HealthManager, ServiceState
@@ -54,6 +56,14 @@ from .repo_reconciliation import (
     capture_repo_snapshot,
 )
 from .runner_deployment import run_manifest_deployment
+from .deploy_retry_planner import DeployRetryPlanner
+from .orchestrated_deploy_execution import (
+    OrchestratedDeployRegistry,
+    assert_remote_target,
+    build_recovery_evidence,
+    execute_approved_plan,
+    validate_approved_plan,
+)
 from .self_update_marker import (
     SelfUpdateResult,
     read_and_consume as _read_self_update_marker,
@@ -62,6 +72,7 @@ from .orch_pending_deploy import (
     read_and_consume as _read_orch_pending_deploy,
     write as _write_orch_pending_deploy,
 )
+from ..integrations.deploy_reporting import ApprovalRevalidationError
 
 if TYPE_CHECKING:
     from ..integrations.orchestrator_client import OrchestratorClient
@@ -333,6 +344,7 @@ class ServiceRunner:
 
         # Orchestrator client (initialized in start() if configured)
         self._orch_client: "OrchestratorClient | None" = None
+        self._orchestrated_deploys = OrchestratedDeployRegistry()
 
         # Per-repo pull locks: acquire(blocking=False) for atomic duplicate guard
         self._pull_locks: dict[str, threading.Lock] = {
@@ -933,6 +945,7 @@ class ServiceRunner:
                 get_services_info=self._collect_services_info,
                 service_command_handler=self._handle_service_command,
                 deploy_approval_handler=self._handle_deploy_approval,
+                deploy_plan_probe_handler=self._handle_deploy_plan_probe,
                 repo_snapshot_handler=self._capture_orchestrator_repo_snapshot,
             )
             # Map any self-update result from the previous wrapper iteration
@@ -998,37 +1011,25 @@ class ServiceRunner:
             )
         return services
 
-    def _handle_deploy_approval(
-        self, deploy_id: str, repo: str, branch: str
-    ) -> str | None:
-        """Handle a deploy_approval from orch-server.
-
-        Runs on an orch_client asyncio executor thread (via asyncio.to_thread).
-
-        Returns:
-            None on synchronous success — caller sends DeployResult{success}.
-            "deferred" for self_repo — caller sends nothing; result is sent
-              on the NEXT runner startup via the orch_pending_deploy marker.
-
-        Raises:
-            ValueError: Unknown repo (caller sends DeployResult{failed}).
-            RuntimeError: trigger_pull failure or already pulling
-              (caller sends DeployResult{failed}).
-        """
+    def _handle_deploy_approval(self, approval: dict) -> str | dict | None:
+        """Revalidate the immutable plan, then enter its sole allowed mode."""
+        deploy_id = approval["deploy_id"]
+        _node_id, repo, branch, _target = deploy_id.split(":", 3)
         if repo not in self._repo_states:
             raise ValueError(f"Unknown repo: {repo}")
         configured_branch = self._repo_states[repo].config.branch
         if branch != configured_branch:
-            # The node only knows how to pull its configured branch. Log
-            # a warning but proceed — orch may have echoed back a stale
-            # branch value, or the node config drifted from what orch sees.
-            logger.warning(
-                "Deploy approval branch %r differs from configured %r for repo %r — "
-                "using configured branch",
-                branch,
-                configured_branch,
-                repo,
+            raise ApprovalRevalidationError(
+                f"approval branch {branch!r} differs from configured "
+                f"branch {configured_branch!r} for {repo!r}"
             )
+
+        probe = self._orchestrated_deploys.consume_approval(approval)
+        planner = self._deploy_retry_planner(repo)
+        if probe is not None:
+            plan = validate_approved_plan(planner, probe, approval)
+            if plan.mode == "evidence_recovery":
+                return build_recovery_evidence(approval, probe, plan)
 
         if self._self_repo and repo == self._self_repo:
             # Self-update path. trigger_pull(self_repo) calls self.stop()
@@ -1041,10 +1042,16 @@ class ServiceRunner:
             # separate daemon thread after a small delay (gives the
             # caller coroutine time to return "deferred" and let the
             # orch_client coroutine finish cleanly).
+            assert_remote_target(self, repo, _target)
             _write_orch_pending_deploy(
                 self.config_dir,
                 deploy_id=deploy_id,
                 started_at=datetime.now(timezone.utc).isoformat(),
+                orchestrator_attempt_id=approval["orchestrator_attempt_id"],
+                connection_generation=approval["connection_generation"],
+                execution_mode=approval["execution_mode"],
+                probe_id=approval.get("probe_id"),
+                preflight_fingerprint=approval.get("preflight_fingerprint"),
             )
             # Mark self-update pending so approve_self_update() proceeds
             # even if the polling loop hasn't yet detected the change.
@@ -1057,28 +1064,25 @@ class ServiceRunner:
                 daemon=True,
             ).start()
             return "deferred"
+        return execute_approved_plan(self, approval, probe, planner)
 
-        # Non-self repo path. trigger_pull holds a per-repo Lock; if another
-        # caller is already pulling, it returns silently — convert that to
-        # an error so the DeployResult accurately reflects what happened.
-        if self._pull_locks[repo].locked():
-            raise RuntimeError("already pulling")
+    def _handle_deploy_plan_probe(self, probe: dict) -> dict:
+        """Return a side-effect-free proposal and retain its immutable snapshot."""
+        repo = probe["repo"]
+        planner = self._deploy_retry_planner(repo)
+        plan = planner.plan(probe)
+        self._orchestrated_deploys.record_probe(probe)
+        return plan.proposal(probe)
 
-        # trigger_pull also silently returns if state.pending_changes is None
-        # (e.g., a previous pull already applied this commit, or the change
-        # was superseded). Detect that here and report a no-op success
-        # instead of falsely claiming the pull happened.
-        state = self._repo_states[repo]
-        if not state.pending_changes:
-            logger.info(
-                "Deploy approval for %s: no pending changes, "
-                "treating as already-applied success",
-                repo,
-            )
-            return None
-
-        self.trigger_pull(repo, auto=False)
-        return None
+    def _deploy_retry_planner(self, repo: str) -> DeployRetryPlanner:
+        state = self._repo_states.get(repo)
+        if state is None:
+            raise ValueError(f"Unknown repo: {repo}")
+        return DeployRetryPlanner(
+            repo_path=(self.config_dir / state.config.path).resolve(),
+            manifest_path=state.config.release_manifest,
+            journal_store=self._deployment_state_store(),
+        )
 
     def _capture_orchestrator_repo_snapshot(
         self,
@@ -1144,6 +1148,8 @@ class ServiceRunner:
                 pending.deploy_id,
                 status="failed",
                 error="self-update result marker missing after restart",
+                orchestrator_attempt_id=pending.orchestrator_attempt_id,
+                connection_generation=pending.connection_generation,
             )
             return
 
@@ -1164,6 +1170,15 @@ class ServiceRunner:
             status=status,
             error=error,
             duration_ms=duration_ms,
+            orchestrator_attempt_id=pending.orchestrator_attempt_id,
+            connection_generation=pending.connection_generation,
+            settled_snapshot=self._capture_orchestrator_repo_snapshot(
+                self._self_repo,
+                self._repo_states[self._self_repo].config.branch,
+                pending.deploy_id,
+            )
+            if self._self_repo
+            else None,
         )
         logger.info(
             "Enqueued DeployResult for self-update: deploy_id=%s status=%s",
@@ -1235,7 +1250,16 @@ class ServiceRunner:
         else:
             raise ValueError(f"Unknown action: {action}")
 
-    def trigger_pull(self, repo_name: str, auto: bool = False) -> None:
+    def trigger_pull(
+        self,
+        repo_name: str,
+        auto: bool = False,
+        *,
+        orchestrator_attempt_id: str | None = None,
+        node_id: str | None = None,
+        branch: str | None = None,
+        target_head: str | None = None,
+    ) -> None:
         """Pull changes for a repository and restart affected services.
 
         This is the single code path used by all three triggers:
@@ -1282,20 +1306,63 @@ class ServiceRunner:
                     self._cancel_pending_restart(svc)
 
                 self._ensure_release_manifest_activation(repo_name)
-                previous_head = None
+                repo_path = self.config_dir / state.config.path
+                previous_head = (
+                    get_head(repo_path)
+                    if (state.config.release_manifest or target_head is not None)
+                    else None
+                )
                 if state.config.release_manifest:
-                    repo_path = self.config_dir / state.config.path
-                    previous_head = get_head(repo_path)
-                    self._record_manifest_deployment_intent(
-                        repo_name, previous_head, "approved-pull-pending"
+                    assert previous_head is not None
+                    resolved_branch = branch or state.config.branch
+                    intended_target = target_head or get_remote_head(
+                        repo_path, state.config.branch
                     )
+                    manifest_identity = state.config.release_manifest
+                    manifest_digest = hashlib.sha256(
+                        read_file_at_commit(
+                            repo_path, intended_target, manifest_identity
+                        )
+                    ).hexdigest()
+                    journal_attempt_id = self._record_manifest_deployment_intent(
+                        repo_name,
+                        previous_head,
+                        "approved-pull-pending",
+                        target_head=intended_target,
+                        orchestrator_attempt_id=orchestrator_attempt_id,
+                        node_id=node_id,
+                        branch=resolved_branch,
+                        manifest_identity=manifest_identity,
+                        manifest_digest=manifest_digest,
+                    )
+                else:
+                    journal_attempt_id = None
                 success, discarded = self._pull_repo(repo_name)
                 if not success:
                     raise RuntimeError(f"git pull failed for {repo_name}")
+                if target_head is not None:
+                    actual_head = get_head(repo_path)
+                    if actual_head != target_head:
+                        assert previous_head is not None
+                        reset_repo_to(repo_path, previous_head)
+                        state.last_head = get_head(repo_path)
+                        raise ApprovalRevalidationError(
+                            "approved target changed during pull: "
+                            f"approved={target_head} pulled={actual_head}"
+                        )
 
                 if state.config.release_manifest:
                     assert previous_head is not None
-                    run_manifest_deployment(self, repo_name, affected, previous_head)
+                    run_manifest_deployment(
+                        self,
+                        repo_name,
+                        affected,
+                        previous_head,
+                        orchestrator_attempt_id=orchestrator_attempt_id,
+                        node_id=node_id,
+                        branch=resolved_branch,
+                        journal_attempt_id=journal_attempt_id,
+                    )
                 else:
                     self._restart_after_pull_legacy(repo_name, affected)
             finally:
@@ -1580,14 +1647,29 @@ class ServiceRunner:
                 )
 
     def _record_manifest_deployment_intent(
-        self, repo_name: str, previous_head: str, release_id: str
-    ) -> None:
+        self,
+        repo_name: str,
+        previous_head: str,
+        release_id: str,
+        *,
+        target_head: str | None = None,
+        orchestrator_attempt_id: str | None = None,
+        node_id: str | None = None,
+        branch: str | None = None,
+        manifest_identity: str | None = None,
+        manifest_digest: str | None = None,
+    ) -> str:
         """Persist the rollback head before a pull can make startup resumable."""
-        self._deployment_state_store().begin(
+        return self._deployment_state_store().begin(
             repo_name,
             previous_head,
-            previous_head,
+            target_head or previous_head,
             release_id,
+            orchestrator_attempt_id=orchestrator_attempt_id,
+            node_id=node_id,
+            branch=branch,
+            manifest_identity=manifest_identity,
+            manifest_digest=manifest_digest,
         )
 
     def _queue_interrupted_manifest_deployment(
@@ -1779,6 +1861,24 @@ class ServiceRunner:
         if not snapshot.in_sync and state.pending_changes:
             commits = state.pending_changes.get("commits", [])
             if commits:
+                manifest_identity = state.config.release_manifest
+                manifest_digest = None
+                if manifest_identity:
+                    try:
+                        payload = read_file_at_commit(
+                            self.config_dir / state.config.path,
+                            snapshot.remote_head,
+                            manifest_identity,
+                        )
+                    except GitError as exc:
+                        logger.warning(
+                            "Cannot snapshot release manifest for %s at %s: %s",
+                            name,
+                            snapshot.remote_head,
+                            exc,
+                        )
+                    else:
+                        manifest_digest = hashlib.sha256(payload).hexdigest()
                 self._orch_client.notify_change(
                     repo=name,
                     branch=state.config.branch,
@@ -1786,6 +1886,10 @@ class ServiceRunner:
                     affected_services=self.get_affected_services(name),
                     diff_stat=state.pending_changes.get("stat"),
                     deploy_id=snapshot.deploy_id,
+                    target_head=snapshot.remote_head,
+                    deployment_kind="manifest" if manifest_identity else "legacy",
+                    expected_manifest_identity=manifest_identity,
+                    expected_manifest_digest=manifest_digest,
                     wait=True,
                 )
         self._orch_client.notify_repo_reconciliation(snapshot, "observed", wait=True)
@@ -1849,14 +1953,22 @@ class ServiceRunner:
             return
         state = self._repo_states[repo]
         before = self._capture_orchestrator_repo_snapshot(repo, state.config.branch)
-        if self._orch_client:
-            self._orch_client.notify_repo_reconciliation(
-                before, "attempt_started", wait=True
-            )
+        permit = self._orch_client.request_auto_attempt(before)
         started = time.monotonic()
         operation_error: str | None = None
         try:
-            self.trigger_pull(repo, auto=True)
+            approval = {
+                "deploy_id": permit["deploy_id"],
+                "orchestrator_attempt_id": permit["begun_orchestrator_attempt_id"],
+                "execution_mode": permit["execution_mode"],
+                "probe_id": permit["probe_id"],
+                "connection_generation": permit["connection_generation"],
+                "preflight_fingerprint": permit["preflight_fingerprint"],
+            }
+            probe = self._orchestrated_deploys.consume_approval(approval)
+            execute_approved_plan(
+                self, approval, probe, self._deploy_retry_planner(repo)
+            )
         except Exception as exc:
             operation_error = str(exc)
         settled = self._capture_orchestrator_repo_snapshot(
@@ -1865,7 +1977,7 @@ class ServiceRunner:
         duration_ms = int((time.monotonic() - started) * 1000)
         if self._orch_client:
             self._orch_client.report_deploy_attempt(
-                settled, operation_error, duration_ms
+                settled, operation_error, duration_ms, permit
             )
         if operation_error:
             raise RuntimeError(operation_error)

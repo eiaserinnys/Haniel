@@ -151,9 +151,45 @@ class DeploymentStateStore:
         previous_head: str,
         target_head: str,
         release_id: str,
-    ) -> None:
+        *,
+        orchestrator_attempt_id: str | None = None,
+        node_id: str | None = None,
+        branch: str | None = None,
+        manifest_identity: str | None = None,
+        manifest_digest: str | None = None,
+        journal_attempt_id: str | None = None,
+    ) -> str:
         previous_attempts: list[dict[str, Any]] = []
         existing = self.read(repo_name)
+        if journal_attempt_id is not None and existing is not None:
+            if existing.get("journal_attempt_id") != journal_attempt_id:
+                raise ValueError(
+                    "journal_attempt_id does not identify the live journal"
+                )
+            immutable = {
+                "previous_head": previous_head,
+                "target_head": target_head,
+                "orchestrator_attempt_id": orchestrator_attempt_id,
+                "node_id": node_id,
+                "branch": branch,
+                "manifest_identity": manifest_identity,
+                "manifest_digest": manifest_digest,
+            }
+            changed = [
+                key for key, value in immutable.items() if existing.get(key) != value
+            ]
+            if changed:
+                raise ValueError(
+                    "journal intent changed immutable fields: " + ", ".join(changed)
+                )
+            existing["release_id"] = release_id
+            existing["state"] = "build"
+            existing["recovered"] = False
+            existing.setdefault("history", []).append(
+                self._entry("build", "deployment intent activated")
+            )
+            self._write(repo_name, existing)
+            return journal_attempt_id
         if existing is not None:
             previous_attempts = deepcopy(existing.get("previous_attempts", []))
             archived = {
@@ -174,17 +210,24 @@ class DeploymentStateStore:
 
         current: dict[str, Any] = {
             "repo": repo_name,
-            "attempt_id": str(uuid4()),
+            "journal_attempt_id": journal_attempt_id or str(uuid4()),
+            "orchestrator_attempt_id": orchestrator_attempt_id,
+            "node_id": node_id,
+            "branch": branch,
             "release_id": release_id,
             "previous_head": previous_head,
             "target_head": target_head,
             "state": "build",
             "recovered": False,
             "history": [self._entry("build")],
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "manifest_identity": manifest_identity,
+            "manifest_digest": manifest_digest,
         }
         if previous_attempts:
             current["previous_attempts"] = previous_attempts
         self._write(repo_name, current)
+        return current["journal_attempt_id"]
 
     def transition(
         self,
@@ -198,6 +241,8 @@ class DeploymentStateStore:
         if current is None:
             raise ValueError(f"deployment journal does not exist for {repo_name}")
         current["state"] = state
+        if state in self.TERMINAL_STATES:
+            current["completed_at"] = datetime.now(timezone.utc).isoformat()
         if recovered is not None:
             current["recovered"] = recovered
         current.setdefault("history", []).append(self._entry(state, message))
@@ -301,6 +346,12 @@ class DeploymentCoordinator:
         target_head: str,
         manifest: ReleaseManifest,
         callbacks: DeploymentCallbacks,
+        orchestrator_attempt_id: str | None = None,
+        node_id: str | None = None,
+        branch: str | None = None,
+        manifest_identity: str | None = None,
+        manifest_digest: str | None = None,
+        journal_attempt_id: str | None = None,
     ) -> DeploymentResult:
         if self.state_store.is_success(repo_name, target_head, manifest.release_id):
             return DeploymentResult(status="success", recovered=False, skipped=True)
@@ -313,7 +364,16 @@ class DeploymentCoordinator:
         }
         migration_started = False
         self.state_store.begin(
-            repo_name, previous_head, target_head, manifest.release_id
+            repo_name,
+            previous_head,
+            target_head,
+            manifest.release_id,
+            orchestrator_attempt_id=orchestrator_attempt_id,
+            node_id=node_id,
+            branch=branch,
+            manifest_identity=manifest_identity,
+            manifest_digest=manifest_digest,
+            journal_attempt_id=journal_attempt_id,
         )
 
         try:

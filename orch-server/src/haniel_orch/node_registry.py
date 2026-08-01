@@ -21,6 +21,8 @@ class ConnectedNode:
     node_id: str
     websocket: WebSocket
     hello: NodeHello
+    connection_generation: str
+    connection_token: str
     last_heartbeat: float = field(default_factory=time.time)
     connected_at: float = field(default_factory=time.time)
     services: list[dict] | None = None  # latest service state (updated by heartbeat)
@@ -34,12 +36,20 @@ class NodeRegistry:
         self._store = store
         self._heartbeat_timeout = heartbeat_timeout
 
-    async def register(self, ws: WebSocket, hello: NodeHello) -> None:
+    async def register(
+        self,
+        ws: WebSocket,
+        hello: NodeHello,
+        connection_generation: str,
+        connection_token: str,
+    ) -> None:
         """Register a node. Upserts in DB and adds to memory."""
         node = ConnectedNode(
             node_id=hello.node_id,
             websocket=ws,
             hello=hello,
+            connection_generation=connection_generation,
+            connection_token=connection_token,
             services=hello.services,
         )
         self._nodes[hello.node_id] = node
@@ -50,32 +60,68 @@ class NodeRegistry:
             arch=hello.arch,
             haniel_version=hello.haniel_version,
             connected=True,
+            connection_generation=connection_generation,
+            connection_token=connection_token,
         )
         logger.info(f"Node registered: {hello.node_id} ({hello.hostname})")
 
-    def is_current_connection(self, node_id: str, websocket: WebSocket) -> bool:
-        """Return True when websocket is the active connection for node_id."""
-        node = self._nodes.get(node_id)
-        return node is not None and node.websocket is websocket
-
-    async def unregister(
-        self, node_id: str, websocket: WebSocket | None = None
+    def is_current_connection(
+        self,
+        node_id: str,
+        websocket: WebSocket,
+        expected_generation: str | None = None,
+        expected_connection_token: str | None = None,
     ) -> bool:
-        """Unregister a node. Marks as disconnected.
+        """Return True when websocket and optional generation are current."""
+        node = self._nodes.get(node_id)
+        return (
+            node is not None
+            and node.websocket is websocket
+            and (
+                expected_generation is None
+                or node.connection_generation == expected_generation
+            )
+            and (
+                expected_connection_token is None
+                or node.connection_token == expected_connection_token
+            )
+        )
 
-        When websocket is provided, unregister only if that exact connection is
-        still current. This prevents a late close from a superseded connection
-        from deleting a freshly reconnected node with the same node_id.
+    def has_connection_identity(
+        self, node_id: str, generation: str, connection_token: str
+    ) -> bool:
+        """Check the server-owned identity without exposing the WebSocket object."""
+        node = self._nodes.get(node_id)
+        return (
+            node is not None
+            and node.connection_generation == generation
+            and node.connection_token == connection_token
+        )
 
-        NOTE: in-flight deploy failure (DEPLOYING → FAILED) is handled by
-        :meth:`WebSocketHub._cleanup_orphan_deploys` — single source of truth
-        for ws-disconnect, heartbeat-timeout, and shutdown paths. The hub
-        invokes both ``unregister`` and ``_cleanup_orphan_deploys`` after
-        observing a disconnect, so DEPLOYING events still transition to
-        FAILED + broadcast.
+    async def unregister_if_current(
+        self,
+        node_id: str,
+        *,
+        websocket: WebSocket,
+        expected_generation: str,
+        expected_connection_token: str,
+    ) -> bool:
+        """Conditionally unregister one immutable connection generation.
+
+        Both the in-memory removal and durable offline write are compare-and-set.
+        A reconnect that lands during the durable await therefore cannot be
+        erased by the older socket's cleanup.
+
+        Durable deploy attempts are not failed here. Their DB deadline remains
+        the single terminal authority across disconnects and server restarts.
         """
         node = self._nodes.get(node_id)
-        if websocket is not None and (node is None or node.websocket is not websocket):
+        if (
+            node is None
+            or node.websocket is not websocket
+            or node.connection_generation != expected_generation
+            or node.connection_token != expected_connection_token
+        ):
             logger.debug("Ignoring stale unregister for node: %s", node_id)
             return False
 
@@ -83,7 +129,15 @@ class NodeRegistry:
 
         # Mark node as disconnected in DB without erasing the last known
         # hostname/version shown in the dashboard.
-        await self._store.mark_node_disconnected(node_id)
+        durable_removed = await self._store.mark_node_disconnected(
+            node_id, expected_generation, expected_connection_token
+        )
+        if not durable_removed:
+            logger.debug(
+                "Ignoring generation superseded during unregister for node: %s",
+                node_id,
+            )
+            return False
 
         logger.info(f"Node unregistered: {node_id}")
         return True
@@ -104,7 +158,11 @@ class NodeRegistry:
         node.last_heartbeat = time.time()
         if services is not None:
             node.services = services
-        await self._store.update_node_heartbeat(node_id)
+        await self._store.update_node_heartbeat(
+            node_id,
+            expected_generation=node.connection_generation,
+            expected_connection_token=node.connection_token,
+        )
 
     def get_node(self, node_id: str) -> ConnectedNode | None:
         """Get a connected node by ID."""

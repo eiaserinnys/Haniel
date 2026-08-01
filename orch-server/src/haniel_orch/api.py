@@ -11,8 +11,9 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from .event_store import EventStore
+from .deploy_attempt_coordinator import PlanRejected
 from .hub import WebSocketHub
-from .protocol import DeployApproval, DeployReject, DeployStatus, ServiceCommand
+from .protocol import DeployReject, DeployStatus, ServiceCommand
 
 logger = logging.getLogger(__name__)
 
@@ -24,18 +25,19 @@ SERVICE_COMMAND_ACTIONS = SERVICE_SCOPED_COMMANDS | CONFIG_COMMANDS
 def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
     """Create REST API routes bound to the given hub and store."""
 
+    async def _approve_one(event: dict[str, Any], approved_by: str, source: str) -> str:
+        return await hub.deploy_coordinator.approve_manual(
+            event, approved_by=approved_by, source=source
+        )
+
     async def get_pending(request: Request) -> JSONResponse:
         """GET /api/orch/pending — list active deploys (pending + deploying).
 
         PendingView shows both states so that a deploy stays visible after
         approval (DEPLOYING) until the node reports a terminal result.
         """
-        await hub.cleanup_pending_for_renamed_nodes()
         deploys = await store.get_active_deploys()
-        latest_failure = await store.get_latest_failed_deploy()
-        return JSONResponse(
-            {"deploys": deploys, "latest_failure": latest_failure}
-        )
+        return JSONResponse({"deploys": deploys})
 
     async def get_nodes(request: Request) -> JSONResponse:
         """GET /api/orch/nodes — list all registered nodes.
@@ -75,8 +77,8 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
     async def approve_deploy(request: Request) -> JSONResponse:
         """POST /api/orch/approve — approve a pending deploy.
 
-        Flow: get event → validate status is PENDING → set APPROVED →
-              send DeployApproval to node → set DEPLOYING.
+        The coordinator either begins a normal attempt transaction or runs a
+        retry preflight before beginning and sending the immutable approval.
         """
         body = await request.json()
         deploy_id = body.get("deploy_id")
@@ -97,64 +99,25 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
                 status_code=409,
             )
 
-        # Mark as approved
         approved_by = body.get("approved_by", "dashboard")
-        await store.update_deploy_status(
-            deploy_id, DeployStatus.APPROVED, approved_by=approved_by
-        )
-
-        await hub.register_pending_deploy(
-            deploy_id, event["node_id"], event["repo"], event["branch"]
-        )
-        transitioned = await store.transition_deploy_status(
-            deploy_id, DeployStatus.APPROVED, DeployStatus.DEPLOYING
-        )
-        if not transitioned:
-            await hub.cancel_pending_deploy(deploy_id)
-            return JSONResponse(
-                {"error": "deploy state changed before dispatch"}, status_code=409
+        try:
+            orchestrator_attempt_id = await _approve_one(
+                event, approved_by, "manual_single"
             )
-        await hub.broadcast_to_dashboards({
-            "type": "status_change",
-            "deploy_id": deploy_id,
-            "status": DeployStatus.DEPLOYING.value,
-            "node_id": event["node_id"],
-        })
-
-        msg = DeployApproval(deploy_id=deploy_id, approved_by=approved_by)
-        sent = await hub.send_to_node(event["node_id"], msg)
-        if sent:
-            # Supersede any other PENDING deploys in the same (node, repo, branch).
-            # `kept_deploy_id` is the one we just approved.
             await hub.supersede_pending(
-                event["node_id"], event["repo"], event["branch"], deploy_id
+                event["node_id"], event["repo"], event["branch"]
             )
-            return JSONResponse({"deploy_id": deploy_id, "status": "deploying"})
-        else:
-            # Node not connected — revert to PENDING and fail the approve.
-            # No deferred reconnect-deploy path exists in the hub register
-            # flow, so leaving APPROVED would strand the deploy silently
-            # (get_active_deploys returns pending+deploying only — APPROVED
-            # disappears from PendingView with no path back). 503 surfaces
-            # the failure; PENDING keeps it visible so the operator can
-            # retry once the node reconnects.
-            await hub.cancel_pending_deploy(deploy_id)
-            await store.transition_deploy_status(
-                deploy_id, DeployStatus.DEPLOYING, DeployStatus.PENDING
-            )
-            await hub.broadcast_to_dashboards({
-                "type": "status_change",
-                "deploy_id": deploy_id,
-                "status": DeployStatus.PENDING.value,
-                "node_id": event["node_id"],
-            })
             return JSONResponse(
                 {
-                    "error": "node not connected, retry after reconnect",
                     "deploy_id": deploy_id,
-                    "node_id": event["node_id"],
-                },
-                status_code=503,
+                    "orchestrator_attempt_id": orchestrator_attempt_id,
+                    "status": "deploying",
+                }
+            )
+        except PlanRejected as exc:
+            return JSONResponse(
+                {"error": str(exc), "deploy_id": deploy_id},
+                status_code=exc.status_code,
             )
 
     async def reject_deploy(request: Request) -> JSONResponse:
@@ -182,6 +145,9 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         await store.update_deploy_status(
             deploy_id, DeployStatus.REJECTED, reject_reason=reason
         )
+        await hub.deploy_coordinator.resolve_terminal_canonicals(
+            {deploy_id}, message="deploy was rejected during preflight"
+        )
 
         # Send rejection to node
         msg = DeployReject(deploy_id=deploy_id, reason=reason)
@@ -199,7 +165,7 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
     async def approve_all(request: Request) -> JSONResponse:
         """POST /api/orch/approve-all — approve all pending deploys.
 
-        Within each (node, repo, branch) group, only the latest (by created_at)
+        Within each (node, repo, branch) group, only the latest canonical
         is approved; the others are auto-superseded so that a stale older
         deploy does not run after a newer one. Response includes ``superseded``
         list when any auto-supersede occurred.
@@ -216,8 +182,8 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
                 "message": "no pending deploys",
             })
 
-        # Group by (node, repo, branch). `pending` is ordered created_at DESC,
-        # so the first occurrence per group is the latest commit. Older
+        # Group by (node, repo, branch). `pending` is ordered by canonical
+        # detected_at, then insertion time, so the first occurrence is latest. Older
         # entries in the same group are auto-superseded via the single
         # source of truth (hub.supersede_pending) — keeps the reject_reason
         # format ("superseded by <id>") and broadcast payload identical to
@@ -228,7 +194,7 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
             key = (ev["node_id"], ev["repo"], ev["branch"])
             if key in seen_groups:
                 # Older deploy in the same branch — handled below by
-                # supersede_pending(kept=newest), no per-row action here.
+                # supersede_pending chooses the transaction-time latest row.
                 continue
             seen_groups.add(key)
             to_approve.append(ev)
@@ -240,7 +206,7 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         auto_superseded: list[str] = []
         for ev in to_approve:
             superseded = await hub.supersede_pending(
-                ev["node_id"], ev["repo"], ev["branch"], ev["deploy_id"]
+                ev["node_id"], ev["repo"], ev["branch"]
             )
             auto_superseded.extend(superseded)
 
@@ -249,56 +215,14 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
 
         for event in to_approve:
             deploy_id = event["deploy_id"]
-            node_id = event["node_id"]
 
-            await store.update_deploy_status(
-                deploy_id, DeployStatus.APPROVED, approved_by="dashboard"
-            )
-
-            await hub.register_pending_deploy(
-                deploy_id, node_id, event["repo"], event["branch"]
-            )
-            transitioned = await store.transition_deploy_status(
-                deploy_id, DeployStatus.APPROVED, DeployStatus.DEPLOYING
-            )
-            if not transitioned:
-                await hub.cancel_pending_deploy(deploy_id)
-                failed.append({
-                    "deploy_id": deploy_id,
-                    "reason": "deploy state changed before dispatch",
-                })
-                continue
-            await hub.broadcast_to_dashboards({
-                "type": "status_change",
-                "deploy_id": deploy_id,
-                "status": DeployStatus.DEPLOYING.value,
-                "node_id": node_id,
-            })
-
-            msg = DeployApproval(deploy_id=deploy_id, approved_by="dashboard")
-            sent = await hub.send_to_node(node_id, msg)
-
-            if sent:
+            try:
+                await _approve_one(event, "dashboard", "manual_batch")
                 approved.append(deploy_id)
-            else:
-                # Node not connected — revert APPROVED → PENDING so the
-                # deploy is not silently stranded (mirrors approve_deploy
-                # offline-revert policy in analysis cache F2). Response
-                # shape is preserved: failed array still carries the
-                # deploy_id and reason for the dashboard.
-                await hub.cancel_pending_deploy(deploy_id)
-                await store.transition_deploy_status(
-                    deploy_id, DeployStatus.DEPLOYING, DeployStatus.PENDING
-                )
-                await hub.broadcast_to_dashboards({
-                    "type": "status_change",
-                    "deploy_id": deploy_id,
-                    "status": DeployStatus.PENDING.value,
-                    "node_id": node_id,
-                })
+            except (PlanRejected, ValueError) as exc:
                 failed.append({
                     "deploy_id": deploy_id,
-                    "reason": "node not connected",
+                    "reason": str(exc),
                 })
 
         response: dict[str, Any] = {"approved": approved, "failed": failed}

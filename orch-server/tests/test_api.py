@@ -2,16 +2,15 @@
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
-from starlette.testclient import TestClient
 
 from haniel_orch.api import create_api_routes
 from haniel_orch.event_store import EventStore
 from haniel_orch.hub import WebSocketHub
 from haniel_orch.node_registry import NodeRegistry
-from haniel_orch.protocol import DeployApproval, DeployStatus, NodeHello
+from haniel_orch.protocol import DeployStatus, NodeHello
 
 
 @pytest.fixture
@@ -47,6 +46,21 @@ async def _seed_pending(
         diff_stat="+10 -3",
         detected_at="2026-01-01T00:00:00Z",
     )
+
+
+async def _register_node(
+    hub: WebSocketHub,
+    registry: NodeRegistry,
+    websocket: AsyncMock,
+    hello: NodeHello,
+) -> str:
+    lease = await hub.deploy_coordinator.register_connection(
+        hello.node_id,
+        activate=lambda lease: registry.register(
+            websocket, hello, lease.generation, lease.connection_token
+        ),
+    )
+    return lease.generation
 
 
 class TestGetPending:
@@ -94,15 +108,27 @@ class TestGetPending:
         resp = client.get("/api/orch/pending")
         assert resp.status_code == 200
         assert resp.json()["deploys"] == []
-        assert resp.json()["latest_failure"] is None
+        assert set(resp.json()) == {"deploys"}
 
-    async def test_latest_failure_is_independent_of_active_list(
-        self, hub, store, routes
-    ):
+    async def test_failure_detail_is_history_only(self, hub, store, routes):
         await _seed_pending(store, "failed")
-        await store.update_deploy_status("failed", DeployStatus.DEPLOYING)
-        await store.apply_deploy_result(
-            "failed", DeployStatus.FAILED, error="post-pull failed"
+        generation = "g1"
+        await store.attempts.begin_normal_attempt(
+            orchestrator_attempt_id="attempt-failed",
+            deploy_id="failed",
+            connection_generation=generation,
+            current_generation=generation,
+            source="manual_single",
+            approved_by="dashboard",
+            deadline_at="2099-01-01T00:00:00+00:00",
+        )
+        await store.attempts.record_result(
+            deploy_id="failed",
+            orchestrator_attempt_id="attempt-failed",
+            connection_generation=generation,
+            status="failed",
+            error="post-pull failed",
+            duration_ms=12,
         )
 
         from starlette.applications import Starlette
@@ -111,9 +137,23 @@ class TestGetPending:
         client = TestClient(Starlette(routes=routes))
         data = client.get("/api/orch/pending").json()
 
-        assert data["deploys"] == []
-        assert data["latest_failure"]["deploy_id"] == "failed"
-        assert data["latest_failure"]["error"] == "post-pull failed"
+        assert [row["deploy_id"] for row in data["deploys"]] == ["failed"]
+        assert data["deploys"][0]["error"] is None
+        assert (
+            not {
+                "terminal_kind",
+                "terminal_stage",
+                "terminal_reason",
+                "terminal_error",
+            }
+            & data["deploys"][0].keys()
+        )
+        history = client.get("/api/orch/history").json()["deploys"]
+        failed_attempt = next(
+            row for row in history if row["error"] == "post-pull failed"
+        )
+        assert failed_attempt["terminal_stage"] == "execution"
+        assert failed_attempt["terminal_reason"] == "deploy_result_failed"
 
     async def test_includes_deploying(self, hub, store, routes):
         """/api/orch/pending returns active (pending + deploying), not just pending."""
@@ -136,16 +176,16 @@ class TestGetPending:
         ids = {d["deploy_id"] for d in resp.json()["deploys"]}
         assert ids == {"d_pending", "d_deploying"}
 
-    async def test_rejects_pending_for_renamed_node(
-        self, hub, registry, store, routes
-    ):
+    async def test_rejects_pending_for_renamed_node(self, hub, registry, store, routes):
         """A disconnected node_id with the same hostname as a connected node
         is a renamed node; its stale pending deploys should not keep asking
         for approval."""
         await store.upsert_node(
             "old-node", "same-host", "Linux", "x86_64", "0.14.2", connected=False
         )
-        await registry.register(
+        await _register_node(
+            hub,
+            registry,
             AsyncMock(),
             NodeHello(
                 node_id="new-node",
@@ -171,6 +211,8 @@ class TestGetPending:
             repo="myrepo",
             branch="main",
         )
+        # Node connection lifecycle owns this repair. The GET route is a pure read.
+        await hub.cleanup_pending_for_renamed_nodes()
 
         from starlette.applications import Starlette
         from starlette.testclient import TestClient
@@ -203,10 +245,14 @@ class TestGetNodes:
         assert resp.status_code == 200
         assert len(resp.json()["nodes"]) == 1
 
-    async def test_connected_reflects_runtime_registry(self, hub, registry, store, routes):
+    async def test_connected_reflects_runtime_registry(
+        self, hub, registry, store, routes
+    ):
         await store.upsert_node("n1", "host-1", "Linux", "x86_64", "0.14.2")
         await store.upsert_node("n2", "host-2", "Linux", "x86_64", "0.14.2")
-        await registry.register(
+        await _register_node(
+            hub,
+            registry,
             AsyncMock(),
             NodeHello(
                 node_id="n2",
@@ -235,7 +281,7 @@ class TestGetNodes:
 class TestGetHistory:
     async def test_returns_history_with_limit(self, hub, store, routes):
         for i in range(5):
-            await _seed_pending(store, f"d{i}")
+            await _seed_pending(store, f"d{i}", branch=f"branch-{i}")
 
         from starlette.applications import Starlette
         from starlette.testclient import TestClient
@@ -247,15 +293,14 @@ class TestGetHistory:
         assert resp.status_code == 200
         assert len(resp.json()["deploys"]) == 3
 
-    async def test_history_excludes_superseded_by_default(
-        self, hub, store, routes
-    ):
+    async def test_history_excludes_superseded_by_default(self, hub, store, routes):
         """GET /api/orch/history (no query) must filter out auto-supersede
         rows so the dashboard's HistoryView is not drowned by them."""
         for did in ("d_old", "d_new"):
             await _seed_pending(store, did)
         await store.update_deploy_status(
-            "d_old", DeployStatus.REJECTED,
+            "d_old",
+            DeployStatus.REJECTED,
             reject_reason="superseded by d_new",
         )
 
@@ -271,15 +316,14 @@ class TestGetHistory:
         assert "d_old" not in ids
         assert "d_new" in ids
 
-    async def test_history_includes_superseded_with_query(
-        self, hub, store, routes
-    ):
+    async def test_history_includes_superseded_with_query(self, hub, store, routes):
         """GET /api/orch/history?include_superseded=1 must return supersede
         rows so the operator can audit chains."""
         for did in ("d_old", "d_new"):
             await _seed_pending(store, did)
         await store.update_deploy_status(
-            "d_old", DeployStatus.REJECTED,
+            "d_old",
+            DeployStatus.REJECTED,
             reject_reason="superseded by d_new",
         )
 
@@ -297,17 +341,34 @@ class TestGetHistory:
 
 class TestApproveDeploy:
     async def test_deploying_state_exists_before_node_can_return_result(
-        self, hub, store, routes
+        self, hub, registry, store, routes
     ):
         await _seed_pending(store, "d1", "n1")
+        await _register_node(
+            hub,
+            registry,
+            AsyncMock(),
+            NodeHello(
+                node_id="n1",
+                token="t",
+                hostname="h",
+                os="Linux",
+                arch="x86_64",
+                haniel_version="0.1.0",
+            ),
+        )
 
-        async def send_after_transition(node_id, message):
+        async def send_after_transition(node_id, generation, message):
             assert node_id == "n1"
+            assert generation == hub.deploy_coordinator.current_generation("n1")
             assert (await store.get_deploy_event("d1"))["status"] == "deploying"
-            assert "d1" in hub._pending_deploys
+            assert any(
+                row["deploy_id"] == "d1"
+                for row in await store.attempts.get_active_attempts()
+            )
             return True
 
-        hub.send_to_node = AsyncMock(side_effect=send_after_transition)
+        hub.deploy_coordinator._send = AsyncMock(side_effect=send_after_transition)
         from starlette.applications import Starlette
         from starlette.testclient import TestClient
 
@@ -329,7 +390,7 @@ class TestApproveDeploy:
             arch="x86_64",
             haniel_version="0.1.0",
         )
-        await registry.register(ws, hello)
+        await _register_node(hub, registry, ws, hello)
 
         from starlette.applications import Starlette
         from starlette.testclient import TestClient
@@ -337,9 +398,7 @@ class TestApproveDeploy:
         app = Starlette(routes=routes)
         client = TestClient(app)
 
-        resp = client.post(
-            "/api/orch/approve", json={"deploy_id": "d1"}
-        )
+        resp = client.post("/api/orch/approve", json={"deploy_id": "d1"})
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "deploying"
@@ -364,14 +423,11 @@ class TestApproveDeploy:
         app = Starlette(routes=routes)
         client = TestClient(app)
 
-        resp = client.post(
-            "/api/orch/approve", json={"deploy_id": "d1"}
-        )
+        resp = client.post("/api/orch/approve", json={"deploy_id": "d1"})
         assert resp.status_code == 503
         data = resp.json()
         assert "error" in data
         assert data["deploy_id"] == "d1"
-        assert data["node_id"] == "n1"
         # DB must be reverted to PENDING — no transient APPROVED leak.
         event = await store.get_deploy_event("d1")
         assert event["status"] == "pending"
@@ -393,9 +449,7 @@ class TestApproveDeploy:
         app = Starlette(routes=routes)
         client = TestClient(app)
 
-        resp = client.post(
-            "/api/orch/approve", json={"deploy_id": "nonexistent"}
-        )
+        resp = client.post("/api/orch/approve", json={"deploy_id": "nonexistent"})
         assert resp.status_code == 404
 
     async def test_approve_already_approved(self, hub, store, routes):
@@ -408,14 +462,10 @@ class TestApproveDeploy:
         app = Starlette(routes=routes)
         client = TestClient(app)
 
-        resp = client.post(
-            "/api/orch/approve", json={"deploy_id": "d1"}
-        )
+        resp = client.post("/api/orch/approve", json={"deploy_id": "d1"})
         assert resp.status_code == 409
 
-    async def test_approve_supersedes_older_pending(
-        self, hub, registry, store, routes
-    ):
+    async def test_approve_supersedes_older_pending(self, hub, registry, store, routes):
         """Approving the latest deploy supersedes older PENDING entries
         on the same (node, repo, branch)."""
         # 3 PENDING deploys on the same branch — d1 oldest, d3 newest (we approve d3).
@@ -430,10 +480,14 @@ class TestApproveDeploy:
 
         ws = AsyncMock()
         hello = NodeHello(
-            node_id="n1", token="t", hostname="h",
-            os="Linux", arch="x86_64", haniel_version="0.1.0",
+            node_id="n1",
+            token="t",
+            hostname="h",
+            os="Linux",
+            arch="x86_64",
+            haniel_version="0.1.0",
         )
-        await registry.register(ws, hello)
+        await _register_node(hub, registry, ws, hello)
 
         ws_dash = AsyncMock()
         hub._dashboard_connections = {ws_dash}
@@ -448,25 +502,20 @@ class TestApproveDeploy:
         assert resp.status_code == 200
         assert resp.json()["status"] == "deploying"
 
-        # d3 deploying, d1/d2 superseded
+        # Each change atomically supersedes the then-current canonical. Approval
+        # does not rewrite the audit chain after the fact.
         ev3 = await store.get_deploy_event("d3")
         assert ev3["status"] == "deploying"
-        for did in ("d1", "d2"):
-            ev = await store.get_deploy_event(did)
-            assert ev["status"] == "rejected"
-            assert ev["reject_reason"] == "superseded by d3"
+        ev1 = await store.get_deploy_event("d1")
+        ev2 = await store.get_deploy_event("d2")
+        assert (ev1["status"], ev1["reject_reason"]) == ("rejected", "superseded by d2")
+        assert (ev2["status"], ev2["reject_reason"]) == ("rejected", "superseded by d3")
 
-        # status_change broadcasts include reject_reason for the superseded ones
+        # Rows were created directly through the store, so their creation-time
+        # broadcasts are intentionally outside this approval request.
         sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
-        rejected = [
-            p for p in sent
-            if p.get("type") == "status_change"
-            and p.get("status") == "rejected"
-        ]
-        rejected_ids = {p["deploy_id"] for p in rejected}
-        assert rejected_ids == {"d1", "d2"}
-        for p in rejected:
-            assert p.get("reject_reason") == "superseded by d3"
+        assert not any(p.get("status") == "rejected" for p in sent)
+        assert any(p.get("status") == "deploying" for p in sent)
 
 
 class TestRejectDeploy:
@@ -498,9 +547,7 @@ class TestRejectDeploy:
         app = Starlette(routes=routes)
         client = TestClient(app)
 
-        resp = client.post(
-            "/api/orch/reject", json={"deploy_id": "x"}
-        )
+        resp = client.post("/api/orch/reject", json={"deploy_id": "x"})
         assert resp.status_code == 404
 
     async def test_reject_not_pending(self, hub, store, routes):
@@ -513,16 +560,12 @@ class TestRejectDeploy:
         app = Starlette(routes=routes)
         client = TestClient(app)
 
-        resp = client.post(
-            "/api/orch/reject", json={"deploy_id": "d1"}
-        )
+        resp = client.post("/api/orch/reject", json={"deploy_id": "d1"})
         assert resp.status_code == 409
 
 
 class TestApproveAll:
-    async def test_approve_all_with_connected_nodes(
-        self, hub, registry, store, routes
-    ):
+    async def test_approve_all_with_connected_nodes(self, hub, registry, store, routes):
         # Two deploys on different branches → distinct (node, repo, branch)
         # groups, so both should be approved (no auto-supersede).
         await _seed_pending(store, "d1", "n1", branch="main")
@@ -538,7 +581,7 @@ class TestApproveAll:
             arch="x86_64",
             haniel_version="0.1.0",
         )
-        await registry.register(ws, hello)
+        await _register_node(hub, registry, ws, hello)
 
         from starlette.applications import Starlette
         from starlette.testclient import TestClient
@@ -589,19 +632,21 @@ class TestApproveAll:
         event = await store.get_deploy_event("d1")
         assert event["status"] == "pending"
 
-    async def test_approve_all_no_supersede_no_key(
-        self, hub, registry, store, routes
-    ):
+    async def test_approve_all_no_supersede_no_key(self, hub, registry, store, routes):
         """When no group has multiple PENDING entries, response has no 'superseded' key."""
         await _seed_pending(store, "d1", "n1", branch="main")
         await _seed_pending(store, "d2", "n1", branch="dev")
 
         ws = AsyncMock()
         hello = NodeHello(
-            node_id="n1", token="t", hostname="h",
-            os="Linux", arch="x86_64", haniel_version="0.1.0",
+            node_id="n1",
+            token="t",
+            hostname="h",
+            os="Linux",
+            arch="x86_64",
+            haniel_version="0.1.0",
         )
-        await registry.register(ws, hello)
+        await _register_node(hub, registry, ws, hello)
 
         from starlette.applications import Starlette
         from starlette.testclient import TestClient
@@ -615,9 +660,7 @@ class TestApproveAll:
         assert "superseded" not in data
         assert set(data["approved"]) == {"d1", "d2"}
 
-    async def test_approve_all_groups_per_branch(
-        self, hub, registry, store, routes
-    ):
+    async def test_approve_all_groups_per_branch(self, hub, registry, store, routes):
         """approve_all approves only the latest per (node, repo, branch);
         older entries in the same group are auto-superseded."""
         # 2 deploys on (n1, myrepo, main) — d2 newest, d1 older
@@ -635,10 +678,14 @@ class TestApproveAll:
         ws_n2 = AsyncMock()
         for nid, ws in (("n1", ws_n1), ("n2", ws_n2)):
             hello = NodeHello(
-                node_id=nid, token="t", hostname="h",
-                os="Linux", arch="x86_64", haniel_version="0.1.0",
+                node_id=nid,
+                token="t",
+                hostname="h",
+                os="Linux",
+                arch="x86_64",
+                haniel_version="0.1.0",
             )
-            await registry.register(ws, hello)
+            await _register_node(hub, registry, ws, hello)
 
         from starlette.applications import Starlette
         from starlette.testclient import TestClient
@@ -654,7 +701,10 @@ class TestApproveAll:
         # its group → d2 is approved, d1 is superseded. d3 and d4 are alone
         # in their groups → both approved.
         assert set(data["approved"]) == {"d2", "d3", "d4"}
-        assert data["superseded"] == ["d1"]
+        assert "superseded" not in data
+        assert (await store.get_deploy_event("d1"))[
+            "reject_reason"
+        ] == "superseded by d2"
         assert data["failed"] == []
 
         ev_d1 = await store.get_deploy_event("d1")

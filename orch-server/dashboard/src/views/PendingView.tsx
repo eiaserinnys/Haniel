@@ -6,7 +6,6 @@ import type { Deploy } from '@/types';
 
 interface PendingViewProps {
   deploys: Deploy[];
-  latestFailure: Deploy | null;
   onApprove: (deployId: string) => Promise<boolean>;
   onReject: (deployId: string, reason: string) => void;
   onApproveAll: (ids: string[]) => Promise<readonly string[]>;
@@ -14,7 +13,6 @@ interface PendingViewProps {
 
 export function PendingView({
   deploys,
-  latestFailure,
   onApprove,
   onReject,
   onApproveAll,
@@ -107,7 +105,6 @@ export function PendingView({
     return (
       <div className="view-pending">
         <h1>Pending Deploys</h1>
-        {latestFailure && <LatestFailure deploy={latestFailure} />}
         <div className="empty-state">
           <div className="empty-icon">
             <Icon name="check" size={28} />
@@ -130,7 +127,6 @@ export function PendingView({
     <div className="view-pending">
       <h1>Pending Deploys</h1>
       <p className="view-subtitle">{subtitle}</p>
-      {latestFailure && <LatestFailure deploy={latestFailure} />}
 
       <div className="pending-actions">
         <label className="select-all-label">
@@ -179,32 +175,6 @@ export function PendingView({
 
 function sameSet(left: Set<string>, right: Set<string>): boolean {
   return left.size === right.size && Array.from(left).every(value => right.has(value));
-}
-
-function LatestFailure({ deploy }: { deploy: Deploy }) {
-  return (
-    <div className="pending-card" aria-label="Latest deploy failure">
-      <div className="pending-card-header">
-        <div className="pending-card-info">
-          <div className="pending-card-title">
-            <span className="pending-repo">Last deploy failed</span>
-            <span className="pending-sep">/</span>
-            <span className="pending-branch">{deploy.repo}</span>
-            <span className="pending-sep">/</span>
-            <span className="pending-node">{deploy.node_id}</span>
-          </div>
-          <div className="pending-card-meta">
-            <span>{deploy.branch}</span>
-            <span className="pending-sep">/</span>
-            <span>{relTime(deploy.updated_at)}</span>
-          </div>
-          <pre className="history-error-block">
-            {deploy.error || deploy.reject_reason || 'Unknown deploy failure'}
-          </pre>
-        </div>
-      </div>
-    </div>
-  );
 }
 
 /* ── PendingCard ─────────────────────────────────────── */

@@ -83,109 +83,11 @@ class TestCreateDeployEvent:
         event = await store.get_deploy_event("no-stat")
         assert event["diff_stat"] is None
 
-    async def test_failed_terminal_reopens_with_snapshot(self, store: EventStore):
-        deploy_id = "n1:repo:main:remote"
-        await store.create_deploy_event(
-            deploy_id=deploy_id,
-            node_id="n1",
-            repo="repo",
-            branch="main",
-            commits=["remote change"],
-            affected_services=["svc"],
-            diff_stat="1 file",
-            detected_at="2026-01-01T00:00:00Z",
-        )
-        await store.update_deploy_status(
-            deploy_id,
-            DeployStatus.DEPLOYING,
-            approved_by="dashboard",
-        )
-        assert await store.apply_deploy_result(
-            deploy_id,
-            DeployStatus.FAILED,
-            error="hook failed",
-            duration_ms=123,
-        )
-        failed = await store.get_deploy_event(deploy_id)
-
-        assert await store.reopen_failed_deploy(deploy_id)
-        reopened = await store.get_deploy_event(deploy_id)
-        assert reopened["status"] == "pending"
-        assert reopened["approved_by"] is None
-        assert reopened["error"] is None
-        assert reopened["duration_ms"] is None
-
-        latest = await store.get_latest_failed_deploy()
-        assert latest is not None
-        assert latest["deploy_id"].startswith("attempt:")
-        assert latest["error"] == "hook failed"
-        assert latest["duration_ms"] == 123
-        assert latest["approved_by"] == "dashboard"
-        assert latest["created_at"] == failed["updated_at"]
-        assert latest["updated_at"] == failed["updated_at"]
-
-    async def test_late_result_cannot_overwrite_reopened_pending(
-        self, store: EventStore
-    ):
-        deploy_id = "n1:repo:main:remote"
-        await store.create_deploy_event(
-            deploy_id=deploy_id,
-            node_id="n1",
-            repo="repo",
-            branch="main",
-            commits=["remote change"],
-            affected_services=[],
-            diff_stat=None,
-            detected_at="2026-01-01T00:00:00Z",
-        )
-        await store.update_deploy_status(deploy_id, DeployStatus.DEPLOYING)
-        assert await store.apply_deploy_result(
-            deploy_id, DeployStatus.FAILED, error="timeout"
-        )
-        assert await store.reopen_failed_deploy(deploy_id)
-
-        assert not await store.apply_deploy_result(
-            deploy_id, DeployStatus.SUCCESS, duration_ms=999
-        )
-        event = await store.get_deploy_event(deploy_id)
-        assert event["status"] == "pending"
-
-    async def test_latest_failed_uses_updated_at_then_deploy_id(
-        self, store: EventStore
-    ):
-        for deploy_id in ("failed-a", "failed-b"):
-            await store.create_deploy_event(
-                deploy_id=deploy_id,
-                node_id="n1",
-                repo="repo",
-                branch=deploy_id,
-                commits=["h msg"],
-                affected_services=[],
-                diff_stat=None,
-                detected_at="2026-01-01T00:00:00Z",
-            )
-            await store.update_deploy_status(deploy_id, DeployStatus.DEPLOYING)
-            await store.apply_deploy_result(
-                deploy_id, DeployStatus.FAILED, error=deploy_id
-            )
-        await store._db.execute(
-            "UPDATE deploy_events SET updated_at = ? WHERE deploy_id IN (?, ?)",
-            ("2026-07-01T00:00:00Z", "failed-a", "failed-b"),
-        )
-        await store._db.commit()
-
-        latest = await store.get_latest_failed_deploy()
-        assert latest["deploy_id"] == "failed-b"
-
-
 class TestMutationBoundary:
     PUBLIC_MUTATIONS = {
         "initialize",
         "create_deploy_event",
-        "reopen_failed_deploy",
-        "apply_deploy_result",
         "transition_deploy_status",
-        "resolve_pending_branch",
         "supersede_stale_pending_deploys",
         "update_deploy_status",
         "reject_pending_deploys_for_nodes",
@@ -210,29 +112,6 @@ class TestMutationBoundary:
             }
             assert nested == set(), (name, nested)
 
-    async def test_composite_reopen_does_not_deadlock_non_reentrant_lock(
-        self, store: EventStore
-    ):
-        deploy_id = "n1:repo:main:remote"
-        await store.create_deploy_event(
-            deploy_id,
-            "n1",
-            "repo",
-            "main",
-            ["remote change"],
-            [],
-            None,
-            "2026-01-01T00:00:00Z",
-        )
-        await store.update_deploy_status(deploy_id, DeployStatus.DEPLOYING)
-        await store.apply_deploy_result(deploy_id, DeployStatus.FAILED, error="boom")
-
-        assert await asyncio.wait_for(
-            store.reopen_failed_deploy(deploy_id),
-            timeout=0.5,
-        )
-
-
 class TestGetPendingDeploys:
     async def test_returns_only_pending(self, store: EventStore):
         # Create 2 pending + 1 approved
@@ -241,7 +120,7 @@ class TestGetPendingDeploys:
                 deploy_id=f"d{i}",
                 node_id="n1",
                 repo="r",
-                branch="main",
+                branch=f"branch-{i}",
                 commits=[f"h{i} msg"],
                 affected_services=[],
                 diff_stat=None,
@@ -259,6 +138,45 @@ class TestGetPendingDeploys:
     async def test_empty_when_none_pending(self, store: EventStore):
         pending = await store.get_pending_deploys()
         assert pending == []
+
+    async def test_orders_by_detected_canonical_time_before_insert_time(
+        self, store: EventStore
+    ):
+        await store.create_deploy_event(
+            "new", "n1", "r", "main", ["new"], [], None,
+            "2026-08-02T00:00:00Z",
+        )
+        await store.create_deploy_event(
+            "late-old", "n1", "r", "main", ["old"], [], None,
+            "2026-08-01T00:00:00Z",
+        )
+
+        assert [row["deploy_id"] for row in await store.get_pending_deploys()] == [
+            "new"
+        ]
+
+    async def test_startup_cleanup_keeps_latest_detected_not_latest_inserted(
+        self, store: EventStore
+    ):
+        await store.create_deploy_event(
+            "detected-new", "n1", "r", "new-branch", ["new"], [], None,
+            "2026-08-02T00:00:00Z",
+        )
+        await store.create_deploy_event(
+            "inserted-late-old", "n1", "r", "old-branch", ["old"], [], None,
+            "2026-08-01T00:00:00Z",
+        )
+        await store._db.execute(
+            "UPDATE deploy_events SET branch = 'main', status = 'pending' "
+            "WHERE deploy_id IN ('detected-new', 'inserted-late-old')"
+        )
+        await store._db.commit()
+
+        superseded = await store.supersede_stale_pending_deploys()
+
+        assert superseded == ["inserted-late-old"]
+        assert (await store.get_deploy_event("detected-new"))["status"] == "pending"
+        assert (await store.get_deploy_event("inserted-late-old"))["status"] == "rejected"
 
 
 class TestGetActiveDeploys:
@@ -322,6 +240,37 @@ class TestGetActiveDeploys:
         active = await store.get_active_deploys()
         # same group is repaired to newest only
         assert [d["deploy_id"] for d in active] == ["d2"]
+
+    async def test_late_older_canonical_cannot_supersede_latest_pending(
+        self, store: EventStore
+    ):
+        await store.create_deploy_event(
+            deploy_id="new",
+            node_id="n1",
+            repo="r",
+            branch="main",
+            commits=["new"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-01-02T00:00:00Z",
+        )
+        await store.create_deploy_event(
+            deploy_id="old-late",
+            node_id="n1",
+            repo="r",
+            branch="main",
+            commits=["old"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+        )
+
+        assert [row["deploy_id"] for row in await store.get_active_deploys()] == [
+            "new"
+        ]
+        stale = await store.get_deploy_event("old-late")
+        assert stale["status"] == "rejected"
+        assert stale["reject_reason"] == "superseded by new"
 
     async def test_repairs_existing_stale_pending_rows(self, store: EventStore):
         await store.create_deploy_event(
@@ -435,7 +384,7 @@ class TestGetDeployHistory:
                 deploy_id=f"h{i}",
                 node_id="n1",
                 repo="r",
-                branch="main",
+                branch=f"history-{i}",
                 commits=[f"c{i} msg"],
                 affected_services=[],
                 diff_stat=None,
@@ -449,16 +398,67 @@ class TestGetDeployHistory:
         history = await store.get_deploy_history()
         assert isinstance(history, list)
 
+    async def test_globally_sorts_canonical_and_attempt_rows_before_limit(
+        self, store: EventStore
+    ):
+        for deploy_id, branch in (("d1", "one"), ("d2", "two")):
+            await store.create_deploy_event(
+                deploy_id=deploy_id,
+                node_id="n1",
+                repo="r",
+                branch=branch,
+                commits=[deploy_id],
+                affected_services=[],
+                diff_stat=None,
+                detected_at="2026-08-01T00:00:00Z",
+                target_head=deploy_id,
+            )
+        attempts = store.attempts
+        assert attempts is not None
+        await attempts.begin_normal_attempt(
+            orchestrator_attempt_id="a1",
+            deploy_id="d1",
+            connection_generation="g1",
+            current_generation="g1",
+            source="manual_single",
+            approved_by="director",
+            deadline_at="2099-01-01T00:00:00+00:00",
+        )
+        await attempts.fail_active_attempt(
+            "a1",
+            kind="failed",
+            stage="execution",
+            reason="test_failure",
+            error="boom",
+        )
+        await store._db.execute(
+            "UPDATE deploy_attempts SET completed_at = ? WHERE orchestrator_attempt_id = ?",
+            ("2026-08-03T00:00:00Z", "a1"),
+        )
+        await store._db.execute(
+            "UPDATE deploy_events SET updated_at = ? WHERE deploy_id = ?",
+            ("2026-08-02T00:00:00Z", "d2"),
+        )
+        await store._db.execute(
+            "UPDATE deploy_events SET updated_at = ? WHERE deploy_id = ?",
+            ("2026-08-01T00:00:00Z", "d1"),
+        )
+        await store._db.commit()
+
+        history = await store.get_deploy_history(limit=2)
+
+        assert [row["deploy_id"] for row in history] == ["attempt:a1", "d2"]
+
     async def test_excludes_superseded_by_default(self, store: EventStore):
         """superseded rows (reject_reason starting with 'superseded by ') are
         excluded from history by default — they would otherwise drown out
         actionable deploys."""
-        for did in ("d_old", "d_new", "d_manual"):
+        for index, did in enumerate(("d_old", "d_new", "d_manual")):
             await store.create_deploy_event(
                 deploy_id=did,
                 node_id="n1",
                 repo="r",
-                branch="main",
+                branch=f"branch-{index}",
                 commits=["h msg"],
                 affected_services=[],
                 diff_stat=None,

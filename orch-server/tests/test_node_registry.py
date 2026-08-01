@@ -1,5 +1,6 @@
 """Tests for NodeRegistry — register, unregister, heartbeat, stale detection."""
 
+import asyncio
 import time
 from unittest.mock import MagicMock
 
@@ -20,32 +21,62 @@ def _make_hello(node_id: str = "n1") -> NodeHello:
     )
 
 
+async def _register(
+    registry: NodeRegistry,
+    websocket,
+    hello: NodeHello,
+    generation: str,
+) -> None:
+    await registry.register(websocket, hello, generation, f"token-{generation}")
+
+
+async def _unregister(
+    registry: NodeRegistry,
+    node_id: str,
+    *,
+    websocket,
+    expected_generation: str,
+) -> bool:
+    return await registry.unregister_if_current(
+        node_id,
+        websocket=websocket,
+        expected_generation=expected_generation,
+        expected_connection_token=f"token-{expected_generation}",
+    )
+
+
 class TestRegister:
     async def test_registers_node_in_memory(self, store: EventStore):
         registry = NodeRegistry(store)
         ws = MagicMock()
         hello = _make_hello("n1")
 
-        await registry.register(ws, hello)
+        await _register(registry, ws, hello, "g1")
 
         node = registry.get_node("n1")
         assert node is not None
         assert node.node_id == "n1"
         assert node.websocket is ws
         assert node.hello is hello
+        assert node.connection_generation == "g1"
+        assert node.connection_token == "token-g1"
 
     async def test_registers_node_in_db(self, store: EventStore):
         registry = NodeRegistry(store)
         ws = MagicMock()
         hello = _make_hello("n1")
 
-        await registry.register(ws, hello)
+        await _register(registry, ws, hello, "g1")
 
         nodes = await store.get_nodes()
         assert len(nodes) == 1
         assert nodes[0]["node_id"] == "n1"
         assert nodes[0]["hostname"] == "host-n1"
         assert nodes[0]["connected"] == 1
+        assert await store.get_node_connection_identity("n1") == (
+            "g1",
+            "token-g1",
+        )
 
     async def test_replaces_existing_node(self, store: EventStore):
         registry = NodeRegistry(store)
@@ -53,8 +84,8 @@ class TestRegister:
         ws2 = MagicMock()
         hello = _make_hello("n1")
 
-        await registry.register(ws1, hello)
-        await registry.register(ws2, hello)
+        await _register(registry, ws1, hello, "g1")
+        await _register(registry, ws2, hello, "g2")
 
         node = registry.get_node("n1")
         assert node.websocket is ws2
@@ -64,32 +95,33 @@ class TestUnregister:
     async def test_removes_from_memory(self, store: EventStore):
         registry = NodeRegistry(store)
         ws = MagicMock()
-        await registry.register(ws, _make_hello("n1"))
+        await _register(registry, ws, _make_hello("n1"), "g1")
 
-        await registry.unregister("n1")
+        await _unregister(registry, "n1", websocket=ws, expected_generation="g1")
 
         assert registry.get_node("n1") is None
 
     async def test_marks_disconnected_in_db(self, store: EventStore):
         registry = NodeRegistry(store)
         ws = MagicMock()
-        await registry.register(ws, _make_hello("n1"))
+        await _register(registry, ws, _make_hello("n1"), "g1")
 
-        await registry.unregister("n1")
+        await _unregister(registry, "n1", websocket=ws, expected_generation="g1")
 
         nodes = await store.get_nodes()
         assert nodes[0]["connected"] == 0
         assert nodes[0]["hostname"] == "host-n1"
         assert nodes[0]["haniel_version"] == "0.14.2"
 
-    # NOTE: in-flight deploy failure (DEPLOYING → FAILED on disconnect) is
-    # the responsibility of WebSocketHub._cleanup_orphan_deploys. See
-    # test_hub.py::TestDeployTimeout for that coverage.
+    # Deploy attempts intentionally outlive a transient node disconnect; the
+    # durable server deadline owns terminalization.
 
     async def test_unregister_nonexistent_does_not_raise(self, store: EventStore):
         registry = NodeRegistry(store)
         # Should not raise
-        await registry.unregister("nonexistent")
+        await _unregister(
+            registry, "nonexistent", websocket=MagicMock(), expected_generation="g1"
+        )
 
     async def test_stale_unregister_does_not_remove_replacement(
         self, store: EventStore
@@ -97,10 +129,12 @@ class TestUnregister:
         registry = NodeRegistry(store)
         old_ws = MagicMock()
         new_ws = MagicMock()
-        await registry.register(old_ws, _make_hello("n1"))
-        await registry.register(new_ws, _make_hello("n1"))
+        await _register(registry, old_ws, _make_hello("n1"), "g1")
+        await _register(registry, new_ws, _make_hello("n1"), "g2")
 
-        removed = await registry.unregister("n1", websocket=old_ws)
+        removed = await _unregister(
+            registry, "n1", websocket=old_ws, expected_generation="g1"
+        )
 
         assert removed is False
         node = registry.get_node("n1")
@@ -109,12 +143,99 @@ class TestUnregister:
         nodes = await store.get_nodes()
         assert nodes[0]["connected"] == 1
 
+    async def test_token_mismatch_does_not_remove_same_generation(
+        self, store: EventStore
+    ):
+        registry = NodeRegistry(store)
+        websocket = MagicMock()
+        await _register(registry, websocket, _make_hello("n1"), "g1")
+
+        removed = await registry.unregister_if_current(
+            "n1",
+            websocket=websocket,
+            expected_generation="g1",
+            expected_connection_token="wrong-token",
+        )
+
+        assert removed is False
+        assert registry.get_node("n1") is not None
+        assert (await store.get_nodes())[0]["connected"] == 1
+
+    async def test_db_await_from_g1_cannot_offline_g2(
+        self, store: EventStore, monkeypatch
+    ):
+        registry = NodeRegistry(store)
+        old_ws = MagicMock()
+        new_ws = MagicMock()
+        await _register(registry, old_ws, _make_hello("n1"), "g1")
+
+        entered_durable_write = asyncio.Event()
+        release_durable_write = asyncio.Event()
+        original_mark_disconnected = store.mark_node_disconnected
+
+        async def blocked_mark_disconnected(
+            node_id: str,
+            expected_generation: str,
+            expected_connection_token: str,
+        ) -> bool:
+            entered_durable_write.set()
+            await release_durable_write.wait()
+            return await original_mark_disconnected(
+                node_id, expected_generation, expected_connection_token
+            )
+
+        monkeypatch.setattr(store, "mark_node_disconnected", blocked_mark_disconnected)
+        stale_cleanup = asyncio.create_task(
+            _unregister(registry, "n1", websocket=old_ws, expected_generation="g1")
+        )
+        await entered_durable_write.wait()
+
+        await _register(registry, new_ws, _make_hello("n1"), "g2")
+        release_durable_write.set()
+
+        assert await stale_cleanup is False
+        current = registry.get_node("n1")
+        assert current is not None
+        assert current.websocket is new_ws
+        assert current.connection_generation == "g2"
+        assert await store.get_node_connection_generation("n1") == "g2"
+        assert await store.get_node_connection_identity("n1") == (
+            "g2",
+            "token-g2",
+        )
+        assert (await store.get_nodes())[0]["connected"] == 1
+
+    async def test_three_generations_only_current_disconnects_once(
+        self, store: EventStore
+    ):
+        registry = NodeRegistry(store)
+        sockets = [MagicMock(), MagicMock(), MagicMock()]
+        for index, websocket in enumerate(sockets, start=1):
+            await _register(registry, websocket, _make_hello("n1"), f"g{index}")
+
+        assert not await _unregister(
+            registry, "n1", websocket=sockets[0], expected_generation="g1"
+        )
+        assert not await _unregister(
+            registry, "n1", websocket=sockets[1], expected_generation="g2"
+        )
+        assert registry.get_node("n1").connection_generation == "g3"
+        assert await _unregister(
+            registry, "n1", websocket=sockets[2], expected_generation="g3"
+        )
+        assert not await _unregister(
+            registry, "n1", websocket=sockets[2], expected_generation="g3"
+        )
+        assert registry.get_node("n1") is None
+        assert await store.get_node_connection_generation("n1") == "g3"
+        assert (await store.get_nodes())[0]["connected"] == 0
+
 
 class TestHeartbeat:
     async def test_updates_last_heartbeat(self, store: EventStore):
         registry = NodeRegistry(store)
         ws = MagicMock()
-        await registry.register(ws, _make_hello("n1"))
+        await _register(registry, ws, _make_hello("n1"), "g1")
 
         node = registry.get_node("n1")
         old_heartbeat = node.last_heartbeat
@@ -147,8 +268,8 @@ class TestHeartbeat:
         registry = NodeRegistry(store)
         old_ws = MagicMock()
         new_ws = MagicMock()
-        await registry.register(old_ws, _make_hello("n1"))
-        await registry.register(new_ws, _make_hello("n1"))
+        await _register(registry, old_ws, _make_hello("n1"), "g1")
+        await _register(registry, new_ws, _make_hello("n1"), "g2")
 
         node = registry.get_node("n1")
         assert node is not None
@@ -169,8 +290,8 @@ class TestHeartbeat:
 class TestGetConnectedNodes:
     async def test_returns_all_connected(self, store: EventStore):
         registry = NodeRegistry(store)
-        await registry.register(MagicMock(), _make_hello("n1"))
-        await registry.register(MagicMock(), _make_hello("n2"))
+        await _register(registry, MagicMock(), _make_hello("n1"), "g1")
+        await _register(registry, MagicMock(), _make_hello("n2"), "g2")
 
         nodes = registry.get_connected_nodes()
         assert len(nodes) == 2
@@ -186,7 +307,7 @@ class TestCheckStale:
     async def test_identifies_stale_nodes(self, store: EventStore):
         registry = NodeRegistry(store, heartbeat_timeout=5.0)
         ws = MagicMock()
-        await registry.register(ws, _make_hello("n1"))
+        await _register(registry, ws, _make_hello("n1"), "g1")
 
         # Force heartbeat to be old
         node = registry.get_node("n1")
@@ -199,7 +320,7 @@ class TestCheckStale:
     async def test_keeps_fresh_nodes(self, store: EventStore):
         registry = NodeRegistry(store, heartbeat_timeout=90.0)
         ws = MagicMock()
-        await registry.register(ws, _make_hello("n1"))
+        await _register(registry, ws, _make_hello("n1"), "g1")
 
         stale = await registry.check_stale()
         assert stale == []
@@ -207,8 +328,8 @@ class TestCheckStale:
 
     async def test_mixed_stale_and_fresh(self, store: EventStore):
         registry = NodeRegistry(store, heartbeat_timeout=5.0)
-        await registry.register(MagicMock(), _make_hello("n1"))
-        await registry.register(MagicMock(), _make_hello("n2"))
+        await _register(registry, MagicMock(), _make_hello("n1"), "g1")
+        await _register(registry, MagicMock(), _make_hello("n2"), "g2")
 
         # Make n1 stale, keep n2 fresh
         registry.get_node("n1").last_heartbeat = time.time() - 10

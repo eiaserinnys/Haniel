@@ -233,6 +233,24 @@ def get_remote_head(path: Path, branch: str, remote: str = "origin") -> str:
         ) from e
 
 
+def read_file_at_commit(path: Path, commit: str, relative_path: str) -> bytes:
+    """Read one tracked file without changing the checkout."""
+    try:
+        result = subprocess.run(
+            ["git", "show", f"{commit}:{relative_path}"],
+            cwd=path,
+            capture_output=True,
+            check=True,
+            timeout=DEFAULT_GIT_TIMEOUT,
+        )
+        return result.stdout
+    except subprocess.CalledProcessError as exc:
+        raise GitError(
+            f"Failed to read {relative_path} at {commit}: "
+            f"{exc.stderr.decode('utf-8', errors='replace').strip()}"
+        ) from exc
+
+
 def clone_repo(
     url: str, branch: str, path: Path, timeout: int = DEFAULT_GIT_TIMEOUT
 ) -> None:

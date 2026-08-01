@@ -40,7 +40,6 @@ describe('PendingView', () => {
         onApprove={vi.fn().mockResolvedValue(false)}
         onReject={vi.fn()}
         onApproveAll={vi.fn().mockResolvedValue([])}
-        latestFailure={null}
       />,
     );
 
@@ -68,7 +67,6 @@ describe('PendingView', () => {
         onApprove={vi.fn().mockResolvedValue(false)}
         onReject={vi.fn()}
         onApproveAll={onApproveAll}
-        latestFailure={null}
       />,
     );
 
@@ -85,7 +83,6 @@ describe('PendingView', () => {
       onApprove: vi.fn().mockResolvedValue(false),
       onReject: vi.fn(),
       onApproveAll,
-      latestFailure: null,
     };
     const { rerender } = render(
       <PendingView
@@ -107,18 +104,17 @@ describe('PendingView', () => {
     expect((screen.getAllByRole('checkbox')[1] as HTMLInputElement).checked).toBe(false);
   });
 
-  it('shows latest failure beside All clear', () => {
+  it('keeps failure details out of the Pending screen', () => {
     render(
       <PendingView
         deploys={[]}
-        latestFailure={deploy({ status: 'failed', error: 'post-pull failed' })}
         onApprove={vi.fn().mockResolvedValue(false)}
         onReject={vi.fn()}
         onApproveAll={vi.fn().mockResolvedValue([])}
       />,
     );
-    expect(screen.getByText('Last deploy failed')).toBeInTheDocument();
-    expect(screen.getByText('post-pull failed')).toBeInTheDocument();
+    expect(screen.queryByText('Last deploy failed')).not.toBeInTheDocument();
+    expect(screen.queryByText('post-pull failed')).not.toBeInTheDocument();
     expect(screen.getByText('All clear')).toBeInTheDocument();
   });
 
@@ -127,7 +123,6 @@ describe('PendingView', () => {
     render(
       <PendingView
         deploys={[deploy({ deploy_id: 'single' })]}
-        latestFailure={null}
         onApprove={onApprove}
         onReject={vi.fn()}
         onApproveAll={vi.fn().mockResolvedValue([])}
@@ -146,7 +141,6 @@ describe('PendingView', () => {
     render(
       <PendingView
         deploys={[deploy({ deploy_id: 'single' })]}
-        latestFailure={null}
         onApprove={onApprove}
         onReject={vi.fn()}
         onApproveAll={vi.fn().mockResolvedValue([])}

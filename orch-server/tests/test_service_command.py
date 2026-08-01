@@ -40,9 +40,7 @@ def app(hub: WebSocketHub, store: EventStore):
 class TestServiceCommandEndpoint:
     """POST /api/orch/service-command tests."""
 
-    async def test_sends_command_to_connected_node(
-        self, app, hub, registry, store
-    ):
+    async def test_sends_command_to_connected_node(self, app, hub, registry, store):
         # Register a node
         ws = AsyncMock()
         hello = NodeHello(
@@ -53,7 +51,7 @@ class TestServiceCommandEndpoint:
             arch="x86_64",
             haniel_version="0.1.0",
         )
-        await registry.register(ws, hello)
+        await registry.register(ws, hello, "g1", "token-g1")
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
@@ -78,7 +76,11 @@ class TestServiceCommandEndpoint:
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/orch/service-command",
-            json={"node_id": "offline-node", "service_name": "bot", "action": "restart"},
+            json={
+                "node_id": "offline-node",
+                "service_name": "bot",
+                "action": "restart",
+            },
         )
         assert resp.status_code == 503
         assert "not connected" in resp.json()["error"]
@@ -110,7 +112,7 @@ class TestServiceCommandEndpoint:
             arch="x86_64",
             haniel_version="0.1.0",
         )
-        await registry.register(ws, hello)
+        await registry.register(ws, hello, "g1", "token-g1")
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
@@ -132,7 +134,7 @@ class TestServiceCommandEndpoint:
             arch="x86_64",
             haniel_version="0.1.0",
         )
-        await registry.register(ws, hello)
+        await registry.register(ws, hello, "g1", "token-g1")
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
@@ -155,7 +157,7 @@ class TestServiceCommandEndpoint:
             arch="x86_64",
             haniel_version="0.1.0",
         )
-        await registry.register(ws, hello)
+        await registry.register(ws, hello, "g1", "token-g1")
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
@@ -180,7 +182,7 @@ class TestServiceCommandEndpoint:
             arch="x86_64",
             haniel_version="0.1.0",
         )
-        await registry.register(ws, hello)
+        await registry.register(ws, hello, "g1", "token-g1")
 
         payload = {
             "name": "flux",
@@ -223,7 +225,7 @@ class TestServiceCommandEndpoint:
             arch="x86_64",
             haniel_version="0.1.0",
         )
-        await registry.register(ws, hello)
+        await registry.register(ws, hello, "g1", "token-g1")
 
         payload = {
             "name": "flux",
@@ -318,16 +320,18 @@ class TestServiceCommandProtocol:
         assert data["result"] == {"ok": True}
 
     def test_parse_service_command_result(self):
-        raw = json.dumps({
-            "type": "service_command_result",
-            "command_id": "n1:bot:restart:123",
-            "node_id": "n1",
-            "service_name": "bot",
-            "action": "restart",
-            "success": False,
-            "error": "service crashed",
-            "result": None,
-        })
+        raw = json.dumps(
+            {
+                "type": "service_command_result",
+                "command_id": "n1:bot:restart:123",
+                "node_id": "n1",
+                "service_name": "bot",
+                "action": "restart",
+                "success": False,
+                "error": "service crashed",
+                "result": None,
+            }
+        )
         msg = parse_node_message(raw)
         assert isinstance(msg, ServiceCommandResult)
         assert msg.success is False
@@ -358,8 +362,11 @@ class TestServiceCommandTimeout:
         await hub.register_pending_command("cid-2", "n1", "bot", "restart")
         timeout_task = hub._pending_commands["cid-2"].timeout_task
         result = ServiceCommandResult(
-            command_id="cid-2", node_id="n1", service_name="bot",
-            action="restart", success=True,
+            command_id="cid-2",
+            node_id="n1",
+            service_name="bot",
+            action="restart",
+            success=True,
         )
         await hub._handle_service_command_result(result)
         assert "cid-2" not in hub._pending_commands
@@ -395,5 +402,7 @@ class TestServiceCommandTimeout:
         )
         assert "cid-x" not in hub._pending_commands
         sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
-        hb = [p for p in sent if p.get("error") == "node disconnected (heartbeat timeout)"]
+        hb = [
+            p for p in sent if p.get("error") == "node disconnected (heartbeat timeout)"
+        ]
         assert len(hb) == 1 and hb[0]["success"] is False

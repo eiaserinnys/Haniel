@@ -19,7 +19,7 @@ describe('api client', () => {
   });
 
   it('fetchPending calls /api/orch/pending', async () => {
-    const mockResponse = { deploys: [], latest_failure: null };
+    const mockResponse = { deploys: [] };
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(JSON.stringify(mockResponse), { status: 200 }),
     );

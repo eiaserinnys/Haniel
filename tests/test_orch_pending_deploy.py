@@ -15,20 +15,35 @@ from haniel.core.orch_pending_deploy import (
 
 
 class TestWriteAndRead:
+    @staticmethod
+    def _write(tmp_path: Path, deploy_id: str, started_at: str) -> None:
+        write(
+            tmp_path,
+            deploy_id,
+            started_at,
+            orchestrator_attempt_id="orch-1",
+            connection_generation="generation-1",
+            execution_mode="execute",
+            probe_id="probe-1",
+            preflight_fingerprint="fingerprint-1",
+        )
+
     def test_write_creates_file(self, tmp_path: Path) -> None:
-        write(tmp_path, "node:repo:main:abc1234", "2026-05-05T00:00:00+00:00")
+        self._write(tmp_path, "node:repo:main:abc1234", "2026-05-05T00:00:00+00:00")
         assert (tmp_path / MARKER_RELPATH).exists()
 
     def test_read_returns_parsed(self, tmp_path: Path) -> None:
-        write(tmp_path, "node:repo:main:abc1234", "2026-05-05T00:00:00+00:00")
+        self._write(tmp_path, "node:repo:main:abc1234", "2026-05-05T00:00:00+00:00")
         result = read_and_consume(tmp_path)
         assert result is not None
         assert result.deploy_id == "node:repo:main:abc1234"
         assert result.started_at == "2026-05-05T00:00:00+00:00"
         assert result.version == SCHEMA_VERSION
+        assert result.orchestrator_attempt_id == "orch-1"
+        assert result.connection_generation == "generation-1"
 
     def test_read_consumes_file(self, tmp_path: Path) -> None:
-        write(tmp_path, "a:b:c:d", "t")
+        self._write(tmp_path, "a:b:c:d", "t")
         read_and_consume(tmp_path)
         assert not (tmp_path / MARKER_RELPATH).exists()
 
@@ -36,11 +51,25 @@ class TestWriteAndRead:
         assert read_and_consume(tmp_path) is None
 
     def test_dataclass_to_dict_roundtrip(self) -> None:
-        item = OrchPendingDeploy(version=1, deploy_id="x", started_at="t")
+        item = OrchPendingDeploy(
+            version=SCHEMA_VERSION,
+            deploy_id="x",
+            started_at="t",
+            orchestrator_attempt_id="orch-1",
+            connection_generation="generation-1",
+            execution_mode="evidence_recovery",
+            probe_id="probe-1",
+            preflight_fingerprint="fingerprint-1",
+        )
         assert item.to_dict() == {
-            "version": 1,
+            "version": SCHEMA_VERSION,
             "deploy_id": "x",
             "started_at": "t",
+            "orchestrator_attempt_id": "orch-1",
+            "connection_generation": "generation-1",
+            "execution_mode": "evidence_recovery",
+            "probe_id": "probe-1",
+            "preflight_fingerprint": "fingerprint-1",
         }
 
 

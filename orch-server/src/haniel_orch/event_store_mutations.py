@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from typing import Any
-from uuid import uuid4
-
 import aiosqlite
 
 from .protocol import DeployStatus
@@ -18,86 +16,6 @@ def _now_iso() -> str:
 
 def _row_to_dict(cursor: aiosqlite.Cursor, row: tuple) -> dict[str, Any]:
     return {column[0]: value for column, value in zip(cursor.description, row)}
-
-
-async def reopen_failed_deploy(
-    db: aiosqlite.Connection,
-    deploy_id: str,
-) -> bool:
-    cursor = await db.execute(
-        "SELECT * FROM deploy_events WHERE deploy_id = ? AND status = ?",
-        (deploy_id, DeployStatus.FAILED.value),
-    )
-    row = await cursor.fetchone()
-    if row is None:
-        return False
-
-    event = _row_to_dict(cursor, row)
-    attempt_id = f"attempt:{uuid4().hex}"
-    terminal_at = event["updated_at"]
-    await db.execute(
-        """INSERT INTO deploy_events
-           (deploy_id, node_id, repo, branch, status, commits_json,
-            affected_services_json, diff_stat, detected_at, approved_by,
-            reject_reason, error, duration_ms, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            attempt_id,
-            event["node_id"],
-            event["repo"],
-            event["branch"],
-            event["status"],
-            event["commits_json"],
-            event["affected_services_json"],
-            event["diff_stat"],
-            event["detected_at"],
-            event["approved_by"],
-            event["reject_reason"],
-            event["error"],
-            event["duration_ms"],
-            terminal_at,
-            terminal_at,
-        ),
-    )
-    now = _now_iso()
-    updated = await db.execute(
-        """UPDATE deploy_events
-           SET status = ?, approved_by = NULL, reject_reason = NULL,
-               error = NULL, duration_ms = NULL,
-               created_at = ?, updated_at = ?
-           WHERE deploy_id = ? AND status = ?""",
-        (
-            DeployStatus.PENDING.value,
-            now,
-            now,
-            deploy_id,
-            DeployStatus.FAILED.value,
-        ),
-    )
-    if updated.rowcount != 1:
-        raise RuntimeError("terminal deploy changed during reopen")
-    return True
-
-
-async def apply_deploy_result(
-    db: aiosqlite.Connection,
-    deploy_id: str,
-    status: DeployStatus,
-    error: str | None,
-    duration_ms: int | None,
-) -> bool:
-    updates = ["status = ?", "updated_at = ?", "error = ?"]
-    params: list[Any] = [status.value, _now_iso(), error]
-    if duration_ms is not None:
-        updates.append("duration_ms = ?")
-        params.append(duration_ms)
-    params.extend([deploy_id, DeployStatus.DEPLOYING.value])
-    cursor = await db.execute(
-        f"UPDATE deploy_events SET {', '.join(updates)} "
-        "WHERE deploy_id = ? AND status = ?",
-        params,
-    )
-    return cursor.rowcount == 1
 
 
 async def transition_deploy_status(
@@ -114,40 +32,13 @@ async def transition_deploy_status(
     return cursor.rowcount == 1
 
 
-async def resolve_pending_branch(
-    db: aiosqlite.Connection,
-    node_id: str,
-    repo: str,
-    branch: str,
-) -> list[str]:
-    cursor = await db.execute(
-        "SELECT deploy_id FROM deploy_events WHERE node_id = ? AND repo = ? "
-        "AND branch = ? AND status = ?",
-        (node_id, repo, branch, DeployStatus.PENDING.value),
-    )
-    deploy_ids = [row[0] for row in await cursor.fetchall()]
-    if deploy_ids:
-        placeholders = ", ".join("?" for _ in deploy_ids)
-        await db.execute(
-            f"UPDATE deploy_events SET status = ?, updated_at = ? "
-            f"WHERE deploy_id IN ({placeholders}) AND status = ?",
-            (
-                DeployStatus.SUCCESS.value,
-                _now_iso(),
-                *deploy_ids,
-                DeployStatus.PENDING.value,
-            ),
-        )
-    return deploy_ids
-
-
 async def supersede_stale_pending_deploys(
     db: aiosqlite.Connection,
 ) -> list[str]:
     cursor = await db.execute(
         "SELECT deploy_id, node_id, repo, branch FROM deploy_events "
-        "WHERE status = ? ORDER BY node_id, repo, branch, created_at DESC, "
-        "detected_at DESC, deploy_id DESC",
+        "WHERE status = ? ORDER BY node_id, repo, branch, detected_at DESC, "
+        "created_at DESC, deploy_id DESC",
         (DeployStatus.PENDING.value,),
     )
     kept_by_group: dict[tuple[str, str, str], str] = {}
@@ -169,8 +60,55 @@ async def supersede_stale_pending_deploys(
                 deploy_id,
             ),
         )
+        await _cleanup_retry_rows(db, [deploy_id])
         superseded.append(deploy_id)
     return superseded
+
+
+async def supersede_pending_for_branch(
+    db: aiosqlite.Connection,
+    node_id: str,
+    repo: str,
+    branch: str,
+) -> list[dict[str, Any]]:
+    """Reject only pending canonicals older than the transaction-time latest."""
+    latest_cursor = await db.execute(
+        "SELECT deploy_id FROM deploy_events WHERE node_id = ? AND repo = ? "
+        "AND branch = ? AND deploy_id NOT LIKE 'attempt:%' "
+        "ORDER BY detected_at DESC, created_at DESC, deploy_id DESC LIMIT 1",
+        (node_id, repo, branch),
+    )
+    latest = await latest_cursor.fetchone()
+    if latest is None:
+        return []
+    latest_id = latest[0]
+    cursor = await db.execute(
+        "SELECT * FROM deploy_events WHERE node_id = ? AND repo = ? "
+        "AND branch = ? AND status = ? AND deploy_id != ?",
+        (node_id, repo, branch, DeployStatus.PENDING.value, latest_id),
+    )
+    rows = await cursor.fetchall()
+    rejected: list[dict[str, Any]] = []
+    now = _now_iso()
+    for row in rows:
+        item = _row_to_dict(cursor, row)
+        item["commits"] = json.loads(item.pop("commits_json"))
+        item["affected_services"] = json.loads(item.pop("affected_services_json"))
+        item["reject_reason"] = f"superseded by {latest_id}"
+        rejected.append(item)
+        await db.execute(
+            "UPDATE deploy_events SET status = ?, reject_reason = ?, updated_at = ? "
+            "WHERE deploy_id = ? AND status = ?",
+            (
+                DeployStatus.REJECTED.value,
+                item["reject_reason"],
+                now,
+                item["deploy_id"],
+                DeployStatus.PENDING.value,
+            ),
+        )
+    await _cleanup_retry_rows(db, [item["deploy_id"] for item in rejected])
+    return rejected
 
 
 async def reject_pending_deploys_for_nodes(
@@ -201,4 +139,33 @@ async def reject_pending_deploys_for_nodes(
                 *node_ids,
             ),
         )
+        await _cleanup_retry_rows(db, [item["deploy_id"] for item in rejected])
     return rejected
+
+
+async def _cleanup_retry_rows(
+    db: aiosqlite.Connection, deploy_ids: list[str]
+) -> None:
+    if not deploy_ids:
+        return
+    placeholders = ", ".join("?" for _ in deploy_ids)
+    await db.execute(
+        f"DELETE FROM deploy_retry_requirements WHERE deploy_id IN ({placeholders})",
+        deploy_ids,
+    )
+    await db.execute(
+        f"DELETE FROM deploy_retry_source_attempts WHERE deploy_id IN ({placeholders})",
+        deploy_ids,
+    )
+    now = _now_iso()
+    await db.execute(
+        f"""UPDATE deploy_plan_probes
+            SET status = 'terminal', terminal_kind = 'preflight_stale',
+                terminal_stage = 'canonical_cleanup',
+                terminal_reason = 'canonical_terminal',
+                terminal_error = 'canonical became terminal during preflight',
+                completed_at = ?
+            WHERE deploy_id IN ({placeholders})
+              AND status IN ('active','proposed')""",
+        (now, *deploy_ids),
+    )

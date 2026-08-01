@@ -11,13 +11,18 @@ from typing import Any
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from .deploy_attempt_coordinator import DeployAttemptCoordinator
 from .event_store import EventStore
+from .node_disconnect_workflow import NodeDisconnectWorkflow
 from .node_registry import NodeRegistry
 from .push import NullPushService, PushService
 from .protocol import (
     ChangeNotification,
+    DeployAttemptTerminal,
+    DeployPlanProposal,
     DeployResult,
     DeployStatus,
+    ManifestRecoveryEvidence,
     NodeHello,
     NodeStatus,
     OrchestratorMessage,
@@ -37,16 +42,6 @@ class PendingCommand:
     node_id: str
     service_name: str
     action: str
-    timeout_task: asyncio.Task[None]
-
-
-@dataclass
-class PendingDeploy:
-    """In-flight deploy tracked by the hub (post-approval, pre-result)."""
-
-    node_id: str
-    repo: str
-    branch: str
     timeout_task: asyncio.Task[None]
 
 
@@ -77,13 +72,21 @@ class WebSocketHub:
         # deployments, an asyncio.Lock would be required.
         self._command_timeout_sec = command_timeout_sec
         self._pending_commands: dict[str, PendingCommand] = {}
-        # In-flight deploys: deploy_id → PendingDeploy.
-        # Single source of truth for deploy tracking (timeout + orphan cleanup);
-        # mirrors the _pending_commands pattern. Race-safe via pop ownership transfer.
         self._deploy_timeout_sec = deploy_timeout_sec
-        self._pending_deploys: dict[str, PendingDeploy] = {}
-        self._repo_reconciler = RepoReconciler(
-            store, self.broadcast_to_dashboards, self.register_pending_deploy
+        self._repo_reconciler = RepoReconciler(store, self.broadcast_to_dashboards)
+        self.deploy_coordinator = DeployAttemptCoordinator(
+            store,
+            self.send_to_node_generation,
+            lambda event: self.broadcast_to_dashboards(event),
+            self._registry.has_connection_identity,
+            probe_timeout_sec=min(deploy_timeout_sec, 30.0),
+            attempt_timeout_sec=deploy_timeout_sec,
+            terminal_callback=self._on_deploy_terminal,
+        )
+        self._disconnects = NodeDisconnectWorkflow(
+            self._registry,
+            self.deploy_coordinator,
+            self._on_current_node_disconnect,
         )
 
     @property
@@ -121,9 +124,17 @@ class WebSocketHub:
             return
 
         # 2. Register node
-        previous = self._registry.get_node(msg.node_id)
-        await self._registry.register(websocket, msg)
         node_id = msg.node_id
+        previous = self._registry.get_node(node_id)
+        connection_lease = await self.deploy_coordinator.register_connection(
+            node_id,
+            activate=lambda lease: self._registry.register(
+                websocket,
+                msg,
+                lease.generation,
+                lease.connection_token,
+            ),
+        )
         if previous is not None and previous.websocket is not websocket:
             try:
                 await previous.websocket.close(code=4000, reason="node reconnected")
@@ -142,7 +153,12 @@ class WebSocketHub:
         try:
             while True:
                 raw = await websocket.receive_text()
-                if not self._registry.is_current_connection(node_id, websocket):
+                if not self._registry.is_current_connection(
+                    node_id,
+                    websocket,
+                    connection_lease.generation,
+                    connection_lease.connection_token,
+                ):
                     logger.debug(
                         "Ignoring message from stale node connection: %s", node_id
                     )
@@ -164,7 +180,21 @@ class WebSocketHub:
                 elif isinstance(incoming, DeployResult):
                     await self._handle_deploy_result(incoming)
                 elif isinstance(incoming, RepoReconciliation):
-                    await self._repo_reconciler.handle(incoming)
+                    if incoming.phase == "observed":
+                        await self._repo_reconciler.handle(incoming)
+                    elif incoming.phase == "attempt_started":
+                        await self.deploy_coordinator.handle_auto_request(incoming)
+                    elif incoming.phase == "settled":
+                        await self.deploy_coordinator.handle_settled(incoming)
+                elif isinstance(incoming, DeployPlanProposal):
+                    await self.deploy_coordinator.handle_proposal(
+                        incoming,
+                        connection_token=connection_lease.connection_token,
+                    )
+                elif isinstance(incoming, ManifestRecoveryEvidence):
+                    await self.deploy_coordinator.handle_evidence(incoming)
+                elif isinstance(incoming, DeployAttemptTerminal):
+                    await self.deploy_coordinator.handle_terminal(incoming)
                 elif isinstance(incoming, ServiceCommandResult):
                     await self._handle_service_command_result(incoming)
 
@@ -178,6 +208,8 @@ class WebSocketHub:
                 error="node disconnected",
                 close_ws=False,
                 websocket=websocket,
+                expected_generation=connection_lease.generation,
+                expected_connection_token=connection_lease.connection_token,
             )
 
     async def _handle_change_notification(self, msg: ChangeNotification) -> None:
@@ -186,8 +218,8 @@ class WebSocketHub:
         Generation-time supersede is the primary gate for "newest PENDING per
         (node, repo, branch)" — older PENDING entries for the same group are
         auto-rejected with reject_reason='superseded by ${msg.deploy_id}'.
-        DEPLOYING is preserved because ``get_pending_deploys_for_branch``
-        binds ``DeployStatus.PENDING.value`` only (event_store.py:185-190).
+        DEPLOYING is preserved because generation-time supersede mutates only
+        canonical rows that are still PENDING.
         approve-time supersede in api.approve_deploy/approve_all remains as a
         defensive secondary gate.
         """
@@ -200,18 +232,45 @@ class WebSocketHub:
             affected_services=msg.affected_services,
             diff_stat=msg.diff_stat,
             detected_at=msg.detected_at,
+            target_head=msg.target_head,
+            deployment_kind=msg.deployment_kind,
+            expected_manifest_identity=msg.expected_manifest_identity,
+            expected_manifest_digest=msg.expected_manifest_digest,
         )
         if not inserted:
             return
 
-        # Supersede older PENDING entries in the same (node, repo, branch)
-        # BEFORE broadcasting new_pending so the dashboard refetches see the
-        # superseded rows already marked REJECTED. ``supersede_pending``
-        # itself broadcasts status_change(rejected, reject_reason='superseded
-        # by …') for each affected entry.
-        await self.supersede_pending(
-            msg.node_id, msg.repo, msg.branch, kept_deploy_id=msg.deploy_id
+        inserted_event = await self._store.get_deploy_event(msg.deploy_id)
+        if inserted_event is None:
+            raise RuntimeError("inserted canonical disappeared")
+        if inserted_event["status"] != DeployStatus.PENDING.value:
+            await self.broadcast_to_dashboards(
+                {
+                    "type": "status_change",
+                    "deploy_id": msg.deploy_id,
+                    "status": DeployStatus.REJECTED.value,
+                    "node_id": msg.node_id,
+                    "reject_reason": inserted_event["reject_reason"],
+                }
+            )
+            return
+
+        superseded_rows = await self._store.get_deploys_superseded_by(msg.deploy_id)
+        await self.deploy_coordinator.resolve_terminal_canonicals(
+            {row["deploy_id"] for row in superseded_rows},
+            message="canonical superseded during preflight",
         )
+        for superseded in superseded_rows:
+            await self.broadcast_to_dashboards(
+                {
+                    "type": "status_change",
+                    "deploy_id": superseded["deploy_id"],
+                    "status": DeployStatus.REJECTED.value,
+                    "node_id": superseded["node_id"],
+                    "reject_reason": superseded["reject_reason"],
+                }
+            )
+
         await self.broadcast_to_dashboards(
             {
                 "type": "new_pending",
@@ -235,43 +294,23 @@ class WebSocketHub:
         )
 
     async def _handle_deploy_result(self, msg: DeployResult) -> None:
-        """Process a DeployResult: cancel timeout, update status, broadcast."""
-        status = DeployStatus[msg.status.upper()]
-        applied = await self._store.apply_deploy_result(
-            msg.deploy_id,
-            status,
-            error=msg.error,
-            duration_ms=msg.duration_ms,
-        )
-        if not applied:
-            logger.info(
-                "Ignoring late deploy result for non-deploying id=%s", msg.deploy_id
-            )
-            return
-        pending = self._pending_deploys.pop(msg.deploy_id, None)
-        if pending is not None:
-            pending.timeout_task.cancel()
-        await self.broadcast_to_dashboards(
-            {
-                "type": "status_change",
-                "deploy_id": msg.deploy_id,
-                "status": status.value,
-                "node_id": msg.node_id,
-            }
-        )
+        """Delegate result correlation to the durable attempt coordinator."""
+        await self.deploy_coordinator.handle_result(msg)
 
-        # Fire-and-forget push for terminal states
-        if status in (DeployStatus.SUCCESS, DeployStatus.FAILED):
-            status_text = "성공" if status == DeployStatus.SUCCESS else "실패"
-            self._spawn_push(
-                title=f"배포 {status_text}: {msg.node_id}",
-                body=f"{msg.node_id}의 배포가 {status_text}했습니다",
-                data={
-                    "deploy_id": msg.deploy_id,
-                    "type": "status_change",
-                    "status": status.value,
-                },
-            )
+    async def _on_deploy_terminal(self, result: dict[str, Any]) -> None:
+        """Preserve terminal push UX without making it a state authority."""
+        if result["status"] not in {"success", "failed"}:
+            return
+        status_text = "성공" if result["status"] == "success" else "실패"
+        self._spawn_push(
+            title=f"배포 {status_text}: {result['node_id']}",
+            body=f"{result['node_id']}의 배포가 {status_text}했습니다",
+            data={
+                "deploy_id": result["deploy_id"],
+                "type": "status_change",
+                "status": result["status"],
+            },
+        )
 
     async def _handle_service_command_result(self, msg: ServiceCommandResult) -> None:
         """Process a ServiceCommandResult: cancel timeout task, broadcast to dashboards."""
@@ -398,132 +437,29 @@ class WebSocketHub:
                 }
             )
 
-    async def register_pending_deploy(
-        self, deploy_id: str, node_id: str, repo: str, branch: str
-    ) -> None:
-        """Track an in-flight deploy and schedule a timeout broadcast.
-
-        On timeout (after `deploy_timeout_sec`), marks status=FAILED with
-        error='timeout' in the store and broadcasts status_change. Cancelled
-        when DeployResult arrives or the deploy is superseded.
-        """
-        timeout_task = asyncio.create_task(self._deploy_timeout(deploy_id))
-        self._pending_deploys[deploy_id] = PendingDeploy(
-            node_id=node_id,
-            repo=repo,
-            branch=branch,
-            timeout_task=timeout_task,
-        )
-
-    async def cancel_pending_deploy(self, deploy_id: str) -> None:
-        pending = self._pending_deploys.pop(deploy_id, None)
-        if pending is not None:
-            pending.timeout_task.cancel()
-
-    async def _deploy_timeout(self, deploy_id: str) -> None:
-        """Wait `deploy_timeout_sec`; broadcast failure if deploy is still in-flight."""
-        try:
-            await asyncio.sleep(self._deploy_timeout_sec)
-        except asyncio.CancelledError:
-            raise
-        # Race-safe: if the result already arrived (or supersede consumed the
-        # entry), pop returns None and we no-op.
-        pending = self._pending_deploys.pop(deploy_id, None)
-        if pending is None:
-            return
-        applied = await self._store.apply_deploy_result(
-            deploy_id, DeployStatus.FAILED, error="timeout"
-        )
-        if not applied:
-            return
-        await self.broadcast_to_dashboards(
-            {
-                "type": "status_change",
-                "deploy_id": deploy_id,
-                "status": DeployStatus.FAILED.value,
-                "node_id": pending.node_id,
-            }
-        )
-
-    async def _cleanup_orphan_deploys(self, node_id: str, *, error: str) -> None:
-        """Handle DEPLOYING rows for a disconnected node.
-
-        Single source of truth for in-flight deploy cleanup (replaces the
-        former NodeRegistry.unregister DEPLOYING→FAILED path). Called from
-        handle_node_ws.finally, _check_loop, and shutdown so that ws-disconnect,
-        heartbeat-timeout, and graceful shutdown all flow through the same code.
-
-        A tracked deploy keeps its timeout after disconnect. Haniel self-update
-        deliberately drops the node connection while the wrapper restarts, then
-        reports DeployResult on the next startup. Failing that deploy here
-        creates a false negative. If no DeployResult arrives, _deploy_timeout
-        remains the failure path.
-
-        DEPLOYING rows that are not tracked in _pending_deploys are still
-        failed here; those rows have no timeout owner in this hub process.
-        """
-        tracked_ids = {
-            did
-            for did, pending in self._pending_deploys.items()
-            if pending.node_id == node_id
-        }
-
-        deploying = await self._store.get_deploying_events_for_node(node_id)
-        for event in deploying:
-            if event["deploy_id"] in tracked_ids:
-                logger.info(
-                    "Deploy %s is still tracked after node %s disconnected; "
-                    "waiting for DeployResult or timeout",
-                    event["deploy_id"],
-                    node_id,
-                )
-                continue
-            applied = await self._store.apply_deploy_result(
-                event["deploy_id"], DeployStatus.FAILED, error=error
-            )
-            if not applied:
-                continue
-            await self.broadcast_to_dashboards(
-                {
-                    "type": "status_change",
-                    "deploy_id": event["deploy_id"],
-                    "status": DeployStatus.FAILED.value,
-                    "node_id": node_id,
-                }
-            )
-
     async def supersede_pending(
-        self, node_id: str, repo: str, branch: str, kept_deploy_id: str
+        self, node_id: str, repo: str, branch: str
     ) -> list[str]:
-        """Reject all PENDING deploys for the same (node, repo, branch) except `kept_deploy_id`.
+        """Reject pending rows older than the transaction-time latest canonical.
 
         Used by approve_deploy/approve_all so that approving a newer deploy
         automatically supersedes older PENDING deploys in the same branch.
         Each superseded deploy gets status=REJECTED + reject_reason
-        ='superseded by ${kept_deploy_id}' and a status_change broadcast
+        ='superseded by ${latest_deploy_id}' and a status_change broadcast
         with the reject_reason field.
 
-        Returns the list of superseded deploy_ids. Defensive: cancels any
-        outstanding _pending_deploys timeout task for the superseded id
-        (PENDING deploys typically aren't tracked yet, so this is a no-op
-        in normal operation).
+        Returns the list of superseded deploy_ids. Generation-time creation is
+        already transactional; this remains the approval-time defensive gate.
         """
-        same_branch = await self._store.get_pending_deploys_for_branch(
-            node_id, repo, branch
+        rejected = await self._store.supersede_pending_for_branch(node_id, repo, branch)
+        await self.deploy_coordinator.resolve_terminal_canonicals(
+            {event["deploy_id"] for event in rejected},
+            message="canonical superseded during preflight",
         )
         superseded: list[str] = []
-        for ev in same_branch:
+        for ev in rejected:
             did = ev["deploy_id"]
-            if did == kept_deploy_id:
-                continue
-            reason = f"superseded by {kept_deploy_id}"
-            await self._store.update_deploy_status(
-                did, DeployStatus.REJECTED, reject_reason=reason
-            )
-            # Defensive: cancel a timeout task if one exists (rare for PENDING).
-            pending = self._pending_deploys.pop(did, None)
-            if pending is not None:
-                pending.timeout_task.cancel()
+            reason = ev["reject_reason"]
             await self.broadcast_to_dashboards(
                 {
                     "type": "status_change",
@@ -569,10 +505,11 @@ class WebSocketHub:
             rejected = await self._store.reject_pending_deploys_for_nodes(
                 stale_node_ids, reason
             )
+            await self.deploy_coordinator.resolve_terminal_canonicals(
+                {event["deploy_id"] for event in rejected},
+                message="canonical node identity changed during preflight",
+            )
             for event in rejected:
-                pending = self._pending_deploys.pop(event["deploy_id"], None)
-                if pending is not None:
-                    pending.timeout_task.cancel()
                 await self.broadcast_to_dashboards(
                     {
                         "type": "status_change",
@@ -608,14 +545,7 @@ class WebSocketHub:
         """Send a message to a specific node. Returns False if node not connected."""
         node = self._registry.get_node(node_id)
         if node is None:
-            await self._disconnect_node(
-                node_id,
-                reason="not_registered",
-                error="node disconnected",
-                close_ws=False,
-            )
             return False
-
         try:
             await node.websocket.send_text(message.model_dump_json())
             return True
@@ -627,7 +557,43 @@ class WebSocketHub:
                 error="node disconnected (send failed)",
                 close_ws=True,
                 websocket=node.websocket,
+                expected_generation=node.connection_generation,
+                expected_connection_token=node.connection_token,
             )
+            return False
+
+    async def send_to_node_generation(
+        self, node_id: str, generation: str, message: OrchestratorMessage
+    ) -> bool:
+        """Send a deploy permit only through its coordinator-owned socket generation."""
+        connection = self.deploy_coordinator.current_connection(node_id)
+        if connection is None or connection.generation != generation:
+            return False
+        node = self._registry.get_node(node_id)
+        if (
+            node is None
+            or node.connection_generation != generation
+            or node.connection_token != connection.connection_token
+        ):
+            return False
+        try:
+            await node.websocket.send_text(message.model_dump_json())
+            return True
+        except Exception as exc:
+            logger.warning("Failed generation-bound send to node %s: %s", node_id, exc)
+            task = asyncio.create_task(
+                self._disconnect_node(
+                    node_id,
+                    reason="send_failed",
+                    error="node disconnected (generation-bound send failed)",
+                    close_ws=True,
+                    websocket=node.websocket,
+                    expected_generation=generation,
+                    expected_connection_token=connection.connection_token,
+                )
+            )
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
             return False
 
     async def _disconnect_node(
@@ -637,30 +603,34 @@ class WebSocketHub:
         reason: str,
         error: str,
         close_ws: bool,
-        websocket: WebSocket | None = None,
+        websocket: WebSocket,
+        expected_generation: str,
+        expected_connection_token: str,
     ) -> None:
-        """Canonical node disconnect path for ws close, heartbeat, and send failure."""
-        node = self._registry.get_node(node_id)
-        if websocket is not None and (node is None or node.websocket is not websocket):
-            logger.debug("Ignoring stale disconnect for node: %s", node_id)
-            return
-        if node is not None and close_ws:
-            try:
-                await node.websocket.close(code=1011, reason=reason)
-            except Exception as e:
-                logger.debug(f"Failed to close node {node_id} websocket: {e}")
+        await self._disconnects.disconnect(
+            node_id,
+            reason=reason,
+            error=error,
+            close_ws=close_ws,
+            websocket=websocket,
+            expected_generation=expected_generation,
+            expected_connection_token=expected_connection_token,
+        )
 
-        removed = await self._registry.unregister(node_id, websocket=websocket)
-        if not removed:
-            return
+    async def _on_current_node_disconnect(
+        self, node_id: str, reason: str, error: str
+    ) -> None:
         await self.broadcast_to_dashboards(
             {"type": "node_disconnected", "node_id": node_id, "reason": reason}
         )
         await self._cleanup_orphan_commands(node_id, error=error)
-        await self._cleanup_orphan_deploys(node_id, error=error)
 
     async def start_heartbeat_checker(self) -> None:
         """Start periodic heartbeat check task (30s interval)."""
+        # One explicit startup repair closes duplicate pending canonicals left by
+        # pre-generation-time servers. Read APIs stay mutation-free.
+        await self._store.supersede_stale_pending_deploys()
+        await self.deploy_coordinator.restore_deadlines()
 
         async def _check_loop() -> None:
             while True:
@@ -673,26 +643,25 @@ class WebSocketHub:
                         error="node disconnected (heartbeat timeout)",
                         close_ws=False,
                         websocket=node.websocket,
+                        expected_generation=node.connection_generation,
+                        expected_connection_token=node.connection_token,
                     )
 
         self._heartbeat_task = asyncio.create_task(_check_loop())
 
     async def shutdown(self) -> None:
         """Graceful shutdown: cancel pending timeouts, close all connections."""
+        await self.deploy_coordinator.shutdown()
         # Cancel pending timeout tasks first; await for graceful unwind to avoid
         # RuntimeWarning: "coroutine was never awaited" on event-loop teardown.
         pending_tasks = [
             pending.timeout_task for pending in self._pending_commands.values()
-        ]
-        pending_tasks += [
-            pending.timeout_task for pending in self._pending_deploys.values()
         ]
         for t in pending_tasks:
             t.cancel()
         if pending_tasks:
             await asyncio.gather(*pending_tasks, return_exceptions=True)
         self._pending_commands.clear()
-        self._pending_deploys.clear()
 
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
