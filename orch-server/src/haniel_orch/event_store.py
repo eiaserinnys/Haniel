@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     haniel_version TEXT NOT NULL,
     connected INTEGER NOT NULL DEFAULT 1,
     connection_generation TEXT,
+    connection_token TEXT,
     last_seen TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -567,6 +568,7 @@ class EventStore:
         haniel_version: str,
         connected: bool = True,
         connection_generation: str | None = None,
+        connection_token: str | None = None,
     ) -> None:
         """Register or update a node and its durable connection generation."""
         async with self._mutation_lock:
@@ -580,6 +582,7 @@ class EventStore:
                     haniel_version,
                     connected,
                     connection_generation,
+                    connection_token,
                 )
                 await self._db.commit()
             except Exception:
@@ -587,13 +590,19 @@ class EventStore:
                 raise
 
     async def update_node_heartbeat(
-        self, node_id: str, expected_generation: str | None = None
+        self,
+        node_id: str,
+        expected_generation: str | None = None,
+        expected_connection_token: str | None = None,
     ) -> bool:
         """Update last_seen timestamp for a node."""
         async with self._mutation_lock:
             try:
                 updated = await event_store_nodes.update_node_heartbeat(
-                    self._db, node_id, expected_generation
+                    self._db,
+                    node_id,
+                    expected_generation,
+                    expected_connection_token,
                 )
                 await self._db.commit()
                 return updated
@@ -602,13 +611,19 @@ class EventStore:
                 raise
 
     async def mark_node_disconnected(
-        self, node_id: str, expected_generation: str
+        self,
+        node_id: str,
+        expected_generation: str,
+        expected_connection_token: str,
     ) -> bool:
         """Mark only the expected live generation disconnected."""
         async with self._mutation_lock:
             try:
                 updated = await event_store_nodes.mark_node_disconnected(
-                    self._db, node_id, expected_generation
+                    self._db,
+                    node_id,
+                    expected_generation,
+                    expected_connection_token,
                 )
                 await self._db.commit()
                 return updated
@@ -623,6 +638,17 @@ class EventStore:
         )
         row = await cursor.fetchone()
         return None if row is None else row[0]
+
+    async def get_node_connection_identity(
+        self, node_id: str
+    ) -> tuple[str | None, str | None] | None:
+        """Return the durable generation and token used by disconnect CAS."""
+        cursor = await self._db.execute(
+            "SELECT connection_generation, connection_token FROM nodes WHERE node_id = ?",
+            (node_id,),
+        )
+        row = await cursor.fetchone()
+        return None if row is None else (row[0], row[1])
 
     async def get_nodes(self) -> list[dict[str, Any]]:
         """Get all nodes (connected and disconnected)."""

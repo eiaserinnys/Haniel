@@ -22,6 +22,7 @@ class ConnectedNode:
     websocket: WebSocket
     hello: NodeHello
     connection_generation: str
+    connection_token: str
     last_heartbeat: float = field(default_factory=time.time)
     connected_at: float = field(default_factory=time.time)
     services: list[dict] | None = None  # latest service state (updated by heartbeat)
@@ -36,7 +37,11 @@ class NodeRegistry:
         self._heartbeat_timeout = heartbeat_timeout
 
     async def register(
-        self, ws: WebSocket, hello: NodeHello, connection_generation: str
+        self,
+        ws: WebSocket,
+        hello: NodeHello,
+        connection_generation: str,
+        connection_token: str,
     ) -> None:
         """Register a node. Upserts in DB and adds to memory."""
         node = ConnectedNode(
@@ -44,6 +49,7 @@ class NodeRegistry:
             websocket=ws,
             hello=hello,
             connection_generation=connection_generation,
+            connection_token=connection_token,
             services=hello.services,
         )
         self._nodes[hello.node_id] = node
@@ -55,6 +61,7 @@ class NodeRegistry:
             haniel_version=hello.haniel_version,
             connected=True,
             connection_generation=connection_generation,
+            connection_token=connection_token,
         )
         logger.info(f"Node registered: {hello.node_id} ({hello.hostname})")
 
@@ -63,6 +70,7 @@ class NodeRegistry:
         node_id: str,
         websocket: WebSocket,
         expected_generation: str | None = None,
+        expected_connection_token: str | None = None,
     ) -> bool:
         """Return True when websocket and optional generation are current."""
         node = self._nodes.get(node_id)
@@ -73,14 +81,30 @@ class NodeRegistry:
                 expected_generation is None
                 or node.connection_generation == expected_generation
             )
+            and (
+                expected_connection_token is None
+                or node.connection_token == expected_connection_token
+            )
         )
 
-    async def unregister(
+    def has_connection_identity(
+        self, node_id: str, generation: str, connection_token: str
+    ) -> bool:
+        """Check the server-owned identity without exposing the WebSocket object."""
+        node = self._nodes.get(node_id)
+        return (
+            node is not None
+            and node.connection_generation == generation
+            and node.connection_token == connection_token
+        )
+
+    async def unregister_if_current(
         self,
         node_id: str,
         *,
         websocket: WebSocket,
         expected_generation: str,
+        expected_connection_token: str,
     ) -> bool:
         """Conditionally unregister one immutable connection generation.
 
@@ -96,6 +120,7 @@ class NodeRegistry:
             node is None
             or node.websocket is not websocket
             or node.connection_generation != expected_generation
+            or node.connection_token != expected_connection_token
         ):
             logger.debug("Ignoring stale unregister for node: %s", node_id)
             return False
@@ -105,7 +130,7 @@ class NodeRegistry:
         # Mark node as disconnected in DB without erasing the last known
         # hostname/version shown in the dashboard.
         durable_removed = await self._store.mark_node_disconnected(
-            node_id, expected_generation
+            node_id, expected_generation, expected_connection_token
         )
         if not durable_removed:
             logger.debug(
@@ -134,7 +159,9 @@ class NodeRegistry:
         if services is not None:
             node.services = services
         await self._store.update_node_heartbeat(
-            node_id, expected_generation=node.connection_generation
+            node_id,
+            expected_generation=node.connection_generation,
+            expected_connection_token=node.connection_token,
         )
 
     def get_node(self, node_id: str) -> ConnectedNode | None:

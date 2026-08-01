@@ -2,16 +2,15 @@
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
-from starlette.testclient import TestClient
 
 from haniel_orch.api import create_api_routes
 from haniel_orch.event_store import EventStore
 from haniel_orch.hub import WebSocketHub
 from haniel_orch.node_registry import NodeRegistry
-from haniel_orch.protocol import DeployApproval, DeployStatus, NodeHello
+from haniel_orch.protocol import DeployStatus, NodeHello
 
 
 @pytest.fixture
@@ -55,10 +54,13 @@ async def _register_node(
     websocket: AsyncMock,
     hello: NodeHello,
 ) -> str:
-    return await hub.deploy_coordinator.register_connection(
+    lease = await hub.deploy_coordinator.register_connection(
         hello.node_id,
-        activate=lambda generation: registry.register(websocket, hello, generation),
+        activate=lambda lease: registry.register(
+            websocket, hello, lease.generation, lease.connection_token
+        ),
     )
+    return lease.generation
 
 
 class TestGetPending:
@@ -110,7 +112,7 @@ class TestGetPending:
 
     async def test_failure_detail_is_history_only(self, hub, store, routes):
         await _seed_pending(store, "failed")
-        generation = await hub.deploy_coordinator.register_connection("n1")
+        generation = "g1"
         await store.attempts.begin_normal_attempt(
             orchestrator_attempt_id="attempt-failed",
             deploy_id="failed",
@@ -339,10 +341,22 @@ class TestGetHistory:
 
 class TestApproveDeploy:
     async def test_deploying_state_exists_before_node_can_return_result(
-        self, hub, store, routes
+        self, hub, registry, store, routes
     ):
         await _seed_pending(store, "d1", "n1")
-        await hub.deploy_coordinator.register_connection("n1")
+        await _register_node(
+            hub,
+            registry,
+            AsyncMock(),
+            NodeHello(
+                node_id="n1",
+                token="t",
+                hostname="h",
+                os="Linux",
+                arch="x86_64",
+                haniel_version="0.1.0",
+            ),
+        )
 
         async def send_after_transition(node_id, generation, message):
             assert node_id == "n1"

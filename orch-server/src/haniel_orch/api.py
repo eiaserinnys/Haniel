@@ -26,11 +26,6 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
     """Create REST API routes bound to the given hub and store."""
 
     async def _approve_one(event: dict[str, Any], approved_by: str, source: str) -> str:
-        if (
-            hub.deploy_coordinator.current_generation(event["node_id"]) is None
-            and hub.registry.get_node(event["node_id"]) is not None
-        ):
-            await hub.deploy_coordinator.register_connection(event["node_id"])
         return await hub.deploy_coordinator.approve_manual(
             event, approved_by=approved_by, source=source
         )
@@ -220,7 +215,6 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
 
         for event in to_approve:
             deploy_id = event["deploy_id"]
-            node_id = event["node_id"]
 
             try:
                 await _approve_one(event, "dashboard", "manual_batch")

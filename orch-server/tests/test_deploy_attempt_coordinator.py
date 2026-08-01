@@ -3,6 +3,7 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 
+from haniel_orch.connection_lifecycle import ActiveConnection, ConnectionLease
 from haniel_orch.deploy_attempt_coordinator import (
     DeployAttemptCoordinator,
     PlanRejected,
@@ -75,15 +76,54 @@ class Harness:
         async def broadcast(message: dict) -> None:
             self.broadcasts.append(message)
 
+        self.connection_present = True
         self.coordinator = DeployAttemptCoordinator(
             store,
             send,
             broadcast,
+            lambda _node_id, _generation, _connection_token: self.connection_present,
             probe_timeout_sec=60,
             attempt_timeout_sec=60,
         )
         self.generation = "g1"
-        self.coordinator._generations["n"] = self.generation
+        self.connection_token = "token-g1"
+        self.coordinator._connections["n"] = ActiveConnection(
+            self.generation, self.connection_token
+        )
+
+    async def activate(self, _lease: ConnectionLease) -> None:
+        return None
+
+    async def reconnect(self) -> str:
+        lease = await self.coordinator.register_connection("n", self.activate)
+        self.generation = lease.generation
+        self.connection_token = lease.connection_token
+        return lease.generation
+
+    async def handle_proposal(
+        self, proposal: DeployPlanProposal, *, connection_token: str | None = None
+    ) -> None:
+        await self.coordinator.handle_proposal(
+            proposal,
+            connection_token=connection_token or self.connection_token,
+        )
+
+    async def begin_disconnect(
+        self,
+        *,
+        generation: str | None = None,
+        connection_token: str | None = None,
+    ):
+        return await self.coordinator.begin_disconnect(
+            "n",
+            generation or self.generation,
+            connection_token or self.connection_token,
+        )
+
+    async def disconnect_current(self) -> bool:
+        disconnecting = await self.begin_disconnect()
+        assert disconnecting is not None
+        return await self.coordinator.finalize_disconnect("n", disconnecting)
 
     async def close(self) -> None:
         for timer in self.coordinator._timers.values():
@@ -121,7 +161,7 @@ class TestAutoPermission:
             assert isinstance(probe, DeployPlanProbe)
             assert await store.attempts.get_active_attempts() == []
 
-            await harness.coordinator.handle_proposal(
+            await harness.handle_proposal(
                 DeployPlanProposal(
                     mode="execute",
                     probe_id=probe.probe_id,
@@ -223,7 +263,7 @@ class TestManualRetryPreflight:
             probe = await wait_for_send(harness)
 
             assert isinstance(probe, DeployPlanProbe)
-            await harness.coordinator.handle_proposal(
+            await harness.handle_proposal(
                 DeployPlanProposal(
                     mode="fail_closed",
                     probe_id=probe.probe_id,
@@ -259,10 +299,11 @@ class TestConnectionGenerationAuthority:
             await harness.coordinator.handle_auto_request(auto_request("g1-request"))
             probe = harness.sent[-1][1]
             old_generation = harness.generation
+            old_token = harness.connection_token
 
-            new_generation = await harness.coordinator.register_connection("n")
+            new_generation = await harness.reconnect()
             assert new_generation != old_generation
-            await harness.coordinator.handle_proposal(
+            await harness.handle_proposal(
                 DeployPlanProposal(
                     mode="execute",
                     probe_id=probe.probe_id,
@@ -275,7 +316,8 @@ class TestConnectionGenerationAuthority:
                     current_head="old",
                     reason="normal_pull",
                     fingerprint="late-g1",
-                )
+                ),
+                connection_token=old_token,
             )
 
             assert await store.attempts.get_active_attempts() == []
@@ -297,7 +339,7 @@ class TestConnectionGenerationAuthority:
         finally:
             await harness.close()
 
-    async def test_begin_and_approval_send_are_serialized_before_reconnect(
+    async def test_proposal_begin_and_permit_finish_before_disconnect_cas(
         self, store: EventStore
     ):
         await seed(store)
@@ -305,6 +347,7 @@ class TestConnectionGenerationAuthority:
         try:
             await harness.coordinator.handle_auto_request(auto_request("serialized"))
             probe = harness.sent[-1][1]
+            old_generation = harness.generation
             approval_entered = asyncio.Event()
             release_approval = asyncio.Event()
 
@@ -320,7 +363,7 @@ class TestConnectionGenerationAuthority:
 
             harness.coordinator._send = blocking_send
             proposal_task = asyncio.create_task(
-                harness.coordinator.handle_proposal(
+                harness.handle_proposal(
                     DeployPlanProposal(
                         mode="execute",
                         probe_id=probe.probe_id,
@@ -337,20 +380,139 @@ class TestConnectionGenerationAuthority:
                 )
             )
             await approval_entered.wait()
-            reconnect_task = asyncio.create_task(
-                harness.coordinator.register_connection("n")
-            )
+            disconnect_task = asyncio.create_task(harness.begin_disconnect())
             await asyncio.sleep(0)
-            assert not reconnect_task.done()
+            assert not disconnect_task.done()
 
             release_approval.set()
             await proposal_task
-            new_generation = await reconnect_task
+            disconnecting = await disconnect_task
 
-            assert harness.sent_generations[-1] == harness.generation
-            assert new_generation != harness.generation
+            assert harness.sent_generations[-1] == old_generation
+            assert disconnecting is not None
             attempts = await store.attempts.get_active_attempts()
-            assert attempts[0]["connection_generation"] == harness.generation
+            assert attempts[0]["connection_generation"] == old_generation
+        finally:
+            await harness.close()
+
+    async def test_disconnect_cas_first_rejects_late_proposal_without_begin(
+        self, store: EventStore
+    ):
+        await seed(store)
+        harness = Harness(store)
+        try:
+            await harness.coordinator.handle_auto_request(
+                auto_request("disconnect-first")
+            )
+            probe = harness.sent[-1][1]
+            generation = harness.generation
+            connection_token = harness.connection_token
+
+            disconnecting = await harness.begin_disconnect()
+            assert disconnecting is not None
+            await harness.handle_proposal(
+                DeployPlanProposal(
+                    mode="execute",
+                    probe_id=probe.probe_id,
+                    connection_generation=generation,
+                    deploy_id=probe.deploy_id,
+                    node_id="n",
+                    repo="r",
+                    branch="main",
+                    target_head="target",
+                    current_head="old",
+                    reason="normal_pull",
+                    fingerprint="disconnect-first",
+                ),
+                connection_token=connection_token,
+            )
+
+            assert await store.attempts.get_active_attempts() == []
+            assert not any(
+                isinstance(message, AcceptedDeployAttemptAck)
+                for _, message in harness.sent
+            )
+            assert (await store.get_deploy_event(probe.deploy_id))[
+                "status"
+            ] == "pending"
+        finally:
+            await harness.close()
+
+    async def test_duplicate_begin_and_finalize_are_idempotent(self, store: EventStore):
+        await seed(store)
+        harness = Harness(store)
+        callbacks = 0
+
+        async def on_disconnect() -> None:
+            nonlocal callbacks
+            callbacks += 1
+
+        try:
+            first = await harness.begin_disconnect()
+            second = await harness.begin_disconnect()
+            assert first is not None
+            assert second == first
+            assert await harness.coordinator.finalize_disconnect(
+                "n", first, on_disconnect
+            )
+            assert not await harness.coordinator.finalize_disconnect(
+                "n", first, on_disconnect
+            )
+            assert callbacks == 1
+            assert harness.coordinator.current_connection("n") is None
+        finally:
+            await harness.close()
+
+    async def test_registry_socket_absence_cannot_begin_attempt(
+        self, store: EventStore
+    ):
+        await seed(store)
+        harness = Harness(store)
+        try:
+            await harness.coordinator.handle_auto_request(auto_request("no-socket"))
+            probe = harness.sent[-1][1]
+            harness.connection_present = False
+            await harness.handle_proposal(
+                DeployPlanProposal(
+                    mode="execute",
+                    probe_id=probe.probe_id,
+                    connection_generation=harness.generation,
+                    deploy_id=probe.deploy_id,
+                    node_id="n",
+                    repo="r",
+                    branch="main",
+                    target_head="target",
+                    current_head="old",
+                    reason="normal_pull",
+                    fingerprint="no-socket",
+                )
+            )
+
+            assert await store.attempts.get_active_attempts() == []
+            assert not any(
+                isinstance(message, AcceptedDeployAttemptAck)
+                for _, message in harness.sent
+            )
+        finally:
+            await harness.close()
+
+    async def test_reconnect_replaces_disconnecting_and_stale_finalize_is_noop(
+        self, store: EventStore
+    ):
+        await seed(store)
+        harness = Harness(store)
+        try:
+            g1_disconnect = await harness.begin_disconnect()
+            assert g1_disconnect is not None
+            generation2 = await harness.reconnect()
+            assert not await harness.coordinator.finalize_disconnect("n", g1_disconnect)
+            assert harness.coordinator.current_generation("n") == generation2
+
+            g2_disconnect = await harness.begin_disconnect()
+            assert g2_disconnect is not None
+            generation3 = await harness.reconnect()
+            assert not await harness.coordinator.finalize_disconnect("n", g2_disconnect)
+            assert harness.coordinator.current_generation("n") == generation3
         finally:
             await harness.close()
 
@@ -366,7 +528,7 @@ class TestConnectionGenerationAuthority:
                     auto_request(f"reconnect-{index}")
                 )
                 probe_ids.append(harness.sent[-1][1].probe_id)
-                await harness.coordinator.register_connection("n")
+                await harness.reconnect()
 
             history = await store.get_deploy_history()
             for probe_id in probe_ids:
@@ -389,7 +551,7 @@ class TestConnectionGenerationAuthority:
             await harness.coordinator.handle_auto_request(auto_request("racing"))
             probe = harness.sent[-1][1]
             await asyncio.gather(
-                harness.coordinator.register_connection("n"),
+                harness.reconnect(),
                 store.create_deploy_event(
                     deploy_id="n:r:main:newer",
                     node_id="n",
@@ -427,14 +589,17 @@ class TestConnectionGenerationAuthority:
         harness = Harness(store)
         try:
             stale_generation = harness.generation
-            current_generation = await harness.coordinator.register_connection("n")
-            harness.generation = current_generation
+            stale_token = harness.connection_token
+            current_generation = await harness.reconnect()
             await harness.coordinator.handle_auto_request(auto_request("g2-race"))
             probe = harness.sent[-1][1]
 
             await asyncio.gather(
-                harness.coordinator.unregister_connection("n", stale_generation),
-                harness.coordinator.handle_proposal(
+                harness.begin_disconnect(
+                    generation=stale_generation,
+                    connection_token=stale_token,
+                ),
+                harness.handle_proposal(
                     DeployPlanProposal(
                         mode="execute",
                         probe_id=probe.probe_id,
@@ -502,7 +667,7 @@ class TestManualRetryPreflightContinuation:
             probe = await wait_for_send(harness)
             assert isinstance(probe, DeployPlanProbe)
 
-            await harness.coordinator.handle_proposal(
+            await harness.handle_proposal(
                 DeployPlanProposal(
                     mode="execute",
                     probe_id=probe.probe_id,
@@ -540,7 +705,7 @@ class TestManualRetryPreflightContinuation:
                 )
             )
             probe = await wait_for_send(harness)
-            await harness.coordinator.handle_proposal(
+            await harness.handle_proposal(
                 DeployPlanProposal(
                     mode="fail_closed",
                     probe_id=probe.probe_id,
@@ -556,7 +721,7 @@ class TestManualRetryPreflightContinuation:
                     fingerprint="fp-fail",
                 )
             )
-            await harness.coordinator.unregister_connection("n", harness.generation)
+            await harness.disconnect_current()
             assert not await store.attempts.terminalize_preflight(
                 probe.probe_id,
                 kind="preflight_timeout",

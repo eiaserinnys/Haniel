@@ -51,7 +51,7 @@ class TestServiceCommandEndpoint:
             arch="x86_64",
             haniel_version="0.1.0",
         )
-        await registry.register(ws, hello, "g1")
+        await registry.register(ws, hello, "g1", "token-g1")
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
@@ -112,7 +112,7 @@ class TestServiceCommandEndpoint:
             arch="x86_64",
             haniel_version="0.1.0",
         )
-        await registry.register(ws, hello, "g1")
+        await registry.register(ws, hello, "g1", "token-g1")
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
@@ -134,7 +134,7 @@ class TestServiceCommandEndpoint:
             arch="x86_64",
             haniel_version="0.1.0",
         )
-        await registry.register(ws, hello, "g1")
+        await registry.register(ws, hello, "g1", "token-g1")
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
@@ -157,7 +157,7 @@ class TestServiceCommandEndpoint:
             arch="x86_64",
             haniel_version="0.1.0",
         )
-        await registry.register(ws, hello, "g1")
+        await registry.register(ws, hello, "g1", "token-g1")
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
@@ -182,7 +182,7 @@ class TestServiceCommandEndpoint:
             arch="x86_64",
             haniel_version="0.1.0",
         )
-        await registry.register(ws, hello, "g1")
+        await registry.register(ws, hello, "g1", "token-g1")
 
         payload = {
             "name": "flux",
@@ -225,7 +225,7 @@ class TestServiceCommandEndpoint:
             arch="x86_64",
             haniel_version="0.1.0",
         )
-        await registry.register(ws, hello, "g1")
+        await registry.register(ws, hello, "g1", "token-g1")
 
         payload = {
             "name": "flux",

@@ -13,6 +13,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from .deploy_attempt_coordinator import DeployAttemptCoordinator
 from .event_store import EventStore
+from .node_disconnect_workflow import NodeDisconnectWorkflow
 from .node_registry import NodeRegistry
 from .push import NullPushService, PushService
 from .protocol import (
@@ -77,9 +78,15 @@ class WebSocketHub:
             store,
             self.send_to_node_generation,
             lambda event: self.broadcast_to_dashboards(event),
+            self._registry.has_connection_identity,
             probe_timeout_sec=min(deploy_timeout_sec, 30.0),
             attempt_timeout_sec=deploy_timeout_sec,
             terminal_callback=self._on_deploy_terminal,
+        )
+        self._disconnects = NodeDisconnectWorkflow(
+            self._registry,
+            self.deploy_coordinator,
+            self._on_current_node_disconnect,
         )
 
     @property
@@ -119,10 +126,13 @@ class WebSocketHub:
         # 2. Register node
         node_id = msg.node_id
         previous = self._registry.get_node(node_id)
-        connection_generation = await self.deploy_coordinator.register_connection(
+        connection_lease = await self.deploy_coordinator.register_connection(
             node_id,
-            activate=lambda generation: self._registry.register(
-                websocket, msg, generation
+            activate=lambda lease: self._registry.register(
+                websocket,
+                msg,
+                lease.generation,
+                lease.connection_token,
             ),
         )
         if previous is not None and previous.websocket is not websocket:
@@ -144,7 +154,10 @@ class WebSocketHub:
             while True:
                 raw = await websocket.receive_text()
                 if not self._registry.is_current_connection(
-                    node_id, websocket, connection_generation
+                    node_id,
+                    websocket,
+                    connection_lease.generation,
+                    connection_lease.connection_token,
                 ):
                     logger.debug(
                         "Ignoring message from stale node connection: %s", node_id
@@ -174,7 +187,10 @@ class WebSocketHub:
                     elif incoming.phase == "settled":
                         await self.deploy_coordinator.handle_settled(incoming)
                 elif isinstance(incoming, DeployPlanProposal):
-                    await self.deploy_coordinator.handle_proposal(incoming)
+                    await self.deploy_coordinator.handle_proposal(
+                        incoming,
+                        connection_token=connection_lease.connection_token,
+                    )
                 elif isinstance(incoming, ManifestRecoveryEvidence):
                     await self.deploy_coordinator.handle_evidence(incoming)
                 elif isinstance(incoming, DeployAttemptTerminal):
@@ -192,7 +208,8 @@ class WebSocketHub:
                 error="node disconnected",
                 close_ws=False,
                 websocket=websocket,
-                expected_generation=connection_generation,
+                expected_generation=connection_lease.generation,
+                expected_connection_token=connection_lease.connection_token,
             )
 
     async def _handle_change_notification(self, msg: ChangeNotification) -> None:
@@ -541,6 +558,7 @@ class WebSocketHub:
                 close_ws=True,
                 websocket=node.websocket,
                 expected_generation=node.connection_generation,
+                expected_connection_token=node.connection_token,
             )
             return False
 
@@ -548,10 +566,15 @@ class WebSocketHub:
         self, node_id: str, generation: str, message: OrchestratorMessage
     ) -> bool:
         """Send a deploy permit only through its coordinator-owned socket generation."""
-        if self.deploy_coordinator.current_generation(node_id) != generation:
+        connection = self.deploy_coordinator.current_connection(node_id)
+        if connection is None or connection.generation != generation:
             return False
         node = self._registry.get_node(node_id)
-        if node is None or node.connection_generation != generation:
+        if (
+            node is None
+            or node.connection_generation != generation
+            or node.connection_token != connection.connection_token
+        ):
             return False
         try:
             await node.websocket.send_text(message.model_dump_json())
@@ -566,6 +589,7 @@ class WebSocketHub:
                     close_ws=True,
                     websocket=node.websocket,
                     expected_generation=generation,
+                    expected_connection_token=connection.connection_token,
                 )
             )
             self._background_tasks.add(task)
@@ -581,43 +605,25 @@ class WebSocketHub:
         close_ws: bool,
         websocket: WebSocket,
         expected_generation: str,
+        expected_connection_token: str,
     ) -> None:
-        """Canonical node disconnect path for ws close, heartbeat, and send failure."""
-        node = self._registry.get_node(node_id)
-        if (
-            node is None
-            or node.websocket is not websocket
-            or node.connection_generation != expected_generation
-        ):
-            logger.debug("Ignoring stale disconnect for node: %s", node_id)
-            return
-        if node is not None and close_ws:
-            try:
-                await node.websocket.close(code=1011, reason=reason)
-            except Exception as e:
-                logger.debug(f"Failed to close node {node_id} websocket: {e}")
-
-        await self._registry.unregister(
+        await self._disconnects.disconnect(
             node_id,
+            reason=reason,
+            error=error,
+            close_ws=close_ws,
             websocket=websocket,
             expected_generation=expected_generation,
+            expected_connection_token=expected_connection_token,
         )
 
-        async def finalize_current_disconnect() -> None:
-            await self.broadcast_to_dashboards(
-                {"type": "node_disconnected", "node_id": node_id, "reason": reason}
-            )
-            await self._cleanup_orphan_commands(node_id, error=error)
-
-        # Lock order is coordinator -> store for registration/proposal, while
-        # registry disconnect releases its store transaction before taking the
-        # coordinator lock. The callback stays under the coordinator lock so a
-        # reconnect cannot overtake the disconnect broadcast.
-        await self.deploy_coordinator.unregister_connection(
-            node_id,
-            expected_generation,
-            on_current_disconnect=finalize_current_disconnect,
+    async def _on_current_node_disconnect(
+        self, node_id: str, reason: str, error: str
+    ) -> None:
+        await self.broadcast_to_dashboards(
+            {"type": "node_disconnected", "node_id": node_id, "reason": reason}
         )
+        await self._cleanup_orphan_commands(node_id, error=error)
 
     async def start_heartbeat_checker(self) -> None:
         """Start periodic heartbeat check task (30s interval)."""
@@ -638,6 +644,7 @@ class WebSocketHub:
                         close_ws=False,
                         websocket=node.websocket,
                         expected_generation=node.connection_generation,
+                        expected_connection_token=node.connection_token,
                     )
 
         self._heartbeat_task = asyncio.create_task(_check_loop())

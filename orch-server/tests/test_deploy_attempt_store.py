@@ -700,7 +700,7 @@ class TestEvidenceRecovery:
 
 
 class TestSchemaMigration:
-    async def test_existing_node_table_adds_connection_generation_idempotently(
+    async def test_existing_node_table_adds_connection_identity_idempotently(
         self, tmp_path
     ):
         db_path = tmp_path / "node-generation.sqlite3"
@@ -709,6 +709,7 @@ class TestSchemaMigration:
         await initial.close()
         connection = sqlite3.connect(db_path)
         connection.execute("ALTER TABLE nodes DROP COLUMN connection_generation")
+        connection.execute("ALTER TABLE nodes DROP COLUMN connection_token")
         connection.commit()
         connection.close()
 
@@ -721,6 +722,7 @@ class TestSchemaMigration:
             cursor = await reopened._db.execute("PRAGMA table_info(nodes)")
             columns = {row[1] for row in await cursor.fetchall()}
             assert "connection_generation" in columns
+            assert "connection_token" in columns
             await reopened.upsert_node(
                 "n1",
                 "host",
@@ -728,8 +730,13 @@ class TestSchemaMigration:
                 "x86_64",
                 "0.1.0",
                 connection_generation="g1",
+                connection_token="token-g1",
             )
             assert await reopened.get_node_connection_generation("n1") == "g1"
+            assert await reopened.get_node_connection_identity("n1") == (
+                "g1",
+                "token-g1",
+            )
         finally:
             await reopened.close()
 

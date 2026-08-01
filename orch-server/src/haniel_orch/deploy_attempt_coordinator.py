@@ -6,6 +6,11 @@ import asyncio
 from typing import Awaitable, Callable
 from uuid import uuid4
 
+from .connection_lifecycle import (
+    ActiveConnection,
+    ConnectionState,
+)
+from .deploy_attempt_connection_lifecycle import DeployAttemptConnectionLifecycle
 from .deploy_attempt_deadlines import DeployAttemptDeadlines
 from .event_store import EventStore
 from .protocol import (
@@ -23,8 +28,7 @@ from .protocol import (
 Send = Callable[[str, str, object], Awaitable[bool]]
 Broadcast = Callable[[dict], Awaitable[None]]
 TerminalCallback = Callable[[dict], Awaitable[None]]
-ConnectionActivation = Callable[[str], Awaitable[None]]
-ConnectionDeactivation = Callable[[], Awaitable[None]]
+ConnectionPresence = Callable[[str, str, str], bool]
 
 
 class PlanRejected(RuntimeError):
@@ -35,7 +39,9 @@ class PlanRejected(RuntimeError):
         super().__init__(message)
 
 
-class DeployAttemptCoordinator(DeployAttemptDeadlines):
+class DeployAttemptCoordinator(
+    DeployAttemptConnectionLifecycle, DeployAttemptDeadlines
+):
     """The sole authority that turns evidence into deploy state transitions."""
 
     def __init__(
@@ -43,6 +49,7 @@ class DeployAttemptCoordinator(DeployAttemptDeadlines):
         store: EventStore,
         send: Send,
         broadcast: Broadcast,
+        connection_present: ConnectionPresence,
         *,
         probe_timeout_sec: float,
         attempt_timeout_sec: float,
@@ -51,11 +58,12 @@ class DeployAttemptCoordinator(DeployAttemptDeadlines):
         self._store = store
         self._send = send
         self._broadcast = broadcast
+        self._connection_present = connection_present
         self._probe_timeout_sec = probe_timeout_sec
         self._attempt_timeout_sec = attempt_timeout_sec
         self._terminal_callback = terminal_callback
         self._coordination_lock = asyncio.Lock()
-        self._generations: dict[str, str] = {}
+        self._connections: dict[str, ConnectionState] = {}
         self._probe_context: dict[str, tuple[str, str, asyncio.Future[str] | None]] = {}
         self._timers: dict[str, asyncio.Task[None]] = {}
 
@@ -65,46 +73,6 @@ class DeployAttemptCoordinator(DeployAttemptDeadlines):
         if attempts is None:
             raise RuntimeError("EventStore is not initialized")
         return attempts
-
-    async def register_connection(
-        self, node_id: str, activate: ConnectionActivation | None = None
-    ) -> str:
-        """Install the current socket generation and stale older probes atomically."""
-        async with self._coordination_lock:
-            generation = uuid4().hex
-            self._generations[node_id] = generation
-            if activate is not None:
-                await activate(generation)
-            stale = await self.attempts.terminalize_prior_generations(
-                node_id, generation
-            )
-            for probe_id in stale:
-                self._resolve_probe(
-                    probe_id, PlanRejected("connection generation changed", 409)
-                )
-            return generation
-
-    def current_generation(self, node_id: str) -> str | None:
-        return self._generations.get(node_id)
-
-    async def unregister_connection(
-        self,
-        node_id: str,
-        expected_generation: str,
-        on_current_disconnect: ConnectionDeactivation | None = None,
-    ) -> bool:
-        """Remove and terminalize only the exact current connection generation."""
-        async with self._coordination_lock:
-            if self._generations.get(node_id) != expected_generation:
-                return False
-            self._generations.pop(node_id, None)
-            for probe_id in await self.attempts.terminalize_generation(
-                expected_generation
-            ):
-                self._resolve_probe(probe_id, PlanRejected("node disconnected", 503))
-            if on_current_disconnect is not None:
-                await on_current_disconnect()
-            return True
 
     async def restore_deadlines(self) -> None:
         """Close pre-restart probes and recreate persisted attempt deadlines."""
@@ -248,20 +216,29 @@ class DeployAttemptCoordinator(DeployAttemptDeadlines):
                 return
             self._schedule_probe(probe_id)
 
-    async def handle_proposal(self, proposal: DeployPlanProposal) -> None:
+    async def handle_proposal(
+        self, proposal: DeployPlanProposal, *, connection_token: str
+    ) -> None:
         async with self._coordination_lock:
             context = self._probe_context.get(proposal.probe_id)
             if context is None:
                 return
             source, approved_by, future = context
             probe = await self.attempts.get_probe(proposal.probe_id)
-            current_generation = self._generations.get(proposal.node_id)
+            state = self._connections.get(proposal.node_id)
             if probe is None:
                 return
             coordinator_generation_matches = (
-                current_generation is not None
+                isinstance(state, ActiveConnection)
                 and proposal.connection_generation == probe["connection_generation"]
-                and probe["connection_generation"] == current_generation
+                and probe["connection_generation"] == state.generation
+                and connection_token == state.connection_token
+                and self._connection_present(
+                    proposal.node_id, state.generation, state.connection_token
+                )
+            )
+            current_generation = (
+                state.generation if coordinator_generation_matches else ""
             )
             probe_requested = source == "auto"
             orchestrator_attempt_id = (
@@ -278,7 +255,7 @@ class DeployAttemptCoordinator(DeployAttemptDeadlines):
                 source=source,
                 approved_by=approved_by,
                 deadline_at=deadline,
-                current_generation=current_generation or "",
+                current_generation=current_generation,
             )
             if not coordinator_generation_matches and result["status"] == "begun":
                 raise RuntimeError("store began an attempt for a stale generation")
@@ -460,10 +437,15 @@ class DeployAttemptCoordinator(DeployAttemptDeadlines):
             context[2].set_exception(error)
 
     def _require_generation(self, node_id: str) -> str:
-        generation = self._generations.get(node_id)
-        if generation is None:
+        state = self._connections.get(node_id)
+        if not (
+            isinstance(state, ActiveConnection)
+            and self._connection_present(
+                node_id, state.generation, state.connection_token
+            )
+        ):
             raise PlanRejected("node not connected", 503)
-        return generation
+        return state.generation
 
     @staticmethod
     def _plan_rejected(message: str, status_code: int) -> PlanRejected:

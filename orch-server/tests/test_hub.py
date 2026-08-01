@@ -3,13 +3,13 @@
 import asyncio
 import contextlib
 import json
-import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
 from starlette.websockets import WebSocketDisconnect
 
+from haniel_orch.connection_lifecycle import ActiveConnection
 from haniel_orch.event_store import EventStore
 from haniel_orch.hub import WebSocketHub
 from haniel_orch.node_registry import NodeRegistry
@@ -18,7 +18,6 @@ from haniel_orch.protocol import (
     DeployApproval,
     DeployPlanProposal,
     DeployResult,
-    DeployStatus,
     NodeHello,
     RepoReconciliation,
 )
@@ -95,9 +94,21 @@ def settled(
 
 
 def bind_generation(
-    hub: WebSocketHub, *, node_id: str = "n1", generation: str = "g1"
+    hub: WebSocketHub,
+    *,
+    node_id: str = "n1",
+    generation: str = "g1",
+    connection_token: str = "token-g1",
 ) -> None:
-    hub.deploy_coordinator._generations[node_id] = generation
+    hub.deploy_coordinator._connections[node_id] = ActiveConnection(
+        generation, connection_token
+    )
+
+
+def current_connection_token(hub: WebSocketHub, node_id: str = "n1") -> str:
+    connection = hub.deploy_coordinator.current_connection(node_id)
+    assert connection is not None
+    return connection.connection_token
 
 
 async def register_node(
@@ -106,10 +117,13 @@ async def register_node(
     websocket: AsyncMock,
     hello: NodeHello,
 ) -> str:
-    return await hub.deploy_coordinator.register_connection(
+    lease = await hub.deploy_coordinator.register_connection(
         hello.node_id,
-        activate=lambda generation: registry.register(websocket, hello, generation),
+        activate=lambda lease: registry.register(
+            websocket, hello, lease.generation, lease.connection_token
+        ),
     )
+    return lease.generation
 
 
 @pytest.fixture
@@ -295,6 +309,7 @@ class TestReconnectReplacement:
             haniel_version="0.1.0",
         )
         old_generation = await register_node(hub, registry, old_ws, hello)
+        old_token = current_connection_token(hub)
         await register_node(hub, registry, new_ws, hello)
 
         await hub._disconnect_node(
@@ -304,6 +319,7 @@ class TestReconnectReplacement:
             close_ws=False,
             websocket=old_ws,
             expected_generation=old_generation,
+            expected_connection_token=old_token,
         )
 
         node = registry.get_node("n1")
@@ -333,17 +349,22 @@ class TestReconnectReplacement:
             haniel_version="0.1.0",
         )
         generation1 = await register_node(hub, registry, old_ws, hello)
+        token1 = current_connection_token(hub)
 
         entered_durable_write = asyncio.Event()
         release_durable_write = asyncio.Event()
         original_mark_disconnected = store.mark_node_disconnected
 
         async def blocked_mark_disconnected(
-            node_id: str, expected_generation: str
+            node_id: str,
+            expected_generation: str,
+            expected_connection_token: str,
         ) -> bool:
             entered_durable_write.set()
             await release_durable_write.wait()
-            return await original_mark_disconnected(node_id, expected_generation)
+            return await original_mark_disconnected(
+                node_id, expected_generation, expected_connection_token
+            )
 
         monkeypatch.setattr(store, "mark_node_disconnected", blocked_mark_disconnected)
         stale_disconnect = asyncio.create_task(
@@ -354,6 +375,7 @@ class TestReconnectReplacement:
                 close_ws=False,
                 websocket=old_ws,
                 expected_generation=generation1,
+                expected_connection_token=token1,
             )
         )
         await entered_durable_write.wait()
@@ -368,6 +390,10 @@ class TestReconnectReplacement:
         assert current.connection_generation == generation2
         assert hub.deploy_coordinator.current_generation("n1") == generation2
         assert await store.get_node_connection_generation("n1") == generation2
+        assert await store.get_node_connection_identity("n1") == (
+            generation2,
+            current_connection_token(hub),
+        )
         assert (await store.get_nodes())[0]["connected"] == 1
         disconnected = [
             json.loads(call.args[0])
@@ -418,7 +444,8 @@ class TestReconnectReplacement:
                 current_head="old",
                 reason="normal_pull",
                 fingerprint="g2-approved",
-            )
+            ),
+            connection_token=current_connection_token(hub),
         )
 
         attempts = await store.attempts.get_active_attempts()
@@ -432,6 +459,115 @@ class TestReconnectReplacement:
         assert len(permits) == 1
         assert permits[0]["accepted"] is True
         assert permits[0]["connection_generation"] == generation2
+        await hub.deploy_coordinator.shutdown()
+
+    async def test_disconnect_phase_one_blocks_late_proposal_during_db_await(
+        self,
+        hub: WebSocketHub,
+        registry: NodeRegistry,
+        store: EventStore,
+        monkeypatch,
+    ):
+        old_ws = AsyncMock()
+        hello = NodeHello(
+            node_id="n1",
+            token="t",
+            hostname="h",
+            os="Linux",
+            arch="x86_64",
+            haniel_version="0.1.0",
+        )
+        generation = await register_node(hub, registry, old_ws, hello)
+        connection_token = current_connection_token(hub)
+        deploy_id = "n1:r:main:late-g1"
+        await store.create_deploy_event(
+            deploy_id=deploy_id,
+            node_id="n1",
+            repo="r",
+            branch="main",
+            commits=["late proposal"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-08-02T00:00:00Z",
+            target_head="late-g1",
+        )
+        await hub.deploy_coordinator.handle_auto_request(
+            RepoReconciliation(
+                phase="attempt_started",
+                deploy_id=deploy_id,
+                node_id="n1",
+                repo="r",
+                branch="main",
+                local_head="old",
+                remote_head="late-g1",
+                orchestrator_attempt_id="late-g1-attempt",
+            )
+        )
+        probe = (await store.attempts.get_active_probes())[0]
+
+        entered_durable_write = asyncio.Event()
+        release_durable_write = asyncio.Event()
+        original_mark_disconnected = store.mark_node_disconnected
+
+        async def blocked_mark_disconnected(
+            node_id: str,
+            expected_generation: str,
+            expected_connection_token: str,
+        ) -> bool:
+            entered_durable_write.set()
+            await release_durable_write.wait()
+            return await original_mark_disconnected(
+                node_id, expected_generation, expected_connection_token
+            )
+
+        monkeypatch.setattr(store, "mark_node_disconnected", blocked_mark_disconnected)
+        disconnect = asyncio.create_task(
+            hub._disconnect_node(
+                "n1",
+                reason="ws_closed",
+                error="node disconnected",
+                close_ws=False,
+                websocket=old_ws,
+                expected_generation=generation,
+                expected_connection_token=connection_token,
+            )
+        )
+        await entered_durable_write.wait()
+
+        await hub.deploy_coordinator.handle_proposal(
+            DeployPlanProposal(
+                mode="execute",
+                probe_id=probe["probe_id"],
+                connection_generation=generation,
+                deploy_id=deploy_id,
+                node_id="n1",
+                repo="r",
+                branch="main",
+                target_head="late-g1",
+                current_head="old",
+                reason="normal_pull",
+                fingerprint="late-g1-proposal",
+            ),
+            connection_token=connection_token,
+        )
+
+        assert await store.attempts.get_active_attempts() == []
+        assert (await store.get_deploy_event(deploy_id))["status"] == "pending"
+        assert not any(
+            json.loads(call.args[0]).get("type") == "deploy_attempt_ack"
+            for call in old_ws.send_text.call_args_list
+        )
+        rows = [
+            row
+            for row in await store.get_deploy_history()
+            if row["deploy_id"] == f"preflight:{probe['probe_id']}"
+        ]
+        assert len(rows) == 1
+        assert rows[0]["terminal_kind"] == "preflight_stale"
+
+        release_durable_write.set()
+        await disconnect
+        assert await store.attempts.get_active_attempts() == []
         await hub.deploy_coordinator.shutdown()
 
     async def test_only_current_of_three_connections_disconnects_once(
@@ -448,11 +584,14 @@ class TestReconnectReplacement:
             haniel_version="0.1.0",
         )
         sockets = [AsyncMock(), AsyncMock(), AsyncMock()]
-        generations = []
+        identities = []
         for websocket in sockets:
-            generations.append(await register_node(hub, registry, websocket, hello))
+            generation = await register_node(hub, registry, websocket, hello)
+            identities.append((generation, current_connection_token(hub)))
 
-        for websocket, generation in zip(sockets[:2], generations[:2]):
+        for websocket, (generation, connection_token) in zip(
+            sockets[:2], identities[:2]
+        ):
             await hub._disconnect_node(
                 "n1",
                 reason="ws_closed",
@@ -460,12 +599,13 @@ class TestReconnectReplacement:
                 close_ws=False,
                 websocket=websocket,
                 expected_generation=generation,
+                expected_connection_token=connection_token,
             )
 
         current = registry.get_node("n1")
         assert current is not None
-        assert current.connection_generation == generations[2]
-        assert hub.deploy_coordinator.current_generation("n1") == generations[2]
+        assert current.connection_generation == identities[2][0]
+        assert hub.deploy_coordinator.current_generation("n1") == identities[2][0]
 
         deploy_id = "n1:r:main:disconnect-target"
         await store.create_deploy_event(
@@ -500,7 +640,8 @@ class TestReconnectReplacement:
                 error="node disconnected",
                 close_ws=False,
                 websocket=sockets[2],
-                expected_generation=generations[2],
+                expected_generation=identities[2][0],
+                expected_connection_token=identities[2][1],
             )
 
         assert registry.get_node("n1") is None
@@ -1129,11 +1270,21 @@ class TestDeployTimeout:
             diff_stat=None,
             detected_at="2026-01-01T00:00:00Z",
         )
-        generation = await hub.deploy_coordinator.register_connection("n1")
+        generation = "g1"
+        connection_token = "token-g1"
+        bind_generation(
+            hub,
+            generation=generation,
+            connection_token=connection_token,
+        )
         await begin_attempt(store, "d1", generation=generation)
         await hub.deploy_coordinator.restore_deadlines()
 
-        await hub.deploy_coordinator.unregister_connection("n1", generation)
+        disconnecting = await hub.deploy_coordinator.begin_disconnect(
+            "n1", generation, connection_token
+        )
+        assert disconnecting is not None
+        await hub.deploy_coordinator.finalize_disconnect("n1", disconnecting)
 
         active = await store.attempts.get_active_attempts()
         assert [row["orchestrator_attempt_id"] for row in active] == ["attempt-d1"]
