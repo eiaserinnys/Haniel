@@ -111,8 +111,10 @@ class DeployReporter:
                 self._snapshot_handler, repo, branch, deploy_id
             )
         except Exception as exc:
-            error = f"{operation_error}; snapshot failed: {exc}" if operation_error else (
-                f"snapshot failed: {exc}"
+            error = (
+                f"{operation_error}; snapshot failed: {exc}"
+                if operation_error
+                else (f"snapshot failed: {exc}")
             )
             await self.send_result(
                 deploy_id, "failed", error=error, duration_ms=duration_ms

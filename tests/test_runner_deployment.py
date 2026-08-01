@@ -103,9 +103,7 @@ def configure_processes(runner: ServiceRunner, events: list[str]) -> dict[str, b
 def write_manifest_without_environment_service(repo: Path) -> None:
     payload = release_manifest()
     payload.pop("environment_service")
-    (repo / "deploy" / "release.json").write_text(
-        json.dumps(payload), encoding="utf-8"
-    )
+    (repo / "deploy" / "release.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
 def runner_with_services(
@@ -154,11 +152,7 @@ def test_manifest_command_infers_single_repo_service_cwd(
     write_manifest_without_environment_service(repo)
     runner = runner_with_services(
         original,
-        {
-            "node-service": ServiceConfig(
-                run="node", repo="app", cwd="./services/app"
-            )
-        },
+        {"node-service": ServiceConfig(run="node", repo="app", cwd="./services/app")},
     )
 
     environment = capture_manifest_command_environment(
@@ -246,11 +240,7 @@ def test_manifest_command_omits_service_cwd_when_repo_services_disagree(
             "manifest environment_service is not affected: other",
         ),
         (
-            {
-                "disabled": ServiceConfig(
-                    run="disabled", repo="app", enabled=False
-                )
-            },
+            {"disabled": ServiceConfig(run="disabled", repo="app", enabled=False)},
             ["disabled"],
             "disabled",
             "manifest environment_service is not enabled: disabled",
@@ -267,9 +257,7 @@ def test_explicit_environment_service_keeps_strict_validation(
     original, repo, previous_head = manifest_runner
     payload = release_manifest()
     payload["environment_service"] = environment_service
-    (repo / "deploy" / "release.json").write_text(
-        json.dumps(payload), encoding="utf-8"
-    )
+    (repo / "deploy" / "release.json").write_text(json.dumps(payload), encoding="utf-8")
     runner = runner_with_services(original, services)
 
     with pytest.raises(ValueError, match=expected_error):

@@ -1775,9 +1775,7 @@ class ServiceRunner:
     def _notify_orchestrator_change(self, name: str, state: RepoState) -> None:
         if not self._orch_client:
             return
-        snapshot = self._capture_orchestrator_repo_snapshot(
-            name, state.config.branch
-        )
+        snapshot = self._capture_orchestrator_repo_snapshot(name, state.config.branch)
         if not snapshot.in_sync and state.pending_changes:
             commits = state.pending_changes.get("commits", [])
             if commits:

@@ -142,8 +142,8 @@ class TestAutoDeployReconciliation:
         runner._orch_client.notify_repo_reconciliation.side_effect = (
             lambda *args, **kwargs: order.append("attempt_started")
         )
-        runner._orch_client.report_deploy_attempt.side_effect = (
-            lambda *args, **kwargs: order.append("settled_report")
+        runner._orch_client.report_deploy_attempt.side_effect = lambda *args, **kwargs: (
+            order.append("settled_report")
         )
         runner.trigger_pull = MagicMock(  # type: ignore[method-assign]
             side_effect=lambda *args, **kwargs: order.append("execute")

@@ -1000,11 +1000,12 @@ class TestServiceRunnerPollCycle:
         runner._repo_states["regular"].last_head = "old-head"
         runner._orch_client = MagicMock()
 
-        with patch(
-            "haniel.core.repo_reconciliation.get_head", return_value="new-head"
-        ), patch(
-            "haniel.core.repo_reconciliation.get_remote_head",
-            return_value="new-head",
+        with (
+            patch("haniel.core.repo_reconciliation.get_head", return_value="new-head"),
+            patch(
+                "haniel.core.repo_reconciliation.get_remote_head",
+                return_value="new-head",
+            ),
         ):
             assert runner._detect_changes() == ["regular"]
 
