@@ -94,6 +94,26 @@ class TestGetPending:
         resp = client.get("/api/orch/pending")
         assert resp.status_code == 200
         assert resp.json()["deploys"] == []
+        assert resp.json()["latest_failure"] is None
+
+    async def test_latest_failure_is_independent_of_active_list(
+        self, hub, store, routes
+    ):
+        await _seed_pending(store, "failed")
+        await store.update_deploy_status("failed", DeployStatus.DEPLOYING)
+        await store.apply_deploy_result(
+            "failed", DeployStatus.FAILED, error="post-pull failed"
+        )
+
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        client = TestClient(Starlette(routes=routes))
+        data = client.get("/api/orch/pending").json()
+
+        assert data["deploys"] == []
+        assert data["latest_failure"]["deploy_id"] == "failed"
+        assert data["latest_failure"]["error"] == "post-pull failed"
 
     async def test_includes_deploying(self, hub, store, routes):
         """/api/orch/pending returns active (pending + deploying), not just pending."""
@@ -276,6 +296,26 @@ class TestGetHistory:
 
 
 class TestApproveDeploy:
+    async def test_deploying_state_exists_before_node_can_return_result(
+        self, hub, store, routes
+    ):
+        await _seed_pending(store, "d1", "n1")
+
+        async def send_after_transition(node_id, message):
+            assert node_id == "n1"
+            assert (await store.get_deploy_event("d1"))["status"] == "deploying"
+            assert "d1" in hub._pending_deploys
+            return True
+
+        hub.send_to_node = AsyncMock(side_effect=send_after_transition)
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        response = TestClient(Starlette(routes=routes)).post(
+            "/api/orch/approve", json={"deploy_id": "d1"}
+        )
+        assert response.status_code == 200
+
     async def test_approve_success_node_connected(self, hub, registry, store, routes):
         await _seed_pending(store, "d1", "n1")
 

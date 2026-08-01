@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from haniel.config.model import OrchestratorClientConfig
+from haniel.core.repo_reconciliation import RepoReconciliationSnapshot
 from haniel.integrations.orchestrator_client import OrchestratorClient
 
 
@@ -233,6 +234,17 @@ class TestParseDeployId:
 
 class TestHandleDeployApproval:
     @staticmethod
+    def _snapshot(repo, branch, deploy_id):
+        return RepoReconciliationSnapshot(
+            node_id="test-node-1",
+            repo=repo,
+            branch=branch,
+            local_head="abc1234",
+            remote_head="abc1234",
+            deploy_id=deploy_id,
+        )
+
+    @staticmethod
     def _capture_send_json(client):
         sent = []
 
@@ -281,6 +293,7 @@ class TestHandleDeployApproval:
             config,
             haniel_version="0.1.0",
             deploy_approval_handler=handler,
+            repo_snapshot_handler=self._snapshot,
         )
         sent = self._capture_send_json(client)
         await client._handle_deploy_approval(
@@ -308,6 +321,7 @@ class TestHandleDeployApproval:
             config,
             haniel_version="0.1.0",
             deploy_approval_handler=handler,
+            repo_snapshot_handler=self._snapshot,
         )
         sent = self._capture_send_json(client)
         pending = asyncio.create_task(
@@ -331,6 +345,7 @@ class TestHandleDeployApproval:
             config,
             haniel_version="0.1.0",
             deploy_approval_handler=handler,
+            repo_snapshot_handler=self._snapshot,
         )
         sent = self._capture_send_json(client)
         await client._handle_deploy_approval(

@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { Icon } from '@/components/shared/Icon';
 import { RejectModal } from '@/components/shared/RejectModal';
 import { relTime, parseCommit, cn } from '@/lib/utils';
@@ -6,34 +6,71 @@ import type { Deploy } from '@/types';
 
 interface PendingViewProps {
   deploys: Deploy[];
-  onApprove: (deployId: string) => void;
+  latestFailure: Deploy | null;
+  onApprove: (deployId: string) => Promise<boolean>;
   onReject: (deployId: string, reason: string) => void;
-  onApproveAll: (ids: string[]) => void;
+  onApproveAll: (ids: string[]) => Promise<readonly string[]>;
 }
 
-export function PendingView({ deploys, onApprove, onReject, onApproveAll }: PendingViewProps) {
+export function PendingView({
+  deploys,
+  latestFailure,
+  onApprove,
+  onReject,
+  onApproveAll,
+}: PendingViewProps) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [rejectTarget, setRejectTarget] = useState<Deploy | null>(null);
 
   // Deploying cards are display-only (server returns 409 if you try to
   // approve them again) — exclude them from selection-driven actions.
-  const selectableDeploys = deploys.filter(d => d.status === 'pending');
+  const selectableDeploys = useMemo(
+    () => deploys.filter(d => d.status === 'pending'),
+    [deploys],
+  );
+  const selectionTokens = useMemo(
+    () => new Map(
+      selectableDeploys.map(deploy => [
+        deploy.deploy_id,
+        `${deploy.deploy_id}\u0000${deploy.created_at}`,
+      ]),
+    ),
+    [selectableDeploys],
+  );
+  const currentTokens = useMemo(
+    () => new Set(selectionTokens.values()),
+    [selectionTokens],
+  );
+  const [knownTokens, setKnownTokens] = useState(currentTokens);
+  if (!sameSet(knownTokens, currentTokens)) {
+    setKnownTokens(currentTokens);
+    setSelected(current => new Set(Array.from(current).filter(token => currentTokens.has(token))));
+  }
+  const activeSelected = useMemo(
+    () => new Set(
+      Array.from(selectionTokens.entries())
+        .filter(([, token]) => selected.has(token))
+        .map(([id]) => id),
+    ),
+    [selected, selectionTokens],
+  );
   const allSelected =
-    selectableDeploys.length > 0 && selected.size === selectableDeploys.length;
+    selectableDeploys.length > 0 && activeSelected.size === selectableDeploys.length;
 
-  const toggleSelect = useCallback((id: string) => {
+  const toggleSelect = useCallback((deploy: Deploy) => {
+    const token = `${deploy.deploy_id}\u0000${deploy.created_at}`;
     setSelected(s => {
       const next = new Set(s);
-      if (next.has(id)) next.delete(id); else next.add(id);
+      if (next.has(token)) next.delete(token); else next.add(token);
       return next;
     });
   }, []);
 
   const toggleSelectAll = useCallback(() => {
     if (allSelected) setSelected(new Set());
-    else setSelected(new Set(selectableDeploys.map(d => d.deploy_id)));
-  }, [allSelected, selectableDeploys]);
+    else setSelected(new Set(selectionTokens.values()));
+  }, [allSelected, selectionTokens]);
 
   const toggleExpand = useCallback((id: string) => {
     setExpanded(s => {
@@ -43,14 +80,34 @@ export function PendingView({ deploys, onApprove, onReject, onApproveAll }: Pend
     });
   }, []);
 
-  const handleApproveAll = useCallback(() => {
-    onApproveAll(Array.from(selected));
-  }, [selected, onApproveAll]);
+  const handleApproveAll = useCallback(async () => {
+    const accepted = await onApproveAll(Array.from(activeSelected));
+    setSelected(current => {
+      const next = new Set(current);
+      accepted.forEach(id => {
+        const token = selectionTokens.get(id);
+        if (token) next.delete(token);
+      });
+      return next;
+    });
+  }, [activeSelected, onApproveAll, selectionTokens]);
+
+  const handleApproveOne = useCallback(async (deploy: Deploy) => {
+    if (!await onApprove(deploy.deploy_id)) return;
+    const token = selectionTokens.get(deploy.deploy_id);
+    if (!token) return;
+    setSelected(current => {
+      const next = new Set(current);
+      next.delete(token);
+      return next;
+    });
+  }, [onApprove, selectionTokens]);
 
   if (deploys.length === 0) {
     return (
       <div className="view-pending">
         <h1>Pending Deploys</h1>
+        {latestFailure && <LatestFailure deploy={latestFailure} />}
         <div className="empty-state">
           <div className="empty-icon">
             <Icon name="check" size={28} />
@@ -73,6 +130,7 @@ export function PendingView({ deploys, onApprove, onReject, onApproveAll }: Pend
     <div className="view-pending">
       <h1>Pending Deploys</h1>
       <p className="view-subtitle">{subtitle}</p>
+      {latestFailure && <LatestFailure deploy={latestFailure} />}
 
       <div className="pending-actions">
         <label className="select-all-label">
@@ -84,10 +142,10 @@ export function PendingView({ deploys, onApprove, onReject, onApproveAll }: Pend
           />
           <span className="select-all-text">Select all</span>
         </label>
-        {selected.size > 0 && (
+        {activeSelected.size > 0 && (
           <button className="btn-approve-all" onClick={handleApproveAll}>
             <Icon name="check" size={12} />
-            Approve {selected.size} selected
+            Approve {activeSelected.size} selected
           </button>
         )}
       </div>
@@ -98,11 +156,11 @@ export function PendingView({ deploys, onApprove, onReject, onApproveAll }: Pend
             key={deploy.deploy_id}
             deploy={deploy}
             isDeploying={deploy.status === 'deploying'}
-            isSelected={selected.has(deploy.deploy_id)}
+            isSelected={activeSelected.has(deploy.deploy_id)}
             isExpanded={expanded.has(deploy.deploy_id)}
-            onToggleSelect={() => toggleSelect(deploy.deploy_id)}
+            onToggleSelect={() => toggleSelect(deploy)}
             onToggleExpand={() => toggleExpand(deploy.deploy_id)}
-            onApprove={() => onApprove(deploy.deploy_id)}
+            onApprove={() => handleApproveOne(deploy)}
             onReject={() => setRejectTarget(deploy)}
           />
         ))}
@@ -115,6 +173,36 @@ export function PendingView({ deploys, onApprove, onReject, onApproveAll }: Pend
           onClose={() => setRejectTarget(null)}
         />
       )}
+    </div>
+  );
+}
+
+function sameSet(left: Set<string>, right: Set<string>): boolean {
+  return left.size === right.size && Array.from(left).every(value => right.has(value));
+}
+
+function LatestFailure({ deploy }: { deploy: Deploy }) {
+  return (
+    <div className="pending-card" aria-label="Latest deploy failure">
+      <div className="pending-card-header">
+        <div className="pending-card-info">
+          <div className="pending-card-title">
+            <span className="pending-repo">Last deploy failed</span>
+            <span className="pending-sep">/</span>
+            <span className="pending-branch">{deploy.repo}</span>
+            <span className="pending-sep">/</span>
+            <span className="pending-node">{deploy.node_id}</span>
+          </div>
+          <div className="pending-card-meta">
+            <span>{deploy.branch}</span>
+            <span className="pending-sep">/</span>
+            <span>{relTime(deploy.updated_at)}</span>
+          </div>
+          <pre className="history-error-block">
+            {deploy.error || deploy.reject_reason || 'Unknown deploy failure'}
+          </pre>
+        </div>
+      </div>
     </div>
   );
 }

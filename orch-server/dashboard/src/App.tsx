@@ -28,6 +28,7 @@ const DASHBOARD_SYNC_INTERVAL_MS = 10_000;
 function App() {
   const [page, setPageRaw] = useState<Page>('pending');
   const [pending, setPending] = useState<Deploy[]>([]);
+  const [latestFailure, setLatestFailure] = useState<Deploy | null>(null);
   const [nodes, setNodes] = useState<OrchestratorNode[]>([]);
   const [history, setHistory] = useState<Deploy[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -79,7 +80,10 @@ function App() {
       api.fetchHistory({ includeSuperseded: includeSupersededHistory }),
     ]).then(([pendingResult, historyResult]) => {
       if (seq !== deploySyncSeq.current) return;
-      if (pendingResult.status === 'fulfilled') setPending(pendingResult.value.deploys);
+      if (pendingResult.status === 'fulfilled') {
+        setPending(pendingResult.value.deploys);
+        setLatestFailure(pendingResult.value.latest_failure);
+      }
       if (historyResult.status === 'fulfilled') setHistory(historyResult.value.deploys);
     });
   }, [includeSupersededHistory]);
@@ -235,8 +239,10 @@ function App() {
       } else {
         pushToast(`Approved deploy`, 'success');
       }
+      return true;
     } catch (e) {
       pushToast(`Approve failed: ${e instanceof api.ApiError ? e.body : 'Unknown error'}`, 'error');
+      return false;
     } finally {
       refreshDeploys();
     }
@@ -280,6 +286,7 @@ function App() {
       const fulfilled = results.filter(
         (r): r is PromiseFulfilledResult<ApproveResponse> => r.status === 'fulfilled',
       );
+      const acceptedIds = ids.filter((_, index) => results[index].status === 'fulfilled');
       const deferred = fulfilled.filter(r => !!r.value.warning).length;
       const succeeded = fulfilled.length - deferred;
       const failed = results.length - fulfilled.length;
@@ -303,6 +310,7 @@ function App() {
         pushToast(`Approved ${succeeded}, deferred ${deferred}, failed ${failed}${tail}`, 'amber');
       }
       refreshDeploys();
+      return acceptedIds;
     } else {
       // Approve all via server API
       try {
@@ -319,8 +327,10 @@ function App() {
             'amber',
           );
         }
+        return result.approved;
       } catch (e) {
         pushToast(`Approve all failed: ${e instanceof api.ApiError ? e.body : 'Unknown error'}`, 'error');
+        return [];
       } finally {
         refreshDeploys();
       }
@@ -372,6 +382,7 @@ function App() {
           {page === 'pending' && (
             <PendingView
               deploys={pending}
+              latestFailure={latestFailure}
               onApprove={handleApprove}
               onReject={handleReject}
               onApproveAll={handleApproveAll}

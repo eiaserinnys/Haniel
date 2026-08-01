@@ -18,6 +18,7 @@ from haniel_orch.protocol import (
     DeployResult,
     DeployStatus,
     NodeHello,
+    RepoReconciliation,
 )
 
 
@@ -588,6 +589,86 @@ class TestPushIntegration:
         # Should not raise any errors — NullPushService.notify is no-op
         await hub._handle_change_notification(notification)
         await asyncio.sleep(0.05)  # let fire-and-forget complete
+
+
+class TestRepoReconciliation:
+    DEPLOY_ID = "n1:repo:main:remote"
+
+    async def _seed(self, store: EventStore) -> None:
+        await store.create_deploy_event(
+            deploy_id=self.DEPLOY_ID,
+            node_id="n1",
+            repo="repo",
+            branch="main",
+            commits=["remote change"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+        )
+
+    def _message(self, phase: str, *, in_sync: bool) -> RepoReconciliation:
+        return RepoReconciliation(
+            phase=phase,
+            deploy_id=self.DEPLOY_ID,
+            node_id="n1",
+            repo="repo",
+            branch="main",
+            local_head="remote" if in_sync else "local",
+            remote_head="remote",
+        )
+
+    async def test_auto_success_equal_removes_stale_pending(self, hub, store):
+        await self._seed(store)
+
+        await hub._repo_reconciler.handle(self._message("observed", in_sync=True))
+
+        assert await store.get_active_deploys() == []
+        event = await store.get_deploy_event(self.DEPLOY_ID)
+        assert event["status"] == "success"
+
+    async def test_failed_mismatch_reopens_and_late_result_is_ignored(self, hub, store):
+        await self._seed(store)
+        await store.update_deploy_status(self.DEPLOY_ID, DeployStatus.DEPLOYING)
+        await hub._handle_deploy_result(
+            DeployResult(
+                deploy_id=self.DEPLOY_ID,
+                node_id="n1",
+                status="failed",
+                error="hook failed",
+            )
+        )
+        await hub._repo_reconciler.handle(self._message("settled", in_sync=False))
+
+        reopened = await store.get_deploy_event(self.DEPLOY_ID)
+        assert reopened["status"] == "pending"
+        latest = await store.get_latest_failed_deploy()
+        assert latest["error"] == "hook failed"
+
+        await hub._handle_deploy_result(
+            DeployResult(
+                deploy_id=self.DEPLOY_ID,
+                node_id="n1",
+                status="success",
+            )
+        )
+        assert (await store.get_deploy_event(self.DEPLOY_ID))["status"] == "pending"
+
+    async def test_success_mismatch_does_not_reopen_success_history(self, hub, store):
+        await self._seed(store)
+        await store.update_deploy_status(self.DEPLOY_ID, DeployStatus.DEPLOYING)
+        await hub._handle_deploy_result(
+            DeployResult(
+                deploy_id=self.DEPLOY_ID,
+                node_id="n1",
+                status="success",
+            )
+        )
+
+        await hub._repo_reconciler.handle(self._message("settled", in_sync=False))
+
+        event = await store.get_deploy_event(self.DEPLOY_ID)
+        assert event["status"] == "success"
+        assert await store.get_latest_failed_deploy() is None
 
 
 class TestDeployTimeout:

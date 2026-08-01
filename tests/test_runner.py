@@ -918,7 +918,7 @@ class TestServiceRunnerPollCycle:
     @patch("haniel.core.runner.get_remote_head", return_value="new-head")
     @patch("haniel.core.runner.get_head", return_value="new-head")
     @patch("haniel.core.runner.fetch_repo", return_value=False)
-    def test_external_self_pull_notifies_orchestrator_once_without_local_surfaces(
+    def test_external_self_pull_keeps_marker_path_out_of_repo_reconciliation(
         self,
         mock_fetch,
         mock_head,
@@ -951,13 +951,8 @@ class TestServiceRunnerPollCycle:
         runner._poll_cycle()
         runner._poll_cycle()
 
-        runner._orch_client.notify_change.assert_called_once_with(
-            repo="haniel",
-            branch="main",
-            commits=["new-head External self update"],
-            affected_services=[],
-            diff_stat="1 file",
-        )
+        runner._orch_client.notify_change.assert_not_called()
+        runner._orch_client.notify_repo_reconciliation.assert_not_called()
         assert runner._state.self_update_pending is True
         assert runner._ws_handler is None
         assert runner._slack_bot is None
@@ -966,7 +961,7 @@ class TestServiceRunnerPollCycle:
         runner._self_update_requested.set()
         runner._repo_states["haniel"].last_head = "older-head"
         assert runner._detect_changes() == []
-        runner._orch_client.notify_change.assert_called_once()
+        runner._orch_client.notify_change.assert_not_called()
 
     @patch(
         "haniel.core.runner.get_pending_changes",
@@ -995,15 +990,29 @@ class TestServiceRunnerPollCycle:
                 )
             },
             services={},
+            orchestrator_client={
+                "url": "ws://localhost/ws/node",
+                "token": "test",
+                "node_id": "node-a",
+            },
         )
         runner = ServiceRunner(config, config_dir=tmp_path)
         runner._repo_states["regular"].last_head = "old-head"
         runner._orch_client = MagicMock()
 
-        assert runner._detect_changes() == ["regular"]
+        with (
+            patch("haniel.core.repo_reconciliation.get_head", return_value="new-head"),
+            patch(
+                "haniel.core.repo_reconciliation.get_remote_head",
+                return_value="new-head",
+            ),
+        ):
+            assert runner._detect_changes() == ["regular"]
 
         runner._orch_client.notify_change.assert_not_called()
-        mock_remote_head.assert_not_called()
+        runner._orch_client.notify_repo_reconciliation.assert_called_once()
+        snapshot = runner._orch_client.notify_repo_reconciliation.call_args.args[0]
+        assert snapshot.in_sync
 
     def test_schedule_restart(self, tmp_path: Path):
         """Test scheduling a service restart."""

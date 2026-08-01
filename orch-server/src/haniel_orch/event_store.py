@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from typing import Any
 
 import aiosqlite
 
+from . import event_store_mutations, event_store_nodes
 from .protocol import DeployStatus
 
 _CREATE_TABLES = """
@@ -66,20 +68,20 @@ class EventStore:
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
         self._db: aiosqlite.Connection | None = None
+        self._mutation_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
         """Create tables if they don't exist."""
-        self._db = await aiosqlite.connect(self._db_path)
-        await self._db.executescript(_CREATE_TABLES)
-        await self._db.commit()
+        async with self._mutation_lock:
+            self._db = await aiosqlite.connect(self._db_path)
+            await self._db.executescript(_CREATE_TABLES)
+            await self._db.commit()
 
     async def close(self) -> None:
         """Close the database connection."""
         if self._db:
             await self._db.close()
             self._db = None
-
-    # --- deploy_events CRUD ---
 
     async def create_deploy_event(
         self,
@@ -97,29 +99,116 @@ class EventStore:
         Returns True when a new row was inserted. Duplicate deploy_id is
         silently ignored and returns False.
         """
-        now = _now_iso()
+        async with self._mutation_lock:
+            now = _now_iso()
+            try:
+                cursor = await self._db.execute(
+                    """INSERT OR IGNORE INTO deploy_events
+                       (deploy_id, node_id, repo, branch, status,
+                        commits_json, affected_services_json, diff_stat, detected_at,
+                        created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        deploy_id,
+                        node_id,
+                        repo,
+                        branch,
+                        DeployStatus.PENDING.value,
+                        json.dumps(commits),
+                        json.dumps(affected_services),
+                        diff_stat,
+                        detected_at,
+                        now,
+                        now,
+                    ),
+                )
+                await self._db.commit()
+                return cursor.rowcount > 0
+            except Exception:
+                await self._db.rollback()
+                raise
+
+    async def reopen_failed_deploy(self, deploy_id: str) -> bool:
+        """Snapshot one failed attempt and conditionally reopen its canonical ID."""
+        async with self._mutation_lock:
+            try:
+                reopened = await event_store_mutations.reopen_failed_deploy(
+                    self._db, deploy_id
+                )
+                await self._db.commit()
+                return reopened
+            except Exception:
+                await self._db.rollback()
+                raise
+
+    async def apply_deploy_result(
+        self,
+        deploy_id: str,
+        status: DeployStatus,
+        *,
+        error: str | None = None,
+        duration_ms: int | None = None,
+    ) -> bool:
+        """Apply a result only to the currently deploying canonical attempt."""
+        if status not in (DeployStatus.SUCCESS, DeployStatus.FAILED):
+            raise ValueError("deploy result must be success or failed")
+        async with self._mutation_lock:
+            try:
+                applied = await event_store_mutations.apply_deploy_result(
+                    self._db, deploy_id, status, error, duration_ms
+                )
+                await self._db.commit()
+                return applied
+            except Exception:
+                await self._db.rollback()
+                raise
+
+    async def transition_deploy_status(
+        self,
+        deploy_id: str,
+        expected: DeployStatus,
+        target: DeployStatus,
+    ) -> bool:
+        """Perform one guarded lifecycle transition."""
+        async with self._mutation_lock:
+            try:
+                transitioned = await event_store_mutations.transition_deploy_status(
+                    self._db, deploy_id, expected, target
+                )
+                await self._db.commit()
+                return transitioned
+            except Exception:
+                await self._db.rollback()
+                raise
+
+    async def resolve_pending_branch(
+        self, node_id: str, repo: str, branch: str
+    ) -> list[str]:
+        """Mark branch PENDING rows successful when local and remote HEAD agree."""
+        async with self._mutation_lock:
+            try:
+                resolved = await event_store_mutations.resolve_pending_branch(
+                    self._db, node_id, repo, branch
+                )
+                await self._db.commit()
+                return resolved
+            except Exception:
+                await self._db.rollback()
+                raise
+
+    async def get_latest_failed_deploy(self) -> dict[str, Any] | None:
         cursor = await self._db.execute(
-            """INSERT OR IGNORE INTO deploy_events
-               (deploy_id, node_id, repo, branch, status,
-                commits_json, affected_services_json, diff_stat, detected_at,
-                created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                deploy_id,
-                node_id,
-                repo,
-                branch,
-                DeployStatus.PENDING.value,
-                json.dumps(commits),
-                json.dumps(affected_services),
-                diff_stat,
-                detected_at,
-                now,
-                now,
-            ),
+            "SELECT * FROM deploy_events WHERE status = ? "
+            "ORDER BY updated_at DESC, deploy_id DESC LIMIT 1",
+            (DeployStatus.FAILED.value,),
         )
-        await self._db.commit()
-        return cursor.rowcount > 0
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        result = _row_to_dict(cursor, row)
+        result["commits"] = json.loads(result.pop("commits_json"))
+        result["affected_services"] = json.loads(result.pop("affected_services_json"))
+        return result
 
     async def get_deploy_event(self, deploy_id: str) -> dict[str, Any] | None:
         """Get a single deploy event by ID. Returns None if not found."""
@@ -131,9 +220,7 @@ class EventStore:
             return None
         result = _row_to_dict(cursor, row)
         result["commits"] = json.loads(result.pop("commits_json"))
-        result["affected_services"] = json.loads(
-            result.pop("affected_services_json")
-        )
+        result["affected_services"] = json.loads(result.pop("affected_services_json"))
         return result
 
     async def get_pending_deploys(self) -> list[dict[str, Any]]:
@@ -186,36 +273,18 @@ class EventStore:
         generation-time supersede was added, or for rows inserted while an old
         orch-server was running. DEPLOYING rows are intentionally excluded.
         """
-        cursor = await self._db.execute(
-            "SELECT deploy_id, node_id, repo, branch FROM deploy_events "
-            "WHERE status = ? "
-            "ORDER BY node_id, repo, branch, created_at DESC, detected_at DESC, deploy_id DESC",
-            (DeployStatus.PENDING.value,),
-        )
-        rows = await cursor.fetchall()
-
-        kept_by_group: dict[tuple[str, str, str], str] = {}
-        superseded: list[str] = []
-        now = _now_iso()
-        for deploy_id, node_id, repo, branch in rows:
-            key = (node_id, repo, branch)
-            kept = kept_by_group.get(key)
-            if kept is None:
-                kept_by_group[key] = deploy_id
-                continue
-
-            reason = f"superseded by {kept}"
-            await self._db.execute(
-                "UPDATE deploy_events "
-                "SET status = ?, reject_reason = ?, updated_at = ? "
-                "WHERE deploy_id = ?",
-                (DeployStatus.REJECTED.value, reason, now, deploy_id),
-            )
-            superseded.append(deploy_id)
-
-        if superseded:
-            await self._db.commit()
-        return superseded
+        async with self._mutation_lock:
+            try:
+                superseded = (
+                    await event_store_mutations.supersede_stale_pending_deploys(
+                        self._db
+                    )
+                )
+                await self._db.commit()
+                return superseded
+            except Exception:
+                await self._db.rollback()
+                raise
 
     async def get_pending_deploys_for_branch(
         self, node_id: str, repo: str, branch: str
@@ -259,10 +328,7 @@ class EventStore:
         only the auto-supersede marker prefix is recognised.
         """
         if include_superseded:
-            sql = (
-                "SELECT * FROM deploy_events "
-                "ORDER BY created_at DESC LIMIT ?"
-            )
+            sql = "SELECT * FROM deploy_events ORDER BY created_at DESC LIMIT ?"
             params: tuple[Any, ...] = (limit,)
         else:
             sql = (
@@ -291,6 +357,25 @@ class EventStore:
         duration_ms: int | None = None,
     ) -> None:
         """Update event status and optional fields. Only non-None args are SET."""
+        async with self._mutation_lock:
+            try:
+                await self._update_deploy_status_unlocked(
+                    deploy_id, status, approved_by, reject_reason, error, duration_ms
+                )
+                await self._db.commit()
+            except Exception:
+                await self._db.rollback()
+                raise
+
+    async def _update_deploy_status_unlocked(
+        self,
+        deploy_id: str,
+        status: DeployStatus,
+        approved_by: str | None = None,
+        reject_reason: str | None = None,
+        error: str | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
         updates = ["status = ?", "updated_at = ?"]
         params: list[Any] = [status.value, _now_iso()]
 
@@ -312,11 +397,8 @@ class EventStore:
             f"UPDATE deploy_events SET {', '.join(updates)} WHERE deploy_id = ?",
             params,
         )
-        await self._db.commit()
 
-    async def get_deploying_events_for_node(
-        self, node_id: str
-    ) -> list[dict[str, Any]]:
+    async def get_deploying_events_for_node(self, node_id: str) -> list[dict[str, Any]]:
         """Get events in DEPLOYING state for a specific node.
 
         Used by WebSocketHub._cleanup_orphan_deploys() to mark in-flight
@@ -342,38 +424,16 @@ class EventStore:
         """Reject all PENDING deploys for the given nodes and return them."""
         if not node_ids:
             return []
-
-        placeholders = ", ".join("?" for _ in node_ids)
-        cursor = await self._db.execute(
-            f"SELECT * FROM deploy_events "
-            f"WHERE status = ? AND node_id IN ({placeholders})",
-            (DeployStatus.PENDING.value, *node_ids),
-        )
-        rows = await cursor.fetchall()
-        rejected = []
-        for row in rows:
-            d = _row_to_dict(cursor, row)
-            d["commits"] = json.loads(d.pop("commits_json"))
-            d["affected_services"] = json.loads(d.pop("affected_services_json"))
-            rejected.append(d)
-
-        if not rejected:
-            return []
-
-        await self._db.execute(
-            f"UPDATE deploy_events "
-            f"SET status = ?, reject_reason = ?, updated_at = ? "
-            f"WHERE status = ? AND node_id IN ({placeholders})",
-            (
-                DeployStatus.REJECTED.value,
-                reject_reason,
-                _now_iso(),
-                DeployStatus.PENDING.value,
-                *node_ids,
-            ),
-        )
-        await self._db.commit()
-        return rejected
+        async with self._mutation_lock:
+            try:
+                rejected = await event_store_mutations.reject_pending_deploys_for_nodes(
+                    self._db, node_ids, reject_reason
+                )
+                await self._db.commit()
+                return rejected
+            except Exception:
+                await self._db.rollback()
+                raise
 
     # --- nodes CRUD ---
 
@@ -387,36 +447,39 @@ class EventStore:
         connected: bool = True,
     ) -> None:
         """Register or update a node. INSERT OR REPLACE."""
-        now = _now_iso()
-        await self._db.execute(
-            """INSERT OR REPLACE INTO nodes
-               (node_id, hostname, os, arch, haniel_version, connected, last_seen, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (node_id, hostname, os, arch, haniel_version, int(connected), now, now),
-        )
-        await self._db.commit()
+        async with self._mutation_lock:
+            try:
+                await event_store_nodes.upsert_node(
+                    self._db, node_id, hostname, os, arch, haniel_version, connected
+                )
+                await self._db.commit()
+            except Exception:
+                await self._db.rollback()
+                raise
 
     async def update_node_heartbeat(self, node_id: str) -> None:
         """Update last_seen timestamp for a node."""
-        await self._db.execute(
-            "UPDATE nodes SET last_seen = ?, connected = 1 WHERE node_id = ?",
-            (_now_iso(), node_id),
-        )
-        await self._db.commit()
+        async with self._mutation_lock:
+            try:
+                await event_store_nodes.update_node_heartbeat(self._db, node_id)
+                await self._db.commit()
+            except Exception:
+                await self._db.rollback()
+                raise
 
     async def mark_node_disconnected(self, node_id: str) -> None:
         """Mark an existing node disconnected without clobbering its metadata."""
-        await self._db.execute(
-            "UPDATE nodes SET connected = 0, last_seen = ? WHERE node_id = ?",
-            (_now_iso(), node_id),
-        )
-        await self._db.commit()
+        async with self._mutation_lock:
+            try:
+                await event_store_nodes.mark_node_disconnected(self._db, node_id)
+                await self._db.commit()
+            except Exception:
+                await self._db.rollback()
+                raise
 
     async def get_nodes(self) -> list[dict[str, Any]]:
         """Get all nodes (connected and disconnected)."""
-        cursor = await self._db.execute(
-            "SELECT * FROM nodes ORDER BY last_seen DESC"
-        )
+        cursor = await self._db.execute("SELECT * FROM nodes ORDER BY last_seen DESC")
         rows = await cursor.fetchall()
         return [_row_to_dict(cursor, row) for row in rows]
 

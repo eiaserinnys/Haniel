@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from enum import Enum
-from typing import Any, Union
+from typing import Any, Literal, Union
 
 from pydantic import BaseModel
 
@@ -40,7 +40,7 @@ class ChangeNotification(BaseModel):
     """Sent when a node detects repo changes (new commits)."""
 
     type: str = "change_notification"
-    deploy_id: str  # deterministic: "{node_id}:{repo}:{branch}:{first_commit_hash}"
+    deploy_id: str  # deterministic: "{node_id}:{repo}:{branch}:{remote_head}"
     node_id: str
     repo: str
     branch: str
@@ -67,6 +67,19 @@ class DeployResult(BaseModel):
     status: str  # "success" | "failed" — server converts via DeployStatus[status.upper()]
     error: str | None = None
     duration_ms: int | None = None
+
+
+class RepoReconciliation(BaseModel):
+    """Node observation that reconciles dashboard activity with actual Git HEADs."""
+
+    type: str = "repo_reconciliation"
+    phase: Literal["observed", "attempt_started", "settled"]
+    deploy_id: str
+    node_id: str
+    repo: str
+    branch: str
+    local_head: str
+    remote_head: str
 
 
 # --- Server → Node messages ---
@@ -117,7 +130,12 @@ class ServiceCommandResult(BaseModel):
 # Union types
 OrchestratorMessage = Union[DeployApproval, DeployReject, ServiceCommand]
 NodeMessage = Union[
-    NodeHello, ChangeNotification, NodeStatus, DeployResult, ServiceCommandResult
+    NodeHello,
+    ChangeNotification,
+    NodeStatus,
+    DeployResult,
+    RepoReconciliation,
+    ServiceCommandResult,
 ]
 
 # Type dispatch map for parse_node_message
@@ -126,6 +144,7 @@ _NODE_MESSAGE_TYPES: dict[str, type[NodeMessage]] = {
     "change_notification": ChangeNotification,
     "node_status": NodeStatus,
     "deploy_result": DeployResult,
+    "repo_reconciliation": RepoReconciliation,
     "service_command_result": ServiceCommandResult,
 }
 

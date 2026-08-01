@@ -1,4 +1,4 @@
-import { act, cleanup, render, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 
@@ -42,7 +42,7 @@ vi.mock('@/hooks/useWebSocket', () => ({
 }));
 
 function resetApiMocks() {
-  apiMock.fetchPending.mockResolvedValue({ deploys: [] });
+  apiMock.fetchPending.mockResolvedValue({ deploys: [], latest_failure: null });
   apiMock.fetchNodes.mockResolvedValue({ nodes: [] });
   apiMock.fetchHistory.mockResolvedValue({ deploys: [] });
   apiMock.approveDeploy.mockResolvedValue({ deploy_id: 'd1', status: 'deploying' });
@@ -55,6 +55,16 @@ async function waitForInitialSync() {
   await waitFor(() => expect(apiMock.fetchPending).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(apiMock.fetchNodes).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(apiMock.fetchHistory).toHaveBeenCalledTimes(1));
+}
+
+function pendingDeploy(id: string) {
+  const now = new Date().toISOString();
+  return {
+    deploy_id: id, node_id: 'n1', repo: id, branch: 'main', status: 'pending',
+    commits: ['abc change'], affected_services: [], diff_stat: null,
+    detected_at: now, approved_by: null, reject_reason: null, error: null,
+    duration_ms: null, created_at: now, updated_at: now,
+  };
 }
 
 describe('App dashboard sync', () => {
@@ -123,5 +133,48 @@ describe('App dashboard sync', () => {
     await waitFor(() => expect(apiMock.fetchPending).toHaveBeenCalledTimes(1));
     expect(apiMock.fetchNodes).toHaveBeenCalledTimes(1);
     expect(apiMock.fetchHistory).toHaveBeenCalledWith({ includeSuperseded: false });
+  });
+
+  it('uses pending.latest_failure instead of history to render first-screen failure', async () => {
+    apiMock.fetchPending.mockResolvedValue({
+      deploys: [],
+      latest_failure: {
+        deploy_id: 'attempt:failed', node_id: 'n1', repo: 'repo', branch: 'main',
+        status: 'failed', commits: [], affected_services: [], diff_stat: null,
+        detected_at: new Date().toISOString(), approved_by: null, reject_reason: null,
+        error: 'HEAD mismatch', duration_ms: 1, created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    });
+
+    render(<App />);
+    await waitForInitialSync();
+
+    expect(screen.getByText('Last deploy failed')).toBeInTheDocument();
+    expect(screen.getByText('HEAD mismatch')).toBeInTheDocument();
+    expect(screen.getByText('All clear')).toBeInTheDocument();
+  });
+
+  it('returns only HTTP-accepted selected ids to the selection owner', async () => {
+    apiMock.fetchPending.mockResolvedValue({
+      deploys: [pendingDeploy('accepted'), pendingDeploy('rejected')],
+      latest_failure: null,
+    });
+    apiMock.approveDeploy.mockImplementation((id: string) => (
+      id === 'accepted'
+        ? Promise.resolve({ deploy_id: id, status: 'deploying' })
+        : Promise.reject(new Error('HTTP rejected'))
+    ));
+
+    render(<App />);
+    await waitForInitialSync();
+    fireEvent.click(screen.getByText('Select all'));
+    fireEvent.click(screen.getByRole('button', { name: /Approve 2 selected/ }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Approve 1 selected/ })).toBeInTheDocument();
+    });
+    expect(apiMock.approveDeploy).toHaveBeenCalledWith('accepted');
+    expect(apiMock.approveDeploy).toHaveBeenCalledWith('rejected');
   });
 });

@@ -273,26 +273,25 @@ class TestRunnerSelfUpdate:
         config = self._make_config()
         runner = self._make_runner(config)
         runner._initiate_self_update = MagicMock()
-        runner.get_affected_services = MagicMock(return_value=[])
-        runner._pull_repo = MagicMock()
+        runner.trigger_pull = MagicMock()
 
         runner._apply_changes(["haniel", "app"])
 
         runner._initiate_self_update.assert_called_once()
         # "app" should still be processed normally
-        runner._pull_repo.assert_called_once_with("app")
+        runner.trigger_pull.assert_called_once_with("app", auto=True)
 
     def test_apply_changes_self_repo_only(self):
         """_apply_changes with only self repo should return after self-update."""
         config = self._make_config()
         runner = self._make_runner(config)
         runner._initiate_self_update = MagicMock()
-        runner._pull_repo = MagicMock()
+        runner.trigger_pull = MagicMock()
 
         runner._apply_changes(["haniel"])
 
         runner._initiate_self_update.assert_called_once()
-        runner._pull_repo.assert_not_called()
+        runner.trigger_pull.assert_not_called()
 
     def test_get_status_includes_self_update(self):
         """get_status should include self_update section when configured."""
