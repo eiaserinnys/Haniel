@@ -23,7 +23,8 @@ from .protocol import (
 Send = Callable[[str, str, object], Awaitable[bool]]
 Broadcast = Callable[[dict], Awaitable[None]]
 TerminalCallback = Callable[[dict], Awaitable[None]]
-ConnectionActivation = Callable[[], Awaitable[None]]
+ConnectionActivation = Callable[[str], Awaitable[None]]
+ConnectionDeactivation = Callable[[], Awaitable[None]]
 
 
 class PlanRejected(RuntimeError):
@@ -73,7 +74,7 @@ class DeployAttemptCoordinator(DeployAttemptDeadlines):
             generation = uuid4().hex
             self._generations[node_id] = generation
             if activate is not None:
-                await activate()
+                await activate(generation)
             stale = await self.attempts.terminalize_prior_generations(
                 node_id, generation
             )
@@ -86,12 +87,24 @@ class DeployAttemptCoordinator(DeployAttemptDeadlines):
     def current_generation(self, node_id: str) -> str | None:
         return self._generations.get(node_id)
 
-    async def disconnect(self, node_id: str, generation: str) -> None:
+    async def unregister_connection(
+        self,
+        node_id: str,
+        expected_generation: str,
+        on_current_disconnect: ConnectionDeactivation | None = None,
+    ) -> bool:
+        """Remove and terminalize only the exact current connection generation."""
         async with self._coordination_lock:
-            if self._generations.get(node_id) == generation:
-                self._generations.pop(node_id, None)
-            for probe_id in await self.attempts.terminalize_generation(generation):
+            if self._generations.get(node_id) != expected_generation:
+                return False
+            self._generations.pop(node_id, None)
+            for probe_id in await self.attempts.terminalize_generation(
+                expected_generation
+            ):
                 self._resolve_probe(probe_id, PlanRejected("node disconnected", 503))
+            if on_current_disconnect is not None:
+                await on_current_disconnect()
+            return True
 
     async def restore_deadlines(self) -> None:
         """Close pre-restart probes and recreate persisted attempt deadlines."""
@@ -104,7 +117,9 @@ class DeployAttemptCoordinator(DeployAttemptDeadlines):
                 error="probe connection generation cannot survive server restart",
             )
         for attempt in await self.attempts.get_active_attempts():
-            self._schedule_attempt(attempt["orchestrator_attempt_id"], attempt["deadline_at"])
+            self._schedule_attempt(
+                attempt["orchestrator_attempt_id"], attempt["deadline_at"]
+            )
 
     async def resolve_terminal_canonicals(
         self,
@@ -120,9 +135,7 @@ class DeployAttemptCoordinator(DeployAttemptDeadlines):
                 and probe["deploy_id"] in deploy_ids
                 and probe["status"] == "terminal"
             ):
-                self._resolve_probe(
-                    probe_id, PlanRejected(message, 409)
-                )
+                self._resolve_probe(probe_id, PlanRejected(message, 409))
 
     async def approve_manual(
         self, event: dict, *, approved_by: str, source: str
@@ -310,9 +323,7 @@ class DeployAttemptCoordinator(DeployAttemptDeadlines):
                 if sent:
                     future.set_result(orchestrator_attempt_id)
                 else:
-                    future.set_exception(
-                        PlanRejected("approval delivery failed", 503)
-                    )
+                    future.set_exception(PlanRejected("approval delivery failed", 503))
 
     async def handle_result(self, msg: DeployResult) -> None:
         result = await self.attempts.record_result(
@@ -323,7 +334,9 @@ class DeployAttemptCoordinator(DeployAttemptDeadlines):
             error=msg.error,
             duration_ms=msg.duration_ms,
         )
-        await self._after_store_terminal(msg.node_id, msg.orchestrator_attempt_id, result)
+        await self._after_store_terminal(
+            msg.node_id, msg.orchestrator_attempt_id, result
+        )
 
     async def handle_settled(self, msg: RepoReconciliation) -> None:
         if msg.orchestrator_attempt_id is None or msg.connection_generation is None:
@@ -335,7 +348,9 @@ class DeployAttemptCoordinator(DeployAttemptDeadlines):
             local_head=msg.local_head,
             remote_head=msg.remote_head,
         )
-        await self._after_store_terminal(msg.node_id, msg.orchestrator_attempt_id, result)
+        await self._after_store_terminal(
+            msg.node_id, msg.orchestrator_attempt_id, result
+        )
 
     async def handle_evidence(self, evidence: ManifestRecoveryEvidence) -> None:
         result = await self.attempts.record_recovery_evidence(evidence)
@@ -363,8 +378,10 @@ class DeployAttemptCoordinator(DeployAttemptDeadlines):
             message="attempt lineage changed during preflight",
         )
         self._cancel_timer(f"attempt:{orchestrator_attempt_id}")
-        status = "success" if result["status"] == "success" else (
-            "rejected" if result["status"] == "superseded" else "pending"
+        status = (
+            "success"
+            if result["status"] == "success"
+            else ("rejected" if result["status"] == "superseded" else "pending")
         )
         await self._broadcast(
             {
@@ -403,7 +420,9 @@ class DeployAttemptCoordinator(DeployAttemptDeadlines):
             expected_manifest_identity=probe["expected_manifest_identity"],
             expected_manifest_digest=probe["expected_manifest_digest"],
             deadline_at=probe["deadline_at"],
-            requested_orchestrator_attempt_id=probe["requested_orchestrator_attempt_id"],
+            requested_orchestrator_attempt_id=probe[
+                "requested_orchestrator_attempt_id"
+            ],
         )
 
     async def _send_auto_retry_rejection(

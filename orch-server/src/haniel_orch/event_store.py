@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     arch TEXT NOT NULL,
     haniel_version TEXT NOT NULL,
     connected INTEGER NOT NULL DEFAULT 1,
+    connection_generation TEXT,
     last_seen TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -78,6 +79,7 @@ class EventStore:
         async with self._mutation_lock:
             self._db = await aiosqlite.connect(self._db_path)
             await self._db.executescript(_CREATE_TABLES)
+            await event_store_nodes.initialize_node_schema(self._db)
             await initialize_attempt_schema(self._db)
             self.attempts = DeployAttemptStore(self._db, self._mutation_lock)
             await self._db.commit()
@@ -162,14 +164,21 @@ class EventStore:
                         await self._db.execute(
                             "UPDATE deploy_events SET status = ?, reject_reason = ?, updated_at = ? "
                             "WHERE deploy_id = ? AND status = ?",
-                            (DeployStatus.REJECTED.value, f"superseded by {latest_id}", now,
-                             old_id, DeployStatus.PENDING.value),
+                            (
+                                DeployStatus.REJECTED.value,
+                                f"superseded by {latest_id}",
+                                now,
+                                old_id,
+                                DeployStatus.PENDING.value,
+                            ),
                         )
                         await self._db.execute(
-                            "DELETE FROM deploy_retry_requirements WHERE deploy_id = ?", (old_id,)
+                            "DELETE FROM deploy_retry_requirements WHERE deploy_id = ?",
+                            (old_id,),
                         )
                         await self._db.execute(
-                            "DELETE FROM deploy_retry_source_attempts WHERE deploy_id = ?", (old_id,)
+                            "DELETE FROM deploy_retry_source_attempts WHERE deploy_id = ?",
+                            (old_id,),
                         )
                         await self._db.execute(
                             """UPDATE deploy_plan_probes
@@ -427,11 +436,17 @@ class EventStore:
             success_metadata = await self.attempts.success_metadata()
             for item in results:
                 metadata = success_metadata.get(item["deploy_id"])
-                if metadata is not None and item["status"] == DeployStatus.SUCCESS.value:
+                if (
+                    metadata is not None
+                    and item["status"] == DeployStatus.SUCCESS.value
+                ):
                     item.update(metadata)
             results.extend(await self.attempts.history_rows(include_superseded))
         results.sort(
-            key=lambda item: (item.get("updated_at") or item.get("created_at") or "", item["deploy_id"]),
+            key=lambda item: (
+                item.get("updated_at") or item.get("created_at") or "",
+                item["deploy_id"],
+            ),
             reverse=True,
         )
         return results[:limit]
@@ -551,41 +566,70 @@ class EventStore:
         arch: str,
         haniel_version: str,
         connected: bool = True,
+        connection_generation: str | None = None,
     ) -> None:
-        """Register or update a node. INSERT OR REPLACE."""
+        """Register or update a node and its durable connection generation."""
         async with self._mutation_lock:
             try:
                 await event_store_nodes.upsert_node(
-                    self._db, node_id, hostname, os, arch, haniel_version, connected
+                    self._db,
+                    node_id,
+                    hostname,
+                    os,
+                    arch,
+                    haniel_version,
+                    connected,
+                    connection_generation,
                 )
                 await self._db.commit()
             except Exception:
                 await self._db.rollback()
                 raise
 
-    async def update_node_heartbeat(self, node_id: str) -> None:
+    async def update_node_heartbeat(
+        self, node_id: str, expected_generation: str | None = None
+    ) -> bool:
         """Update last_seen timestamp for a node."""
         async with self._mutation_lock:
             try:
-                await event_store_nodes.update_node_heartbeat(self._db, node_id)
+                updated = await event_store_nodes.update_node_heartbeat(
+                    self._db, node_id, expected_generation
+                )
                 await self._db.commit()
+                return updated
             except Exception:
                 await self._db.rollback()
                 raise
 
-    async def mark_node_disconnected(self, node_id: str) -> None:
-        """Mark an existing node disconnected without clobbering its metadata."""
+    async def mark_node_disconnected(
+        self, node_id: str, expected_generation: str
+    ) -> bool:
+        """Mark only the expected live generation disconnected."""
         async with self._mutation_lock:
             try:
-                await event_store_nodes.mark_node_disconnected(self._db, node_id)
+                updated = await event_store_nodes.mark_node_disconnected(
+                    self._db, node_id, expected_generation
+                )
                 await self._db.commit()
+                return updated
             except Exception:
                 await self._db.rollback()
                 raise
+
+    async def get_node_connection_generation(self, node_id: str) -> str | None:
+        """Return the durable connection generation for race assertions."""
+        cursor = await self._db.execute(
+            "SELECT connection_generation FROM nodes WHERE node_id = ?", (node_id,)
+        )
+        row = await cursor.fetchone()
+        return None if row is None else row[0]
 
     async def get_nodes(self) -> list[dict[str, Any]]:
         """Get all nodes (connected and disconnected)."""
-        cursor = await self._db.execute("SELECT * FROM nodes ORDER BY last_seen DESC")
+        cursor = await self._db.execute(
+            "SELECT node_id, hostname, os, arch, haniel_version, connected, "
+            "last_seen, created_at FROM nodes ORDER BY last_seen DESC"
+        )
         rows = await cursor.fetchall()
         return [_row_to_dict(cursor, row) for row in rows]
 

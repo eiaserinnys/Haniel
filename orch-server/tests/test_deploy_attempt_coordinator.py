@@ -3,7 +3,10 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 
-from haniel_orch.deploy_attempt_coordinator import DeployAttemptCoordinator, PlanRejected
+from haniel_orch.deploy_attempt_coordinator import (
+    DeployAttemptCoordinator,
+    PlanRejected,
+)
 from haniel_orch.event_store import EventStore
 from haniel_orch.protocol import (
     AcceptedDeployAttemptAck,
@@ -85,9 +88,7 @@ class Harness:
     async def close(self) -> None:
         for timer in self.coordinator._timers.values():
             timer.cancel()
-        await asyncio.gather(
-            *self.coordinator._timers.values(), return_exceptions=True
-        )
+        await asyncio.gather(*self.coordinator._timers.values(), return_exceptions=True)
 
 
 async def make_retry(store: EventStore, generation: str) -> None:
@@ -142,7 +143,9 @@ class TestAutoPermission:
             active = await store.attempts.get_active_attempts()
             assert active[0]["orchestrator_attempt_id"] == "auto-1"
             assert active[0]["approved_by"] == "system:auto"
-            assert (await store.get_deploy_event(probe.deploy_id))["status"] == "deploying"
+            assert (await store.get_deploy_event(probe.deploy_id))[
+                "status"
+            ] == "deploying"
         finally:
             await harness.close()
 
@@ -164,7 +167,9 @@ class TestAutoPermission:
             assert await store.attempts.get_active_probes() == []
             assert await store.attempts.get_active_attempts() == []
             assert await store.get_deploy_history() == before
-            assert (await store.get_deploy_event("n:r:main:target"))["status"] == "pending"
+            assert (await store.get_deploy_event("n:r:main:target"))[
+                "status"
+            ] == "pending"
         finally:
             await harness.close()
 
@@ -209,9 +214,7 @@ class TestManualRetryPreflight:
             async def stale_marker_read(_deploy_id: str) -> bool:
                 return False
 
-            monkeypatch.setattr(
-                attempts, "has_retry_requirement", stale_marker_read
-            )
+            monkeypatch.setattr(attempts, "has_retry_requirement", stale_marker_read)
             approval_task = asyncio.create_task(
                 harness.coordinator.approve_manual(
                     event, approved_by="director", source="manual_single"
@@ -278,7 +281,8 @@ class TestConnectionGenerationAuthority:
             assert await store.attempts.get_active_attempts() == []
             assert len(harness.sent) == 1
             row = next(
-                item for item in await store.get_deploy_history()
+                item
+                for item in await store.get_deploy_history()
                 if item["deploy_id"] == f"preflight:{probe.probe_id}"
             )
             assert (
@@ -304,7 +308,9 @@ class TestConnectionGenerationAuthority:
             approval_entered = asyncio.Event()
             release_approval = asyncio.Event()
 
-            async def blocking_send(node_id: str, generation: str, message: object) -> bool:
+            async def blocking_send(
+                node_id: str, generation: str, message: object
+            ) -> bool:
                 harness.sent.append((node_id, message))
                 harness.sent_generations.append(generation)
                 if isinstance(message, AcceptedDeployAttemptAck):
@@ -365,7 +371,8 @@ class TestConnectionGenerationAuthority:
             history = await store.get_deploy_history()
             for probe_id in probe_ids:
                 rows = [
-                    item for item in history
+                    item
+                    for item in history
                     if item["deploy_id"] == f"preflight:{probe_id}"
                 ]
                 assert len(rows) == 1
@@ -404,13 +411,80 @@ class TestConnectionGenerationAuthority:
             )
 
             rows = [
-                item for item in await store.get_deploy_history()
+                item
+                for item in await store.get_deploy_history()
                 if item["deploy_id"] == f"preflight:{probe.probe_id}"
             ]
             assert len(rows) == 1
             assert await store.attempts.get_active_attempts() == []
         finally:
             await harness.close()
+
+    async def test_stale_socket_close_cannot_win_proposal_canonical_deadline_race(
+        self, store: EventStore
+    ):
+        await seed(store)
+        harness = Harness(store)
+        try:
+            stale_generation = harness.generation
+            current_generation = await harness.coordinator.register_connection("n")
+            harness.generation = current_generation
+            await harness.coordinator.handle_auto_request(auto_request("g2-race"))
+            probe = harness.sent[-1][1]
+
+            await asyncio.gather(
+                harness.coordinator.unregister_connection("n", stale_generation),
+                harness.coordinator.handle_proposal(
+                    DeployPlanProposal(
+                        mode="execute",
+                        probe_id=probe.probe_id,
+                        connection_generation=current_generation,
+                        deploy_id=probe.deploy_id,
+                        node_id="n",
+                        repo="r",
+                        branch="main",
+                        target_head="target",
+                        current_head="old",
+                        reason="normal_pull",
+                        fingerprint="g2-race-fp",
+                    )
+                ),
+                store.create_deploy_event(
+                    deploy_id="n:r:main:newer-race",
+                    node_id="n",
+                    repo="r",
+                    branch="main",
+                    commits=["newer change"],
+                    affected_services=["svc"],
+                    diff_stat=None,
+                    detected_at="2026-08-02T00:00:00Z",
+                    target_head="newer-race",
+                ),
+                store.attempts.terminalize_preflight(
+                    probe.probe_id,
+                    kind="preflight_timeout",
+                    stage="deadline",
+                    reason="probe_timeout",
+                    error="probe timed out",
+                ),
+            )
+
+            assert harness.coordinator.current_generation("n") == current_generation
+            preflight_rows = [
+                item
+                for item in await store.get_deploy_history()
+                if item["deploy_id"] == f"preflight:{probe.probe_id}"
+            ]
+            assert len(preflight_rows) <= 1
+            assert not any(
+                row["terminal_kind"] == "preflight_disconnected"
+                for row in preflight_rows
+            )
+            for attempt in await store.attempts.get_active_attempts():
+                assert attempt["connection_generation"] == current_generation
+        finally:
+            await harness.close()
+
 
 class TestManualRetryPreflightContinuation:
     async def test_manual_retry_waits_for_proposal_then_sends_fixed_mode_approval(
@@ -482,7 +556,7 @@ class TestManualRetryPreflightContinuation:
                     fingerprint="fp-fail",
                 )
             )
-            await harness.coordinator.disconnect("n", harness.generation)
+            await harness.coordinator.unregister_connection("n", harness.generation)
             assert not await store.attempts.terminalize_preflight(
                 probe.probe_id,
                 kind="preflight_timeout",
@@ -502,7 +576,9 @@ class TestManualRetryPreflightContinuation:
             assert len(rows) == 1
             assert rows[0]["terminal_kind"] == "preflight_fail_closed"
             assert rows[0]["error"] == "manifest retry journal is missing"
-            assert (await store.get_deploy_event(probe.deploy_id))["status"] == "pending"
+            assert (await store.get_deploy_event(probe.deploy_id))[
+                "status"
+            ] == "pending"
         finally:
             await harness.close()
 

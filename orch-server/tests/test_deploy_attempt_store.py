@@ -138,7 +138,9 @@ class TestNormalFinalization:
             duration_ms=321,
         )
         assert raw["status"] == "recorded"
-        assert (await store.get_deploy_event("n:r:main:target"))["status"] == "deploying"
+        assert (await store.get_deploy_event("n:r:main:target"))[
+            "status"
+        ] == "deploying"
 
         settled = await attempts.record_settled(
             deploy_id="n:r:main:target",
@@ -231,7 +233,9 @@ class TestNormalFinalization:
         )
 
         assert stale["status"] == "ignored"
-        assert (await store.get_deploy_event("n:r:main:target"))["status"] == "deploying"
+        assert (await store.get_deploy_event("n:r:main:target"))[
+            "status"
+        ] == "deploying"
 
     async def test_late_attempt_a_cannot_mutate_retry_b(self, store: EventStore):
         await canonical(store)
@@ -239,8 +243,11 @@ class TestNormalFinalization:
         attempts = store.attempts
         assert attempts is not None
         await attempts.fail_active_attempt(
-            "a", kind="attempt_timeout", stage="deadline",
-            reason="attempt_evidence_timeout", error="timeout"
+            "a",
+            kind="attempt_timeout",
+            stage="deadline",
+            reason="attempt_evidence_timeout",
+            error="timeout",
         )
 
         probe = await attempts.create_probe(
@@ -297,8 +304,11 @@ class TestNormalFinalization:
             remote_head="target",
         )
         late_timeout = await attempts.fail_active_attempt(
-            "a", kind="attempt_timeout", stage="deadline",
-            reason="attempt_evidence_timeout", error="late timeout"
+            "a",
+            kind="attempt_timeout",
+            stage="deadline",
+            reason="attempt_evidence_timeout",
+            error="late timeout",
         )
         assert {
             late_failure["status"],
@@ -329,13 +339,18 @@ class TestNormalFinalization:
         assert attempts is not None
 
         result = await attempts.fail_active_attempt(
-            "old-attempt", kind="deploy_result_failed", stage="execution",
-            reason="deploy_result_failed", error="old failed late"
+            "old-attempt",
+            kind="deploy_result_failed",
+            stage="execution",
+            reason="deploy_result_failed",
+            error="old failed late",
         )
 
         assert result["status"] == "superseded"
         assert (await store.get_deploy_event("n:r:main:target"))["status"] == "rejected"
-        assert (await store.get_deploy_event("n:r:main:new-target"))["status"] == "pending"
+        assert (await store.get_deploy_event("n:r:main:new-target"))[
+            "status"
+        ] == "pending"
         assert not await attempts.has_retry_requirement("n:r:main:target")
 
     async def test_new_commit_supersedes_reopened_retry_and_cleans_marker(
@@ -346,8 +361,11 @@ class TestNormalFinalization:
         attempts = store.attempts
         assert attempts is not None
         await attempts.fail_active_attempt(
-            "failed-first", kind="deploy_result_failed", stage="execution",
-            reason="deploy_result_failed", error="failed"
+            "failed-first",
+            kind="deploy_result_failed",
+            stage="execution",
+            reason="deploy_result_failed",
+            error="failed",
         )
         assert await attempts.has_retry_requirement("n:r:main:target")
 
@@ -408,8 +426,7 @@ class TestPreflightAuthority:
         history = await store.get_deploy_history()
         for probe_id, (kind, stage, reason) in terminals.items():
             row = next(
-                item for item in history
-                if item["deploy_id"] == f"preflight:{probe_id}"
+                item for item in history if item["deploy_id"] == f"preflight:{probe_id}"
             )
             assert (
                 row["terminal_kind"],
@@ -500,13 +517,10 @@ class TestPreflightAuthority:
             )
         )["status"] == "begun"
         await attempts.fail_active_attempt(
-            "a1", kind="failed", stage="execution",
-            reason="test_failure", error="boom"
+            "a1", kind="failed", stage="execution", reason="test_failure", error="boom"
         )
 
-        second = first.model_copy(
-            update={"probe_id": "p2", "fingerprint": "fp2"}
-        )
+        second = first.model_copy(update={"probe_id": "p2", "fingerprint": "fp2"})
         late = await attempts.record_proposal_and_begin(
             second,
             orchestrator_attempt_id="a2",
@@ -520,7 +534,9 @@ class TestPreflightAuthority:
         assert await attempts.get_active_attempts() == []
         assert await attempts.has_retry_requirement("n:r:main:target")
 
-    async def test_first_preflight_terminal_wins_one_history_row(self, store: EventStore):
+    async def test_first_preflight_terminal_wins_one_history_row(
+        self, store: EventStore
+    ):
         await canonical(store)
         attempts = store.attempts
         assert attempts is not None
@@ -562,14 +578,15 @@ class TestPreflightAuthority:
         }
         assert (await store.get_deploy_event("n:r:main:target"))["status"] == "pending"
 
-    async def test_auto_retry_is_rejected_before_probe_creation(self, store: EventStore):
+    async def test_auto_retry_is_rejected_before_probe_creation(
+        self, store: EventStore
+    ):
         await canonical(store)
         await begin(store)
         attempts = store.attempts
         assert attempts is not None
         await attempts.fail_active_attempt(
-            "a1", kind="failed", stage="execution",
-            reason="test_failure", error="boom"
+            "a1", kind="failed", stage="execution", reason="test_failure", error="boom"
         )
         try:
             await attempts.create_probe(
@@ -609,8 +626,11 @@ class TestEvidenceRecovery:
         attempts = store.attempts
         assert attempts is not None
         await attempts.fail_active_attempt(
-            "source", kind="attempt_timeout", stage="deadline",
-            reason="attempt_evidence_timeout", error="lost"
+            "source",
+            kind="attempt_timeout",
+            stage="deadline",
+            reason="attempt_evidence_timeout",
+            error="lost",
         )
         await attempts.create_probe(
             probe_id="recovery-probe",
@@ -680,6 +700,39 @@ class TestEvidenceRecovery:
 
 
 class TestSchemaMigration:
+    async def test_existing_node_table_adds_connection_generation_idempotently(
+        self, tmp_path
+    ):
+        db_path = tmp_path / "node-generation.sqlite3"
+        initial = EventStore(str(db_path))
+        await initial.initialize()
+        await initial.close()
+        connection = sqlite3.connect(db_path)
+        connection.execute("ALTER TABLE nodes DROP COLUMN connection_generation")
+        connection.commit()
+        connection.close()
+
+        migrated = EventStore(str(db_path))
+        await migrated.initialize()
+        await migrated.close()
+        reopened = EventStore(str(db_path))
+        await reopened.initialize()
+        try:
+            cursor = await reopened._db.execute("PRAGMA table_info(nodes)")
+            columns = {row[1] for row in await cursor.fetchall()}
+            assert "connection_generation" in columns
+            await reopened.upsert_node(
+                "n1",
+                "host",
+                "Linux",
+                "x86_64",
+                "0.1.0",
+                connection_generation="g1",
+            )
+            assert await reopened.get_node_connection_generation("n1") == "g1"
+        finally:
+            await reopened.close()
+
     async def test_existing_attempt_table_adds_terminal_audit_columns_idempotently(
         self, tmp_path
     ):
@@ -752,7 +805,9 @@ class TestSchemaMigration:
             assert await migrated.attempts.get_active_attempts() == []
             assert await migrated.attempts.get_active_probes() == []
             assert not await migrated.attempts.has_retry_requirement("failed-old")
-            assert {row["deploy_id"] for row in await migrated.get_deploy_history()} >= {
+            assert {
+                row["deploy_id"] for row in await migrated.get_deploy_history()
+            } >= {
                 "failed-old",
                 "pending-old",
             }
@@ -767,8 +822,7 @@ class TestRetryMarkerCleanup:
         attempts = store.attempts
         assert attempts is not None
         await attempts.fail_active_attempt(
-            "a1", kind="failed", stage="execution",
-            reason="test_failure", error="boom"
+            "a1", kind="failed", stage="execution", reason="test_failure", error="boom"
         )
 
         await store.update_deploy_status(
@@ -783,13 +837,10 @@ class TestRetryMarkerCleanup:
         attempts = store.attempts
         assert attempts is not None
         await attempts.fail_active_attempt(
-            "a1", kind="failed", stage="execution",
-            reason="test_failure", error="boom"
+            "a1", kind="failed", stage="execution", reason="test_failure", error="boom"
         )
 
-        rejected = await store.reject_pending_deploys_for_nodes(
-            ["n"], "node renamed"
-        )
+        rejected = await store.reject_pending_deploys_for_nodes(["n"], "node renamed")
 
         assert [row["deploy_id"] for row in rejected] == ["n:r:main:target"]
         assert not await attempts.has_retry_requirement("n:r:main:target")
