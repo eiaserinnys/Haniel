@@ -21,9 +21,11 @@ from .protocol import (
     NodeHello,
     NodeStatus,
     OrchestratorMessage,
+    RepoReconciliation,
     ServiceCommandResult,
     parse_node_message,
 )
+from .reconciliation import RepoReconciler
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +82,9 @@ class WebSocketHub:
         # mirrors the _pending_commands pattern. Race-safe via pop ownership transfer.
         self._deploy_timeout_sec = deploy_timeout_sec
         self._pending_deploys: dict[str, PendingDeploy] = {}
+        self._repo_reconciler = RepoReconciler(
+            store, self.broadcast_to_dashboards, self.register_pending_deploy
+        )
 
     @property
     def registry(self) -> NodeRegistry:
@@ -158,6 +163,8 @@ class WebSocketHub:
                     )
                 elif isinstance(incoming, DeployResult):
                     await self._handle_deploy_result(incoming)
+                elif isinstance(incoming, RepoReconciliation):
+                    await self._repo_reconciler.handle(incoming)
                 elif isinstance(incoming, ServiceCommandResult):
                     await self._handle_service_command_result(incoming)
 
@@ -229,17 +236,21 @@ class WebSocketHub:
 
     async def _handle_deploy_result(self, msg: DeployResult) -> None:
         """Process a DeployResult: cancel timeout, update status, broadcast."""
-        # Race-safe ownership transfer: pop ensures the timeout task can no longer broadcast.
-        pending = self._pending_deploys.pop(msg.deploy_id, None)
-        if pending is not None:
-            pending.timeout_task.cancel()
         status = DeployStatus[msg.status.upper()]
-        await self._store.update_deploy_status(
+        applied = await self._store.apply_deploy_result(
             msg.deploy_id,
             status,
             error=msg.error,
             duration_ms=msg.duration_ms,
         )
+        if not applied:
+            logger.info(
+                "Ignoring late deploy result for non-deploying id=%s", msg.deploy_id
+            )
+            return
+        pending = self._pending_deploys.pop(msg.deploy_id, None)
+        if pending is not None:
+            pending.timeout_task.cancel()
         await self.broadcast_to_dashboards(
             {
                 "type": "status_change",
@@ -404,20 +415,27 @@ class WebSocketHub:
             timeout_task=timeout_task,
         )
 
+    async def cancel_pending_deploy(self, deploy_id: str) -> None:
+        pending = self._pending_deploys.pop(deploy_id, None)
+        if pending is not None:
+            pending.timeout_task.cancel()
+
     async def _deploy_timeout(self, deploy_id: str) -> None:
         """Wait `deploy_timeout_sec`; broadcast failure if deploy is still in-flight."""
         try:
             await asyncio.sleep(self._deploy_timeout_sec)
         except asyncio.CancelledError:
-            return
+            raise
         # Race-safe: if the result already arrived (or supersede consumed the
         # entry), pop returns None and we no-op.
         pending = self._pending_deploys.pop(deploy_id, None)
         if pending is None:
             return
-        await self._store.update_deploy_status(
+        applied = await self._store.apply_deploy_result(
             deploy_id, DeployStatus.FAILED, error="timeout"
         )
+        if not applied:
+            return
         await self.broadcast_to_dashboards(
             {
                 "type": "status_change",
@@ -460,9 +478,11 @@ class WebSocketHub:
                     node_id,
                 )
                 continue
-            await self._store.update_deploy_status(
+            applied = await self._store.apply_deploy_result(
                 event["deploy_id"], DeployStatus.FAILED, error=error
             )
+            if not applied:
+                continue
             await self.broadcast_to_dashboards(
                 {
                     "type": "status_change",

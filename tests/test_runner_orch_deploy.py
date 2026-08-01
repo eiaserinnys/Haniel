@@ -11,6 +11,7 @@ import pytest
 from haniel.config.model import (
     HanielConfig,
 )
+from haniel.core.repo_reconciliation import RepoReconciliationSnapshot
 from haniel.core.orch_pending_deploy import (
     MARKER_RELPATH,
     write as write_pending,
@@ -39,6 +40,11 @@ def _build_runner(tmp_path: Path, with_self_repo: bool = False) -> ServiceRunner
             "svc-a": {"run": "echo a", "repo": "appA", "enabled": True},
         },
         "repos": repos,
+        "orchestrator_client": {
+            "url": "ws://localhost/ws/node",
+            "token": "test",
+            "node_id": "node-a",
+        },
     }
     if with_self_repo:
         # `self_update` is exposed via alias `self` in HanielConfig model.
@@ -106,6 +112,54 @@ class TestHandleDeployApprovalNonSelf:
             runner._handle_deploy_approval("id", "appA", "feature/x")
         assert "differs from configured" in caplog.text
         runner.trigger_pull.assert_called_once()
+
+
+class TestAutoDeployReconciliation:
+    def test_no_service_repo_still_uses_common_attempt_path(self, tmp_path: Path):
+        runner = _build_runner(tmp_path)
+        runner.config.services.clear()
+        runner._run_auto_deploy = MagicMock()  # type: ignore[method-assign]
+
+        runner._apply_changes(["appA"])
+
+        runner._run_auto_deploy.assert_called_once_with("appA")
+
+    def test_attempt_started_precedes_execution_and_settled_report(
+        self, tmp_path: Path
+    ):
+        runner = _build_runner(tmp_path)
+        before = RepoReconciliationSnapshot(
+            "node-a", "appA", "main", "local", "remote", "node-a:appA:main:remote"
+        )
+        settled = RepoReconciliationSnapshot(
+            "node-a", "appA", "main", "remote", "remote", before.deploy_id
+        )
+        runner._capture_orchestrator_repo_snapshot = MagicMock(  # type: ignore[method-assign]
+            side_effect=[before, settled]
+        )
+        order: list[str] = []
+        runner._orch_client = MagicMock()
+        runner._orch_client.notify_repo_reconciliation.side_effect = (
+            lambda *args, **kwargs: order.append("attempt_started")
+        )
+        runner._orch_client.report_deploy_attempt.side_effect = (
+            lambda *args, **kwargs: order.append("settled_report")
+        )
+        runner.trigger_pull = MagicMock(  # type: ignore[method-assign]
+            side_effect=lambda *args, **kwargs: order.append("execute")
+        )
+
+        runner._run_auto_deploy("appA")
+
+        runner._orch_client.notify_repo_reconciliation.assert_called_once_with(
+            before, "attempt_started", wait=True
+        )
+        runner.trigger_pull.assert_called_once_with("appA", auto=True)
+        runner._orch_client.report_deploy_attempt.assert_called_once()
+        args = runner._orch_client.report_deploy_attempt.call_args.args
+        assert args[0] == settled
+        assert args[1] is None
+        assert order == ["attempt_started", "execute", "settled_report"]
 
 
 class TestHandleDeployApprovalSelfRepo:

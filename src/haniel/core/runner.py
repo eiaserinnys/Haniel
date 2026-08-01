@@ -49,6 +49,10 @@ from .git import (
 from .health import HealthManager, ServiceState
 from .process import ProcessManager
 from .deployment import DeploymentError, DeploymentStateStore
+from .repo_reconciliation import (
+    RepoReconciliationSnapshot,
+    capture_repo_snapshot,
+)
 from .runner_deployment import run_manifest_deployment
 from .self_update_marker import (
     SelfUpdateResult,
@@ -929,6 +933,7 @@ class ServiceRunner:
                 get_services_info=self._collect_services_info,
                 service_command_handler=self._handle_service_command,
                 deploy_approval_handler=self._handle_deploy_approval,
+                repo_snapshot_handler=self._capture_orchestrator_repo_snapshot,
             )
             # Map any self-update result from the previous wrapper iteration
             # into a buffered DeployResult before the client connects. The
@@ -1074,6 +1079,24 @@ class ServiceRunner:
 
         self.trigger_pull(repo, auto=False)
         return None
+
+    def _capture_orchestrator_repo_snapshot(
+        self,
+        repo: str,
+        branch: str,
+        deploy_id: str | None = None,
+    ) -> RepoReconciliationSnapshot:
+        """Capture the one Git-truth contract shared by every trigger."""
+        state = self._repo_states.get(repo)
+        if state is None:
+            raise ValueError(f"Unknown repo: {repo}")
+        return capture_repo_snapshot(
+            node_id=self.config.orchestrator_client.node_id,
+            repo=repo,
+            branch=state.config.branch,
+            path=self.config_dir / state.config.path,
+            deploy_id=deploy_id,
+        )
 
     def _deferred_stop_for_self_update(self) -> None:
         """Helper: small delay then stop. Allows the orch_client coroutine
@@ -1694,7 +1717,6 @@ class ServiceRunner:
                             path=repo_path,
                             branch=state.config.branch,
                         )
-                    self._notify_orchestrator_change(name, state)
                     if self._ws_handler is not None:
                         self._ws_handler.broadcast_repo_change(
                             name, state.pending_changes or {}
@@ -1721,7 +1743,6 @@ class ServiceRunner:
                             path=repo_path,
                             branch=state.config.branch,
                         )
-                        self._notify_orchestrator_change(name, state)
                         if self._ws_handler is not None:
                             self._ws_handler.broadcast_repo_change(
                                 name, state.pending_changes or {}
@@ -1742,6 +1763,9 @@ class ServiceRunner:
                     else:
                         state.pending_changes = None
 
+                if name != self._self_repo:
+                    self._notify_orchestrator_change(name, state)
+
             except GitError as e:
                 logger.error(f"Failed to fetch {name}: {e}")
                 state.fetch_error = str(e)
@@ -1749,18 +1773,24 @@ class ServiceRunner:
         return changed
 
     def _notify_orchestrator_change(self, name: str, state: RepoState) -> None:
-        if not self._orch_client or not state.pending_changes:
+        if not self._orch_client:
             return
-        commits = state.pending_changes.get("commits", [])
-        if not commits:
-            return
-        self._orch_client.notify_change(
-            repo=name,
-            branch=state.config.branch,
-            commits=commits,
-            affected_services=self.get_affected_services(name),
-            diff_stat=state.pending_changes.get("stat"),
+        snapshot = self._capture_orchestrator_repo_snapshot(
+            name, state.config.branch
         )
+        if not snapshot.in_sync and state.pending_changes:
+            commits = state.pending_changes.get("commits", [])
+            if commits:
+                self._orch_client.notify_change(
+                    repo=name,
+                    branch=state.config.branch,
+                    commits=commits,
+                    affected_services=self.get_affected_services(name),
+                    diff_stat=state.pending_changes.get("stat"),
+                    deploy_id=snapshot.deploy_id,
+                    wait=True,
+                )
+        self._orch_client.notify_repo_reconciliation(snapshot, "observed", wait=True)
 
     def _apply_changes(self, changed_repos: list[str]) -> None:
         """Apply changes from the specified repositories.
@@ -1805,25 +1835,42 @@ class ServiceRunner:
         if not changed_repos:
             return
 
-        # Collect all affected services
-        all_affected: set[str] = set()
-        for repo in changed_repos:
-            all_affected.update(self.get_affected_services(repo))
-
-        if not all_affected:
-            # No services affected, just pull
-            for repo in changed_repos:
-                self._pull_repo(repo)
-            return
-
-        logger.info(f"Services affected by changes: {all_affected}")
-
-        # Trigger pull for each changed repo via the unified method
         for repo in changed_repos:
             try:
-                self.trigger_pull(repo, auto=True)
+                self._run_auto_deploy(repo)
             except Exception as e:
                 logger.error("Auto-deploy failed for %s: %s", repo, e)
+
+    def _run_auto_deploy(self, repo: str) -> None:
+        """Run auto_apply through the same settled-HEAD reporting contract."""
+        if (
+            getattr(self, "_orch_client", None) is None
+            or self.config.orchestrator_client is None
+        ):
+            self.trigger_pull(repo, auto=True)
+            return
+        state = self._repo_states[repo]
+        before = self._capture_orchestrator_repo_snapshot(repo, state.config.branch)
+        if self._orch_client:
+            self._orch_client.notify_repo_reconciliation(
+                before, "attempt_started", wait=True
+            )
+        started = time.monotonic()
+        operation_error: str | None = None
+        try:
+            self.trigger_pull(repo, auto=True)
+        except Exception as exc:
+            operation_error = str(exc)
+        settled = self._capture_orchestrator_repo_snapshot(
+            repo, state.config.branch, before.deploy_id
+        )
+        duration_ms = int((time.monotonic() - started) * 1000)
+        if self._orch_client:
+            self._orch_client.report_deploy_attempt(
+                settled, operation_error, duration_ms
+            )
+        if operation_error:
+            raise RuntimeError(operation_error)
 
     def _initiate_self_update(self) -> None:
         """Handle detection of changes in haniel's own repo.

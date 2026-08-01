@@ -13,6 +13,7 @@ from haniel_orch.protocol import (
     NodeMessage,
     NodeStatus,
     OrchestratorMessage,
+    RepoReconciliation,
     parse_node_message,
 )
 
@@ -137,6 +138,31 @@ class TestDeployResult:
         )
         assert msg.status == "failed"
         assert msg.error == "exit code 1"
+
+
+class TestRepoReconciliation:
+    def test_parse_settled_snapshot(self):
+        raw = (
+            '{"type":"repo_reconciliation","phase":"settled",'
+            '"deploy_id":"n:r:main:bbbb","node_id":"n","repo":"r",'
+            '"branch":"main","local_head":"aaaa","remote_head":"bbbb"}'
+        )
+        msg = parse_node_message(raw)
+        assert isinstance(msg, RepoReconciliation)
+        assert msg.phase == "settled"
+        assert msg.local_head != msg.remote_head
+
+    def test_phase_is_closed_enum(self):
+        with pytest.raises(ValidationError):
+            RepoReconciliation(
+                phase="invalid",
+                deploy_id="n:r:main:b",
+                node_id="n",
+                repo="r",
+                branch="main",
+                local_head="a",
+                remote_head="b",
+            )
 
 
 class TestServerMessages:

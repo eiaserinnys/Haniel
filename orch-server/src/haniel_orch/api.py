@@ -32,7 +32,10 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         """
         await hub.cleanup_pending_for_renamed_nodes()
         deploys = await store.get_active_deploys()
-        return JSONResponse({"deploys": deploys})
+        latest_failure = await store.get_latest_failed_deploy()
+        return JSONResponse(
+            {"deploys": deploys, "latest_failure": latest_failure}
+        )
 
     async def get_nodes(request: Request) -> JSONResponse:
         """GET /api/orch/nodes — list all registered nodes.
@@ -100,27 +103,27 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
             deploy_id, DeployStatus.APPROVED, approved_by=approved_by
         )
 
-        # Send approval to node
+        await hub.register_pending_deploy(
+            deploy_id, event["node_id"], event["repo"], event["branch"]
+        )
+        transitioned = await store.transition_deploy_status(
+            deploy_id, DeployStatus.APPROVED, DeployStatus.DEPLOYING
+        )
+        if not transitioned:
+            await hub.cancel_pending_deploy(deploy_id)
+            return JSONResponse(
+                {"error": "deploy state changed before dispatch"}, status_code=409
+            )
+        await hub.broadcast_to_dashboards({
+            "type": "status_change",
+            "deploy_id": deploy_id,
+            "status": DeployStatus.DEPLOYING.value,
+            "node_id": event["node_id"],
+        })
+
         msg = DeployApproval(deploy_id=deploy_id, approved_by=approved_by)
         sent = await hub.send_to_node(event["node_id"], msg)
-
         if sent:
-            # Track for timeout/disconnect handling FIRST. A fast node may
-            # send DeployResult before our await chain completes; if that
-            # arrives before register, _handle_deploy_result.pop() returns
-            # None and we'd leak a timeout task that fires false-positive
-            # status='failed' minutes later.
-            await hub.register_pending_deploy(
-                deploy_id, event["node_id"], event["repo"], event["branch"]
-            )
-            # Node received — mark as deploying
-            await store.update_deploy_status(deploy_id, DeployStatus.DEPLOYING)
-            await hub.broadcast_to_dashboards({
-                "type": "status_change",
-                "deploy_id": deploy_id,
-                "status": DeployStatus.DEPLOYING.value,
-                "node_id": event["node_id"],
-            })
             # Supersede any other PENDING deploys in the same (node, repo, branch).
             # `kept_deploy_id` is the one we just approved.
             await hub.supersede_pending(
@@ -135,7 +138,16 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
             # disappears from PendingView with no path back). 503 surfaces
             # the failure; PENDING keeps it visible so the operator can
             # retry once the node reconnects.
-            await store.update_deploy_status(deploy_id, DeployStatus.PENDING)
+            await hub.cancel_pending_deploy(deploy_id)
+            await store.transition_deploy_status(
+                deploy_id, DeployStatus.DEPLOYING, DeployStatus.PENDING
+            )
+            await hub.broadcast_to_dashboards({
+                "type": "status_change",
+                "deploy_id": deploy_id,
+                "status": DeployStatus.PENDING.value,
+                "node_id": event["node_id"],
+            })
             return JSONResponse(
                 {
                     "error": "node not connected, retry after reconnect",
@@ -243,24 +255,30 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
                 deploy_id, DeployStatus.APPROVED, approved_by="dashboard"
             )
 
+            await hub.register_pending_deploy(
+                deploy_id, node_id, event["repo"], event["branch"]
+            )
+            transitioned = await store.transition_deploy_status(
+                deploy_id, DeployStatus.APPROVED, DeployStatus.DEPLOYING
+            )
+            if not transitioned:
+                await hub.cancel_pending_deploy(deploy_id)
+                failed.append({
+                    "deploy_id": deploy_id,
+                    "reason": "deploy state changed before dispatch",
+                })
+                continue
+            await hub.broadcast_to_dashboards({
+                "type": "status_change",
+                "deploy_id": deploy_id,
+                "status": DeployStatus.DEPLOYING.value,
+                "node_id": node_id,
+            })
+
             msg = DeployApproval(deploy_id=deploy_id, approved_by="dashboard")
             sent = await hub.send_to_node(node_id, msg)
 
             if sent:
-                # Race-safe: register before any further await so a fast
-                # DeployResult finds the entry. See approve_deploy comment.
-                await hub.register_pending_deploy(
-                    deploy_id, node_id, event["repo"], event["branch"]
-                )
-                await store.update_deploy_status(
-                    deploy_id, DeployStatus.DEPLOYING
-                )
-                await hub.broadcast_to_dashboards({
-                    "type": "status_change",
-                    "deploy_id": deploy_id,
-                    "status": DeployStatus.DEPLOYING.value,
-                    "node_id": node_id,
-                })
                 approved.append(deploy_id)
             else:
                 # Node not connected — revert APPROVED → PENDING so the
@@ -268,7 +286,16 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
                 # offline-revert policy in analysis cache F2). Response
                 # shape is preserved: failed array still carries the
                 # deploy_id and reason for the dashboard.
-                await store.update_deploy_status(deploy_id, DeployStatus.PENDING)
+                await hub.cancel_pending_deploy(deploy_id)
+                await store.transition_deploy_status(
+                    deploy_id, DeployStatus.DEPLOYING, DeployStatus.PENDING
+                )
+                await hub.broadcast_to_dashboards({
+                    "type": "status_change",
+                    "deploy_id": deploy_id,
+                    "status": DeployStatus.PENDING.value,
+                    "node_id": node_id,
+                })
                 failed.append({
                     "deploy_id": deploy_id,
                     "reason": "node not connected",

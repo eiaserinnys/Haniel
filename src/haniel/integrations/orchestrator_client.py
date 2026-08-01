@@ -15,12 +15,14 @@ import json
 import logging
 import platform
 import threading
-import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 
+from .deploy_reporting import DeployReporter, parse_deploy_id
+
 if TYPE_CHECKING:
     from ..config.model import OrchestratorClientConfig
+    from ..core.repo_reconciliation import RepoReconciliationSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,9 @@ class OrchestratorClient:
             "Callable[[str, str, dict[str, Any] | None], Any] | None"
         ) = None,
         deploy_approval_handler: "Callable[[str, str, str], str | None] | None" = None,
+        repo_snapshot_handler: (
+            "Callable[[str, str, str], RepoReconciliationSnapshot] | None"
+        ) = None,
     ) -> None:
         self._config = config
         self._haniel_version = haniel_version
@@ -54,6 +59,7 @@ class OrchestratorClient:
         #                startup via enqueue_deploy_result.
         #   Exception  — failure; we send DeployResult{failed, error=str(e)}.
         self._deploy_approval_handler = deploy_approval_handler
+        self._repo_snapshot_handler = repo_snapshot_handler
         self._ws = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -64,6 +70,12 @@ class OrchestratorClient:
         # Used for self-update results that survive runner restart.
         self._pending_deploy_results: list[dict] = []
         self._pending_lock = threading.Lock()
+        self._deploy_reporter = DeployReporter(
+            node_id=config.node_id,
+            approval_handler=deploy_approval_handler,
+            snapshot_handler=repo_snapshot_handler,
+            send_json=lambda message: self._send_json(message),
+        )
 
     def start(self) -> None:
         """Start the background WebSocket connection thread."""
@@ -91,6 +103,8 @@ class OrchestratorClient:
         commits: list[str],
         affected_services: list[str],
         diff_stat: str | None = None,
+        deploy_id: str | None = None,
+        wait: bool = False,
     ) -> None:
         """Notify the orchestrator of detected changes. Thread-safe.
 
@@ -103,9 +117,9 @@ class OrchestratorClient:
         if not commits:
             return  # Nothing to notify
 
-        # Build deterministic deploy_id
-        first_commit_hash = commits[0].split()[0] if commits[0] else ""
-        deploy_id = f"{self._config.node_id}:{repo}:{branch}:{first_commit_hash}"
+        if deploy_id is None:
+            first_commit_hash = commits[0].split()[0] if commits[0] else ""
+            deploy_id = f"{self._config.node_id}:{repo}:{branch}:{first_commit_hash}"
 
         msg = {
             "type": "change_notification",
@@ -120,9 +134,53 @@ class OrchestratorClient:
         }
 
         try:
-            asyncio.run_coroutine_threadsafe(self._send_json(msg), self._loop)
+            future = asyncio.run_coroutine_threadsafe(self._send_json(msg), self._loop)
+            if wait:
+                future.result(timeout=self._config.ping_timeout)
         except Exception as e:
             logger.debug(f"Failed to queue change notification: {e}")
+
+    def notify_repo_reconciliation(
+        self,
+        snapshot: "RepoReconciliationSnapshot",
+        phase: str,
+        *,
+        wait: bool = False,
+    ) -> None:
+        """Send one explicit HEAD reconciliation message from a sync runner thread."""
+        self._schedule_report(
+            lambda: self._deploy_reporter.send_reconciliation(snapshot, phase),
+            wait=wait,
+        )
+
+    def report_deploy_attempt(
+        self,
+        snapshot: "RepoReconciliationSnapshot",
+        operation_error: str | None,
+        duration_ms: int,
+    ) -> None:
+        """Send DeployResult followed by settled reconciliation."""
+        self._schedule_report(
+            lambda: self._deploy_reporter.send_settled_result(
+                snapshot, operation_error, duration_ms
+            ),
+            wait=False,
+        )
+
+    def _schedule_report(
+        self,
+        coroutine_factory: Callable[[], Any],
+        *,
+        wait: bool,
+    ) -> None:
+        if not self._connected or not self._ws or not self._loop:
+            return
+        try:
+            future = asyncio.run_coroutine_threadsafe(coroutine_factory(), self._loop)
+            if wait:
+                future.result(timeout=self._config.ping_timeout)
+        except Exception as exc:
+            logger.warning("Failed to send orchestrator deploy report: %s", exc)
 
     def _build_node_hello(self) -> dict:
         """Build the NodeHello payload sent after connecting."""
@@ -311,101 +369,8 @@ class OrchestratorClient:
             logger.debug(f"Unknown orchestrator message type: {msg_type}")
 
     async def _handle_deploy_approval(self, msg: dict) -> None:
-        """Handle a deploy_approval message from orch-server.
-
-        Parses deploy_id, runs the registered handler in a worker thread
-        (to avoid blocking the event loop during git pull + service restart),
-        then sends DeployResult with success/failed status.
-
-        For self_repo deploys, the handler returns "deferred" after scheduling
-        the actual restart elsewhere; in that case DeployResult is sent on the
-        NEXT startup via the orch_pending_deploy marker, not from here.
-        """
-        deploy_id = msg.get("deploy_id", "")
-        approved_by = msg.get("approved_by", "unknown")
-        logger.info(f"Deploy approved: {deploy_id} by {approved_by}")
-
-        parsed = self._parse_deploy_id(deploy_id)
-        if parsed is None:
-            await self._send_deploy_result(
-                deploy_id,
-                "failed",
-                error=f"invalid deploy_id format: {deploy_id!r}",
-            )
-            return
-        node_id_in_id, repo, branch, _commit = parsed
-        if node_id_in_id != self._config.node_id:
-            await self._send_deploy_result(
-                deploy_id,
-                "failed",
-                error=(
-                    f"deploy_id node mismatch: "
-                    f"{node_id_in_id} != {self._config.node_id}"
-                ),
-            )
-            return
-
-        if self._deploy_approval_handler is None:
-            await self._send_deploy_result(
-                deploy_id,
-                "failed",
-                error="no deploy_approval handler registered",
-            )
-            return
-
-        started = time.monotonic()
-        try:
-            # Run the sync handler off the event loop. The handler returns
-            # quickly for self_repo (deferred stop) and may take seconds-
-            # to-minutes for other repos (git pull + restart).
-            result = await asyncio.to_thread(
-                self._deploy_approval_handler, deploy_id, repo, branch
-            )
-        except Exception as e:
-            duration_ms = int((time.monotonic() - started) * 1000)
-            logger.warning(f"Deploy {deploy_id} failed: {e}")
-            await self._send_deploy_result(
-                deploy_id,
-                "failed",
-                error=str(e),
-                duration_ms=duration_ms,
-            )
-            return
-
-        if result == "deferred":
-            logger.info(
-                f"Deploy {deploy_id} deferred (self_repo) — "
-                f"DeployResult will be sent after restart"
-            )
-            return
-
-        duration_ms = int((time.monotonic() - started) * 1000)
-        await self._send_deploy_result(
-            deploy_id,
-            "success",
-            duration_ms=duration_ms,
-        )
-
-    async def _send_deploy_result(
-        self,
-        deploy_id: str,
-        status: str,
-        error: str | None = None,
-        duration_ms: int | None = None,
-    ) -> None:
-        """Send a single DeployResult message to orch-server."""
-        result = {
-            "type": "deploy_result",
-            "deploy_id": deploy_id,
-            "node_id": self._config.node_id,
-            "status": status,
-            "error": error,
-            "duration_ms": duration_ms,
-        }
-        try:
-            await self._send_json(result)
-        except Exception as e:
-            logger.warning(f"Failed to send deploy result {deploy_id}: {e}")
+        """Delegate manual execution and result ordering to DeployReporter."""
+        await self._deploy_reporter.handle_approval(msg)
 
     @staticmethod
     def _parse_deploy_id(
@@ -418,12 +383,7 @@ class OrchestratorClient:
         leftover ':' (commit hashes are pure hex so the 4th element is
         always a single hash).
         """
-        if not isinstance(deploy_id, str) or not deploy_id:
-            return None
-        parts = deploy_id.split(":", 3)
-        if len(parts) != 4:
-            return None
-        return tuple(parts)  # type: ignore[return-value]
+        return parse_deploy_id(deploy_id)
 
     async def _handle_service_command(self, msg: dict) -> None:
         """Handle a service_command message: execute and send result back."""
