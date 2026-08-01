@@ -1,7 +1,6 @@
 """Read-only retry plan and generation-bound ACK contracts."""
 
 import hashlib
-import threading
 
 import pytest
 
