@@ -48,6 +48,9 @@ class DeployAttemptStoreSupport:
                     "updated_at": attempt["completed_at"],
                     "attempt_outcome": attempt["outcome"],
                     "terminal_kind": attempt["terminal_kind"],
+                    "terminal_stage": attempt["terminal_stage"],
+                    "terminal_reason": attempt["terminal_reason"],
+                    "terminal_error": attempt["terminal_error"],
                 }
             )
         probe_cursor = await self._db.execute(
@@ -72,6 +75,9 @@ class DeployAttemptStoreSupport:
                     "created_at": probe["created_at"],
                     "updated_at": probe["completed_at"],
                     "terminal_kind": probe["terminal_kind"],
+                    "terminal_stage": probe["terminal_stage"],
+                    "terminal_reason": probe["terminal_reason"],
+                    "terminal_error": probe["terminal_error"],
                 }
             )
         return rows
@@ -177,17 +183,28 @@ class DeployAttemptStoreSupport:
             (DeployStatus.SUCCESS.value, attempt["duration_ms"], now, attempt["deploy_id"], DeployStatus.DEPLOYING.value),
         )
         await self.cleanup_retry(attempt["deploy_id"])
+        await self._terminalize_sibling_probes_unlocked(
+            attempt["deploy_id"],
+            "canonical succeeded before this probe began",
+        )
         return {"status": "success", "deploy_id": attempt["deploy_id"]}
 
     async def _fail_attempt_unlocked(
-        self, attempt: dict[str, Any], kind: str, error: str
+        self,
+        attempt: dict[str, Any],
+        *,
+        kind: str,
+        stage: str,
+        reason: str,
+        error: str,
     ) -> dict[str, Any]:
         now = _now_iso()
         changed = await self._db.execute(
             "UPDATE deploy_attempts SET outcome = 'failed', terminal_kind = ?, "
-            "terminal_error = ?, completed_at = ? WHERE orchestrator_attempt_id = ? "
+            "terminal_stage = ?, terminal_reason = ?, terminal_error = ?, "
+            "completed_at = ? WHERE orchestrator_attempt_id = ? "
             "AND outcome = 'active'",
-            (kind, error, now, attempt["orchestrator_attempt_id"]),
+            (kind, stage, reason, error, now, attempt["orchestrator_attempt_id"]),
         )
         if changed.rowcount != 1:
             return {"status": "ignored"}
@@ -201,9 +218,14 @@ class DeployAttemptStoreSupport:
                 (DeployStatus.REJECTED.value, "superseded by newer canonical", now, attempt["deploy_id"]),
             )
             await self.cleanup_retry(attempt["deploy_id"])
+            await self._terminalize_sibling_probes_unlocked(
+                attempt["deploy_id"],
+                "canonical was superseded before this probe began",
+            )
             return {"status": "superseded", "deploy_id": attempt["deploy_id"]}
         await self._db.execute(
-            "UPDATE deploy_events SET status = ?, error = NULL, duration_ms = NULL, "
+            "UPDATE deploy_events SET status = ?, approved_by = NULL, error = NULL, "
+            "duration_ms = NULL, "
             "updated_at = ? WHERE deploy_id = ? AND status = ?",
             (DeployStatus.PENDING.value, now, attempt["deploy_id"], DeployStatus.DEPLOYING.value),
         )
@@ -229,7 +251,24 @@ class DeployAttemptStoreSupport:
             "INSERT OR IGNORE INTO deploy_retry_source_attempts VALUES (?, ?, ?)",
             (attempt["deploy_id"], attempt["orchestrator_attempt_id"], now),
         )
+        await self._terminalize_sibling_probes_unlocked(
+            attempt["deploy_id"],
+            "attempt failed; a new manual retry probe is required",
+        )
         return {"status": "failed", "deploy_id": attempt["deploy_id"]}
+
+    async def _terminalize_sibling_probes_unlocked(
+        self, deploy_id: str, error: str
+    ) -> None:
+        await self._db.execute(
+            """UPDATE deploy_plan_probes
+               SET status = 'terminal', terminal_kind = 'preflight_stale',
+                   terminal_stage = 'attempt_terminal',
+                   terminal_reason = 'attempt_lineage_changed',
+                   terminal_error = ?, completed_at = ?
+               WHERE deploy_id = ? AND status IN ('active','proposed')""",
+            (error, _now_iso(), deploy_id),
+        )
 
     async def _validate_recovery_evidence(
         self, attempt: dict[str, Any], evidence: ManifestRecoveryEvidence
@@ -299,17 +338,28 @@ class DeployAttemptStoreSupport:
 
     async def _proposal_stale_reason(
         self, probe: dict[str, Any], proposal: DeployPlanProposal
-    ) -> str | None:
+    ) -> tuple[str, str] | None:
         if _expired(probe["deadline_at"]):
-            return "probe deadline expired"
+            return "probe_deadline_expired", "probe deadline expired"
         if proposal.connection_generation != probe["connection_generation"]:
-            return "connection generation changed"
+            return "connection_generation_changed", "connection generation changed"
         fields = ("deploy_id", "node_id", "repo", "branch", "target_head")
         if any(getattr(proposal, field) != probe[field] for field in fields):
-            return "proposal snapshot changed"
+            return "proposal_snapshot_changed", "proposal snapshot changed"
         event = await self._event(probe["deploy_id"])
         if event is None or event["status"] != DeployStatus.PENDING.value or not await self._is_latest(event):
-            return "canonical is no longer latest pending"
+            return "canonical_not_latest_pending", "canonical is no longer latest pending"
+        retry = await self._retry_unlocked(probe["deploy_id"])
+        probe_source = probe["source_orchestrator_attempt_id"]
+        probe_lineage = json.loads(probe["retry_lineage_json"])
+        if probe_source is None and retry is not None:
+            return "retry_requires_manual_approval", "retry now requires manual approval"
+        if probe_source is not None and (
+            retry is None
+            or retry["source_orchestrator_attempt_id"] != probe_source
+            or retry["lineage"] != probe_lineage
+        ):
+            return "retry_lineage_changed", "retry lineage changed after probe creation"
         return None
 
     async def _terminalize_probe_unlocked(

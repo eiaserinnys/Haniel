@@ -9,13 +9,14 @@ from typing import Any
 
 import aiosqlite
 
+from .deploy_attempt_generation_store import DeployAttemptGenerationStore
+from .deploy_attempt_store_support import DeployAttemptStoreSupport
 from .protocol import (
     DeployAttemptTerminal,
     DeployPlanProposal,
     DeployStatus,
     ManifestRecoveryEvidence,
 )
-from .deploy_attempt_store_support import DeployAttemptStoreSupport
 
 
 def _now_iso() -> str:
@@ -26,7 +27,7 @@ def _expired(deadline: str) -> bool:
     return datetime.fromisoformat(deadline) <= datetime.now(timezone.utc)
 
 
-class DeployAttemptStore(DeployAttemptStoreSupport):
+class DeployAttemptStore(DeployAttemptGenerationStore, DeployAttemptStoreSupport):
     """One-lock transaction boundary for probes, attempts, and retry markers."""
 
     def __init__(self, db: aiosqlite.Connection, mutation_lock: asyncio.Lock) -> None:
@@ -117,12 +118,15 @@ class DeployAttemptStore(DeployAttemptStoreSupport):
         orchestrator_attempt_id: str,
         deploy_id: str,
         connection_generation: str,
+        current_generation: str,
         source: str,
         approved_by: str,
         deadline_at: str,
     ) -> dict[str, Any]:
         async with self._mutation_lock:
             try:
+                if connection_generation != current_generation:
+                    raise ValueError("connection generation changed")
                 event = await self._event(deploy_id)
                 if event is None or event["status"] != DeployStatus.PENDING.value:
                     raise ValueError("canonical is not pending")
@@ -155,6 +159,7 @@ class DeployAttemptStore(DeployAttemptStoreSupport):
         source: str,
         approved_by: str,
         deadline_at: str,
+        current_generation: str,
     ) -> dict[str, Any]:
         async with self._mutation_lock:
             try:
@@ -165,10 +170,24 @@ class DeployAttemptStore(DeployAttemptStoreSupport):
                     return {"status": "duplicate_begun"}
                 if probe["status"] != "active":
                     return {"status": "ignored", "reason": "terminal_probe"}
-                stale_reason = await self._proposal_stale_reason(probe, proposal)
-                if stale_reason:
+                if (
+                    proposal.connection_generation != probe["connection_generation"]
+                    or probe["connection_generation"] != current_generation
+                ):
                     await self._terminalize_probe_unlocked(
-                        probe, "preflight_stale", "proposal", stale_reason, stale_reason
+                        probe,
+                        "preflight_stale",
+                        "proposal",
+                        "connection_generation_changed",
+                        "proposal, stored probe, and current connection generation differ",
+                    )
+                    await self._db.commit()
+                    return {"status": "terminal", "kind": "preflight_stale"}
+                stale = await self._proposal_stale_reason(probe, proposal)
+                if stale:
+                    reason, error = stale
+                    await self._terminalize_probe_unlocked(
+                        probe, "preflight_stale", "proposal", reason, error
                     )
                     await self._db.commit()
                     return {"status": "terminal", "kind": "preflight_stale"}
@@ -267,9 +286,11 @@ class DeployAttemptStore(DeployAttemptStoreSupport):
                     return {"status": "ignored"}
                 if attempt["execution_mode"] != "execute":
                     result = await self._fail_attempt_unlocked(
-                        attempt,
-                        "execution_mode_mismatch",
-                        "raw DeployResult is forbidden for evidence_recovery mode",
+                        attempt=attempt,
+                        kind="execution_mode_mismatch",
+                        stage="message_validation",
+                        reason="result_forbidden_for_mode",
+                        error="raw DeployResult is forbidden for evidence_recovery mode",
                     )
                 elif status == "failed":
                     await self._db.execute(
@@ -278,9 +299,11 @@ class DeployAttemptStore(DeployAttemptStoreSupport):
                         (status, error, duration_ms, orchestrator_attempt_id),
                     )
                     result = await self._fail_attempt_unlocked(
-                        {**attempt, "duration_ms": duration_ms},
-                        "deploy_result_failed",
-                        error or "deployment operation failed",
+                        attempt={**attempt, "duration_ms": duration_ms},
+                        kind="deploy_result_failed",
+                        stage="execution",
+                        reason="deploy_result_failed",
+                        error=error or "deployment operation failed",
                     )
                 else:
                     await self._db.execute(
@@ -322,9 +345,11 @@ class DeployAttemptStore(DeployAttemptStoreSupport):
                     result = {"status": "recorded"}
                 elif local_head != remote_head or local_head != attempt["target_head"]:
                     result = await self._fail_attempt_unlocked(
-                        attempt,
-                        "settled_head_mismatch",
-                        "settled HEAD mismatch: "
+                        attempt=attempt,
+                        kind="settled_head_mismatch",
+                        stage="reconciliation",
+                        reason="settled_head_mismatch",
+                        error="settled HEAD mismatch: "
                         f"local={local_head} remote={remote_head} target={attempt['target_head']}",
                     )
                 else:
@@ -349,15 +374,21 @@ class DeployAttemptStore(DeployAttemptStoreSupport):
                     return {"status": "ignored"}
                 if attempt["execution_mode"] != "evidence_recovery":
                     result = await self._fail_attempt_unlocked(
-                        attempt,
-                        "execution_mode_mismatch",
-                        "ManifestRecoveryEvidence is forbidden for execute mode",
+                        attempt=attempt,
+                        kind="execution_mode_mismatch",
+                        stage="message_validation",
+                        reason="evidence_forbidden_for_mode",
+                        error="ManifestRecoveryEvidence is forbidden for execute mode",
                     )
                 else:
                     error = await self._validate_recovery_evidence(attempt, evidence)
                     if error:
                         result = await self._fail_attempt_unlocked(
-                            attempt, "recovery_evidence_invalid", error
+                            attempt=attempt,
+                            kind="recovery_evidence_invalid",
+                            stage="evidence_validation",
+                            reason="recovery_evidence_invalid",
+                            error=error,
                         )
                     else:
                         result = await self._success_unlocked(
@@ -374,6 +405,8 @@ class DeployAttemptStore(DeployAttemptStoreSupport):
         orchestrator_attempt_id: str,
         *,
         kind: str,
+        stage: str,
+        reason: str,
         error: str,
     ) -> dict[str, Any]:
         async with self._mutation_lock:
@@ -381,7 +414,13 @@ class DeployAttemptStore(DeployAttemptStoreSupport):
                 attempt = await self._attempt(orchestrator_attempt_id)
                 if attempt is None or attempt["outcome"] != "active":
                     return {"status": "ignored"}
-                result = await self._fail_attempt_unlocked(attempt, kind, error)
+                result = await self._fail_attempt_unlocked(
+                    attempt=attempt,
+                    kind=kind,
+                    stage=stage,
+                    reason=reason,
+                    error=error,
+                )
                 await self._db.commit()
                 return result
             except Exception:
@@ -402,7 +441,11 @@ class DeployAttemptStore(DeployAttemptStoreSupport):
                 if attempt is None:
                     return {"status": "ignored"}
                 result = await self._fail_attempt_unlocked(
-                    attempt, terminal.kind, terminal.error
+                    attempt=attempt,
+                    kind=terminal.kind,
+                    stage=terminal.stage,
+                    reason=terminal.reason,
+                    error=terminal.error,
                 )
                 await self._db.commit()
                 return {**result, "node_id": attempt["node_id"]}
@@ -426,31 +469,6 @@ class DeployAttemptStore(DeployAttemptStoreSupport):
                 changed = await self._terminalize_probe_unlocked(
                     probe, kind, stage, reason, error
                 )
-                await self._db.commit()
-                return changed
-            except Exception:
-                await self._db.rollback()
-                raise
-
-    async def terminalize_generation(self, generation: str) -> list[str]:
-        async with self._mutation_lock:
-            try:
-                cursor = await self._db.execute(
-                    "SELECT probe_id FROM deploy_plan_probes WHERE connection_generation = ? "
-                    "AND status IN ('active','proposed')",
-                    (generation,),
-                )
-                changed: list[str] = []
-                for (probe_id,) in await cursor.fetchall():
-                    probe = await self._probe(probe_id)
-                    if probe and await self._terminalize_probe_unlocked(
-                        probe,
-                        "preflight_disconnected",
-                        "connection",
-                        "node_disconnected",
-                        "node disconnected before begin",
-                    ):
-                        changed.append(probe_id)
                 await self._db.commit()
                 return changed
             except Exception:

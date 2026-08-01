@@ -75,7 +75,7 @@ class WebSocketHub:
         self._repo_reconciler = RepoReconciler(store, self.broadcast_to_dashboards)
         self.deploy_coordinator = DeployAttemptCoordinator(
             store,
-            lambda node_id, message: self.send_to_node(node_id, message),
+            self.send_to_node_generation,
             lambda event: self.broadcast_to_dashboards(event),
             probe_timeout_sec=min(deploy_timeout_sec, 30.0),
             attempt_timeout_sec=deploy_timeout_sec,
@@ -117,10 +117,12 @@ class WebSocketHub:
             return
 
         # 2. Register node
-        previous = self._registry.get_node(msg.node_id)
-        await self._registry.register(websocket, msg)
         node_id = msg.node_id
-        self.deploy_coordinator.register_connection(node_id)
+        previous = self._registry.get_node(node_id)
+        await self.deploy_coordinator.register_connection(
+            node_id,
+            activate=lambda: self._registry.register(websocket, msg),
+        )
         if previous is not None and previous.websocket is not websocket:
             try:
                 await previous.websocket.close(code=4000, reason="node reconnected")
@@ -194,8 +196,8 @@ class WebSocketHub:
         Generation-time supersede is the primary gate for "newest PENDING per
         (node, repo, branch)" — older PENDING entries for the same group are
         auto-rejected with reject_reason='superseded by ${msg.deploy_id}'.
-        DEPLOYING is preserved because ``get_pending_deploys_for_branch``
-        binds ``DeployStatus.PENDING.value`` only (event_store.py:185-190).
+        DEPLOYING is preserved because generation-time supersede mutates only
+        canonical rows that are still PENDING.
         approve-time supersede in api.approve_deploy/approve_all remains as a
         defensive secondary gate.
         """
@@ -530,7 +532,6 @@ class WebSocketHub:
                 close_ws=False,
             )
             return False
-
         try:
             await node.websocket.send_text(message.model_dump_json())
             return True
@@ -543,6 +544,33 @@ class WebSocketHub:
                 close_ws=True,
                 websocket=node.websocket,
             )
+            return False
+
+    async def send_to_node_generation(
+        self, node_id: str, generation: str, message: OrchestratorMessage
+    ) -> bool:
+        """Send a deploy permit only through its coordinator-owned socket generation."""
+        if self.deploy_coordinator.current_generation(node_id) != generation:
+            return False
+        node = self._registry.get_node(node_id)
+        if node is None:
+            return False
+        try:
+            await node.websocket.send_text(message.model_dump_json())
+            return True
+        except Exception as exc:
+            logger.warning("Failed generation-bound send to node %s: %s", node_id, exc)
+            task = asyncio.create_task(
+                self._disconnect_node(
+                    node_id,
+                    reason="send_failed",
+                    error="node disconnected (generation-bound send failed)",
+                    close_ws=True,
+                    websocket=node.websocket,
+                )
+            )
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
             return False
 
     async def _disconnect_node(

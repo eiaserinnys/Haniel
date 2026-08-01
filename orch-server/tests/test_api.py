@@ -100,11 +100,12 @@ class TestGetPending:
         self, hub, store, routes
     ):
         await _seed_pending(store, "failed")
-        generation = hub.deploy_coordinator.register_connection("n1")
+        generation = await hub.deploy_coordinator.register_connection("n1")
         await store.attempts.begin_normal_attempt(
             orchestrator_attempt_id="attempt-failed",
             deploy_id="failed",
             connection_generation=generation,
+            current_generation=generation,
             source="manual_single",
             approved_by="dashboard",
             deadline_at="2099-01-01T00:00:00+00:00",
@@ -126,8 +127,18 @@ class TestGetPending:
 
         assert [row["deploy_id"] for row in data["deploys"]] == ["failed"]
         assert data["deploys"][0]["error"] is None
+        assert not {
+            "terminal_kind",
+            "terminal_stage",
+            "terminal_reason",
+            "terminal_error",
+        } & data["deploys"][0].keys()
         history = client.get("/api/orch/history").json()["deploys"]
-        assert any(row["error"] == "post-pull failed" for row in history)
+        failed_attempt = next(
+            row for row in history if row["error"] == "post-pull failed"
+        )
+        assert failed_attempt["terminal_stage"] == "execution"
+        assert failed_attempt["terminal_reason"] == "deploy_result_failed"
 
     async def test_includes_deploying(self, hub, store, routes):
         """/api/orch/pending returns active (pending + deploying), not just pending."""
@@ -316,10 +327,11 @@ class TestApproveDeploy:
         self, hub, store, routes
     ):
         await _seed_pending(store, "d1", "n1")
-        hub.deploy_coordinator.register_connection("n1")
+        await hub.deploy_coordinator.register_connection("n1")
 
-        async def send_after_transition(node_id, message):
+        async def send_after_transition(node_id, generation, message):
             assert node_id == "n1"
+            assert generation == hub.deploy_coordinator.current_generation("n1")
             assert (await store.get_deploy_event("d1"))["status"] == "deploying"
             assert any(
                 row["deploy_id"] == "d1"
@@ -327,7 +339,7 @@ class TestApproveDeploy:
             )
             return True
 
-        hub.send_to_node = AsyncMock(side_effect=send_after_transition)
+        hub.deploy_coordinator._send = AsyncMock(side_effect=send_after_transition)
         from starlette.applications import Starlette
         from starlette.testclient import TestClient
 

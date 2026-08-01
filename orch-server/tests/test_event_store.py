@@ -419,11 +419,18 @@ class TestGetDeployHistory:
             orchestrator_attempt_id="a1",
             deploy_id="d1",
             connection_generation="g1",
+            current_generation="g1",
             source="manual_single",
             approved_by="director",
             deadline_at="2099-01-01T00:00:00+00:00",
         )
-        await attempts.fail_active_attempt("a1", kind="failed", error="boom")
+        await attempts.fail_active_attempt(
+            "a1",
+            kind="failed",
+            stage="execution",
+            reason="test_failure",
+            error="boom",
+        )
         await store._db.execute(
             "UPDATE deploy_attempts SET completed_at = ? WHERE orchestrator_attempt_id = ?",
             ("2026-08-03T00:00:00Z", "a1"),

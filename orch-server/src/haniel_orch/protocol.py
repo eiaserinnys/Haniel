@@ -26,6 +26,24 @@ class DeployStatus(str, Enum):
     FAILED = "failed"
 
 
+DeployPlanReason = Literal[
+    "legacy_retry",
+    "manifest_read_failed",
+    "manifest_mismatch",
+    "normal_pull",
+    "journal_missing",
+    "journal_target_mismatch",
+    "journal_scope_mismatch",
+    "journal_manifest_mismatch",
+    "journal_link_missing",
+    "retry_lineage_mismatch",
+    "journal_completion_missing",
+    "durable_local_success",
+    "manifest_retry",
+    "unsafe_journal",
+]
+
+
 # --- Node → Server messages ---
 
 
@@ -136,7 +154,7 @@ class DeployPlanProposal(StrictMessage):
     manifest_identity: str | None = None
     manifest_digest: str | None = None
     journal_completed_at: str | None = None
-    reason: str
+    reason: DeployPlanReason
     error: str | None = None
     fingerprint: str
 
@@ -171,7 +189,7 @@ class DeployAttemptTerminal(StrictMessage):
     orchestrator_attempt_id: str
     connection_generation: str
     stage: Literal["approval_revalidation"] = "approval_revalidation"
-    reason: str
+    reason: Literal["approval_revalidation_failed"]
     error: str
 
 

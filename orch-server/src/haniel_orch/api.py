@@ -30,7 +30,7 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
             hub.deploy_coordinator.current_generation(event["node_id"]) is None
             and hub.registry.get_node(event["node_id"]) is not None
         ):
-            hub.deploy_coordinator.register_connection(event["node_id"])
+            await hub.deploy_coordinator.register_connection(event["node_id"])
         return await hub.deploy_coordinator.approve_manual(
             event, approved_by=approved_by, source=source
         )
@@ -82,8 +82,8 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
     async def approve_deploy(request: Request) -> JSONResponse:
         """POST /api/orch/approve — approve a pending deploy.
 
-        Flow: get event → validate status is PENDING → set APPROVED →
-              send DeployApproval to node → set DEPLOYING.
+        The coordinator either begins a normal attempt transaction or runs a
+        retry preflight before beginning and sending the immutable approval.
         """
         body = await request.json()
         deploy_id = body.get("deploy_id")
@@ -170,7 +170,7 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
     async def approve_all(request: Request) -> JSONResponse:
         """POST /api/orch/approve-all — approve all pending deploys.
 
-        Within each (node, repo, branch) group, only the latest (by created_at)
+        Within each (node, repo, branch) group, only the latest canonical
         is approved; the others are auto-superseded so that a stale older
         deploy does not run after a newer one. Response includes ``superseded``
         list when any auto-supersede occurred.
@@ -187,8 +187,8 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
                 "message": "no pending deploys",
             })
 
-        # Group by (node, repo, branch). `pending` is ordered created_at DESC,
-        # so the first occurrence per group is the latest commit. Older
+        # Group by (node, repo, branch). `pending` is ordered by canonical
+        # detected_at, then insertion time, so the first occurrence is latest. Older
         # entries in the same group are auto-superseded via the single
         # source of truth (hub.supersede_pending) — keeps the reject_reason
         # format ("superseded by <id>") and broadcast payload identical to

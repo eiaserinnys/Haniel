@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
 from uuid import uuid4
 
+from .deploy_attempt_deadlines import DeployAttemptDeadlines
 from .event_store import EventStore
 from .protocol import (
     AcceptedDeployAttemptAck,
@@ -20,9 +20,10 @@ from .protocol import (
     RepoReconciliation,
 )
 
-Send = Callable[[str, object], Awaitable[bool]]
+Send = Callable[[str, str, object], Awaitable[bool]]
 Broadcast = Callable[[dict], Awaitable[None]]
 TerminalCallback = Callable[[dict], Awaitable[None]]
+ConnectionActivation = Callable[[], Awaitable[None]]
 
 
 class PlanRejected(RuntimeError):
@@ -33,7 +34,7 @@ class PlanRejected(RuntimeError):
         super().__init__(message)
 
 
-class DeployAttemptCoordinator:
+class DeployAttemptCoordinator(DeployAttemptDeadlines):
     """The sole authority that turns evidence into deploy state transitions."""
 
     def __init__(
@@ -52,6 +53,7 @@ class DeployAttemptCoordinator:
         self._probe_timeout_sec = probe_timeout_sec
         self._attempt_timeout_sec = attempt_timeout_sec
         self._terminal_callback = terminal_callback
+        self._coordination_lock = asyncio.Lock()
         self._generations: dict[str, str] = {}
         self._probe_context: dict[str, tuple[str, str, asyncio.Future[str] | None]] = {}
         self._timers: dict[str, asyncio.Task[None]] = {}
@@ -63,19 +65,33 @@ class DeployAttemptCoordinator:
             raise RuntimeError("EventStore is not initialized")
         return attempts
 
-    def register_connection(self, node_id: str) -> str:
-        generation = uuid4().hex
-        self._generations[node_id] = generation
-        return generation
+    async def register_connection(
+        self, node_id: str, activate: ConnectionActivation | None = None
+    ) -> str:
+        """Install the current socket generation and stale older probes atomically."""
+        async with self._coordination_lock:
+            generation = uuid4().hex
+            self._generations[node_id] = generation
+            if activate is not None:
+                await activate()
+            stale = await self.attempts.terminalize_prior_generations(
+                node_id, generation
+            )
+            for probe_id in stale:
+                self._resolve_probe(
+                    probe_id, PlanRejected("connection generation changed", 409)
+                )
+            return generation
 
     def current_generation(self, node_id: str) -> str | None:
         return self._generations.get(node_id)
 
     async def disconnect(self, node_id: str, generation: str) -> None:
-        if self._generations.get(node_id) == generation:
-            self._generations.pop(node_id, None)
-        for probe_id in await self.attempts.terminalize_generation(generation):
-            self._resolve_probe(probe_id, PlanRejected("node disconnected", 503))
+        async with self._coordination_lock:
+            if self._generations.get(node_id) == generation:
+                self._generations.pop(node_id, None)
+            for probe_id in await self.attempts.terminalize_generation(generation):
+                self._resolve_probe(probe_id, PlanRejected("node disconnected", 503))
 
     async def restore_deadlines(self) -> None:
         """Close pre-restart probes and recreate persisted attempt deadlines."""
@@ -89,15 +105,6 @@ class DeployAttemptCoordinator:
             )
         for attempt in await self.attempts.get_active_attempts():
             self._schedule_attempt(attempt["orchestrator_attempt_id"], attempt["deadline_at"])
-
-    async def shutdown(self) -> None:
-        """Stop only in-memory timers; durable state remains for startup recovery."""
-        timers = list(self._timers.values())
-        self._timers.clear()
-        for timer in timers:
-            timer.cancel()
-        if timers:
-            await asyncio.gather(*timers, return_exceptions=True)
 
     async def resolve_terminal_canonicals(
         self,
@@ -120,159 +127,192 @@ class DeployAttemptCoordinator:
     async def approve_manual(
         self, event: dict, *, approved_by: str, source: str
     ) -> str:
-        generation = self._require_generation(event["node_id"])
-        if not await self.attempts.has_retry_requirement(event["deploy_id"]):
-            orchestrator_attempt_id = uuid4().hex
-            deadline = self._deadline(self._attempt_timeout_sec)
+        async with self._coordination_lock:
+            generation = self._require_generation(event["node_id"])
+            retry_required = await self.attempts.has_retry_requirement(
+                event["deploy_id"]
+            )
+            if not retry_required:
+                orchestrator_attempt_id = uuid4().hex
+                deadline = self._deadline(self._attempt_timeout_sec)
+                try:
+                    await self.attempts.begin_normal_attempt(
+                        orchestrator_attempt_id=orchestrator_attempt_id,
+                        deploy_id=event["deploy_id"],
+                        connection_generation=generation,
+                        current_generation=generation,
+                        source=source,
+                        approved_by=approved_by,
+                        deadline_at=deadline,
+                    )
+                except ValueError as exc:
+                    if str(exc) == "retry requires preflight":
+                        retry_required = True
+                    else:
+                        raise PlanRejected(str(exc), 409) from exc
+                except PermissionError as exc:
+                    raise PlanRejected(str(exc), 409) from exc
+                if not retry_required:
+                    approval = DeployApproval(
+                        deploy_id=event["deploy_id"],
+                        orchestrator_attempt_id=orchestrator_attempt_id,
+                        execution_mode="execute",
+                        connection_generation=generation,
+                        approved_by=approved_by,
+                    )
+                    sent = await self._send(event["node_id"], generation, approval)
+                    self._schedule_attempt(orchestrator_attempt_id, deadline)
+                    if not sent:
+                        raise PlanRejected("node not connected", 503)
+                    await self._broadcast_status(event, "deploying")
+                    return orchestrator_attempt_id
+
+            probe_id = uuid4().hex
+            future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+            self._probe_context[probe_id] = (source, approved_by, future)
             try:
-                await self.attempts.begin_normal_attempt(
-                    orchestrator_attempt_id=orchestrator_attempt_id,
+                probe = await self.attempts.create_probe(
+                    probe_id=probe_id,
                     deploy_id=event["deploy_id"],
                     connection_generation=generation,
-                    source=source,
-                    approved_by=approved_by,
-                    deadline_at=deadline,
+                    deadline_at=self._deadline(self._probe_timeout_sec),
+                    manual_retry=True,
                 )
-            except PermissionError as exc:
+            except (ValueError, PermissionError) as exc:
+                self._probe_context.pop(probe_id, None)
                 raise PlanRejected(str(exc), 409) from exc
-            approval = DeployApproval(
-                deploy_id=event["deploy_id"],
-                orchestrator_attempt_id=orchestrator_attempt_id,
-                execution_mode="execute",
-                connection_generation=generation,
-                approved_by=approved_by,
-            )
-            if not await self._send(event["node_id"], approval):
-                # The committed attempt remains owned by its durable deadline.
-                # Retrying or rolling it back here would create a second terminal
-                # authority beside the persisted attempt timeout.
-                self._schedule_attempt(orchestrator_attempt_id, deadline)
+            if not await self._send(
+                event["node_id"], generation, self._probe_message(probe)
+            ):
+                await self.attempts.terminalize_preflight(
+                    probe_id,
+                    kind="preflight_disconnected",
+                    stage="probe_send",
+                    reason="node_disconnected",
+                    error="node disconnected before plan probe delivery",
+                )
+                self._probe_context.pop(probe_id, None)
                 raise PlanRejected("node not connected", 503)
-            self._schedule_attempt(orchestrator_attempt_id, deadline)
-            await self._broadcast_status(event, "deploying")
-            return orchestrator_attempt_id
-
-        probe_id = uuid4().hex
-        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-        self._probe_context[probe_id] = (source, approved_by, future)
-        probe = await self.attempts.create_probe(
-            probe_id=probe_id,
-            deploy_id=event["deploy_id"],
-            connection_generation=generation,
-            deadline_at=self._deadline(self._probe_timeout_sec),
-            manual_retry=True,
-        )
-        if not await self._send(event["node_id"], self._probe_message(probe)):
-            await self.attempts.terminalize_preflight(
-                probe_id,
-                kind="preflight_disconnected",
-                stage="probe_send",
-                reason="node_disconnected",
-                error="node disconnected before plan probe delivery",
-            )
-            self._probe_context.pop(probe_id, None)
-            raise PlanRejected("node not connected", 503)
-        self._schedule_probe(probe_id)
+            self._schedule_probe(probe_id)
         return await future
 
     async def handle_auto_request(self, msg: RepoReconciliation) -> None:
         requested = msg.orchestrator_attempt_id
         if requested is None:
             raise ValueError("auto attempt request requires orchestrator_attempt_id")
-        generation = self._require_generation(msg.node_id)
-        if await self.attempts.has_retry_requirement(msg.deploy_id):
-            await self._send_auto_retry_rejection(msg, requested, generation)
-            return
-        probe_id = uuid4().hex
-        try:
-            probe = await self.attempts.create_probe(
-                probe_id=probe_id,
-                deploy_id=msg.deploy_id,
-                connection_generation=generation,
-                deadline_at=self._deadline(self._probe_timeout_sec),
-                manual_retry=False,
-                requested_orchestrator_attempt_id=requested,
-            )
-        except PermissionError as exc:
-            if str(exc) == "retry_requires_manual_approval":
+        async with self._coordination_lock:
+            generation = self._require_generation(msg.node_id)
+            if await self.attempts.has_retry_requirement(msg.deploy_id):
                 await self._send_auto_retry_rejection(msg, requested, generation)
-            return
-        except ValueError:
-            return
-        self._probe_context[probe_id] = ("auto", "system:auto", None)
-        if not await self._send(msg.node_id, self._probe_message(probe)):
-            await self.attempts.terminalize_preflight(
-                probe_id,
-                kind="preflight_disconnected",
-                stage="probe_send",
-                reason="node_disconnected",
-                error="node disconnected before auto plan probe delivery",
-            )
-            return
-        self._schedule_probe(probe_id)
+                return
+            probe_id = uuid4().hex
+            try:
+                probe = await self.attempts.create_probe(
+                    probe_id=probe_id,
+                    deploy_id=msg.deploy_id,
+                    connection_generation=generation,
+                    deadline_at=self._deadline(self._probe_timeout_sec),
+                    manual_retry=False,
+                    requested_orchestrator_attempt_id=requested,
+                )
+            except PermissionError as exc:
+                if str(exc) == "retry_requires_manual_approval":
+                    await self._send_auto_retry_rejection(msg, requested, generation)
+                return
+            except ValueError:
+                return
+            self._probe_context[probe_id] = ("auto", "system:auto", None)
+            if not await self._send(
+                msg.node_id, generation, self._probe_message(probe)
+            ):
+                await self.attempts.terminalize_preflight(
+                    probe_id,
+                    kind="preflight_disconnected",
+                    stage="probe_send",
+                    reason="node_disconnected",
+                    error="node disconnected before auto plan probe delivery",
+                )
+                return
+            self._schedule_probe(probe_id)
 
     async def handle_proposal(self, proposal: DeployPlanProposal) -> None:
-        context = self._probe_context.get(proposal.probe_id)
-        if context is None:
-            return
-        source, approved_by, future = context
-        probe_requested = source == "auto"
-        orchestrator_attempt_id = (
-            await self._requested_id(proposal.probe_id)
-            if probe_requested
-            else uuid4().hex
-        )
-        if orchestrator_attempt_id is None:
-            return
-        deadline = self._deadline(self._attempt_timeout_sec)
-        result = await self.attempts.record_proposal_and_begin(
-            proposal,
-            orchestrator_attempt_id=orchestrator_attempt_id,
-            source=source,
-            approved_by=approved_by,
-            deadline_at=deadline,
-        )
-        if result["status"] == "duplicate_begun":
-            return
-        if result["status"] != "begun":
-            self._cancel_timer(f"probe:{proposal.probe_id}")
-            self._resolve_probe(
-                proposal.probe_id,
-                PlanRejected(result.get("kind", "preflight rejected"), 422),
+        async with self._coordination_lock:
+            context = self._probe_context.get(proposal.probe_id)
+            if context is None:
+                return
+            source, approved_by, future = context
+            probe = await self.attempts.get_probe(proposal.probe_id)
+            current_generation = self._generations.get(proposal.node_id)
+            if probe is None:
+                return
+            coordinator_generation_matches = (
+                current_generation is not None
+                and proposal.connection_generation == probe["connection_generation"]
+                and probe["connection_generation"] == current_generation
             )
-            return
-        attempt = result["attempt"]
-        if source == "auto":
-            permit = AcceptedDeployAttemptAck(
-                accepted=True,
-                requested_orchestrator_attempt_id=orchestrator_attempt_id,
-                begun_orchestrator_attempt_id=orchestrator_attempt_id,
-                deploy_id=attempt["deploy_id"],
-                connection_generation=attempt["connection_generation"],
-                probe_id=attempt["probe_id"],
-                execution_mode=attempt["execution_mode"],
-                preflight_fingerprint=attempt["proposal_fingerprint"],
+            probe_requested = source == "auto"
+            orchestrator_attempt_id = (
+                probe["requested_orchestrator_attempt_id"]
+                if probe_requested
+                else uuid4().hex
             )
-        else:
-            permit = DeployApproval(
-                deploy_id=attempt["deploy_id"],
+            if orchestrator_attempt_id is None:
+                return
+            deadline = self._deadline(self._attempt_timeout_sec)
+            result = await self.attempts.record_proposal_and_begin(
+                proposal,
                 orchestrator_attempt_id=orchestrator_attempt_id,
-                execution_mode=attempt["execution_mode"],
-                probe_id=attempt["probe_id"],
-                connection_generation=attempt["connection_generation"],
-                preflight_fingerprint=attempt["proposal_fingerprint"],
+                source=source,
                 approved_by=approved_by,
+                deadline_at=deadline,
+                current_generation=current_generation or "",
             )
-        sent = await self._send(attempt["node_id"], permit)
-        self._cancel_timer(f"probe:{proposal.probe_id}")
-        self._probe_context.pop(proposal.probe_id, None)
-        self._schedule_attempt(orchestrator_attempt_id, deadline)
-        await self._broadcast_status(attempt, "deploying")
-        if future is not None and not future.done():
-            if sent:
-                future.set_result(orchestrator_attempt_id)
+            if not coordinator_generation_matches and result["status"] == "begun":
+                raise RuntimeError("store began an attempt for a stale generation")
+            if result["status"] == "duplicate_begun":
+                return
+            if result["status"] != "begun":
+                self._resolve_probe(
+                    proposal.probe_id,
+                    PlanRejected(result.get("kind", "preflight rejected"), 422),
+                )
+                return
+            attempt = result["attempt"]
+            if source == "auto":
+                permit = AcceptedDeployAttemptAck(
+                    accepted=True,
+                    requested_orchestrator_attempt_id=orchestrator_attempt_id,
+                    begun_orchestrator_attempt_id=orchestrator_attempt_id,
+                    deploy_id=attempt["deploy_id"],
+                    connection_generation=attempt["connection_generation"],
+                    probe_id=attempt["probe_id"],
+                    execution_mode=attempt["execution_mode"],
+                    preflight_fingerprint=attempt["proposal_fingerprint"],
+                )
             else:
-                future.set_exception(PlanRejected("approval delivery failed", 503))
+                permit = DeployApproval(
+                    deploy_id=attempt["deploy_id"],
+                    orchestrator_attempt_id=orchestrator_attempt_id,
+                    execution_mode=attempt["execution_mode"],
+                    probe_id=attempt["probe_id"],
+                    connection_generation=attempt["connection_generation"],
+                    preflight_fingerprint=attempt["proposal_fingerprint"],
+                    approved_by=approved_by,
+                )
+            sent = await self._send(
+                attempt["node_id"], attempt["connection_generation"], permit
+            )
+            self._cancel_timer(f"probe:{proposal.probe_id}")
+            self._probe_context.pop(proposal.probe_id, None)
+            self._schedule_attempt(orchestrator_attempt_id, deadline)
+            await self._broadcast_status(attempt, "deploying")
+            if future is not None and not future.done():
+                if sent:
+                    future.set_result(orchestrator_attempt_id)
+                else:
+                    future.set_exception(
+                        PlanRejected("approval delivery failed", 503)
+                    )
 
     async def handle_result(self, msg: DeployResult) -> None:
         result = await self.attempts.record_result(
@@ -318,6 +358,10 @@ class DeployAttemptCoordinator:
     ) -> None:
         if result.get("status") not in {"success", "failed", "superseded"}:
             return
+        await self.resolve_terminal_canonicals(
+            {result["deploy_id"]},
+            message="attempt lineage changed during preflight",
+        )
         self._cancel_timer(f"attempt:{orchestrator_attempt_id}")
         status = "success" if result["status"] == "success" else (
             "rejected" if result["status"] == "superseded" else "pending"
@@ -337,60 +381,6 @@ class DeployAttemptCoordinator:
                     "node_id": node_id,
                     "orchestrator_attempt_id": orchestrator_attempt_id,
                 }
-            )
-
-    def _schedule_probe(self, probe_id: str) -> None:
-        self._timers[f"probe:{probe_id}"] = asyncio.create_task(
-            self._probe_timeout(probe_id)
-        )
-
-    def _schedule_attempt(self, orchestrator_attempt_id: str, deadline_at: str) -> None:
-        delay = max(
-            0.0,
-            (datetime.fromisoformat(deadline_at) - datetime.now(timezone.utc)).total_seconds(),
-        )
-        self._timers[f"attempt:{orchestrator_attempt_id}"] = asyncio.create_task(
-            self._attempt_timeout(orchestrator_attempt_id, delay)
-        )
-
-    async def _probe_timeout(self, probe_id: str) -> None:
-        try:
-            await asyncio.sleep(self._probe_timeout_sec)
-        except asyncio.CancelledError:
-            return
-        if await self.attempts.terminalize_preflight(
-            probe_id,
-            kind="preflight_timeout",
-            stage="deadline",
-            reason="probe_timeout",
-            error="deploy plan probe timed out before begin",
-        ):
-            self._resolve_probe(probe_id, PlanRejected("preflight timeout", 504))
-
-    async def _attempt_timeout(self, orchestrator_attempt_id: str, delay: float) -> None:
-        try:
-            await asyncio.sleep(delay)
-        except asyncio.CancelledError:
-            return
-        attempt = await self.attempts.get_attempt(orchestrator_attempt_id)
-        if attempt is None or attempt["outcome"] != "active":
-            return
-        if attempt["execution_mode"] == "evidence_recovery":
-            error = "manifest recovery evidence was not received before the attempt deadline"
-        elif attempt["result_status"] == "success":
-            error = "settled HEAD evidence was not received after a successful deploy result"
-        elif attempt["settled_at"] is not None:
-            error = "deploy result was not received after settled HEAD evidence"
-        else:
-            error = "deploy result and settled HEAD evidence were not received before the attempt deadline"
-        result = await self.attempts.fail_active_attempt(
-            orchestrator_attempt_id,
-            kind="attempt_timeout",
-            error=error,
-        )
-        if result.get("deploy_id"):
-            await self._after_store_terminal(
-                attempt["node_id"], orchestrator_attempt_id, result
             )
 
     async def _requested_id(self, probe_id: str) -> str | None:
@@ -424,6 +414,7 @@ class DeployAttemptCoordinator:
     ) -> None:
         await self._send(
             msg.node_id,
+            generation,
             RejectedDeployAttemptAck(
                 accepted=False,
                 requested_orchestrator_attempt_id=requested,
@@ -455,11 +446,6 @@ class DeployAttemptCoordinator:
             raise PlanRejected("node not connected", 503)
         return generation
 
-    def _cancel_timer(self, key: str) -> None:
-        task = self._timers.pop(key, None)
-        if task is not None:
-            task.cancel()
-
     @staticmethod
-    def _deadline(seconds: float) -> str:
-        return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+    def _plan_rejected(message: str, status_code: int) -> PlanRejected:
+        return PlanRejected(message, status_code)

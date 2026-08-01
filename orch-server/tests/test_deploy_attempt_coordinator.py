@@ -61,10 +61,12 @@ async def wait_for_send(harness: "Harness") -> object:
 class Harness:
     def __init__(self, store: EventStore) -> None:
         self.sent: list[tuple[str, object]] = []
+        self.sent_generations: list[str] = []
         self.broadcasts: list[dict] = []
 
-        async def send(node_id: str, message: object) -> bool:
+        async def send(node_id: str, generation: str, message: object) -> bool:
             self.sent.append((node_id, message))
+            self.sent_generations.append(generation)
             return True
 
         async def broadcast(message: dict) -> None:
@@ -77,7 +79,8 @@ class Harness:
             probe_timeout_sec=60,
             attempt_timeout_sec=60,
         )
-        self.generation = self.coordinator.register_connection("n")
+        self.generation = "g1"
+        self.coordinator._generations["n"] = self.generation
 
     async def close(self) -> None:
         for timer in self.coordinator._timers.values():
@@ -93,12 +96,17 @@ async def make_retry(store: EventStore, generation: str) -> None:
         orchestrator_attempt_id="failed-source",
         deploy_id="n:r:main:target",
         connection_generation=generation,
+        current_generation=generation,
         source="manual_single",
         approved_by="director",
         deadline_at=deadline(),
     )
     await store.attempts.fail_active_attempt(
-        "failed-source", kind="deploy_result_failed", error="hook failed"
+        "failed-source",
+        kind="deploy_result_failed",
+        stage="execution",
+        reason="deploy_result_failed",
+        error="hook failed",
     )
 
 
@@ -188,6 +196,223 @@ class TestAutoPermission:
 
 
 class TestManualRetryPreflight:
+    async def test_marker_created_between_check_and_begin_switches_to_preflight(
+        self, store: EventStore, monkeypatch
+    ):
+        event = await seed(store)
+        harness = Harness(store)
+        attempts = store.attempts
+        assert attempts is not None
+        try:
+            await make_retry(store, harness.generation)
+
+            async def stale_marker_read(_deploy_id: str) -> bool:
+                return False
+
+            monkeypatch.setattr(
+                attempts, "has_retry_requirement", stale_marker_read
+            )
+            approval_task = asyncio.create_task(
+                harness.coordinator.approve_manual(
+                    event, approved_by="director", source="manual_single"
+                )
+            )
+            probe = await wait_for_send(harness)
+
+            assert isinstance(probe, DeployPlanProbe)
+            await harness.coordinator.handle_proposal(
+                DeployPlanProposal(
+                    mode="fail_closed",
+                    probe_id=probe.probe_id,
+                    connection_generation=harness.generation,
+                    deploy_id=probe.deploy_id,
+                    node_id="n",
+                    repo="r",
+                    branch="main",
+                    target_head="target",
+                    current_head="target",
+                    reason="journal_missing",
+                    error="test closed",
+                    fingerprint="fp-closed",
+                )
+            )
+            try:
+                await approval_task
+            except PlanRejected as exc:
+                assert exc.status_code == 422
+            else:
+                raise AssertionError("retry race bypassed preflight")
+        finally:
+            await harness.close()
+
+
+class TestConnectionGenerationAuthority:
+    async def test_late_g1_proposal_after_g2_reconnect_is_stale_without_begin(
+        self, store: EventStore
+    ):
+        await seed(store)
+        harness = Harness(store)
+        try:
+            await harness.coordinator.handle_auto_request(auto_request("g1-request"))
+            probe = harness.sent[-1][1]
+            old_generation = harness.generation
+
+            new_generation = await harness.coordinator.register_connection("n")
+            assert new_generation != old_generation
+            await harness.coordinator.handle_proposal(
+                DeployPlanProposal(
+                    mode="execute",
+                    probe_id=probe.probe_id,
+                    connection_generation=old_generation,
+                    deploy_id=probe.deploy_id,
+                    node_id="n",
+                    repo="r",
+                    branch="main",
+                    target_head="target",
+                    current_head="old",
+                    reason="normal_pull",
+                    fingerprint="late-g1",
+                )
+            )
+
+            assert await store.attempts.get_active_attempts() == []
+            assert len(harness.sent) == 1
+            row = next(
+                item for item in await store.get_deploy_history()
+                if item["deploy_id"] == f"preflight:{probe.probe_id}"
+            )
+            assert (
+                row["terminal_kind"],
+                row["terminal_stage"],
+                row["terminal_reason"],
+            ) == (
+                "preflight_stale",
+                "connection_registration",
+                "connection_generation_changed",
+            )
+        finally:
+            await harness.close()
+
+    async def test_begin_and_approval_send_are_serialized_before_reconnect(
+        self, store: EventStore
+    ):
+        await seed(store)
+        harness = Harness(store)
+        try:
+            await harness.coordinator.handle_auto_request(auto_request("serialized"))
+            probe = harness.sent[-1][1]
+            approval_entered = asyncio.Event()
+            release_approval = asyncio.Event()
+
+            async def blocking_send(node_id: str, generation: str, message: object) -> bool:
+                harness.sent.append((node_id, message))
+                harness.sent_generations.append(generation)
+                if isinstance(message, AcceptedDeployAttemptAck):
+                    approval_entered.set()
+                    await release_approval.wait()
+                return True
+
+            harness.coordinator._send = blocking_send
+            proposal_task = asyncio.create_task(
+                harness.coordinator.handle_proposal(
+                    DeployPlanProposal(
+                        mode="execute",
+                        probe_id=probe.probe_id,
+                        connection_generation=harness.generation,
+                        deploy_id=probe.deploy_id,
+                        node_id="n",
+                        repo="r",
+                        branch="main",
+                        target_head="target",
+                        current_head="old",
+                        reason="normal_pull",
+                        fingerprint="serialized-fp",
+                    )
+                )
+            )
+            await approval_entered.wait()
+            reconnect_task = asyncio.create_task(
+                harness.coordinator.register_connection("n")
+            )
+            await asyncio.sleep(0)
+            assert not reconnect_task.done()
+
+            release_approval.set()
+            await proposal_task
+            new_generation = await reconnect_task
+
+            assert harness.sent_generations[-1] == harness.generation
+            assert new_generation != harness.generation
+            attempts = await store.attempts.get_active_attempts()
+            assert attempts[0]["connection_generation"] == harness.generation
+        finally:
+            await harness.close()
+
+    async def test_repeated_reconnect_terminalizes_each_prior_probe_once(
+        self, store: EventStore
+    ):
+        await seed(store)
+        harness = Harness(store)
+        try:
+            probe_ids = []
+            for index in range(2):
+                await harness.coordinator.handle_auto_request(
+                    auto_request(f"reconnect-{index}")
+                )
+                probe_ids.append(harness.sent[-1][1].probe_id)
+                await harness.coordinator.register_connection("n")
+
+            history = await store.get_deploy_history()
+            for probe_id in probe_ids:
+                rows = [
+                    item for item in history
+                    if item["deploy_id"] == f"preflight:{probe_id}"
+                ]
+                assert len(rows) == 1
+                assert rows[0]["terminal_reason"] == "connection_generation_changed"
+        finally:
+            await harness.close()
+
+    async def test_disconnect_new_canonical_and_deadline_race_materializes_once(
+        self, store: EventStore
+    ):
+        await seed(store)
+        harness = Harness(store)
+        try:
+            await harness.coordinator.handle_auto_request(auto_request("racing"))
+            probe = harness.sent[-1][1]
+            await asyncio.gather(
+                harness.coordinator.register_connection("n"),
+                store.create_deploy_event(
+                    deploy_id="n:r:main:newer",
+                    node_id="n",
+                    repo="r",
+                    branch="main",
+                    commits=["newer change"],
+                    affected_services=["svc"],
+                    diff_stat=None,
+                    detected_at="2026-08-02T00:00:00Z",
+                    target_head="newer",
+                ),
+                store.attempts.terminalize_preflight(
+                    probe.probe_id,
+                    kind="preflight_timeout",
+                    stage="deadline",
+                    reason="probe_timeout",
+                    error="probe timed out",
+                ),
+            )
+
+            rows = [
+                item for item in await store.get_deploy_history()
+                if item["deploy_id"] == f"preflight:{probe.probe_id}"
+            ]
+            assert len(rows) == 1
+            assert await store.attempts.get_active_attempts() == []
+        finally:
+            await harness.close()
+
+class TestManualRetryPreflightContinuation:
     async def test_manual_retry_waits_for_proposal_then_sends_fixed_mode_approval(
         self, store: EventStore
     ):

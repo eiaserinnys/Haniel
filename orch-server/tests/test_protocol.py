@@ -305,6 +305,16 @@ class TestDeployAttemptProtocolAuthority:
                 error="forbidden",
             )
 
+        with pytest.raises(ValidationError):
+            DeployAttemptTerminal(
+                kind="approval_revalidation_failed",
+                deploy_id="d1",
+                orchestrator_attempt_id="a1",
+                connection_generation="g1",
+                reason="untyped_reason",
+                error="forbidden",
+            )
+
     def test_missing_type_raises_value_error(self):
         with pytest.raises(ValueError, match="Missing 'type'"):
             parse_node_message('{"node_id":"n1"}')
@@ -325,5 +335,3 @@ class TestDeployAttemptProtocolAuthority:
         # NodeHello without required 'token' field
         with pytest.raises(ValidationError):
             parse_node_message('{"type":"node_hello","node_id":"n1"}')
-    DeployAttemptTerminal,
-    RejectedDeployAttemptAck,

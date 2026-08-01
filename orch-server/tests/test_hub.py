@@ -64,6 +64,7 @@ async def begin_attempt(
         orchestrator_attempt_id=f"attempt-{deploy_id}",
         deploy_id=deploy_id,
         connection_generation=generation,
+        current_generation=generation,
         source="manual_single",
         approved_by="test",
         deadline_at=deadline_at
@@ -137,6 +138,37 @@ class TestBroadcastToDashboards:
 
 
 class TestSendToNode:
+    async def test_generation_bound_send_never_routes_to_replacement_socket(
+        self, hub: WebSocketHub, registry: NodeRegistry
+    ):
+        ws1 = AsyncMock()
+        ws2 = AsyncMock()
+        hello = NodeHello(
+            node_id="n1",
+            token="t",
+            hostname="h",
+            os="Linux",
+            arch="x86_64",
+            haniel_version="0.1.0",
+        )
+        generation1 = await hub.deploy_coordinator.register_connection(
+            "n1", activate=lambda: registry.register(ws1, hello)
+        )
+        generation2 = await hub.deploy_coordinator.register_connection(
+            "n1", activate=lambda: registry.register(ws2, hello)
+        )
+
+        stale = approval().model_copy(
+            update={"connection_generation": generation1}
+        )
+        current = approval().model_copy(
+            update={"connection_generation": generation2}
+        )
+        assert not await hub.send_to_node_generation("n1", generation1, stale)
+        assert await hub.send_to_node_generation("n1", generation2, current)
+        ws1.send_text.assert_not_awaited()
+        ws2.send_text.assert_awaited_once_with(current.model_dump_json())
+
     async def test_sends_message_to_connected_node(
         self, hub: WebSocketHub, registry: NodeRegistry, store: EventStore
     ):
@@ -865,7 +897,7 @@ class TestDeployTimeout:
             commits=["h msg"], affected_services=[], diff_stat=None,
             detected_at="2026-01-01T00:00:00Z",
         )
-        generation = hub.deploy_coordinator.register_connection("n1")
+        generation = await hub.deploy_coordinator.register_connection("n1")
         await begin_attempt(store, "d1", generation=generation)
         await hub.deploy_coordinator.restore_deadlines()
 

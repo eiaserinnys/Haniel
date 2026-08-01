@@ -312,9 +312,9 @@ class EventStore:
     async def supersede_stale_pending_deploys(self) -> list[str]:
         """Reject older PENDING deploys per (node, repo, branch).
 
-        This is the read/repair gate for rows that existed before
-        generation-time supersede was added, or for rows inserted while an old
-        orch-server was running. DEPLOYING rows are intentionally excluded.
+        This startup repair handles rows that existed before generation-time
+        supersede was added, or rows inserted while an old orch-server was
+        running. Read APIs never invoke it. DEPLOYING rows are excluded.
         """
         async with self._mutation_lock:
             try:
@@ -416,6 +416,12 @@ class EventStore:
             d = _row_to_dict(cursor, row)
             d["commits"] = json.loads(d.pop("commits_json"))
             d["affected_services"] = json.loads(d.pop("affected_services_json"))
+            d.update(
+                terminal_kind=None,
+                terminal_stage=None,
+                terminal_reason=None,
+                terminal_error=None,
+            )
             results.append(d)
         if self.attempts is not None:
             success_metadata = await self.attempts.success_metadata()

@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS deploy_attempts (
     settled_at TEXT,
     outcome TEXT NOT NULL DEFAULT 'active',
     terminal_kind TEXT,
+    terminal_stage TEXT,
+    terminal_reason TEXT,
     terminal_error TEXT,
     commits_json TEXT NOT NULL,
     affected_services_json TEXT NOT NULL,
@@ -99,15 +101,24 @@ CANONICAL_COLUMNS = {
     "expected_manifest_digest": "TEXT",
 }
 
+ATTEMPT_COLUMNS = {
+    "terminal_stage": "TEXT",
+    "terminal_reason": "TEXT",
+}
+
+
+async def _ensure_columns(
+    db: aiosqlite.Connection, table: str, columns: dict[str, str]
+) -> None:
+    cursor = await db.execute(f"PRAGMA table_info({table})")
+    existing = {row[1] for row in await cursor.fetchall()}
+    for name, declaration in columns.items():
+        if name not in existing:
+            await db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+
 
 async def initialize_attempt_schema(db: aiosqlite.Connection) -> None:
     """Add v16 tables without reopening historical FAILED rows or journals."""
-    cursor = await db.execute("PRAGMA table_info(deploy_events)")
-    existing = {row[1] for row in await cursor.fetchall()}
-    for name, declaration in CANONICAL_COLUMNS.items():
-        if name not in existing:
-            await db.execute(
-                f"ALTER TABLE deploy_events ADD COLUMN {name} {declaration}"
-            )
+    await _ensure_columns(db, "deploy_events", CANONICAL_COLUMNS)
     await db.executescript(ATTEMPT_TABLES_SQL)
-
+    await _ensure_columns(db, "deploy_attempts", ATTEMPT_COLUMNS)
