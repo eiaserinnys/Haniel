@@ -1065,10 +1065,14 @@ class TestServiceRunnerPollCycle:
             assert "test-service" not in runner._pending_restarts
         mock_start.assert_called_once_with("test-service")
 
+    @patch("haniel.core.runner.read_file_at_commit", return_value=b"manifest")
+    @patch("haniel.core.runner.get_remote_head", return_value="target-head")
     @patch("haniel.core.runner.run_manifest_deployment")
     def test_trigger_pull_routes_manifest_repo_through_state_machine(
         self,
         mock_deploy,
+        mock_remote_head,
+        mock_read_manifest,
         runner_with_mock_repo,
     ):
         runner = runner_with_mock_repo
@@ -1080,12 +1084,44 @@ class TestServiceRunnerPollCycle:
         with patch.object(runner, "_pull_repo", return_value=(True, [])):
             runner.trigger_pull("test-repo")
 
-        mock_deploy.assert_called_once_with(
-            runner,
-            "test-repo",
-            ["test-service"],
-            previous_head,
-        )
+        args, kwargs = mock_deploy.call_args
+        assert args == (runner, "test-repo", ["test-service"], previous_head)
+        assert kwargs["branch"] == "main"
+        assert kwargs["journal_attempt_id"]
+        assert kwargs["orchestrator_attempt_id"] is None
+        assert kwargs["node_id"] is None
+        mock_remote_head.assert_called_once()
+        mock_read_manifest.assert_called_once()
+
+    @patch("haniel.core.runner.read_file_at_commit", return_value=b"manifest")
+    @patch("haniel.core.runner.run_manifest_deployment")
+    def test_orchestrated_pull_target_drift_restores_previous_before_hooks(
+        self,
+        mock_deploy,
+        _mock_read_manifest,
+        runner_with_mock_repo,
+    ):
+        runner = runner_with_mock_repo
+        state = runner._repo_states["test-repo"]
+        state.config.release_manifest = "deploy/release.json"
+        state.pending_changes = {"commits": ["a"]}
+        repo_path = runner.config_dir / state.config.path
+        previous_head = get_head(repo_path)
+
+        with (
+            patch.object(runner, "_pull_repo", return_value=(True, [])),
+            pytest.raises(Exception, match="approved target changed during pull"),
+        ):
+            runner.trigger_pull(
+                "test-repo",
+                orchestrator_attempt_id="orch-1",
+                node_id="node-a",
+                branch="main",
+                target_head="different-target",
+            )
+
+        assert get_head(repo_path) == previous_head
+        mock_deploy.assert_not_called()
 
     @patch("haniel.core.runner.ServiceRunner._start_service")
     def test_trigger_pull_blocks_restart_until_post_pull_finishes(

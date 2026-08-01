@@ -49,7 +49,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function fetchPending(): Promise<{
   deploys: Deploy[];
-  latest_failure: Deploy | null;
 }> {
   return request('/api/orch/pending');
 }

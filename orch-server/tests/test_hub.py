@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import time
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -20,6 +21,81 @@ from haniel_orch.protocol import (
     NodeHello,
     RepoReconciliation,
 )
+
+
+def approval(deploy_id: str = "d1", approved_by: str = "dashboard") -> DeployApproval:
+    return DeployApproval(
+        deploy_id=deploy_id,
+        orchestrator_attempt_id=f"attempt-{deploy_id}",
+        execution_mode="execute",
+        connection_generation="g1",
+        approved_by=approved_by,
+    )
+
+
+def deploy_result(
+    deploy_id: str,
+    *,
+    node_id: str = "n1",
+    status: str,
+    error: str | None = None,
+    duration_ms: int | None = None,
+) -> DeployResult:
+    return DeployResult(
+        deploy_id=deploy_id,
+        node_id=node_id,
+        status=status,
+        error=error,
+        duration_ms=duration_ms,
+        orchestrator_attempt_id=f"attempt-{deploy_id}",
+        connection_generation="g1",
+    )
+
+
+async def begin_attempt(
+    store: EventStore,
+    deploy_id: str,
+    *,
+    generation: str = "g1",
+    deadline_at: str | None = None,
+) -> None:
+    assert store.attempts is not None
+    await store.attempts.begin_normal_attempt(
+        orchestrator_attempt_id=f"attempt-{deploy_id}",
+        deploy_id=deploy_id,
+        connection_generation=generation,
+        source="manual_single",
+        approved_by="test",
+        deadline_at=deadline_at
+        or (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+    )
+
+
+def settled(
+    deploy_id: str,
+    *,
+    node_id: str = "n1",
+    local_head: str | None = None,
+    remote_head: str | None = None,
+) -> RepoReconciliation:
+    target = deploy_id.rsplit(":", 1)[-1]
+    return RepoReconciliation(
+        phase="settled",
+        deploy_id=deploy_id,
+        node_id=node_id,
+        repo="r" if ":repo:" not in deploy_id else "repo",
+        branch="main",
+        local_head=local_head or target,
+        remote_head=remote_head or target,
+        orchestrator_attempt_id=f"attempt-{deploy_id}",
+        connection_generation="g1",
+    )
+
+
+def bind_generation(
+    hub: WebSocketHub, *, node_id: str = "n1", generation: str = "g1"
+) -> None:
+    hub.deploy_coordinator._generations[node_id] = generation
 
 
 @pytest.fixture
@@ -75,14 +151,14 @@ class TestSendToNode:
         )
         await registry.register(ws, hello)
 
-        msg = DeployApproval(deploy_id="d1", approved_by="test")
+        msg = approval(approved_by="test")
         result = await hub.send_to_node("n1", msg)
 
         assert result is True
         ws.send_text.assert_called_once_with(msg.model_dump_json())
 
     async def test_returns_false_for_unknown_node(self, hub: WebSocketHub):
-        msg = DeployApproval(deploy_id="d1")
+        msg = approval()
         result = await hub.send_to_node("nonexistent", msg)
         assert result is False
 
@@ -101,7 +177,7 @@ class TestSendToNode:
         )
         await registry.register(ws, hello)
 
-        msg = DeployApproval(deploy_id="d1")
+        msg = approval()
         result = await hub.send_to_node("n1", msg)
         assert result is False
         assert registry.get_node("n1") is None
@@ -128,7 +204,7 @@ class TestSendToNode:
             ),
         )
 
-        result = await hub.send_to_node("n1", DeployApproval(deploy_id="d1"))
+        result = await hub.send_to_node("n1", approval())
 
         assert result is False
         sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
@@ -262,6 +338,7 @@ class TestHandleChangeNotificationSupersede:
         node_id: str = "n1",
         repo: str = "r",
         branch: str = "main",
+        detected_at: str = "2026-05-19T00:00:00Z",
     ) -> ChangeNotification:
         return ChangeNotification(
             deploy_id=deploy_id,
@@ -271,8 +348,37 @@ class TestHandleChangeNotificationSupersede:
             commits=["hN msgN"],
             affected_services=[],
             diff_stat=None,
-            detected_at="2026-05-19T00:00:00Z",
+            detected_at=detected_at,
         )
+
+    async def test_late_older_notification_does_not_open_or_push_pending(
+        self, hub: WebSocketHub, store: EventStore
+    ):
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        await hub._handle_change_notification(
+            self._notification("new", detected_at="2026-05-20T00:00:00Z")
+        )
+        ws_dash.reset_mock()
+
+        await hub._handle_change_notification(
+            self._notification("old-late", detected_at="2026-05-19T00:00:00Z")
+        )
+
+        assert [row["deploy_id"] for row in await store.get_active_deploys()] == [
+            "new"
+        ]
+        sent = [json.loads(call.args[0]) for call in ws_dash.send_text.call_args_list]
+        assert not any(item.get("type") == "new_pending" for item in sent)
+        assert sent == [
+            {
+                "type": "status_change",
+                "deploy_id": "old-late",
+                "status": "rejected",
+                "node_id": "n1",
+                "reject_reason": "superseded by new",
+            }
+        ]
 
     async def test_supersedes_prior_pending_same_branch(
         self, hub: WebSocketHub, store: EventStore
@@ -293,7 +399,7 @@ class TestHandleChangeNotificationSupersede:
         """d_running DEPLOYING + d_new change_notification → d_running 그대로
         (이미 실행 중인 작업은 보호)."""
         await self._seed_pending(store, "d_running")
-        await store.update_deploy_status("d_running", DeployStatus.DEPLOYING)
+        await begin_attempt(store, "d_running")
 
         await hub._handle_change_notification(self._notification("d_new"))
 
@@ -374,13 +480,16 @@ class TestHandleDeployResult:
             diff_stat=None,
             detected_at="2026-01-01T00:00:00Z",
         )
-        await store.update_deploy_status("d1", DeployStatus.DEPLOYING)
+        await begin_attempt(store, "d1")
 
-        result = DeployResult(
-            deploy_id="d1", node_id="n1", status="success", duration_ms=5000
-        )
+        result = deploy_result("d1", status="success", duration_ms=5000)
         await hub._handle_deploy_result(result)
 
+        event = await store.get_deploy_event("d1")
+        assert event["status"] == "deploying"
+
+        bind_generation(hub)
+        await hub.deploy_coordinator.handle_settled(settled("d1"))
         event = await store.get_deploy_event("d1")
         assert event["status"] == "success"
         assert event["duration_ms"] == 5000
@@ -400,20 +509,22 @@ class TestHandleDeployResult:
             diff_stat=None,
             detected_at="2026-01-01T00:00:00Z",
         )
-        await store.update_deploy_status("d2", DeployStatus.DEPLOYING)
+        await begin_attempt(store, "d2")
 
-        result = DeployResult(
-            deploy_id="d2",
-            node_id="n1",
-            status="failed",
-            error="exit code 1",
-            duration_ms=3400,
+        result = deploy_result(
+            "d2", status="failed", error="exit code 1", duration_ms=3400
         )
         await hub._handle_deploy_result(result)
 
         event = await store.get_deploy_event("d2")
-        assert event["status"] == "failed"
-        assert event["error"] == "exit code 1"
+        assert event["status"] == "pending"
+        assert event["error"] is None
+        retry = await store.attempts.get_retry_requirement("d2")
+        assert retry["source_orchestrator_attempt_id"] == "attempt-d2"
+        history = await store.get_deploy_history()
+        failed = next(row for row in history if row["deploy_id"] == "attempt:attempt-d2")
+        assert failed["error"] == "exit code 1"
+        assert failed["duration_ms"] == 3400
 
 
 class TestHeartbeatChecker:
@@ -504,12 +615,13 @@ class TestPushIntegration:
             diff_stat=None,
             detected_at="2026-01-01T00:00:00Z",
         )
-        await store.update_deploy_status("d1", DeployStatus.DEPLOYING)
+        await begin_attempt(store, "d1")
 
-        result = DeployResult(
-            deploy_id="d1", node_id="n1", status="success", duration_ms=5000
-        )
+        result = deploy_result("d1", status="success", duration_ms=5000)
         await hub._handle_deploy_result(result)
+        push.notify.assert_not_called()
+        bind_generation(hub)
+        await hub.deploy_coordinator.handle_settled(settled("d1"))
         await asyncio.sleep(0.05)
 
         push.notify.assert_called_once()
@@ -533,11 +645,9 @@ class TestPushIntegration:
             diff_stat=None,
             detected_at="2026-01-01T00:00:00Z",
         )
-        await store.update_deploy_status("d2", DeployStatus.DEPLOYING)
+        await begin_attempt(store, "d2")
 
-        result = DeployResult(
-            deploy_id="d2", node_id="n1", status="failed", error="exit 1"
-        )
+        result = deploy_result("d2", status="failed", error="exit 1")
         await hub._handle_deploy_result(result)
         await asyncio.sleep(0.05)
 
@@ -615,6 +725,10 @@ class TestRepoReconciliation:
             branch="main",
             local_head="remote" if in_sync else "local",
             remote_head="remote",
+            orchestrator_attempt_id=(
+                f"attempt-{self.DEPLOY_ID}" if phase != "observed" else None
+            ),
+            connection_generation=("g1" if phase == "settled" else None),
         )
 
     async def test_auto_success_equal_removes_stale_pending(self, hub, store):
@@ -626,53 +740,51 @@ class TestRepoReconciliation:
         event = await store.get_deploy_event(self.DEPLOY_ID)
         assert event["status"] == "success"
 
-    async def test_failed_mismatch_reopens_and_late_result_is_ignored(self, hub, store):
+    async def test_failed_equal_observation_stays_retryable_and_late_result_is_ignored(
+        self, hub, store
+    ):
         await self._seed(store)
-        await store.update_deploy_status(self.DEPLOY_ID, DeployStatus.DEPLOYING)
+        await begin_attempt(store, self.DEPLOY_ID)
         await hub._handle_deploy_result(
-            DeployResult(
-                deploy_id=self.DEPLOY_ID,
-                node_id="n1",
-                status="failed",
-                error="hook failed",
-            )
+            deploy_result(self.DEPLOY_ID, status="failed", error="hook failed")
         )
-        await hub._repo_reconciler.handle(self._message("settled", in_sync=False))
+        await hub._repo_reconciler.handle(self._message("observed", in_sync=True))
 
         reopened = await store.get_deploy_event(self.DEPLOY_ID)
         assert reopened["status"] == "pending"
-        latest = await store.get_latest_failed_deploy()
-        assert latest["error"] == "hook failed"
+        history = await store.get_deploy_history()
+        assert any(row.get("error") == "hook failed" for row in history)
 
         await hub._handle_deploy_result(
-            DeployResult(
-                deploy_id=self.DEPLOY_ID,
-                node_id="n1",
-                status="success",
-            )
+            deploy_result(self.DEPLOY_ID, status="success")
         )
         assert (await store.get_deploy_event(self.DEPLOY_ID))["status"] == "pending"
 
-    async def test_success_mismatch_does_not_reopen_success_history(self, hub, store):
+    async def test_raw_success_then_settled_mismatch_reopens_retryable(self, hub, store):
         await self._seed(store)
-        await store.update_deploy_status(self.DEPLOY_ID, DeployStatus.DEPLOYING)
+        await begin_attempt(store, self.DEPLOY_ID)
         await hub._handle_deploy_result(
-            DeployResult(
-                deploy_id=self.DEPLOY_ID,
-                node_id="n1",
-                status="success",
-            )
+            deploy_result(self.DEPLOY_ID, status="success")
         )
 
-        await hub._repo_reconciler.handle(self._message("settled", in_sync=False))
+        bind_generation(hub)
+        await hub.deploy_coordinator.handle_settled(
+            self._message("settled", in_sync=False)
+        )
 
         event = await store.get_deploy_event(self.DEPLOY_ID)
-        assert event["status"] == "success"
-        assert await store.get_latest_failed_deploy() is None
+        assert event["status"] == "pending"
+        history = await store.get_deploy_history()
+        failure = next(
+            row for row in history
+            if row["deploy_id"] == f"attempt:attempt-{self.DEPLOY_ID}"
+        )
+        assert failure["terminal_kind"] == "settled_head_mismatch"
+        assert "local=local" in failure["error"]
 
 
 class TestDeployTimeout:
-    """Hub tracks in-flight deploys; broadcasts timeout/orphan-fail."""
+    """Persisted orchestration IDs, not hub memory, own deploy deadlines."""
 
     async def _seed_deploying(
         self, store: EventStore, deploy_id: str, node_id: str = "n1"
@@ -687,160 +799,104 @@ class TestDeployTimeout:
             diff_stat=None,
             detected_at="2026-01-01T00:00:00Z",
         )
-        await store.update_deploy_status(deploy_id, DeployStatus.DEPLOYING)
+        await begin_attempt(store, deploy_id)
 
-    async def test_timeout_broadcasts_failure(self, registry, store):
-        hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=0.1)
+    async def test_timeout_reopens_retryable_and_broadcasts_pending(self, registry, store):
+        hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=0.05)
         ws_dash = AsyncMock()
         hub._dashboard_connections = {ws_dash}
-        await self._seed_deploying(store, "d1")
-        await hub.register_pending_deploy("d1", "n1", "r", "main")
-        await asyncio.sleep(0.25)
+        await store.create_deploy_event(
+            deploy_id="d1", node_id="n1", repo="r", branch="main",
+            commits=["h msg"], affected_services=[], diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+        )
+        await begin_attempt(
+            store,
+            "d1",
+            deadline_at=(datetime.now(timezone.utc) + timedelta(milliseconds=30)).isoformat(),
+        )
+        await hub.deploy_coordinator.restore_deadlines()
+        await asyncio.sleep(0.12)
 
         sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
         timeouts = [
             p
             for p in sent
-            if p.get("type") == "status_change" and p.get("status") == "failed"
+            if p.get("type") == "status_change" and p.get("status") == "pending"
         ]
         assert len(timeouts) == 1
         assert timeouts[0]["deploy_id"] == "d1"
         assert timeouts[0]["node_id"] == "n1"
-        assert "d1" not in hub._pending_deploys
         ev = await store.get_deploy_event("d1")
-        assert ev["status"] == "failed"
-        assert ev["error"] == "timeout"
+        assert ev["status"] == "pending"
+        history = await store.get_deploy_history()
+        timeout = next(row for row in history if row["deploy_id"] == "attempt:attempt-d1")
+        assert timeout["terminal_kind"] == "attempt_timeout"
+        assert "deploy result and settled HEAD evidence" in timeout["error"]
 
-    async def test_result_arrival_cancels_timeout(self, registry, store):
+    async def test_raw_success_keeps_deadline_until_settled(self, registry, store):
         hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
         ws_dash = AsyncMock()
         hub._dashboard_connections = {ws_dash}
         await self._seed_deploying(store, "d1")
-        await hub.register_pending_deploy("d1", "n1", "r", "main")
-        timeout_task = hub._pending_deploys["d1"].timeout_task
+        await hub.deploy_coordinator.restore_deadlines()
+        timer_key = "attempt:attempt-d1"
+        timeout_task = hub.deploy_coordinator._timers[timer_key]
 
-        result = DeployResult(
-            deploy_id="d1",
-            node_id="n1",
-            status="success",
-            duration_ms=500,
-        )
+        result = deploy_result("d1", status="success", duration_ms=500)
         await hub._handle_deploy_result(result)
 
-        assert "d1" not in hub._pending_deploys
+        assert timer_key in hub.deploy_coordinator._timers
+        assert (await store.get_deploy_event("d1"))["status"] == "deploying"
+        bind_generation(hub)
+        await hub.deploy_coordinator.handle_settled(settled("d1"))
+        assert timer_key not in hub.deploy_coordinator._timers
         with contextlib.suppress(asyncio.CancelledError):
             await timeout_task
-        assert timeout_task.cancelled()
-        # Single broadcast — the success status_change. No timeout.
+        assert timeout_task.done()
         sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
         statuses = [p["status"] for p in sent if p.get("type") == "status_change"]
         assert statuses == ["success"]
 
-    async def test_cleanup_keeps_tracked_deploys_until_result_or_timeout(
-        self, registry, store
-    ):
-        """Tracked deploys survive node disconnect.
-
-        Self-update intentionally disconnects the node while the wrapper
-        restarts. The server must keep DEPLOYING until the next startup sends
-        DeployResult or the deploy timeout fires.
-        """
+    async def test_disconnect_keeps_active_attempt_for_result_or_deadline(self, registry, store):
         hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
-        ws_dash = AsyncMock()
-        hub._dashboard_connections = {ws_dash}
-        await self._seed_deploying(store, "d_a", node_id="n1")
-        await self._seed_deploying(store, "d_b", node_id="n2")
-        await hub.register_pending_deploy("d_a", "n1", "r", "main")
-        await hub.register_pending_deploy("d_b", "n2", "r", "main")
-        timeout_task = hub._pending_deploys["d_a"].timeout_task
-
-        await hub._cleanup_orphan_deploys("n1", error="node disconnected")
-
-        assert "d_a" in hub._pending_deploys
-        assert "d_b" in hub._pending_deploys
-        sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
-        failed = [
-            p
-            for p in sent
-            if p.get("type") == "status_change" and p.get("status") == "failed"
-        ]
-        assert failed == []
-        ev = await store.get_deploy_event("d_a")
-        assert ev["status"] == "deploying"
-        assert not timeout_task.cancelled()
-
-        await hub._handle_deploy_result(
-            DeployResult(deploy_id="d_a", node_id="n1", status="success")
+        await store.create_deploy_event(
+            deploy_id="d1", node_id="n1", repo="r", branch="main",
+            commits=["h msg"], affected_services=[], diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
         )
-        assert "d_a" not in hub._pending_deploys
-        with contextlib.suppress(asyncio.CancelledError):
-            await timeout_task
-        assert timeout_task.done()
-        ev = await store.get_deploy_event("d_a")
-        assert ev["status"] == "success"
+        generation = hub.deploy_coordinator.register_connection("n1")
+        await begin_attempt(store, "d1", generation=generation)
+        await hub.deploy_coordinator.restore_deadlines()
 
-    async def test_cleanup_orphan_deploys_via_store(self, registry, store):
-        """DEPLOYING events that were never registered (e.g., previous server lifecycle)
-        are still failed + broadcast on cleanup. Replaces the former
-        NodeRegistry.unregister responsibility."""
+        await hub.deploy_coordinator.disconnect("n1", generation)
+
+        active = await store.attempts.get_active_attempts()
+        assert [row["orchestrator_attempt_id"] for row in active] == ["attempt-d1"]
+        assert (await store.get_deploy_event("d1"))["status"] == "deploying"
+
+    async def test_restart_closes_old_probe_without_opening_attempt(self, registry, store):
         hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
-        ws_dash = AsyncMock()
-        hub._dashboard_connections = {ws_dash}
-        await self._seed_deploying(store, "d_orphan", node_id="n1")
-
-        await hub._cleanup_orphan_deploys("n1", error="node disconnected")
-
-        ev = await store.get_deploy_event("d_orphan")
-        assert ev["status"] == "failed"
-        assert ev["error"] == "node disconnected"
-        sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
-        failed = [
-            p
-            for p in sent
-            if p.get("type") == "status_change" and p.get("status") == "failed"
-        ]
-        assert len(failed) == 1 and failed[0]["deploy_id"] == "d_orphan"
-
-    async def test_heartbeat_timeout_path_keeps_tracked_deploys(self, store):
-        """Integration: heartbeat timeout goes through the hub disconnect policy."""
-        registry = NodeRegistry(store, heartbeat_timeout=0.05)
-        hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
-        ws_dash = AsyncMock()
-        hub._dashboard_connections = {ws_dash}
-
-        ws = AsyncMock()
-        hello = NodeHello(
-            node_id="n1",
-            token="t",
-            hostname="h",
-            os="Linux",
-            arch="x86_64",
-            haniel_version="0.1.0",
+        await store.create_deploy_event(
+            deploy_id="d1", node_id="n1", repo="r", branch="main",
+            commits=["h msg"], affected_services=[], diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
         )
-        await registry.register(ws, hello)
-        await self._seed_deploying(store, "d1", node_id="n1")
-        await hub.register_pending_deploy("d1", "n1", "r", "main")
-
-        # Force the heartbeat to be older than the timeout
-        registry.get_node("n1").last_heartbeat = time.time() - 1.0
-
-        stale = await registry.check_stale()
-        assert stale == ["n1"]
-        assert registry.get_node("n1") is not None
-        ev_before = await store.get_deploy_event("d1")
-        assert ev_before["status"] == "deploying"
-
-        await hub._disconnect_node(
-            "n1",
-            reason="heartbeat_timeout",
-            error="node disconnected (heartbeat timeout)",
-            close_ws=False,
+        await store.attempts.create_probe(
+            probe_id="p1", deploy_id="d1", connection_generation="old-generation",
+            deadline_at=(datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(),
+            manual_retry=False,
         )
 
-        assert registry.get_node("n1") is None
-        ev_after = await store.get_deploy_event("d1")
-        assert ev_after["status"] == "deploying"
-        assert "d1" in hub._pending_deploys
+        await hub.deploy_coordinator.restore_deadlines()
+
+        assert await store.attempts.get_active_probes() == []
+        assert await store.attempts.get_active_attempts() == []
+        assert (await store.get_deploy_event("d1"))["status"] == "pending"
+        history = await store.get_deploy_history()
+        assert next(row for row in history if row["deploy_id"] == "preflight:p1")[
+            "terminal_kind"
+        ] == "preflight_disconnected"
 
 
 class TestSupersedePending:
@@ -865,41 +921,33 @@ class TestSupersedePending:
             detected_at="2026-01-01T00:00:00Z",
         )
 
-    async def test_marks_others_rejected(self, hub: WebSocketHub, store):
-        ws_dash = AsyncMock()
-        hub._dashboard_connections = {ws_dash}
+    async def test_creation_time_supersede_chain_is_not_rewritten_on_approval(
+        self, hub: WebSocketHub, store
+    ):
         await self._seed_pending(store, "d1")
         await asyncio.sleep(0.005)
         await self._seed_pending(store, "d2")
         await asyncio.sleep(0.005)
         await self._seed_pending(store, "d3")
 
-        result = await hub.supersede_pending("n1", "r", "main", "d3")
+        result = await hub.supersede_pending("n1", "r", "main")
 
-        assert set(result) == {"d1", "d2"}
-        for did in ("d1", "d2"):
-            ev = await store.get_deploy_event(did)
-            assert ev["status"] == "rejected"
-            assert ev["reject_reason"] == "superseded by d3"
+        assert result == []
+        ev1 = await store.get_deploy_event("d1")
+        ev2 = await store.get_deploy_event("d2")
+        assert ev1["status"] == "rejected"
+        assert ev1["reject_reason"] == "superseded by d2"
+        assert ev2["status"] == "rejected"
+        assert ev2["reject_reason"] == "superseded by d3"
         ev3 = await store.get_deploy_event("d3")
         assert ev3["status"] == "pending"
-
-        sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
-        rejected = [
-            p
-            for p in sent
-            if p.get("type") == "status_change" and p.get("status") == "rejected"
-        ]
-        assert {p["deploy_id"] for p in rejected} == {"d1", "d2"}
-        for p in rejected:
-            assert p.get("reject_reason") == "superseded by d3"
 
     async def test_skips_other_branches(self, hub: WebSocketHub, store):
         # Only the dev-branch deploy exists; supersede_pending on main → no-op.
         # Verifies that a PENDING entry on a different branch is untouched.
         await self._seed_pending(store, "d_dev", branch="dev")
 
-        result = await hub.supersede_pending("n1", "r", "main", "d_new")
+        result = await hub.supersede_pending("n1", "r", "main")
 
         assert result == []
         ev_dev = await store.get_deploy_event("d_dev")
@@ -908,7 +956,21 @@ class TestSupersedePending:
 
     async def test_returns_empty_when_no_others(self, hub: WebSocketHub, store):
         await self._seed_pending(store, "d_alone")
-        result = await hub.supersede_pending("n1", "r", "main", "d_alone")
+        result = await hub.supersede_pending("n1", "r", "main")
         assert result == []
         ev = await store.get_deploy_event("d_alone")
         assert ev["status"] == "pending"
+
+    async def test_old_approval_cleanup_never_rejects_newer_pending(
+        self, hub: WebSocketHub, store
+    ):
+        await self._seed_pending(store, "old")
+        await begin_attempt(store, "old")
+        await asyncio.sleep(0.005)
+        await self._seed_pending(store, "new")
+
+        result = await hub.supersede_pending("n1", "r", "main")
+
+        assert result == []
+        assert (await store.get_deploy_event("old"))["status"] == "deploying"
+        assert (await store.get_deploy_event("new"))["status"] == "pending"

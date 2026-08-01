@@ -4,8 +4,10 @@ import pytest
 from pydantic import ValidationError
 
 from haniel_orch.protocol import (
+    AcceptedDeployAttemptAck,
     ChangeNotification,
     DeployApproval,
+    DeployAttemptTerminal,
     DeployReject,
     DeployResult,
     DeployStatus,
@@ -14,6 +16,7 @@ from haniel_orch.protocol import (
     NodeStatus,
     OrchestratorMessage,
     RepoReconciliation,
+    RejectedDeployAttemptAck,
     parse_node_message,
 )
 
@@ -108,6 +111,33 @@ class TestChangeNotification:
         )
         assert msg.diff_stat is None
 
+    def test_manifest_identity_without_digest_is_a_fail_closed_snapshot(self):
+        msg = ChangeNotification(
+            deploy_id="n:r:b:h",
+            node_id="n",
+            repo="r",
+            branch="b",
+            commits=["h invalid manifest"],
+            affected_services=[],
+            detected_at="2026-08-01T00:00:00Z",
+            deployment_kind="manifest",
+            expected_manifest_identity="haniel.release.json",
+        )
+        assert msg.expected_manifest_digest is None
+
+    def test_manifest_without_identity_is_rejected(self):
+        with pytest.raises(ValidationError, match="requires identity"):
+            ChangeNotification(
+                deploy_id="n:r:b:h",
+                node_id="n",
+                repo="r",
+                branch="b",
+                commits=["h invalid manifest"],
+                affected_services=[],
+                detected_at="2026-08-01T00:00:00Z",
+                deployment_kind="manifest",
+            )
+
 
 class TestNodeStatus:
     def test_serialize_deserialize(self):
@@ -124,6 +154,8 @@ class TestDeployResult:
             node_id="n1",
             status="success",
             duration_ms=8200,
+            orchestrator_attempt_id="a1",
+            connection_generation="g1",
         )
         assert msg.error is None
         assert msg.duration_ms == 8200
@@ -135,6 +167,8 @@ class TestDeployResult:
             status="failed",
             error="exit code 1",
             duration_ms=3400,
+            orchestrator_attempt_id="a1",
+            connection_generation="g1",
         )
         assert msg.status == "failed"
         assert msg.error == "exit code 1"
@@ -145,12 +179,26 @@ class TestRepoReconciliation:
         raw = (
             '{"type":"repo_reconciliation","phase":"settled",'
             '"deploy_id":"n:r:main:bbbb","node_id":"n","repo":"r",'
-            '"branch":"main","local_head":"aaaa","remote_head":"bbbb"}'
+            '"branch":"main","local_head":"aaaa","remote_head":"bbbb",'
+            '"orchestrator_attempt_id":"a1","connection_generation":"g1"}'
         )
         msg = parse_node_message(raw)
         assert isinstance(msg, RepoReconciliation)
         assert msg.phase == "settled"
         assert msg.local_head != msg.remote_head
+
+    def test_settled_requires_connection_generation(self):
+        with pytest.raises(ValidationError):
+            RepoReconciliation(
+                phase="settled",
+                deploy_id="n:r:main:b",
+                node_id="n",
+                repo="r",
+                branch="main",
+                local_head="b",
+                remote_head="b",
+                orchestrator_attempt_id="a1",
+            )
 
     def test_phase_is_closed_enum(self):
         with pytest.raises(ValidationError):
@@ -167,12 +215,18 @@ class TestRepoReconciliation:
 
 class TestServerMessages:
     def test_deploy_approval(self):
-        msg = DeployApproval(deploy_id="d1")
+        msg = DeployApproval(
+            deploy_id="d1", orchestrator_attempt_id="a1",
+            execution_mode="execute", connection_generation="g1"
+        )
         assert msg.type == "deploy_approval"
         assert msg.approved_by == "dashboard"
 
     def test_deploy_approval_custom_approver(self):
-        msg = DeployApproval(deploy_id="d1", approved_by="slack")
+        msg = DeployApproval(
+            deploy_id="d1", orchestrator_attempt_id="a1",
+            execution_mode="execute", connection_generation="g1", approved_by="slack"
+        )
         assert msg.approved_by == "slack"
 
     def test_deploy_reject(self):
@@ -200,10 +254,56 @@ class TestParseNodeMessage:
         assert isinstance(msg, NodeStatus)
 
     def test_parse_deploy_result(self):
-        raw = '{"type":"deploy_result","deploy_id":"d1","node_id":"n1","status":"success"}'
+        raw = '{"type":"deploy_result","deploy_id":"d1","node_id":"n1","status":"success","orchestrator_attempt_id":"a1","connection_generation":"g1"}'
         msg = parse_node_message(raw)
         assert isinstance(msg, DeployResult)
         assert msg.status == "success"
+
+
+class TestDeployAttemptProtocolAuthority:
+    def test_rejected_ack_has_only_requested_orchestrator_id(self):
+        ack = RejectedDeployAttemptAck(
+            accepted=False,
+            requested_orchestrator_attempt_id="requested-a",
+            deploy_id="d1",
+            connection_generation="g1",
+            error="retry_requires_manual_approval",
+        )
+        assert "request_id" not in ack.model_dump()
+
+    def test_ack_variants_reject_cross_contamination(self):
+        with pytest.raises(ValidationError):
+            RejectedDeployAttemptAck(
+                accepted=False,
+                requested_orchestrator_attempt_id="requested-a",
+                deploy_id="d1",
+                connection_generation="g1",
+                error="retry_requires_manual_approval",
+                probe_id="forbidden",
+            )
+        with pytest.raises(ValidationError):
+            AcceptedDeployAttemptAck(
+                accepted=True,
+                requested_orchestrator_attempt_id="a1",
+                begun_orchestrator_attempt_id="a1",
+                deploy_id="d1",
+                connection_generation="g1",
+                probe_id="p1",
+                execution_mode="execute",
+                preflight_fingerprint="fp",
+                error="forbidden",
+            )
+
+    def test_node_terminal_authority_is_closed(self):
+        with pytest.raises(ValidationError):
+            DeployAttemptTerminal(
+                kind="preflight_timeout",
+                deploy_id="d1",
+                orchestrator_attempt_id="a1",
+                connection_generation="g1",
+                reason="forbidden",
+                error="forbidden",
+            )
 
     def test_missing_type_raises_value_error(self):
         with pytest.raises(ValueError, match="Missing 'type'"):
@@ -225,3 +325,5 @@ class TestParseNodeMessage:
         # NodeHello without required 'token' field
         with pytest.raises(ValidationError):
             parse_node_message('{"type":"node_hello","node_id":"n1"}')
+    DeployAttemptTerminal,
+    RejectedDeployAttemptAck,

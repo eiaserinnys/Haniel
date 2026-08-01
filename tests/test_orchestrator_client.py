@@ -234,6 +234,17 @@ class TestParseDeployId:
 
 class TestHandleDeployApproval:
     @staticmethod
+    def _approval(config, deploy_id: str | None = None) -> dict:
+        return {
+            "deploy_id": deploy_id
+            or f"{config.node_id}:repo:main:abc1234",
+            "orchestrator_attempt_id": "orch-1",
+            "connection_generation": "generation-1",
+            "execution_mode": "execute",
+            "approved_by": "dashboard",
+        }
+
+    @staticmethod
     def _snapshot(repo, branch, deploy_id):
         return RepoReconciliationSnapshot(
             node_id="test-node-1",
@@ -262,7 +273,6 @@ class TestHandleDeployApproval:
         assert sent[0]["type"] == "deploy_result"
         assert sent[0]["status"] == "failed"
         assert "invalid deploy_id format" in sent[0]["error"]
-        assert sent[0]["node_id"] == config.node_id
 
     async def test_node_id_mismatch_sends_failed(self, config):
         client = OrchestratorClient(config, haniel_version="0.1.0")
@@ -285,8 +295,8 @@ class TestHandleDeployApproval:
     async def test_success_sends_success(self, config):
         called = []
 
-        def handler(deploy_id, repo, branch):
-            called.append((deploy_id, repo, branch))
+        def handler(approval):
+            called.append(approval)
             return None
 
         client = OrchestratorClient(
@@ -296,14 +306,15 @@ class TestHandleDeployApproval:
             repo_snapshot_handler=self._snapshot,
         )
         sent = self._capture_send_json(client)
-        await client._handle_deploy_approval(
-            {"deploy_id": f"{config.node_id}:repo:main:abc1234"}
-        )
-        assert called == [(f"{config.node_id}:repo:main:abc1234", "repo", "main")]
+        approval = self._approval(config)
+        await client._handle_deploy_approval(approval)
+        assert called == [approval]
         assert sent[0]["status"] == "success"
         assert sent[0]["error"] is None
         assert sent[0]["duration_ms"] is not None
         assert sent[0]["duration_ms"] >= 0
+        assert sent[0]["orchestrator_attempt_id"] == "orch-1"
+        assert sent[1]["type"] == "repo_reconciliation"
 
     async def test_success_is_not_sent_until_handler_finishes_verification(
         self, config
@@ -313,7 +324,7 @@ class TestHandleDeployApproval:
 
         verification_done = threading.Event()
 
-        def handler(_deploy_id, _repo, _branch):
+        def handler(_approval):
             verification_done.wait(timeout=2)
             return None
 
@@ -326,7 +337,7 @@ class TestHandleDeployApproval:
         sent = self._capture_send_json(client)
         pending = asyncio.create_task(
             client._handle_deploy_approval(
-                {"deploy_id": f"{config.node_id}:repo:main:abc1234"}
+                self._approval(config)
             )
         )
         await asyncio.sleep(0.02)
@@ -338,7 +349,7 @@ class TestHandleDeployApproval:
         assert sent[0]["status"] == "success"
 
     async def test_handler_raises_sends_failed(self, config):
-        def handler(deploy_id, repo, branch):
+        def handler(_approval):
             raise RuntimeError("boom")
 
         client = OrchestratorClient(
@@ -348,15 +359,13 @@ class TestHandleDeployApproval:
             repo_snapshot_handler=self._snapshot,
         )
         sent = self._capture_send_json(client)
-        await client._handle_deploy_approval(
-            {"deploy_id": f"{config.node_id}:repo:main:abc1234"}
-        )
+        await client._handle_deploy_approval(self._approval(config))
         assert sent[0]["status"] == "failed"
         assert sent[0]["error"] == "boom"
         assert sent[0]["duration_ms"] is not None
 
     async def test_deferred_does_not_send(self, config):
-        def handler(deploy_id, repo, branch):
+        def handler(_approval):
             return "deferred"
 
         client = OrchestratorClient(
@@ -365,10 +374,43 @@ class TestHandleDeployApproval:
             deploy_approval_handler=handler,
         )
         sent = self._capture_send_json(client)
-        await client._handle_deploy_approval(
-            {"deploy_id": f"{config.node_id}:repo:main:abc1234"}
-        )
+        await client._handle_deploy_approval(self._approval(config))
         assert sent == []
+
+
+class TestDeployPlanProbe:
+    async def test_planner_exception_returns_fail_closed_proposal(self, config):
+        def broken_planner(_probe):
+            raise RuntimeError("journal unreadable")
+
+        client = OrchestratorClient(
+            config,
+            haniel_version="0.1.0",
+            deploy_plan_probe_handler=broken_planner,
+        )
+        sent = []
+
+        async def fake_send_json(message):
+            sent.append(message)
+
+        client._send_json = fake_send_json  # type: ignore[assignment]
+        await client._handle_server_message(
+            {
+                "type": "deploy_plan_probe",
+                "probe_id": "p1",
+                "connection_generation": "g1",
+                "deploy_id": "test-node-1:r:main:target",
+                "node_id": "test-node-1",
+                "repo": "r",
+                "branch": "main",
+                "target_head": "target",
+            }
+        )
+
+        assert sent[0]["mode"] == "fail_closed"
+        assert sent[0]["reason"] == "planner_error"
+        assert "journal unreadable" in sent[0]["error"]
+        assert sent[0]["node_id"] == config.node_id
 
 
 class TestHandleServiceCommand:

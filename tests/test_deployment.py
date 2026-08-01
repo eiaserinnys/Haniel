@@ -146,13 +146,62 @@ def test_new_attempt_preserves_interrupted_attempt_with_distinct_identity(
 
     assert current is not None
     assert current["state"] == "build"
-    assert current["attempt_id"] != first["attempt_id"]
+    assert current["journal_attempt_id"] != first["journal_attempt_id"]
     assert current["target_head"] == "second-target"
     previous = current["previous_attempts"][-1]
-    assert previous["attempt_id"] == first["attempt_id"]
+    assert previous["journal_attempt_id"] == first["journal_attempt_id"]
     assert previous["state"] == "interrupted"
     assert previous["interrupted_from"] == "migrating"
     assert previous["interruption_reason"] == "process stopped"
+
+
+def test_bound_intent_reuses_one_journal_identity_and_rejects_drift(
+    tmp_path: Path,
+) -> None:
+    store = DeploymentStateStore(tmp_path / "state")
+    journal_id = store.begin(
+        "repo",
+        "previous",
+        "target",
+        "approved-pull-pending",
+        orchestrator_attempt_id="orch-1",
+        node_id="node-a",
+        branch="main",
+        manifest_identity="release.json",
+        manifest_digest="digest",
+    )
+
+    rebound = store.begin(
+        "repo",
+        "previous",
+        "target",
+        "release-1",
+        orchestrator_attempt_id="orch-1",
+        node_id="node-a",
+        branch="main",
+        manifest_identity="release.json",
+        manifest_digest="digest",
+        journal_attempt_id=journal_id,
+    )
+
+    assert rebound == journal_id
+    current = store.read("repo")
+    assert current["journal_attempt_id"] == journal_id
+    assert current["orchestrator_attempt_id"] == "orch-1"
+    assert "previous_attempts" not in current
+    with pytest.raises(ValueError, match="immutable fields"):
+        store.begin(
+            "repo",
+            "previous",
+            "different-target",
+            "release-1",
+            orchestrator_attempt_id="orch-1",
+            node_id="node-a",
+            branch="main",
+            manifest_identity="release.json",
+            manifest_digest="digest",
+            journal_attempt_id=journal_id,
+        )
 
 
 def test_new_begin_aborts_unfinished_live_intent_before_archiving(

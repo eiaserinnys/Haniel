@@ -15,10 +15,12 @@ import json
 import logging
 import platform
 import threading
+from uuid import uuid4
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 
 from .deploy_reporting import DeployReporter, parse_deploy_id
+from .deploy_attempt_gate import DeployAttemptGate
 
 if TYPE_CHECKING:
     from ..config.model import OrchestratorClientConfig
@@ -43,7 +45,10 @@ class OrchestratorClient:
         service_command_handler: (
             "Callable[[str, str, dict[str, Any] | None], Any] | None"
         ) = None,
-        deploy_approval_handler: "Callable[[str, str, str], str | None] | None" = None,
+        deploy_approval_handler: (
+            "Callable[[dict[str, Any]], str | dict[str, Any] | None] | None"
+        ) = None,
+        deploy_plan_probe_handler: "Callable[[dict[str, Any]], dict[str, Any]] | None" = None,
         repo_snapshot_handler: (
             "Callable[[str, str, str], RepoReconciliationSnapshot] | None"
         ) = None,
@@ -52,13 +57,14 @@ class OrchestratorClient:
         self._haniel_version = haniel_version
         self._get_services_info = get_services_info
         self._service_command_handler = service_command_handler
-        # handler convention: (deploy_id, repo, branch) -> None | "deferred".
+        # handler convention: immutable approval dict -> result.
         #   None       — synchronous success; we send DeployResult{success}.
         #   "deferred" — handler scheduled the work elsewhere (e.g. self-update
         #                via deferred stop); DeployResult is sent on next
         #                startup via enqueue_deploy_result.
         #   Exception  — failure; we send DeployResult{failed, error=str(e)}.
         self._deploy_approval_handler = deploy_approval_handler
+        self._deploy_plan_probe_handler = deploy_plan_probe_handler
         self._repo_snapshot_handler = repo_snapshot_handler
         self._ws = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -70,6 +76,7 @@ class OrchestratorClient:
         # Used for self-update results that survive runner restart.
         self._pending_deploy_results: list[dict] = []
         self._pending_lock = threading.Lock()
+        self._deploy_attempt_gate = DeployAttemptGate()
         self._deploy_reporter = DeployReporter(
             node_id=config.node_id,
             approval_handler=deploy_approval_handler,
@@ -104,6 +111,10 @@ class OrchestratorClient:
         affected_services: list[str],
         diff_stat: str | None = None,
         deploy_id: str | None = None,
+        target_head: str | None = None,
+        deployment_kind: str = "legacy",
+        expected_manifest_identity: str | None = None,
+        expected_manifest_digest: str | None = None,
         wait: bool = False,
     ) -> None:
         """Notify the orchestrator of detected changes. Thread-safe.
@@ -131,6 +142,10 @@ class OrchestratorClient:
             "affected_services": affected_services,
             "diff_stat": diff_stat,
             "detected_at": datetime.now(timezone.utc).isoformat(),
+            "target_head": target_head,
+            "deployment_kind": deployment_kind,
+            "expected_manifest_identity": expected_manifest_identity,
+            "expected_manifest_digest": expected_manifest_digest,
         }
 
         try:
@@ -145,11 +160,14 @@ class OrchestratorClient:
         snapshot: "RepoReconciliationSnapshot",
         phase: str,
         *,
+        orchestrator_attempt_id: str | None = None,
         wait: bool = False,
     ) -> None:
         """Send one explicit HEAD reconciliation message from a sync runner thread."""
         self._schedule_report(
-            lambda: self._deploy_reporter.send_reconciliation(snapshot, phase),
+            lambda: self._deploy_reporter.send_reconciliation(
+                snapshot, phase, orchestrator_attempt_id=orchestrator_attempt_id
+            ),
             wait=wait,
         )
 
@@ -158,14 +176,33 @@ class OrchestratorClient:
         snapshot: "RepoReconciliationSnapshot",
         operation_error: str | None,
         duration_ms: int,
+        permit: dict[str, Any],
     ) -> None:
         """Send DeployResult followed by settled reconciliation."""
         self._schedule_report(
             lambda: self._deploy_reporter.send_settled_result(
-                snapshot, operation_error, duration_ms
+                snapshot,
+                operation_error,
+                duration_ms,
+                permit["begun_orchestrator_attempt_id"],
+                permit["connection_generation"],
             ),
             wait=False,
         )
+
+    def request_auto_attempt(
+        self, snapshot: "RepoReconciliationSnapshot"
+    ) -> dict[str, Any]:
+        """Request and wait for an explicit generation-bound execution ACK."""
+        requested = uuid4().hex
+        self._deploy_attempt_gate.register(requested, snapshot.deploy_id)
+        self.notify_repo_reconciliation(
+            snapshot,
+            "attempt_started",
+            orchestrator_attempt_id=requested,
+            wait=True,
+        )
+        return self._deploy_attempt_gate.wait(requested, self._config.ping_timeout)
 
     def _schedule_report(
         self,
@@ -201,6 +238,9 @@ class OrchestratorClient:
         status: str,
         error: str | None = None,
         duration_ms: int | None = None,
+        orchestrator_attempt_id: str = "",
+        connection_generation: str = "",
+        settled_snapshot: "RepoReconciliationSnapshot | None" = None,
     ) -> None:
         """Buffer a DeployResult to send on the next successful connection.
 
@@ -214,9 +254,26 @@ class OrchestratorClient:
             "status": status,
             "error": error,
             "duration_ms": duration_ms,
+            "orchestrator_attempt_id": orchestrator_attempt_id,
+            "connection_generation": connection_generation,
         }
         with self._pending_lock:
             self._pending_deploy_results.append(msg)
+            if settled_snapshot is not None:
+                self._pending_deploy_results.append(
+                    {
+                        "type": "repo_reconciliation",
+                        "phase": "settled",
+                        "deploy_id": settled_snapshot.deploy_id,
+                        "node_id": settled_snapshot.node_id,
+                        "repo": settled_snapshot.repo,
+                        "branch": settled_snapshot.branch,
+                        "local_head": settled_snapshot.local_head,
+                        "remote_head": settled_snapshot.remote_head,
+                        "orchestrator_attempt_id": orchestrator_attempt_id,
+                        "connection_generation": connection_generation,
+                    }
+                )
         # If already connected, kick a flush on the loop
         if self._connected and self._loop is not None:
             try:
@@ -295,6 +352,7 @@ class OrchestratorClient:
             close_timeout=self._config.ping_timeout,
         ) as ws:
             self._ws = ws
+            self._deploy_attempt_gate.reset_connection()
 
             # Send NodeHello
             await self._send_json(self._build_node_hello())
@@ -357,7 +415,13 @@ class OrchestratorClient:
         """Handle messages from the orchestrator server."""
         msg_type = msg.get("type")
         if msg_type == "deploy_approval":
+            self._deploy_attempt_gate.observe_generation(msg["connection_generation"])
             await self._handle_deploy_approval(msg)
+        elif msg_type == "deploy_plan_probe":
+            await self._handle_deploy_plan_probe(msg)
+        elif msg_type == "deploy_attempt_ack":
+            self._deploy_attempt_gate.observe_generation(msg["connection_generation"])
+            self._deploy_attempt_gate.accept_ack(msg)
         elif msg_type == "deploy_reject":
             logger.info(
                 f"Deploy rejected: {msg.get('deploy_id')} "
@@ -371,6 +435,60 @@ class OrchestratorClient:
     async def _handle_deploy_approval(self, msg: dict) -> None:
         """Delegate manual execution and result ordering to DeployReporter."""
         await self._deploy_reporter.handle_approval(msg)
+
+    async def _handle_deploy_plan_probe(self, msg: dict) -> None:
+        """Run the read-only planner and return its proposal."""
+        self._deploy_attempt_gate.observe_generation(msg["connection_generation"])
+        if self._deploy_plan_probe_handler is None:
+            proposal = {
+                "type": "deploy_plan_proposal",
+                "mode": "fail_closed",
+                "reason": "planner_missing",
+                "error": "no deploy plan probe handler registered",
+                "fingerprint": "planner-missing",
+                "current_head": "",
+                "journal_status": None,
+                "journal_attempt_id": None,
+                "linked_orchestrator_attempt_id": None,
+                "journal_target_head": None,
+                "original_previous_head": None,
+                "manifest_identity": None,
+                "manifest_digest": None,
+                "journal_completed_at": None,
+            }
+        else:
+            try:
+                proposal = await asyncio.to_thread(self._deploy_plan_probe_handler, msg)
+            except Exception as exc:
+                proposal = {
+                    "type": "deploy_plan_proposal",
+                    "mode": "fail_closed",
+                    "reason": "planner_error",
+                    "error": f"deploy plan probe failed: {exc}",
+                    "fingerprint": "planner-error",
+                    "current_head": "",
+                    "journal_status": None,
+                    "journal_attempt_id": None,
+                    "linked_orchestrator_attempt_id": None,
+                    "journal_target_head": None,
+                    "original_previous_head": None,
+                    "manifest_identity": None,
+                    "manifest_digest": None,
+                    "journal_completed_at": None,
+                }
+        await self._send_json(
+            {
+                **proposal,
+                "type": "deploy_plan_proposal",
+                "probe_id": msg["probe_id"],
+                "connection_generation": msg["connection_generation"],
+                "deploy_id": msg["deploy_id"],
+                "node_id": msg["node_id"],
+                "repo": msg["repo"],
+                "branch": msg["branch"],
+                "target_head": msg["target_head"],
+            }
+        )
 
     @staticmethod
     def _parse_deploy_id(

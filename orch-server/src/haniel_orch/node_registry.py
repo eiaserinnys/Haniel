@@ -67,12 +67,8 @@ class NodeRegistry:
         still current. This prevents a late close from a superseded connection
         from deleting a freshly reconnected node with the same node_id.
 
-        NOTE: in-flight deploy failure (DEPLOYING → FAILED) is handled by
-        :meth:`WebSocketHub._cleanup_orphan_deploys` — single source of truth
-        for ws-disconnect, heartbeat-timeout, and shutdown paths. The hub
-        invokes both ``unregister`` and ``_cleanup_orphan_deploys`` after
-        observing a disconnect, so DEPLOYING events still transition to
-        FAILED + broadcast.
+        Durable deploy attempts are not failed here. Their DB deadline remains
+        the single terminal authority across disconnects and server restarts.
         """
         node = self._nodes.get(node_id)
         if websocket is not None and (node is None or node.websocket is not websocket):

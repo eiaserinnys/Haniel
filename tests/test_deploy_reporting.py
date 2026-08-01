@@ -67,15 +67,25 @@ async def test_manual_success_return_with_mismatch_sends_failed_then_settled() -
     )
 
     await reporter.handle_approval(
-        {"deploy_id": "node-a:repo-a:main:remote-head", "approved_by": "dashboard"}
+        {
+            "deploy_id": "node-a:repo-a:main:remote-head",
+            "orchestrator_attempt_id": "orch-1",
+            "connection_generation": "generation-1",
+            "execution_mode": "execute",
+            "approved_by": "dashboard",
+        }
     )
 
     assert [message["type"] for message in sent] == [
         "deploy_result",
         "repo_reconciliation",
     ]
-    assert sent[0]["status"] == "failed"
+    # Raw operation success and settled HEAD are independent evidence. The
+    # server combines them and turns this mismatch into retryable failure.
+    assert sent[0]["status"] == "success"
+    assert sent[0]["orchestrator_attempt_id"] == "orch-1"
     assert sent[1]["phase"] == "settled"
+    assert sent[1]["orchestrator_attempt_id"] == "orch-1"
     assert sent[1]["deploy_id"] == "node-a:repo-a:main:remote-head"
 
 

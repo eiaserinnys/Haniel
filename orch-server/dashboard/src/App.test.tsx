@@ -42,7 +42,7 @@ vi.mock('@/hooks/useWebSocket', () => ({
 }));
 
 function resetApiMocks() {
-  apiMock.fetchPending.mockResolvedValue({ deploys: [], latest_failure: null });
+  apiMock.fetchPending.mockResolvedValue({ deploys: [] });
   apiMock.fetchNodes.mockResolvedValue({ nodes: [] });
   apiMock.fetchHistory.mockResolvedValue({ deploys: [] });
   apiMock.approveDeploy.mockResolvedValue({ deploy_id: 'd1', status: 'deploying' });
@@ -135,30 +135,22 @@ describe('App dashboard sync', () => {
     expect(apiMock.fetchHistory).toHaveBeenCalledWith({ includeSuperseded: false });
   });
 
-  it('uses pending.latest_failure instead of history to render first-screen failure', async () => {
+  it('does not render failure details on the Pending screen', async () => {
     apiMock.fetchPending.mockResolvedValue({
       deploys: [],
-      latest_failure: {
-        deploy_id: 'attempt:failed', node_id: 'n1', repo: 'repo', branch: 'main',
-        status: 'failed', commits: [], affected_services: [], diff_stat: null,
-        detected_at: new Date().toISOString(), approved_by: null, reject_reason: null,
-        error: 'HEAD mismatch', duration_ms: 1, created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      },
     });
 
     render(<App />);
     await waitForInitialSync();
 
-    expect(screen.getByText('Last deploy failed')).toBeInTheDocument();
-    expect(screen.getByText('HEAD mismatch')).toBeInTheDocument();
+    expect(screen.queryByText('Last deploy failed')).not.toBeInTheDocument();
+    expect(screen.queryByText('HEAD mismatch')).not.toBeInTheDocument();
     expect(screen.getByText('All clear')).toBeInTheDocument();
   });
 
   it('returns only HTTP-accepted selected ids to the selection owner', async () => {
     apiMock.fetchPending.mockResolvedValue({
       deploys: [pendingDeploy('accepted'), pendingDeploy('rejected')],
-      latest_failure: null,
     });
     apiMock.approveDeploy.mockImplementation((id: string) => (
       id === 'accepted'

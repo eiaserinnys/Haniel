@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -18,6 +18,15 @@ from haniel.core.orch_pending_deploy import (
 )
 from haniel.core.runner import ServiceRunner
 from haniel.core.self_update_marker import SelfUpdateResult
+from haniel.core.orchestrated_deploy_execution import execute_approved_plan
+
+
+@pytest.fixture(autouse=True)
+def approved_remote_target(monkeypatch):
+    monkeypatch.setattr(
+        "haniel.core.orchestrated_deploy_execution.get_remote_head",
+        lambda _path, _branch: "abc1234",
+    )
 
 
 def _build_runner(tmp_path: Path, with_self_repo: bool = False) -> ServiceRunner:
@@ -54,15 +63,42 @@ def _build_runner(tmp_path: Path, with_self_repo: bool = False) -> ServiceRunner
     return ServiceRunner(config=config, config_dir=tmp_path)
 
 
+def _approval(
+    repo: str = "appA",
+    branch: str = "main",
+    *,
+    mode: str = "execute",
+    probe_id: str | None = None,
+) -> dict:
+    return {
+        "deploy_id": f"node-a:{repo}:{branch}:abc1234",
+        "orchestrator_attempt_id": "orch-1",
+        "connection_generation": "generation-1",
+        "execution_mode": mode,
+        "probe_id": probe_id,
+        "preflight_fingerprint": "fingerprint-1" if probe_id else None,
+        "approved_by": "dashboard",
+    }
+
+
+def _write_pending(tmp_path: Path, deploy_id: str, started_at: str) -> None:
+    write_pending(
+        tmp_path,
+        deploy_id,
+        started_at,
+        orchestrator_attempt_id="orch-1",
+        connection_generation="generation-1",
+        execution_mode="execute",
+        probe_id="probe-1",
+        preflight_fingerprint="fingerprint-1",
+    )
+
+
 class TestHandleDeployApprovalNonSelf:
     def test_unknown_repo_raises(self, tmp_path: Path) -> None:
         runner = _build_runner(tmp_path)
         with pytest.raises(ValueError, match="Unknown repo"):
-            runner._handle_deploy_approval(
-                "id",
-                "missing",
-                "main",
-            )
+            runner._handle_deploy_approval(_approval("missing"))
 
     def test_calls_trigger_pull_when_pending(self, tmp_path: Path) -> None:
         runner = _build_runner(tmp_path)
@@ -72,46 +108,97 @@ class TestHandleDeployApprovalNonSelf:
             "stat": "+1 -0",
         }
         runner.trigger_pull = MagicMock()  # type: ignore[assignment]
-        result = runner._handle_deploy_approval("id", "appA", "main")
-        runner.trigger_pull.assert_called_once_with("appA", auto=False)
+        result = runner._handle_deploy_approval(_approval())
+        runner.trigger_pull.assert_called_once_with(
+            "appA",
+            auto=False,
+            orchestrator_attempt_id="orch-1",
+            node_id="node-a",
+            branch="main",
+            target_head="abc1234",
+        )
         assert result is None
 
-    def test_no_pending_changes_returns_success_noop(
+    def test_no_pending_changes_still_enters_execution_path(
         self,
         tmp_path: Path,
     ) -> None:
-        """No pending_changes → trigger_pull NOT called, return None (success no-op)."""
+        """Memory state is not proof; settled HEAD remains the success authority."""
         runner = _build_runner(tmp_path)
         runner._repo_states["appA"].pending_changes = None
         runner.trigger_pull = MagicMock()  # type: ignore[assignment]
-        result = runner._handle_deploy_approval("id", "appA", "main")
+        with patch(
+            "haniel.core.orchestrated_deploy_execution.get_head",
+            return_value="abc1234",
+        ):
+            result = runner._handle_deploy_approval(_approval())
         runner.trigger_pull.assert_not_called()
-        assert result is None  # caller will report success
+        assert result is None
 
     def test_already_pulling_raises(self, tmp_path: Path) -> None:
         runner = _build_runner(tmp_path)
         runner._pull_locks["appA"].acquire()
         try:
             with pytest.raises(RuntimeError, match="already pulling"):
-                runner._handle_deploy_approval("id", "appA", "main")
+                runner._repo_states["appA"].pending_changes = {
+                    "commits": ["abc1234 fix"], "stat": "+1 -0"
+                }
+                runner._handle_deploy_approval(_approval())
         finally:
             runner._pull_locks["appA"].release()
 
-    def test_branch_mismatch_warns_and_proceeds(
-        self,
-        tmp_path: Path,
-        caplog,
-    ) -> None:
+    def test_branch_mismatch_fails_before_execution(self, tmp_path: Path) -> None:
         runner = _build_runner(tmp_path)
         runner._repo_states["appA"].pending_changes = {
             "commits": ["abc1234 fix"],
             "stat": "+1 -0",
         }
         runner.trigger_pull = MagicMock()  # type: ignore[assignment]
-        with caplog.at_level("WARNING"):
-            runner._handle_deploy_approval("id", "appA", "feature/x")
-        assert "differs from configured" in caplog.text
-        runner.trigger_pull.assert_called_once()
+        with pytest.raises(
+            Exception, match="differs from configured branch"
+        ):
+            runner._handle_deploy_approval(_approval(branch="feature/x"))
+        runner.trigger_pull.assert_not_called()
+
+    def test_remote_target_change_fails_before_execution(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = _build_runner(tmp_path)
+        runner._repo_states["appA"].pending_changes = {"commits": ["abc1234 fix"]}
+        runner.trigger_pull = MagicMock()  # type: ignore[assignment]
+        monkeypatch.setattr(
+            "haniel.core.orchestrated_deploy_execution.get_remote_head",
+            lambda _path, _branch: "newer",
+        )
+
+        with pytest.raises(Exception, match="approved target changed"):
+            runner._handle_deploy_approval(_approval())
+
+        runner.trigger_pull.assert_not_called()
+
+    def test_missing_preflight_probe_fails_closed(self, tmp_path: Path) -> None:
+        runner = _build_runner(tmp_path)
+        runner.trigger_pull = MagicMock()  # type: ignore[assignment]
+
+        with pytest.raises(Exception, match="missing preflight probe"):
+            runner._handle_deploy_approval(_approval(probe_id="missing"))
+
+        runner.trigger_pull.assert_not_called()
+
+    def test_duplicate_approval_attempt_is_not_executed_twice(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _build_runner(tmp_path)
+        runner.trigger_pull = MagicMock()  # type: ignore[assignment]
+        with patch(
+            "haniel.core.orchestrated_deploy_execution.get_head",
+            return_value="abc1234",
+        ):
+            runner._handle_deploy_approval(_approval())
+            with pytest.raises(Exception, match="already consumed"):
+                runner._handle_deploy_approval(_approval())
+
+        runner.trigger_pull.assert_not_called()
 
 
 class TestAutoDeployReconciliation:
@@ -139,27 +226,141 @@ class TestAutoDeployReconciliation:
         )
         order: list[str] = []
         runner._orch_client = MagicMock()
-        runner._orch_client.notify_repo_reconciliation.side_effect = (
-            lambda *args, **kwargs: order.append("attempt_started")
+        permit = {
+            "accepted": True,
+            "requested_orchestrator_attempt_id": "orch-auto",
+            "begun_orchestrator_attempt_id": "orch-auto",
+            "deploy_id": before.deploy_id,
+            "connection_generation": "generation-1",
+            "probe_id": "probe-1",
+            "execution_mode": "execute",
+            "preflight_fingerprint": "fingerprint-1",
+        }
+        runner._orch_client.request_auto_attempt.side_effect = lambda snapshot: (
+            order.append("attempt_started") or permit
         )
+        runner._orchestrated_deploys.record_probe({"probe_id": "probe-1"})
         runner._orch_client.report_deploy_attempt.side_effect = lambda *args, **kwargs: (
             order.append("settled_report")
         )
-        runner.trigger_pull = MagicMock(  # type: ignore[method-assign]
-            side_effect=lambda *args, **kwargs: order.append("execute")
-        )
+        with patch(
+            "haniel.core.runner.execute_approved_plan",
+            side_effect=lambda *args, **kwargs: order.append("execute"),
+        ):
+            runner._run_auto_deploy("appA")
 
-        runner._run_auto_deploy("appA")
-
-        runner._orch_client.notify_repo_reconciliation.assert_called_once_with(
-            before, "attempt_started", wait=True
-        )
-        runner.trigger_pull.assert_called_once_with("appA", auto=True)
+        runner._orch_client.request_auto_attempt.assert_called_once_with(before)
         runner._orch_client.report_deploy_attempt.assert_called_once()
         args = runner._orch_client.report_deploy_attempt.call_args.args
         assert args[0] == settled
         assert args[1] is None
         assert order == ["attempt_started", "execute", "settled_report"]
+
+
+class TestImmutableRetryExecution:
+    @staticmethod
+    def _probe() -> dict:
+        return {
+            "probe_id": "probe-1",
+            "connection_generation": "generation-1",
+            "deploy_id": "node-a:appA:main:abc1234",
+            "node_id": "node-a",
+            "repo": "appA",
+            "branch": "main",
+            "target_head": "abc1234",
+            "source_orchestrator_attempt_id": "source-1",
+        }
+
+    def test_generation_mismatch_fails_before_retry_execution(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _build_runner(tmp_path)
+        runner.trigger_pull = MagicMock()  # type: ignore[assignment]
+        approval = _approval(probe_id="probe-1")
+        approval["connection_generation"] = "different"
+
+        with pytest.raises(Exception, match="connection_generation"):
+            execute_approved_plan(runner, approval, self._probe(), MagicMock())
+
+        runner.trigger_pull.assert_not_called()
+
+    def test_equal_head_legacy_restarts_without_pull_or_manifest(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _build_runner(tmp_path)
+        runner._restart_after_pull_legacy = MagicMock()  # type: ignore[assignment]
+        runner.trigger_pull = MagicMock()  # type: ignore[assignment]
+        planner = MagicMock()
+        planner.revalidate.return_value = MagicMock(
+            mode="execute", evidence={}, reason="legacy_retry"
+        )
+        with (
+            patch("haniel.core.orchestrated_deploy_execution.get_head", return_value="abc1234"),
+            patch("haniel.core.orchestrated_deploy_execution.run_manifest_deployment") as manifest,
+        ):
+            execute_approved_plan(runner, _approval(probe_id="probe-1"), self._probe(), planner)
+
+        runner._restart_after_pull_legacy.assert_called_once_with("appA", ["svc-a"])
+        runner.trigger_pull.assert_not_called()
+        manifest.assert_not_called()
+
+    def test_equal_head_manifest_retry_uses_original_previous_head(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _build_runner(tmp_path)
+        runner._repo_states["appA"].config.release_manifest = "release.json"
+        planner = MagicMock()
+        planner.revalidate.return_value = MagicMock(
+            mode="execute",
+            evidence={"original_previous_head": "original-previous"},
+            reason="manifest_retry",
+        )
+        with (
+            patch("haniel.core.orchestrated_deploy_execution.get_head", return_value="abc1234"),
+            patch("haniel.core.orchestrated_deploy_execution.run_manifest_deployment") as manifest,
+        ):
+            execute_approved_plan(runner, _approval(probe_id="probe-1"), self._probe(), planner)
+
+        manifest.assert_called_once_with(
+            runner,
+            "appA",
+            ["svc-a"],
+            "original-previous",
+            orchestrator_attempt_id="orch-1",
+            node_id="node-a",
+            branch="main",
+        )
+
+    def test_recovery_mode_returns_evidence_without_deploy_side_effects(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _build_runner(tmp_path)
+        runner.trigger_pull = MagicMock()  # type: ignore[assignment]
+        runner._restart_after_pull_legacy = MagicMock()  # type: ignore[assignment]
+        planner = MagicMock()
+        planner.revalidate.return_value = MagicMock(
+            mode="evidence_recovery",
+            reason="durable_local_success",
+            evidence={
+                "journal_attempt_id": "journal-1",
+                "current_head": "abc1234",
+                "manifest_identity": "release.json",
+                "manifest_digest": "digest",
+                "journal_completed_at": "2026-08-01T00:00:00Z",
+                "original_previous_head": "previous",
+            },
+        )
+
+        result = execute_approved_plan(
+            runner,
+            _approval(mode="evidence_recovery", probe_id="probe-1"),
+            self._probe(),
+            planner,
+        )
+
+        assert result["type"] == "manifest_recovery_evidence"
+        runner.trigger_pull.assert_not_called()
+        runner._restart_after_pull_legacy.assert_not_called()
 
 
 class TestHandleDeployApprovalSelfRepo:
@@ -170,16 +371,33 @@ class TestHandleDeployApprovalSelfRepo:
         runner = _build_runner(tmp_path, with_self_repo=True)
         runner.approve_self_update = MagicMock(return_value="ok")  # type: ignore[assignment]
         runner._deferred_stop_for_self_update = MagicMock()  # type: ignore[assignment]
-        result = runner._handle_deploy_approval(
-            "node:haniel:main:abc1234",
-            "haniel",
-            "main",
-        )
+        result = runner._handle_deploy_approval(_approval("haniel"))
         assert result == "deferred"
         # Pending file written so next runner can correlate self-update result
         assert (tmp_path / MARKER_RELPATH).exists()
         # approve_self_update gate (state.self_update_pending=True) bypassed
         runner.approve_self_update.assert_called_once()
+
+    def test_recovery_approval_never_starts_self_update(self, tmp_path: Path) -> None:
+        runner = _build_runner(tmp_path, with_self_repo=True)
+        runner.approve_self_update = MagicMock()  # type: ignore[assignment]
+        runner._orchestrated_deploys.record_probe({"probe_id": "probe-1"})
+        recovered = {"type": "manifest_recovery_evidence", "deploy_id": "d"}
+        plan = MagicMock(mode="evidence_recovery")
+        with (
+            patch.object(runner, "_deploy_retry_planner", return_value=MagicMock()),
+            patch("haniel.core.runner.validate_approved_plan", return_value=plan),
+            patch(
+                "haniel.core.runner.build_recovery_evidence", return_value=recovered
+            ),
+        ):
+            result = runner._handle_deploy_approval(
+                _approval("haniel", mode="evidence_recovery", probe_id="probe-1")
+            )
+
+        assert result == recovered
+        runner.approve_self_update.assert_not_called()
+        assert not (tmp_path / MARKER_RELPATH).exists()
 
 
 class TestEnqueuePendingSelfDeployResult:
@@ -192,7 +410,7 @@ class TestEnqueuePendingSelfDeployResult:
     def test_no_orch_client_skips(self, tmp_path: Path) -> None:
         runner = _build_runner(tmp_path)
         runner._orch_client = None
-        write_pending(tmp_path, "d1", datetime.now(timezone.utc).isoformat())
+        _write_pending(tmp_path, "d1", datetime.now(timezone.utc).isoformat())
         # Must not raise
         runner._enqueue_pending_self_deploy_result()
         # Marker still consumed
@@ -201,7 +419,7 @@ class TestEnqueuePendingSelfDeployResult:
     def test_marker_with_success_result(self, tmp_path: Path) -> None:
         runner = _build_runner(tmp_path)
         runner._orch_client = MagicMock()
-        write_pending(
+        _write_pending(
             tmp_path,
             "d1",
             datetime(2026, 5, 5, 0, 0, 0, tzinfo=timezone.utc).isoformat(),
@@ -225,7 +443,7 @@ class TestEnqueuePendingSelfDeployResult:
     def test_marker_with_failed_result(self, tmp_path: Path) -> None:
         runner = _build_runner(tmp_path)
         runner._orch_client = MagicMock()
-        write_pending(tmp_path, "d1", datetime.now(timezone.utc).isoformat())
+        _write_pending(tmp_path, "d1", datetime.now(timezone.utc).isoformat())
         runner._last_self_update_result = SelfUpdateResult(
             version=1,
             started_at=datetime.now(timezone.utc).isoformat(),
@@ -245,7 +463,7 @@ class TestEnqueuePendingSelfDeployResult:
     ) -> None:
         runner = _build_runner(tmp_path)
         runner._orch_client = MagicMock()
-        write_pending(tmp_path, "d1", datetime.now(timezone.utc).isoformat())
+        _write_pending(tmp_path, "d1", datetime.now(timezone.utc).isoformat())
         runner._last_self_update_result = SelfUpdateResult(
             version=1,
             started_at=datetime.now(timezone.utc).isoformat(),
@@ -265,7 +483,7 @@ class TestEnqueuePendingSelfDeployResult:
     ) -> None:
         runner = _build_runner(tmp_path)
         runner._orch_client = MagicMock()
-        write_pending(tmp_path, "d1", datetime.now(timezone.utc).isoformat())
+        _write_pending(tmp_path, "d1", datetime.now(timezone.utc).isoformat())
         runner._last_self_update_result = None
         runner._enqueue_pending_self_deploy_result()
         kwargs = runner._orch_client.enqueue_deploy_result.call_args.kwargs
@@ -275,7 +493,7 @@ class TestEnqueuePendingSelfDeployResult:
     def test_invalid_started_at_skips_duration(self, tmp_path: Path) -> None:
         runner = _build_runner(tmp_path)
         runner._orch_client = MagicMock()
-        write_pending(tmp_path, "d1", "not-a-timestamp")
+        _write_pending(tmp_path, "d1", "not-a-timestamp")
         runner._last_self_update_result = SelfUpdateResult(
             version=1,
             started_at="t1",

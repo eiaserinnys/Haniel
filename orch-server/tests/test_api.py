@@ -94,15 +94,28 @@ class TestGetPending:
         resp = client.get("/api/orch/pending")
         assert resp.status_code == 200
         assert resp.json()["deploys"] == []
-        assert resp.json()["latest_failure"] is None
+        assert set(resp.json()) == {"deploys"}
 
-    async def test_latest_failure_is_independent_of_active_list(
+    async def test_failure_detail_is_history_only(
         self, hub, store, routes
     ):
         await _seed_pending(store, "failed")
-        await store.update_deploy_status("failed", DeployStatus.DEPLOYING)
-        await store.apply_deploy_result(
-            "failed", DeployStatus.FAILED, error="post-pull failed"
+        generation = hub.deploy_coordinator.register_connection("n1")
+        await store.attempts.begin_normal_attempt(
+            orchestrator_attempt_id="attempt-failed",
+            deploy_id="failed",
+            connection_generation=generation,
+            source="manual_single",
+            approved_by="dashboard",
+            deadline_at="2099-01-01T00:00:00+00:00",
+        )
+        await store.attempts.record_result(
+            deploy_id="failed",
+            orchestrator_attempt_id="attempt-failed",
+            connection_generation=generation,
+            status="failed",
+            error="post-pull failed",
+            duration_ms=12,
         )
 
         from starlette.applications import Starlette
@@ -111,9 +124,10 @@ class TestGetPending:
         client = TestClient(Starlette(routes=routes))
         data = client.get("/api/orch/pending").json()
 
-        assert data["deploys"] == []
-        assert data["latest_failure"]["deploy_id"] == "failed"
-        assert data["latest_failure"]["error"] == "post-pull failed"
+        assert [row["deploy_id"] for row in data["deploys"]] == ["failed"]
+        assert data["deploys"][0]["error"] is None
+        history = client.get("/api/orch/history").json()["deploys"]
+        assert any(row["error"] == "post-pull failed" for row in history)
 
     async def test_includes_deploying(self, hub, store, routes):
         """/api/orch/pending returns active (pending + deploying), not just pending."""
@@ -171,6 +185,8 @@ class TestGetPending:
             repo="myrepo",
             branch="main",
         )
+        # Node connection lifecycle owns this repair. The GET route is a pure read.
+        await hub.cleanup_pending_for_renamed_nodes()
 
         from starlette.applications import Starlette
         from starlette.testclient import TestClient
@@ -235,7 +251,7 @@ class TestGetNodes:
 class TestGetHistory:
     async def test_returns_history_with_limit(self, hub, store, routes):
         for i in range(5):
-            await _seed_pending(store, f"d{i}")
+            await _seed_pending(store, f"d{i}", branch=f"branch-{i}")
 
         from starlette.applications import Starlette
         from starlette.testclient import TestClient
@@ -300,11 +316,15 @@ class TestApproveDeploy:
         self, hub, store, routes
     ):
         await _seed_pending(store, "d1", "n1")
+        hub.deploy_coordinator.register_connection("n1")
 
         async def send_after_transition(node_id, message):
             assert node_id == "n1"
             assert (await store.get_deploy_event("d1"))["status"] == "deploying"
-            assert "d1" in hub._pending_deploys
+            assert any(
+                row["deploy_id"] == "d1"
+                for row in await store.attempts.get_active_attempts()
+            )
             return True
 
         hub.send_to_node = AsyncMock(side_effect=send_after_transition)
@@ -371,7 +391,6 @@ class TestApproveDeploy:
         data = resp.json()
         assert "error" in data
         assert data["deploy_id"] == "d1"
-        assert data["node_id"] == "n1"
         # DB must be reverted to PENDING — no transient APPROVED leak.
         event = await store.get_deploy_event("d1")
         assert event["status"] == "pending"
@@ -448,25 +467,24 @@ class TestApproveDeploy:
         assert resp.status_code == 200
         assert resp.json()["status"] == "deploying"
 
-        # d3 deploying, d1/d2 superseded
+        # Each change atomically supersedes the then-current canonical. Approval
+        # does not rewrite the audit chain after the fact.
         ev3 = await store.get_deploy_event("d3")
         assert ev3["status"] == "deploying"
-        for did in ("d1", "d2"):
-            ev = await store.get_deploy_event(did)
-            assert ev["status"] == "rejected"
-            assert ev["reject_reason"] == "superseded by d3"
+        ev1 = await store.get_deploy_event("d1")
+        ev2 = await store.get_deploy_event("d2")
+        assert (ev1["status"], ev1["reject_reason"]) == (
+            "rejected", "superseded by d2"
+        )
+        assert (ev2["status"], ev2["reject_reason"]) == (
+            "rejected", "superseded by d3"
+        )
 
-        # status_change broadcasts include reject_reason for the superseded ones
+        # Rows were created directly through the store, so their creation-time
+        # broadcasts are intentionally outside this approval request.
         sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
-        rejected = [
-            p for p in sent
-            if p.get("type") == "status_change"
-            and p.get("status") == "rejected"
-        ]
-        rejected_ids = {p["deploy_id"] for p in rejected}
-        assert rejected_ids == {"d1", "d2"}
-        for p in rejected:
-            assert p.get("reject_reason") == "superseded by d3"
+        assert not any(p.get("status") == "rejected" for p in sent)
+        assert any(p.get("status") == "deploying" for p in sent)
 
 
 class TestRejectDeploy:
@@ -654,7 +672,8 @@ class TestApproveAll:
         # its group → d2 is approved, d1 is superseded. d3 and d4 are alone
         # in their groups → both approved.
         assert set(data["approved"]) == {"d2", "d3", "d4"}
-        assert data["superseded"] == ["d1"]
+        assert "superseded" not in data
+        assert (await store.get_deploy_event("d1"))["reject_reason"] == "superseded by d2"
         assert data["failed"] == []
 
         ev_d1 = await store.get_deploy_event("d1")

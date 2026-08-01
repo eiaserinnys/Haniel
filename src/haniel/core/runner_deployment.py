@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -163,6 +164,10 @@ def run_manifest_deployment(
     previous_head: str,
     *,
     desired_running: set[str] | None = None,
+    orchestrator_attempt_id: str | None = None,
+    node_id: str | None = None,
+    branch: str | None = None,
+    journal_attempt_id: str | None = None,
 ) -> None:
     """Load the pulled release manifest and run the auditable handover."""
 
@@ -188,7 +193,25 @@ def run_manifest_deployment(
     try:
         manifest = ReleaseManifest.load(manifest_path)
     except Exception as error:
-        state_store.begin(repo_name, previous_head, target_head, "invalid-manifest")
+        live = state_store.read(repo_name)
+        identity = repo_config.release_manifest
+        digest = (
+            live.get("manifest_digest")
+            if live is not None and live.get("journal_attempt_id") == journal_attempt_id
+            else None
+        )
+        state_store.begin(
+            repo_name,
+            previous_head,
+            target_head,
+            "invalid-manifest",
+            orchestrator_attempt_id=orchestrator_attempt_id,
+            node_id=node_id,
+            branch=branch,
+            manifest_identity=identity,
+            manifest_digest=digest,
+            journal_attempt_id=journal_attempt_id,
+        )
         state_store.transition(repo_name, "recovering", message=str(error))
         try:
             adapter.rollback()
@@ -248,4 +271,10 @@ def run_manifest_deployment(
         target_head=target_head,
         manifest=manifest,
         callbacks=adapter.callbacks(),
+        orchestrator_attempt_id=orchestrator_attempt_id,
+        node_id=node_id,
+        branch=branch,
+        manifest_identity=repo_config.release_manifest,
+        manifest_digest=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        journal_attempt_id=journal_attempt_id,
     )

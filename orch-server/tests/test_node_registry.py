@@ -82,9 +82,8 @@ class TestUnregister:
         assert nodes[0]["hostname"] == "host-n1"
         assert nodes[0]["haniel_version"] == "0.14.2"
 
-    # NOTE: in-flight deploy failure (DEPLOYING → FAILED on disconnect) is
-    # the responsibility of WebSocketHub._cleanup_orphan_deploys. See
-    # test_hub.py::TestDeployTimeout for that coverage.
+    # Deploy attempts intentionally outlive a transient node disconnect; the
+    # durable server deadline owns terminalization.
 
     async def test_unregister_nonexistent_does_not_raise(self, store: EventStore):
         registry = NodeRegistry(store)

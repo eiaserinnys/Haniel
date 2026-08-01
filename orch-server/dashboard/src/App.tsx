@@ -28,7 +28,6 @@ const DASHBOARD_SYNC_INTERVAL_MS = 10_000;
 function App() {
   const [page, setPageRaw] = useState<Page>('pending');
   const [pending, setPending] = useState<Deploy[]>([]);
-  const [latestFailure, setLatestFailure] = useState<Deploy | null>(null);
   const [nodes, setNodes] = useState<OrchestratorNode[]>([]);
   const [history, setHistory] = useState<Deploy[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -82,7 +81,6 @@ function App() {
       if (seq !== deploySyncSeq.current) return;
       if (pendingResult.status === 'fulfilled') {
         setPending(pendingResult.value.deploys);
-        setLatestFailure(pendingResult.value.latest_failure);
       }
       if (historyResult.status === 'fulfilled') setHistory(historyResult.value.deploys);
     });
@@ -382,7 +380,6 @@ function App() {
           {page === 'pending' && (
             <PendingView
               deploys={pending}
-              latestFailure={latestFailure}
               onApprove={handleApprove}
               onReject={handleReject}
               onApproveAll={handleApproveAll}
