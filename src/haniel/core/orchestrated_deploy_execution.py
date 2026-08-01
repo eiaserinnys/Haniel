@@ -61,9 +61,7 @@ def execute_approved_plan(
     return None
 
 
-def assert_remote_target(
-    runner: "ServiceRunner", repo: str, target_head: str
-) -> None:
+def assert_remote_target(runner: "ServiceRunner", repo: str, target_head: str) -> None:
     """Fail before side effects if the approved branch no longer names target."""
     state = runner._repo_states[repo]
     repo_path = runner.config_dir / state.config.path

@@ -236,8 +236,7 @@ class TestHandleDeployApproval:
     @staticmethod
     def _approval(config, deploy_id: str | None = None) -> dict:
         return {
-            "deploy_id": deploy_id
-            or f"{config.node_id}:repo:main:abc1234",
+            "deploy_id": deploy_id or f"{config.node_id}:repo:main:abc1234",
             "orchestrator_attempt_id": "orch-1",
             "connection_generation": "generation-1",
             "execution_mode": "execute",
@@ -336,9 +335,7 @@ class TestHandleDeployApproval:
         )
         sent = self._capture_send_json(client)
         pending = asyncio.create_task(
-            client._handle_deploy_approval(
-                self._approval(config)
-            )
+            client._handle_deploy_approval(self._approval(config))
         )
         await asyncio.sleep(0.02)
         assert sent == []

@@ -90,7 +90,10 @@ class TestDeployRetryPlanner:
         planner = self.planner(tmp_path, monkeypatch)
         store = planner.journal_store
         store.begin(
-            "r", "original-previous", "target", "release",
+            "r",
+            "original-previous",
+            "target",
+            "release",
             orchestrator_attempt_id="source",
             node_id="n",
             branch="main",
@@ -161,7 +164,9 @@ class TestDeployAttemptGate:
                 "error": "retry_requires_manual_approval",
             }
         )
-        with pytest.raises(DeployPermissionError, match="retry_requires_manual_approval"):
+        with pytest.raises(
+            DeployPermissionError, match="retry_requires_manual_approval"
+        ):
             gate.wait("a1", 10)
 
     def test_stale_generation_and_wrong_request_do_not_open_permission(self):
@@ -235,7 +240,9 @@ class TestDeployAttemptGate:
 
         gate.observe_generation("g2")
 
-        with pytest.raises(DeployPermissionError, match="connection_generation_changed"):
+        with pytest.raises(
+            DeployPermissionError, match="connection_generation_changed"
+        ):
             gate.wait("a1", 10)
 
     def test_reconnect_forgets_old_generation_before_new_request(self):

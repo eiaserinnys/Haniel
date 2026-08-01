@@ -78,11 +78,17 @@ class DeployRetryPlanner:
             return self._build("execute", evidence, "normal_pull", None)
         if not journal:
             return self._build(
-                "fail_closed", evidence, "journal_missing", "manifest retry journal is missing"
+                "fail_closed",
+                evidence,
+                "journal_missing",
+                "manifest retry journal is missing",
             )
         if journal.get("target_head") != target:
             return self._build(
-                "fail_closed", evidence, "journal_target_mismatch", "journal target differs from approval target"
+                "fail_closed",
+                evidence,
+                "journal_target_mismatch",
+                "journal target differs from approval target",
             )
         journal_scope_matches = (
             journal.get("repo") == probe["repo"]
@@ -111,15 +117,27 @@ class DeployRetryPlanner:
             lineage = probe.get("retry_lineage", [])
             if not journal.get("orchestrator_attempt_id"):
                 return self._build(
-                    "fail_closed", evidence, "journal_link_missing", "success journal lacks orchestrator_attempt_id"
+                    "fail_closed",
+                    evidence,
+                    "journal_link_missing",
+                    "success journal lacks orchestrator_attempt_id",
                 )
-            if journal.get("orchestrator_attempt_id") != source or source not in lineage:
+            if (
+                journal.get("orchestrator_attempt_id") != source
+                or source not in lineage
+            ):
                 return self._build(
-                    "fail_closed", evidence, "retry_lineage_mismatch", "success journal is outside retry lineage"
+                    "fail_closed",
+                    evidence,
+                    "retry_lineage_mismatch",
+                    "success journal is outside retry lineage",
                 )
             if not journal.get("completed_at"):
                 return self._build(
-                    "fail_closed", evidence, "journal_completion_missing", "success journal lacks completion timestamp"
+                    "fail_closed",
+                    evidence,
+                    "journal_completion_missing",
+                    "success journal lacks completion timestamp",
                 )
             return self._build(
                 "evidence_recovery", evidence, "durable_local_success", None
@@ -130,8 +148,7 @@ class DeployRetryPlanner:
             and journal.get("completed_at")
             and journal.get("orchestrator_attempt_id")
             == probe.get("source_orchestrator_attempt_id")
-            and journal.get("orchestrator_attempt_id")
-            in probe.get("retry_lineage", [])
+            and journal.get("orchestrator_attempt_id") in probe.get("retry_lineage", [])
         ):
             return self._build("execute", evidence, "manifest_retry", None)
         return self._build(
@@ -159,7 +176,9 @@ class DeployRetryPlanner:
             )
         return current
 
-    def _manifest_snapshot(self, target: str) -> tuple[str | None, str | None, str | None]:
+    def _manifest_snapshot(
+        self, target: str
+    ) -> tuple[str | None, str | None, str | None]:
         if self.manifest_path is None:
             return None, None, None
         try:
@@ -179,7 +198,8 @@ class DeployRetryPlanner:
             "current_head": current_head,
             "journal_status": journal and journal.get("state"),
             "journal_attempt_id": journal and journal.get("journal_attempt_id"),
-            "linked_orchestrator_attempt_id": journal and journal.get("orchestrator_attempt_id"),
+            "linked_orchestrator_attempt_id": journal
+            and journal.get("orchestrator_attempt_id"),
             "journal_target_head": journal and journal.get("target_head"),
             "original_previous_head": journal and journal.get("previous_head"),
             "manifest_identity": identity,

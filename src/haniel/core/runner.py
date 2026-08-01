@@ -1176,7 +1176,9 @@ class ServiceRunner:
                 self._self_repo,
                 self._repo_states[self._self_repo].config.branch,
                 pending.deploy_id,
-            ) if self._self_repo else None,
+            )
+            if self._self_repo
+            else None,
         )
         logger.info(
             "Enqueued DeployResult for self-update: deploy_id=%s status=%s",
@@ -1305,9 +1307,11 @@ class ServiceRunner:
 
                 self._ensure_release_manifest_activation(repo_name)
                 repo_path = self.config_dir / state.config.path
-                previous_head = get_head(repo_path) if (
-                    state.config.release_manifest or target_head is not None
-                ) else None
+                previous_head = (
+                    get_head(repo_path)
+                    if (state.config.release_manifest or target_head is not None)
+                    else None
+                )
                 if state.config.release_manifest:
                     assert previous_head is not None
                     resolved_branch = branch or state.config.branch

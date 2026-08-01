@@ -68,21 +68,28 @@ class DeployReporter:
         parsed = parse_deploy_id(deploy_id)
         if parsed is None:
             await self.send_result(
-                deploy_id, orchestrator_attempt_id, connection_generation,
-                "failed", error=f"invalid deploy_id format: {deploy_id!r}"
+                deploy_id,
+                orchestrator_attempt_id,
+                connection_generation,
+                "failed",
+                error=f"invalid deploy_id format: {deploy_id!r}",
             )
             return
         node_id, repo, branch, _remote_head = parsed
         if node_id != self._node_id:
             await self.send_result(
-                deploy_id, orchestrator_attempt_id, connection_generation,
+                deploy_id,
+                orchestrator_attempt_id,
+                connection_generation,
                 "failed",
                 error=f"deploy_id node mismatch: {node_id} != {self._node_id}",
             )
             return
         if self._approval_handler is None:
             await self.send_result(
-                deploy_id, orchestrator_attempt_id, connection_generation,
+                deploy_id,
+                orchestrator_attempt_id,
+                connection_generation,
                 "failed",
                 error="no deploy_approval handler registered",
             )
@@ -91,9 +98,7 @@ class DeployReporter:
         started = time.monotonic()
         operation_error: str | None = None
         try:
-            result = await asyncio.to_thread(
-                self._approval_handler, msg
-            )
+            result = await asyncio.to_thread(self._approval_handler, msg)
         except ApprovalRevalidationError as exc:
             await self._send_json(
                 {
@@ -117,13 +122,18 @@ class DeployReporter:
                 "Deploy %s deferred; result will be sent after restart", deploy_id
             )
             return
-        if isinstance(result, dict) and result.get("type") == "manifest_recovery_evidence":
+        if (
+            isinstance(result, dict)
+            and result.get("type") == "manifest_recovery_evidence"
+        ):
             await self._send_json(result)
             return
 
         if self._snapshot_handler is None:
             await self.send_result(
-                deploy_id, orchestrator_attempt_id, connection_generation,
+                deploy_id,
+                orchestrator_attempt_id,
+                connection_generation,
                 "failed",
                 error="no repository snapshot handler registered",
             )
@@ -141,8 +151,12 @@ class DeployReporter:
                 else (f"snapshot failed: {exc}")
             )
             await self.send_result(
-                deploy_id, orchestrator_attempt_id, connection_generation,
-                "failed", error=error, duration_ms=duration_ms
+                deploy_id,
+                orchestrator_attempt_id,
+                connection_generation,
+                "failed",
+                error=error,
+                duration_ms=duration_ms,
             )
             return
         await self.send_settled_result(

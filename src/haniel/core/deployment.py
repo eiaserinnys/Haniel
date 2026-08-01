@@ -163,7 +163,9 @@ class DeploymentStateStore:
         existing = self.read(repo_name)
         if journal_attempt_id is not None and existing is not None:
             if existing.get("journal_attempt_id") != journal_attempt_id:
-                raise ValueError("journal_attempt_id does not identify the live journal")
+                raise ValueError(
+                    "journal_attempt_id does not identify the live journal"
+                )
             immutable = {
                 "previous_head": previous_head,
                 "target_head": target_head,

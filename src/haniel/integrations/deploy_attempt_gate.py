@@ -30,7 +30,10 @@ class DeployAttemptGate:
         with self._lock:
             if self._generation is not None and self._generation != generation:
                 for pending in self._pending.values():
-                    pending.response = {"accepted": False, "error": "connection_generation_changed"}
+                    pending.response = {
+                        "accepted": False,
+                        "error": "connection_generation_changed",
+                    }
                     pending.event.set()
             self._generation = generation
 
@@ -64,7 +67,10 @@ class DeployAttemptGate:
                 return False
             if ack["deploy_id"] != pending.deploy_id:
                 return False
-            if self._generation is not None and ack["connection_generation"] != self._generation:
+            if (
+                self._generation is not None
+                and ack["connection_generation"] != self._generation
+            ):
                 return False
             if pending.response is not None:
                 return True
@@ -72,7 +78,9 @@ class DeployAttemptGate:
             pending.event.set()
             return True
 
-    def wait(self, requested_orchestrator_attempt_id: str, timeout: float) -> dict[str, Any]:
+    def wait(
+        self, requested_orchestrator_attempt_id: str, timeout: float
+    ) -> dict[str, Any]:
         with self._lock:
             pending = self._pending.get(requested_orchestrator_attempt_id)
         if pending is None:
@@ -85,7 +93,9 @@ class DeployAttemptGate:
             completed = self._pending.pop(requested_orchestrator_attempt_id, pending)
         response = completed.response or {"accepted": False, "error": "ACK lost"}
         if not response.get("accepted"):
-            raise DeployPermissionError(str(response.get("error", "deploy attempt rejected")))
+            raise DeployPermissionError(
+                str(response.get("error", "deploy attempt rejected"))
+            )
         return response
 
     @staticmethod
@@ -110,8 +120,13 @@ class DeployAttemptGate:
         if ack.get("accepted") is True:
             if keys != common | accepted_only:
                 raise DeployPermissionError("accepted ACK fields are contaminated")
-            if ack["begun_orchestrator_attempt_id"] != ack["requested_orchestrator_attempt_id"]:
-                raise DeployPermissionError("accepted ACK changed orchestrator attempt ID")
+            if (
+                ack["begun_orchestrator_attempt_id"]
+                != ack["requested_orchestrator_attempt_id"]
+            ):
+                raise DeployPermissionError(
+                    "accepted ACK changed orchestrator attempt ID"
+                )
         elif ack.get("accepted") is False:
             if (
                 keys != common | rejected_only

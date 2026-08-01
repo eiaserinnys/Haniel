@@ -141,7 +141,8 @@ class TestHandleDeployApprovalNonSelf:
         try:
             with pytest.raises(RuntimeError, match="already pulling"):
                 runner._repo_states["appA"].pending_changes = {
-                    "commits": ["abc1234 fix"], "stat": "+1 -0"
+                    "commits": ["abc1234 fix"],
+                    "stat": "+1 -0",
                 }
                 runner._handle_deploy_approval(_approval())
         finally:
@@ -154,9 +155,7 @@ class TestHandleDeployApprovalNonSelf:
             "stat": "+1 -0",
         }
         runner.trigger_pull = MagicMock()  # type: ignore[assignment]
-        with pytest.raises(
-            Exception, match="differs from configured branch"
-        ):
+        with pytest.raises(Exception, match="differs from configured branch"):
             runner._handle_deploy_approval(_approval(branch="feature/x"))
         runner.trigger_pull.assert_not_called()
 
@@ -295,10 +294,17 @@ class TestImmutableRetryExecution:
             mode="execute", evidence={}, reason="legacy_retry"
         )
         with (
-            patch("haniel.core.orchestrated_deploy_execution.get_head", return_value="abc1234"),
-            patch("haniel.core.orchestrated_deploy_execution.run_manifest_deployment") as manifest,
+            patch(
+                "haniel.core.orchestrated_deploy_execution.get_head",
+                return_value="abc1234",
+            ),
+            patch(
+                "haniel.core.orchestrated_deploy_execution.run_manifest_deployment"
+            ) as manifest,
         ):
-            execute_approved_plan(runner, _approval(probe_id="probe-1"), self._probe(), planner)
+            execute_approved_plan(
+                runner, _approval(probe_id="probe-1"), self._probe(), planner
+            )
 
         runner._restart_after_pull_legacy.assert_called_once_with("appA", ["svc-a"])
         runner.trigger_pull.assert_not_called()
@@ -316,10 +322,17 @@ class TestImmutableRetryExecution:
             reason="manifest_retry",
         )
         with (
-            patch("haniel.core.orchestrated_deploy_execution.get_head", return_value="abc1234"),
-            patch("haniel.core.orchestrated_deploy_execution.run_manifest_deployment") as manifest,
+            patch(
+                "haniel.core.orchestrated_deploy_execution.get_head",
+                return_value="abc1234",
+            ),
+            patch(
+                "haniel.core.orchestrated_deploy_execution.run_manifest_deployment"
+            ) as manifest,
         ):
-            execute_approved_plan(runner, _approval(probe_id="probe-1"), self._probe(), planner)
+            execute_approved_plan(
+                runner, _approval(probe_id="probe-1"), self._probe(), planner
+            )
 
         manifest.assert_called_once_with(
             runner,
@@ -387,9 +400,7 @@ class TestHandleDeployApprovalSelfRepo:
         with (
             patch.object(runner, "_deploy_retry_planner", return_value=MagicMock()),
             patch("haniel.core.runner.validate_approved_plan", return_value=plan),
-            patch(
-                "haniel.core.runner.build_recovery_evidence", return_value=recovered
-            ),
+            patch("haniel.core.runner.build_recovery_evidence", return_value=recovered),
         ):
             result = runner._handle_deploy_approval(
                 _approval("haniel", mode="evidence_recovery", probe_id="probe-1")
