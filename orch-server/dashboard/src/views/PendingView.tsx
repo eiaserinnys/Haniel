@@ -188,14 +188,14 @@ function LatestFailure({ deploy }: { deploy: Deploy }) {
         <div className="pending-card-info">
           <div className="pending-card-title">
             <span className="pending-repo">Last deploy failed</span>
-            <span className="pending-sep">·</span>
+            <span className="pending-sep">/</span>
             <span className="pending-branch">{deploy.repo}</span>
-            <span className="pending-sep">·</span>
+            <span className="pending-sep">/</span>
             <span className="pending-node">{deploy.node_id}</span>
           </div>
           <div className="pending-card-meta">
             <span>{deploy.branch}</span>
-            <span className="pending-sep">·</span>
+            <span className="pending-sep">/</span>
             <span>{relTime(deploy.updated_at)}</span>
           </div>
           <pre className="history-error-block">
