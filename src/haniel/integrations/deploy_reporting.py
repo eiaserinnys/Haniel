@@ -6,13 +6,15 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
-from ..core.repo_reconciliation import RepoReconciliationSnapshot
+if TYPE_CHECKING:
+    from ..core.repo_reconciliation import RepoReconciliationSnapshot
 
 logger = logging.getLogger(__name__)
 
 ApprovalHandler = Callable[[dict], str | dict | None]
-SnapshotHandler = Callable[[str, str, str], RepoReconciliationSnapshot]
+SnapshotHandler = Callable[[str, str, str], "RepoReconciliationSnapshot"]
 SendJson = Callable[[dict], Awaitable[None]]
 
 

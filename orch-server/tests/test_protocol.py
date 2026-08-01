@@ -1,5 +1,7 @@
 """Tests for protocol message models and parse_node_message."""
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -8,13 +10,12 @@ from haniel_orch.protocol import (
     ChangeNotification,
     DeployApproval,
     DeployAttemptTerminal,
+    DeployPlanProposal,
     DeployReject,
     DeployResult,
     DeployStatus,
     NodeHello,
-    NodeMessage,
     NodeStatus,
-    OrchestratorMessage,
     RepoReconciliation,
     RejectedDeployAttemptAck,
     parse_node_message,
@@ -216,16 +217,21 @@ class TestRepoReconciliation:
 class TestServerMessages:
     def test_deploy_approval(self):
         msg = DeployApproval(
-            deploy_id="d1", orchestrator_attempt_id="a1",
-            execution_mode="execute", connection_generation="g1"
+            deploy_id="d1",
+            orchestrator_attempt_id="a1",
+            execution_mode="execute",
+            connection_generation="g1",
         )
         assert msg.type == "deploy_approval"
         assert msg.approved_by == "dashboard"
 
     def test_deploy_approval_custom_approver(self):
         msg = DeployApproval(
-            deploy_id="d1", orchestrator_attempt_id="a1",
-            execution_mode="execute", connection_generation="g1", approved_by="slack"
+            deploy_id="d1",
+            orchestrator_attempt_id="a1",
+            execution_mode="execute",
+            connection_generation="g1",
+            approved_by="slack",
         )
         assert msg.approved_by == "slack"
 
@@ -258,6 +264,53 @@ class TestParseNodeMessage:
         msg = parse_node_message(raw)
         assert isinstance(msg, DeployResult)
         assert msg.status == "success"
+
+    @pytest.mark.parametrize("reason", ["planner_missing", "planner_error"])
+    def test_parse_planner_fallback_fail_closed_proposal(self, reason: str):
+        raw = json.dumps(
+            {
+                "type": "deploy_plan_proposal",
+                "mode": "fail_closed",
+                "probe_id": "p1",
+                "connection_generation": "g1",
+                "deploy_id": "n:r:main:target",
+                "node_id": "n",
+                "repo": "r",
+                "branch": "main",
+                "target_head": "target",
+                "current_head": "",
+                "reason": reason,
+                "error": "planner could not produce a safe plan",
+                "fingerprint": f"{reason}-fingerprint",
+            }
+        )
+
+        proposal = parse_node_message(raw)
+
+        assert isinstance(proposal, DeployPlanProposal)
+        assert proposal.mode == "fail_closed"
+        assert proposal.reason == reason
+
+    def test_unknown_planner_reason_is_rejected(self):
+        raw = json.dumps(
+            {
+                "type": "deploy_plan_proposal",
+                "mode": "fail_closed",
+                "probe_id": "p1",
+                "connection_generation": "g1",
+                "deploy_id": "n:r:main:target",
+                "node_id": "n",
+                "repo": "r",
+                "branch": "main",
+                "target_head": "target",
+                "current_head": "",
+                "reason": "unregistered_planner_reason",
+                "fingerprint": "unknown-reason",
+            }
+        )
+
+        with pytest.raises(ValidationError):
+            parse_node_message(raw)
 
 
 class TestDeployAttemptProtocolAuthority:

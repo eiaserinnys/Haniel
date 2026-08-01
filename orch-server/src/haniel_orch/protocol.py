@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from enum import Enum
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal, Union, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -41,7 +41,10 @@ DeployPlanReason = Literal[
     "durable_local_success",
     "manifest_retry",
     "unsafe_journal",
+    "planner_missing",
+    "planner_error",
 ]
+SERVER_DEPLOY_PLAN_REASON_INVENTORY = frozenset(get_args(DeployPlanReason))
 
 
 # --- Node → Server messages ---
@@ -126,7 +129,10 @@ class RepoReconciliation(StrictMessage):
 
     @model_validator(mode="after")
     def validate_attempt_identity(self) -> "RepoReconciliation":
-        if self.phase in ("attempt_started", "settled") and not self.orchestrator_attempt_id:
+        if (
+            self.phase in ("attempt_started", "settled")
+            and not self.orchestrator_attempt_id
+        ):
             raise ValueError(f"{self.phase} requires orchestrator_attempt_id")
         if self.phase == "settled" and not self.connection_generation:
             raise ValueError("settled requires connection_generation")

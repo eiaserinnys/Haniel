@@ -28,6 +28,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+DEPLOY_PLAN_REASON_INVENTORY = frozenset(
+    {
+        "legacy_retry",
+        "manifest_read_failed",
+        "manifest_mismatch",
+        "normal_pull",
+        "journal_missing",
+        "journal_target_mismatch",
+        "journal_scope_mismatch",
+        "journal_manifest_mismatch",
+        "journal_link_missing",
+        "retry_lineage_mismatch",
+        "journal_completion_missing",
+        "durable_local_success",
+        "manifest_retry",
+        "unsafe_journal",
+        "planner_missing",
+        "planner_error",
+    }
+)
+
 
 class OrchestratorClient:
     """Node-side orchestrator WebSocket client.
@@ -76,6 +97,8 @@ class OrchestratorClient:
         # Used for self-update results that survive runner restart.
         self._pending_deploy_results: list[dict] = []
         self._pending_lock = threading.Lock()
+        self._flush_lock: asyncio.Lock | None = None
+        self._flush_lock_loop: asyncio.AbstractEventLoop | None = None
         self._deploy_attempt_gate = DeployAttemptGate()
         self._deploy_reporter = DeployReporter(
             node_id=config.node_id,
@@ -284,22 +307,32 @@ class OrchestratorClient:
                 logger.debug(f"Failed to schedule deploy result flush: {e}")
 
     async def _flush_pending_deploy_results(self) -> None:
-        """Send all buffered DeployResults. Re-queue on send failure."""
-        with self._pending_lock:
-            pending = list(self._pending_deploy_results)
-            self._pending_deploy_results.clear()
-        for msg in pending:
-            try:
-                await self._send_json(msg)
-            except Exception as e:
-                logger.warning(
-                    f"Failed to send buffered deploy result {msg.get('deploy_id')}: {e}"
-                )
-                # Re-queue this message and stop processing further messages
-                # to preserve order. The next connect will flush again.
+        """Send the buffered prefix while preserving the complete unsent suffix."""
+        async with self._flush_lock_for_running_loop():
+            while True:
                 with self._pending_lock:
-                    self._pending_deploy_results.append(msg)
-                break
+                    if not self._pending_deploy_results:
+                        return
+                    msg = self._pending_deploy_results.pop(0)
+                try:
+                    await self._send_json(msg)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to send buffered deploy result %s: %s",
+                        msg.get("deploy_id"),
+                        e,
+                    )
+                    with self._pending_lock:
+                        self._pending_deploy_results.insert(0, msg)
+                    return
+
+    def _flush_lock_for_running_loop(self) -> asyncio.Lock:
+        """Return one flush lock for the client's current background event loop."""
+        loop = asyncio.get_running_loop()
+        if self._flush_lock is None or self._flush_lock_loop is not loop:
+            self._flush_lock = asyncio.Lock()
+            self._flush_lock_loop = loop
+        return self._flush_lock
 
     def _run_loop(self) -> None:
         """Entry point for the background thread."""

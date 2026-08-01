@@ -3,6 +3,8 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from haniel_orch.connection_lifecycle import ActiveConnection, ConnectionLease
 from haniel_orch.deploy_attempt_coordinator import (
     DeployAttemptCoordinator,
@@ -741,6 +743,64 @@ class TestManualRetryPreflightContinuation:
             assert len(rows) == 1
             assert rows[0]["terminal_kind"] == "preflight_fail_closed"
             assert rows[0]["error"] == "manifest retry journal is missing"
+            assert (await store.get_deploy_event(probe.deploy_id))[
+                "status"
+            ] == "pending"
+        finally:
+            await harness.close()
+
+    @pytest.mark.parametrize(
+        ("reason", "error"),
+        [
+            ("planner_missing", "no deploy plan probe handler registered"),
+            ("planner_error", "deploy plan probe failed: journal unreadable"),
+        ],
+    )
+    async def test_planner_fallback_has_one_history_row_and_no_permit(
+        self, store: EventStore, reason: str, error: str
+    ):
+        event = await seed(store)
+        harness = Harness(store)
+        try:
+            await make_retry(store, harness.generation)
+            approval_task = asyncio.create_task(
+                harness.coordinator.approve_manual(
+                    event, approved_by="director", source="manual_single"
+                )
+            )
+            probe = await wait_for_send(harness)
+            sent_before_proposal = len(harness.sent)
+
+            await harness.handle_proposal(
+                DeployPlanProposal(
+                    mode="fail_closed",
+                    probe_id=probe.probe_id,
+                    connection_generation=harness.generation,
+                    deploy_id=probe.deploy_id,
+                    node_id="n",
+                    repo="r",
+                    branch="main",
+                    target_head="target",
+                    current_head="target",
+                    reason=reason,
+                    error=error,
+                    fingerprint=reason,
+                )
+            )
+            with pytest.raises(PlanRejected):
+                await approval_task
+
+            rows = [
+                row
+                for row in await store.get_deploy_history()
+                if row["deploy_id"] == f"preflight:{probe.probe_id}"
+            ]
+            assert len(rows) == 1
+            assert rows[0]["terminal_kind"] == "preflight_fail_closed"
+            assert rows[0]["terminal_reason"] == reason
+            assert rows[0]["terminal_error"] == error
+            assert len(harness.sent) == sent_before_proposal
+            assert await store.attempts.get_active_attempts() == []
             assert (await store.get_deploy_event(probe.deploy_id))[
                 "status"
             ] == "pending"

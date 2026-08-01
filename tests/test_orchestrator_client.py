@@ -376,6 +376,31 @@ class TestHandleDeployApproval:
 
 
 class TestDeployPlanProbe:
+    async def test_missing_planner_returns_fail_closed_proposal(self, config):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+        sent = []
+
+        async def fake_send_json(message):
+            sent.append(message)
+
+        client._send_json = fake_send_json  # type: ignore[assignment]
+        await client._handle_server_message(
+            {
+                "type": "deploy_plan_probe",
+                "probe_id": "p1",
+                "connection_generation": "g1",
+                "deploy_id": "test-node-1:r:main:target",
+                "node_id": "test-node-1",
+                "repo": "r",
+                "branch": "main",
+                "target_head": "target",
+            }
+        )
+
+        assert sent[0]["mode"] == "fail_closed"
+        assert sent[0]["reason"] == "planner_missing"
+        assert sent[0]["error"] == "no deploy plan probe handler registered"
+
     async def test_planner_exception_returns_fail_closed_proposal(self, config):
         def broken_planner(_probe):
             raise RuntimeError("journal unreadable")
@@ -530,25 +555,153 @@ class TestEnqueueDeployResult:
         with client._pending_lock:
             assert client._pending_deploy_results == []
 
-    async def test_flush_requeues_on_failure(self, config):
+    async def test_first_message_failure_preserves_entire_queue(self, config):
         client = OrchestratorClient(config, haniel_version="0.1.0")
         client.enqueue_deploy_result("d1", "success")
         client.enqueue_deploy_result("d2", "success")
 
-        sent = []
-
-        async def fake_send_json(msg):
-            if len(sent) >= 1:
-                raise OSError("connection lost")
-            sent.append(msg)
+        async def fake_send_json(_msg):
+            raise OSError("connection lost")
 
         client._send_json = fake_send_json  # type: ignore[assignment]
         await client._flush_pending_deploy_results()
-        assert len(sent) == 1
-        # d2 was attempted, failed, and re-queued (order preserved)
         with client._pending_lock:
-            assert len(client._pending_deploy_results) == 1
-            assert client._pending_deploy_results[0]["deploy_id"] == "d2"
+            assert [msg["deploy_id"] for msg in client._pending_deploy_results] == [
+                "d1",
+                "d2",
+            ]
+
+    async def test_middle_message_failure_preserves_unsent_suffix(self, config):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+        for deploy_id in ("d1", "d2", "d3"):
+            client.enqueue_deploy_result(deploy_id, "success")
+        sent = []
+
+        async def fake_send_json(msg):
+            if msg["deploy_id"] == "d2":
+                raise OSError("connection lost")
+            sent.append(msg["deploy_id"])
+
+        client._send_json = fake_send_json  # type: ignore[assignment]
+        await client._flush_pending_deploy_results()
+
+        assert sent == ["d1"]
+        with client._pending_lock:
+            assert [msg["deploy_id"] for msg in client._pending_deploy_results] == [
+                "d2",
+                "d3",
+            ]
+
+    async def test_failure_during_concurrent_enqueue_preserves_total_order(
+        self, config
+    ):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+        client.enqueue_deploy_result("d1", "success")
+        client.enqueue_deploy_result("d2", "success")
+        send_entered = asyncio.Event()
+        release_send = asyncio.Event()
+
+        async def fake_send_json(_msg):
+            send_entered.set()
+            await release_send.wait()
+            raise OSError("connection lost")
+
+        client._send_json = fake_send_json  # type: ignore[assignment]
+        flush = asyncio.create_task(client._flush_pending_deploy_results())
+        await send_entered.wait()
+        client.enqueue_deploy_result("d3", "success")
+        release_send.set()
+        await flush
+
+        with client._pending_lock:
+            assert [msg["deploy_id"] for msg in client._pending_deploy_results] == [
+                "d1",
+                "d2",
+                "d3",
+            ]
+
+    async def test_reconnect_retry_sends_failed_message_then_suffix(self, config):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+        for deploy_id in ("d1", "d2", "d3"):
+            client.enqueue_deploy_result(deploy_id, "success")
+
+        async def fail_middle(msg):
+            if msg["deploy_id"] == "d2":
+                raise OSError("connection lost")
+
+        client._send_json = fail_middle  # type: ignore[assignment]
+        await client._flush_pending_deploy_results()
+        retried = []
+
+        async def capture(msg):
+            retried.append(msg["deploy_id"])
+
+        client._send_json = capture  # type: ignore[assignment]
+        await client._flush_pending_deploy_results()
+
+        assert retried == ["d2", "d3"]
+        with client._pending_lock:
+            assert client._pending_deploy_results == []
+
+    async def test_self_update_result_and_settled_snapshot_keep_wire_order(
+        self, config
+    ):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+        snapshot = RepoReconciliationSnapshot(
+            deploy_id="test-node-1:r:main:target",
+            node_id="test-node-1",
+            repo="r",
+            branch="main",
+            local_head="target",
+            remote_head="target",
+        )
+        client.enqueue_deploy_result(
+            snapshot.deploy_id,
+            "success",
+            orchestrator_attempt_id="a1",
+            connection_generation="g1",
+            settled_snapshot=snapshot,
+        )
+        sent = []
+
+        async def capture(msg):
+            sent.append(msg)
+
+        client._send_json = capture  # type: ignore[assignment]
+        await client._flush_pending_deploy_results()
+
+        assert [msg["type"] for msg in sent] == [
+            "deploy_result",
+            "repo_reconciliation",
+        ]
+        assert sent[1]["phase"] == "settled"
+        assert sent[0]["orchestrator_attempt_id"] == sent[1]["orchestrator_attempt_id"]
+
+    async def test_concurrent_flushes_do_not_duplicate_or_lose_messages(self, config):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+        for deploy_id in ("d1", "d2", "d3"):
+            client.enqueue_deploy_result(deploy_id, "success")
+        first_send_entered = asyncio.Event()
+        release_first_send = asyncio.Event()
+        sent = []
+
+        async def capture(msg):
+            if not sent:
+                first_send_entered.set()
+                await release_first_send.wait()
+            sent.append(msg["deploy_id"])
+
+        client._send_json = capture  # type: ignore[assignment]
+        first = asyncio.create_task(client._flush_pending_deploy_results())
+        await first_send_entered.wait()
+        second = asyncio.create_task(client._flush_pending_deploy_results())
+        await asyncio.sleep(0)
+        release_first_send.set()
+        await asyncio.gather(first, second)
+
+        assert sent == ["d1", "d2", "d3"]
+        with client._pending_lock:
+            assert client._pending_deploy_results == []
 
     async def test_flush_with_empty_buffer_noop(self, config):
         client = OrchestratorClient(config, haniel_version="0.1.0")
