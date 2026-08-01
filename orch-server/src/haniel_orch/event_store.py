@@ -82,6 +82,7 @@ class EventStore:
         if self._db:
             await self._db.close()
             self._db = None
+
     async def create_deploy_event(
         self,
         deploy_id: str,
@@ -108,9 +109,17 @@ class EventStore:
                         created_at, updated_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
-                        deploy_id, node_id, repo, branch,
-                        DeployStatus.PENDING.value, json.dumps(commits),
-                        json.dumps(affected_services), diff_stat, detected_at, now, now,
+                        deploy_id,
+                        node_id,
+                        repo,
+                        branch,
+                        DeployStatus.PENDING.value,
+                        json.dumps(commits),
+                        json.dumps(affected_services),
+                        diff_stat,
+                        detected_at,
+                        now,
+                        now,
                     ),
                 )
                 await self._db.commit()
@@ -119,16 +128,12 @@ class EventStore:
                 await self._db.rollback()
                 raise
 
-    async def reopen_terminal_deploy(
-        self, deploy_id: str, expected_status: DeployStatus
-    ) -> bool:
-        """Snapshot one terminal attempt and conditionally reopen its canonical ID."""
-        if expected_status not in (DeployStatus.FAILED, DeployStatus.SUCCESS):
-            raise ValueError("only failed or success deploys can be reopened")
+    async def reopen_failed_deploy(self, deploy_id: str) -> bool:
+        """Snapshot one failed attempt and conditionally reopen its canonical ID."""
         async with self._mutation_lock:
             try:
-                reopened = await event_store_mutations.reopen_terminal_deploy(
-                    self._db, deploy_id, expected_status
+                reopened = await event_store_mutations.reopen_failed_deploy(
+                    self._db, deploy_id
                 )
                 await self._db.commit()
                 return reopened
@@ -215,9 +220,7 @@ class EventStore:
             return None
         result = _row_to_dict(cursor, row)
         result["commits"] = json.loads(result.pop("commits_json"))
-        result["affected_services"] = json.loads(
-            result.pop("affected_services_json")
-        )
+        result["affected_services"] = json.loads(result.pop("affected_services_json"))
         return result
 
     async def get_pending_deploys(self) -> list[dict[str, Any]]:
@@ -325,10 +328,7 @@ class EventStore:
         only the auto-supersede marker prefix is recognised.
         """
         if include_superseded:
-            sql = (
-                "SELECT * FROM deploy_events "
-                "ORDER BY created_at DESC LIMIT ?"
-            )
+            sql = "SELECT * FROM deploy_events ORDER BY created_at DESC LIMIT ?"
             params: tuple[Any, ...] = (limit,)
         else:
             sql = (
@@ -398,9 +398,7 @@ class EventStore:
             params,
         )
 
-    async def get_deploying_events_for_node(
-        self, node_id: str
-    ) -> list[dict[str, Any]]:
+    async def get_deploying_events_for_node(self, node_id: str) -> list[dict[str, Any]]:
         """Get events in DEPLOYING state for a specific node.
 
         Used by WebSocketHub._cleanup_orphan_deploys() to mark in-flight
@@ -428,10 +426,8 @@ class EventStore:
             return []
         async with self._mutation_lock:
             try:
-                rejected = (
-                    await event_store_mutations.reject_pending_deploys_for_nodes(
-                        self._db, node_ids, reject_reason
-                    )
+                rejected = await event_store_mutations.reject_pending_deploys_for_nodes(
+                    self._db, node_ids, reject_reason
                 )
                 await self._db.commit()
                 return rejected
@@ -483,9 +479,7 @@ class EventStore:
 
     async def get_nodes(self) -> list[dict[str, Any]]:
         """Get all nodes (connected and disconnected)."""
-        cursor = await self._db.execute(
-            "SELECT * FROM nodes ORDER BY last_seen DESC"
-        )
+        cursor = await self._db.execute("SELECT * FROM nodes ORDER BY last_seen DESC")
         rows = await cursor.fetchall()
         return [_row_to_dict(cursor, row) for row in rows]
 

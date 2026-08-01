@@ -20,14 +20,13 @@ def _row_to_dict(cursor: aiosqlite.Cursor, row: tuple) -> dict[str, Any]:
     return {column[0]: value for column, value in zip(cursor.description, row)}
 
 
-async def reopen_terminal_deploy(
+async def reopen_failed_deploy(
     db: aiosqlite.Connection,
     deploy_id: str,
-    expected_status: DeployStatus,
 ) -> bool:
     cursor = await db.execute(
         "SELECT * FROM deploy_events WHERE deploy_id = ? AND status = ?",
-        (deploy_id, expected_status.value),
+        (deploy_id, DeployStatus.FAILED.value),
     )
     row = await cursor.fetchone()
     if row is None:
@@ -72,7 +71,7 @@ async def reopen_terminal_deploy(
             now,
             now,
             deploy_id,
-            expected_status.value,
+            DeployStatus.FAILED.value,
         ),
     )
     if updated.rowcount != 1:
@@ -181,8 +180,7 @@ async def reject_pending_deploys_for_nodes(
 ) -> list[dict[str, Any]]:
     placeholders = ", ".join("?" for _ in node_ids)
     cursor = await db.execute(
-        f"SELECT * FROM deploy_events WHERE status = ? "
-        f"AND node_id IN ({placeholders})",
+        f"SELECT * FROM deploy_events WHERE status = ? AND node_id IN ({placeholders})",
         (DeployStatus.PENDING.value, *node_ids),
     )
     rejected = []

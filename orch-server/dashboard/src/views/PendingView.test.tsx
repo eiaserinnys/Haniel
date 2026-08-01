@@ -37,7 +37,7 @@ describe('PendingView', () => {
             ].join('\n'),
           }),
         ]}
-        onApprove={vi.fn()}
+        onApprove={vi.fn().mockResolvedValue(false)}
         onReject={vi.fn()}
         onApproveAll={vi.fn().mockResolvedValue([])}
         latestFailure={null}
@@ -65,7 +65,7 @@ describe('PendingView', () => {
           deploy({ deploy_id: 'accepted', repo: 'accepted' }),
           deploy({ deploy_id: 'rejected', repo: 'rejected' }),
         ]}
-        onApprove={vi.fn()}
+        onApprove={vi.fn().mockResolvedValue(false)}
         onReject={vi.fn()}
         onApproveAll={onApproveAll}
         latestFailure={null}
@@ -82,7 +82,7 @@ describe('PendingView', () => {
   it('prunes stale selections and does not reselect a reopened deterministic id', async () => {
     const onApproveAll = vi.fn().mockResolvedValue(['same-id']);
     const props = {
-      onApprove: vi.fn(),
+      onApprove: vi.fn().mockResolvedValue(false),
       onReject: vi.fn(),
       onApproveAll,
       latestFailure: null,
@@ -112,7 +112,7 @@ describe('PendingView', () => {
       <PendingView
         deploys={[]}
         latestFailure={deploy({ status: 'failed', error: 'post-pull failed' })}
-        onApprove={vi.fn()}
+        onApprove={vi.fn().mockResolvedValue(false)}
         onReject={vi.fn()}
         onApproveAll={vi.fn().mockResolvedValue([])}
       />,
@@ -120,5 +120,43 @@ describe('PendingView', () => {
     expect(screen.getByText('Last deploy failed')).toBeInTheDocument();
     expect(screen.getByText('post-pull failed')).toBeInTheDocument();
     expect(screen.getByText('All clear')).toBeInTheDocument();
+  });
+
+  it('clears a selected card after its single approve request is accepted', async () => {
+    const onApprove = vi.fn().mockResolvedValue(true);
+    render(
+      <PendingView
+        deploys={[deploy({ deploy_id: 'single' })]}
+        latestFailure={null}
+        onApprove={onApprove}
+        onReject={vi.fn()}
+        onApproveAll={vi.fn().mockResolvedValue([])}
+      />,
+    );
+    fireEvent.click(screen.getByText('Select all'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: /selected/ })).not.toBeInTheDocument());
+    expect(onApprove).toHaveBeenCalledWith('single');
+  });
+
+  it('keeps a selected card when its single approve request is rejected', async () => {
+    const onApprove = vi.fn().mockResolvedValue(false);
+    render(
+      <PendingView
+        deploys={[deploy({ deploy_id: 'single' })]}
+        latestFailure={null}
+        onApprove={onApprove}
+        onReject={vi.fn()}
+        onApproveAll={vi.fn().mockResolvedValue([])}
+      />,
+    );
+    fireEvent.click(screen.getByText('Select all'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+
+    await waitFor(() => expect(onApprove).toHaveBeenCalledWith('single'));
+    expect(screen.getByRole('button', { name: /Approve 1 selected/ })).toBeInTheDocument();
   });
 });

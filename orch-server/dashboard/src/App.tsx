@@ -239,8 +239,10 @@ function App() {
       } else {
         pushToast(`Approved deploy`, 'success');
       }
+      return true;
     } catch (e) {
       pushToast(`Approve failed: ${e instanceof api.ApiError ? e.body : 'Unknown error'}`, 'error');
+      return false;
     } finally {
       refreshDeploys();
     }

@@ -7,7 +7,7 @@ import type { Deploy } from '@/types';
 interface PendingViewProps {
   deploys: Deploy[];
   latestFailure: Deploy | null;
-  onApprove: (deployId: string) => void;
+  onApprove: (deployId: string) => Promise<boolean>;
   onReject: (deployId: string, reason: string) => void;
   onApproveAll: (ids: string[]) => Promise<readonly string[]>;
 }
@@ -92,6 +92,17 @@ export function PendingView({
     });
   }, [activeSelected, onApproveAll, selectionTokens]);
 
+  const handleApproveOne = useCallback(async (deploy: Deploy) => {
+    if (!await onApprove(deploy.deploy_id)) return;
+    const token = selectionTokens.get(deploy.deploy_id);
+    if (!token) return;
+    setSelected(current => {
+      const next = new Set(current);
+      next.delete(token);
+      return next;
+    });
+  }, [onApprove, selectionTokens]);
+
   if (deploys.length === 0) {
     return (
       <div className="view-pending">
@@ -149,7 +160,7 @@ export function PendingView({
             isExpanded={expanded.has(deploy.deploy_id)}
             onToggleSelect={() => toggleSelect(deploy)}
             onToggleExpand={() => toggleExpand(deploy.deploy_id)}
-            onApprove={() => onApprove(deploy.deploy_id)}
+            onApprove={() => handleApproveOne(deploy)}
             onReject={() => setRejectTarget(deploy)}
           />
         ))}

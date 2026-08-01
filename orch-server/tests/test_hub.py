@@ -626,9 +626,7 @@ class TestRepoReconciliation:
         event = await store.get_deploy_event(self.DEPLOY_ID)
         assert event["status"] == "success"
 
-    async def test_failed_mismatch_reopens_and_late_result_is_ignored(
-        self, hub, store
-    ):
+    async def test_failed_mismatch_reopens_and_late_result_is_ignored(self, hub, store):
         await self._seed(store)
         await store.update_deploy_status(self.DEPLOY_ID, DeployStatus.DEPLOYING)
         await hub._handle_deploy_result(
@@ -654,6 +652,23 @@ class TestRepoReconciliation:
             )
         )
         assert (await store.get_deploy_event(self.DEPLOY_ID))["status"] == "pending"
+
+    async def test_success_mismatch_does_not_reopen_success_history(self, hub, store):
+        await self._seed(store)
+        await store.update_deploy_status(self.DEPLOY_ID, DeployStatus.DEPLOYING)
+        await hub._handle_deploy_result(
+            DeployResult(
+                deploy_id=self.DEPLOY_ID,
+                node_id="n1",
+                status="success",
+            )
+        )
+
+        await hub._repo_reconciler.handle(self._message("settled", in_sync=False))
+
+        event = await store.get_deploy_event(self.DEPLOY_ID)
+        assert event["status"] == "success"
+        assert await store.get_latest_failed_deploy() is None
 
 
 class TestDeployTimeout:

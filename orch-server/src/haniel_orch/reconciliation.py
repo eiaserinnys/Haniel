@@ -67,13 +67,9 @@ class RepoReconciler:
         event = await self._store.get_deploy_event(msg.deploy_id)
         if event is None:
             return
-        try:
-            terminal = DeployStatus(event["status"])
-        except ValueError:
+        if event["status"] != DeployStatus.FAILED.value:
             return
-        if terminal not in (DeployStatus.FAILED, DeployStatus.SUCCESS):
-            return
-        if await self._store.reopen_terminal_deploy(msg.deploy_id, terminal):
+        if await self._store.reopen_failed_deploy(msg.deploy_id):
             await self._broadcast(
                 {
                     "type": "new_pending",
