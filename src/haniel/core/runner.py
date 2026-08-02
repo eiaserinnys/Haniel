@@ -1843,10 +1843,16 @@ class ServiceRunner:
                                     name, state.pending_changes
                                 )
                     else:
-                        state.pending_changes = None
+                        # A self checkout can already match origin while the running
+                        # process still uses the previous code. Preserve the restart
+                        # evidence so reconnecting orchestrators can recover the same
+                        # deterministic Pending until approval restarts Haniel.
+                        if not (
+                            name == self._self_repo and self._state.self_update_pending
+                        ):
+                            state.pending_changes = None
 
-                if name != self._self_repo:
-                    self._notify_orchestrator_change(name, state)
+                self._notify_orchestrator_change(name, state)
 
             except GitError as e:
                 logger.error(f"Failed to fetch {name}: {e}")
@@ -1858,7 +1864,11 @@ class ServiceRunner:
         if not self._orch_client:
             return
         snapshot = self._capture_orchestrator_repo_snapshot(name, state.config.branch)
-        if not snapshot.in_sync and state.pending_changes:
+        self_restart_required = name == self._self_repo and (
+            self._state.self_update_pending
+            or (snapshot.in_sync and bool(state.pending_changes))
+        )
+        if state.pending_changes and (not snapshot.in_sync or self_restart_required):
             commits = state.pending_changes.get("commits", [])
             if commits:
                 manifest_identity = state.config.release_manifest
@@ -1892,6 +1902,8 @@ class ServiceRunner:
                     expected_manifest_digest=manifest_digest,
                     wait=True,
                 )
+        if self_restart_required:
+            return
         self._orch_client.notify_repo_reconciliation(snapshot, "observed", wait=True)
 
     def _apply_changes(self, changed_repos: list[str]) -> None:

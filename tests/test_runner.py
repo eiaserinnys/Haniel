@@ -3,7 +3,7 @@
 import subprocess
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -918,7 +918,7 @@ class TestServiceRunnerPollCycle:
     @patch("haniel.core.runner.get_remote_head", return_value="new-head")
     @patch("haniel.core.runner.get_head", return_value="new-head")
     @patch("haniel.core.runner.fetch_repo", return_value=False)
-    def test_external_self_pull_keeps_marker_path_out_of_repo_reconciliation(
+    def test_external_self_pull_opens_pending_without_observed_auto_settlement(
         self,
         mock_fetch,
         mock_head,
@@ -942,18 +942,48 @@ class TestServiceRunnerPollCycle:
                 },
                 "services": {},
                 "self": {"repo": "haniel", "auto_update": False},
+                "orchestrator_client": {
+                    "url": "ws://localhost/ws/node",
+                    "token": "test",
+                    "node_id": "node-a",
+                },
             }
         )
         runner = ServiceRunner(config, config_dir=tmp_path)
         runner._repo_states["haniel"].last_head = "old-head"
         runner._orch_client = MagicMock()
 
-        runner._poll_cycle()
-        runner._poll_cycle()
+        with (
+            patch("haniel.core.repo_reconciliation.get_head", return_value="new-head"),
+            patch(
+                "haniel.core.repo_reconciliation.get_remote_head",
+                return_value="new-head",
+            ),
+        ):
+            runner._poll_cycle()
+            runner._poll_cycle()
 
-        runner._orch_client.notify_change.assert_not_called()
+        assert runner._orch_client.notify_change.call_count == 2
+        expected_change = call(
+            repo="haniel",
+            branch="main",
+            commits=["new-head External self update"],
+            affected_services=[],
+            diff_stat="1 file",
+            deploy_id="node-a:haniel:main:new-head",
+            target_head="new-head",
+            deployment_kind="legacy",
+            expected_manifest_identity=None,
+            expected_manifest_digest=None,
+            wait=True,
+        )
+        assert runner._orch_client.notify_change.call_args_list == [
+            expected_change,
+            expected_change,
+        ]
         runner._orch_client.notify_repo_reconciliation.assert_not_called()
         assert runner._state.self_update_pending is True
+        assert runner.self_update_requested is False
         assert runner._ws_handler is None
         assert runner._slack_bot is None
         mock_between.assert_called_once_with(repo_path, "old-head", "new-head")
@@ -961,7 +991,65 @@ class TestServiceRunnerPollCycle:
         runner._self_update_requested.set()
         runner._repo_states["haniel"].last_head = "older-head"
         assert runner._detect_changes() == []
-        runner._orch_client.notify_change.assert_not_called()
+        assert runner._orch_client.notify_change.call_count == 2
+
+    @patch(
+        "haniel.core.runner.get_pending_changes",
+        return_value={"commits": ["new-head Self update"], "stat": "1 file"},
+    )
+    @patch("haniel.core.runner.get_remote_head", return_value="new-head")
+    @patch("haniel.core.runner.get_head", return_value="old-head")
+    @patch("haniel.core.runner.fetch_repo", return_value=True)
+    def test_remote_ahead_self_repo_notifies_pending_and_observed_mismatch(
+        self,
+        mock_fetch,
+        mock_head,
+        mock_remote_head,
+        mock_pending,
+        tmp_path: Path,
+    ):
+        repo_path = tmp_path / "haniel"
+        repo_path.mkdir()
+        (repo_path / ".git").mkdir()
+        config = HanielConfig.model_validate(
+            {
+                "poll_interval": 1,
+                "repos": {
+                    "haniel": {
+                        "url": "git@github.com:test/haniel.git",
+                        "branch": "main",
+                        "path": "./haniel",
+                    }
+                },
+                "services": {},
+                "self": {"repo": "haniel", "auto_update": False},
+                "orchestrator_client": {
+                    "url": "ws://localhost/ws/node",
+                    "token": "test",
+                    "node_id": "node-a",
+                },
+            }
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        runner._repo_states["haniel"].last_head = "old-head"
+        runner._orch_client = MagicMock()
+
+        with (
+            patch("haniel.core.repo_reconciliation.get_head", return_value="old-head"),
+            patch(
+                "haniel.core.repo_reconciliation.get_remote_head",
+                return_value="new-head",
+            ),
+        ):
+            runner._poll_cycle()
+
+        runner._orch_client.notify_change.assert_called_once()
+        runner._orch_client.notify_repo_reconciliation.assert_called_once()
+        snapshot = runner._orch_client.notify_repo_reconciliation.call_args.args[0]
+        assert snapshot.deploy_id == "node-a:haniel:main:new-head"
+        assert snapshot.in_sync is False
+        assert runner._state.self_update_pending is True
+        assert runner.self_update_requested is False
 
     @patch(
         "haniel.core.runner.get_pending_changes",
