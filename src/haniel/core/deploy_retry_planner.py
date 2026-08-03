@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .deployment import DeploymentStateStore
-from .git import GitError, get_head, read_file_at_commit
+from .git import GitError, get_head, sha256_file_at_commit
 
 
 @dataclass(frozen=True)
@@ -182,10 +182,10 @@ class DeployRetryPlanner:
         if self.manifest_path is None:
             return None, None, None
         try:
-            payload = read_file_at_commit(self.repo_path, target, self.manifest_path)
+            digest = sha256_file_at_commit(self.repo_path, target, self.manifest_path)
         except GitError as exc:
             return self.manifest_path, None, str(exc)
-        return self.manifest_path, hashlib.sha256(payload).hexdigest(), None
+        return self.manifest_path, digest, None
 
     @staticmethod
     def _evidence(

@@ -44,9 +44,9 @@ from .git import (
     get_head,
     get_pending_changes,
     get_remote_head,
-    read_file_at_commit,
     reset_repo_to,
     pull_repo,
+    sha256_file_at_commit,
 )
 from .health import HealthManager, ServiceState
 from .process import ProcessManager
@@ -1319,11 +1319,9 @@ class ServiceRunner:
                         repo_path, state.config.branch
                     )
                     manifest_identity = state.config.release_manifest
-                    manifest_digest = hashlib.sha256(
-                        read_file_at_commit(
-                            repo_path, intended_target, manifest_identity
-                        )
-                    ).hexdigest()
+                    manifest_digest = sha256_file_at_commit(
+                        repo_path, intended_target, manifest_identity
+                    )
                     journal_attempt_id = self._record_manifest_deployment_intent(
                         repo_name,
                         previous_head,
@@ -1875,7 +1873,7 @@ class ServiceRunner:
                 manifest_digest = None
                 if manifest_identity:
                     try:
-                        payload = read_file_at_commit(
+                        manifest_digest = sha256_file_at_commit(
                             self.config_dir / state.config.path,
                             snapshot.remote_head,
                             manifest_identity,
@@ -1887,8 +1885,6 @@ class ServiceRunner:
                             snapshot.remote_head,
                             exc,
                         )
-                    else:
-                        manifest_digest = hashlib.sha256(payload).hexdigest()
                 self._orch_client.notify_change(
                     repo=name,
                     branch=state.config.branch,

@@ -36,8 +36,8 @@ class TestDeployRetryPlanner:
             "haniel.core.deploy_retry_planner.get_head", lambda _path: head
         )
         monkeypatch.setattr(
-            "haniel.core.deploy_retry_planner.read_file_at_commit",
-            lambda _path, _commit, _relative: b"manifest",
+            "haniel.core.deploy_retry_planner.sha256_file_at_commit",
+            lambda _path, _commit, _relative: hashlib.sha256(b"manifest").hexdigest(),
         )
         return DeployRetryPlanner(
             repo_path=tmp_path / "repo",
@@ -122,8 +122,8 @@ class TestDeployRetryPlanner:
             "preflight_fingerprint": initial.fingerprint,
         }
         monkeypatch.setattr(
-            "haniel.core.deploy_retry_planner.read_file_at_commit",
-            lambda _path, _commit, _relative: b"changed",
+            "haniel.core.deploy_retry_planner.sha256_file_at_commit",
+            lambda _path, _commit, _relative: hashlib.sha256(b"changed").hexdigest(),
         )
         revalidated = planner.revalidate(probe(), approval)
         assert revalidated.mode == "fail_closed"

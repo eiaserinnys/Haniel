@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,7 +14,7 @@ from .deployment import (
     ReleaseManifest,
     subprocess_command_runner,
 )
-from .git import get_head, reset_repo_to
+from .git import get_head, reset_repo_to, sha256_file_at_commit
 
 if TYPE_CHECKING:
     from ..config import ServiceConfig
@@ -275,6 +274,8 @@ def run_manifest_deployment(
         node_id=node_id,
         branch=branch,
         manifest_identity=repo_config.release_manifest,
-        manifest_digest=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        manifest_digest=sha256_file_at_commit(
+            repo_path, target_head, repo_config.release_manifest
+        ),
         journal_attempt_id=journal_attempt_id,
     )

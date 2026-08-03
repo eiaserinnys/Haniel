@@ -1153,14 +1153,14 @@ class TestServiceRunnerPollCycle:
             assert "test-service" not in runner._pending_restarts
         mock_start.assert_called_once_with("test-service")
 
-    @patch("haniel.core.runner.read_file_at_commit", return_value=b"manifest")
+    @patch("haniel.core.runner.sha256_file_at_commit", return_value="manifest-digest")
     @patch("haniel.core.runner.get_remote_head", return_value="target-head")
     @patch("haniel.core.runner.run_manifest_deployment")
     def test_trigger_pull_routes_manifest_repo_through_state_machine(
         self,
         mock_deploy,
         mock_remote_head,
-        mock_read_manifest,
+        mock_manifest_digest,
         runner_with_mock_repo,
     ):
         runner = runner_with_mock_repo
@@ -1179,14 +1179,14 @@ class TestServiceRunnerPollCycle:
         assert kwargs["orchestrator_attempt_id"] is None
         assert kwargs["node_id"] is None
         mock_remote_head.assert_called_once()
-        mock_read_manifest.assert_called_once()
+        mock_manifest_digest.assert_called_once()
 
-    @patch("haniel.core.runner.read_file_at_commit", return_value=b"manifest")
+    @patch("haniel.core.runner.sha256_file_at_commit", return_value="manifest-digest")
     @patch("haniel.core.runner.run_manifest_deployment")
     def test_orchestrated_pull_target_drift_restores_previous_before_hooks(
         self,
         mock_deploy,
-        _mock_read_manifest,
+        _mock_manifest_digest,
         runner_with_mock_repo,
     ):
         runner = runner_with_mock_repo
