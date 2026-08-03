@@ -106,9 +106,7 @@ def _execute_normal(
         if current_head == target and repo not in runner._startup_repo_locks:
             return
         if current_head != target:
-            state.pending_changes = get_pending_changes(
-                repo_path, state.config.branch
-            )
+            state.pending_changes = get_pending_changes(repo_path, state.config.branch)
             if not state.pending_changes.get("commits"):
                 raise RuntimeError(
                     f"approval target {target} is not present and no pending change is available"

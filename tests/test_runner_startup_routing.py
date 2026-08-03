@@ -167,9 +167,7 @@ def test_startup_manifest_holds_repo_lock_through_handover(
             )
         },
         services={
-            "soulstream-orch-server": ServiceConfig(
-                run="orch", repo="soulstream"
-            )
+            "soulstream-orch-server": ServiceConfig(run="orch", repo="soulstream")
         },
     )
     runner = ServiceRunner(config, config_dir=tmp_path)

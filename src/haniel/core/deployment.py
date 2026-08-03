@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .deployment_command_runner import (
     CommandRunner,
     CommandSpec,
-    subprocess_command_runner,
+    subprocess_command_runner as subprocess_command_runner,
 )
 
 
