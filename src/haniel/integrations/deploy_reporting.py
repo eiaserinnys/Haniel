@@ -8,12 +8,14 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
+from .deploy_progress import DeployProgressEmitter, ProgressCallback
+
 if TYPE_CHECKING:
     from ..core.repo_reconciliation import RepoReconciliationSnapshot
 
 logger = logging.getLogger(__name__)
 
-ApprovalHandler = Callable[[dict], str | dict | None]
+ApprovalHandler = Callable[[dict, ProgressCallback], str | dict | None]
 SnapshotHandler = Callable[[str, str, str], "RepoReconciliationSnapshot"]
 SendJson = Callable[[dict], Awaitable[None]]
 
@@ -57,11 +59,13 @@ class DeployReporter:
         approval_handler: ApprovalHandler | None,
         snapshot_handler: SnapshotHandler | None,
         send_json: SendJson,
+        progress_interval_sec: float = 30.0,
     ) -> None:
         self._node_id = node_id
         self._approval_handler = approval_handler
         self._snapshot_handler = snapshot_handler
         self._send_json = send_json
+        self._progress_interval_sec = progress_interval_sec
 
     async def handle_approval(self, msg: dict) -> None:
         deploy_id = msg.get("deploy_id", "")
@@ -99,26 +103,59 @@ class DeployReporter:
 
         started = time.monotonic()
         operation_error: str | None = None
+        loop = asyncio.get_running_loop()
+        progress_tasks: set[asyncio.Task[None]] = set()
+
+        def emit_progress(message: dict) -> None:
+            def spawn() -> None:
+                progress_tasks.add(asyncio.create_task(self._send_json(message)))
+
+            loop.call_soon_threadsafe(spawn)
+
+        emitter = DeployProgressEmitter(
+            node_id=self._node_id,
+            deploy_id=deploy_id,
+            orchestrator_attempt_id=orchestrator_attempt_id,
+            connection_generation=connection_generation,
+            emit=emit_progress,
+            interval_sec=self._progress_interval_sec,
+        )
+        emitter.start()
         try:
-            result = await asyncio.to_thread(self._approval_handler, msg)
-        except ApprovalRevalidationError as exc:
-            await self._send_json(
-                {
-                    "type": "deploy_attempt_terminal",
-                    "kind": "approval_revalidation_failed",
-                    "deploy_id": deploy_id,
-                    "orchestrator_attempt_id": orchestrator_attempt_id,
-                    "connection_generation": connection_generation,
-                    "stage": "approval_revalidation",
-                    "reason": "approval_revalidation_failed",
-                    "error": str(exc),
-                }
-            )
-            return
-        except Exception as exc:
-            operation_error = str(exc)
-            logger.warning("Deploy %s failed: %s", deploy_id, exc)
-            result = None
+            try:
+                result = await asyncio.to_thread(
+                    self._approval_handler, msg, emitter.transition
+                )
+            except ApprovalRevalidationError as exc:
+                await self._send_json(
+                    {
+                        "type": "deploy_attempt_terminal",
+                        "kind": "approval_revalidation_failed",
+                        "deploy_id": deploy_id,
+                        "orchestrator_attempt_id": orchestrator_attempt_id,
+                        "connection_generation": connection_generation,
+                        "stage": "approval_revalidation",
+                        "reason": "approval_revalidation_failed",
+                        "error": str(exc),
+                    }
+                )
+                return
+            except Exception as exc:
+                operation_error = str(exc)
+                logger.warning("Deploy %s failed: %s", deploy_id, exc)
+                result = None
+        finally:
+            emitter.stop()
+            await asyncio.sleep(0)
+            if progress_tasks:
+                outcomes = await asyncio.gather(*progress_tasks, return_exceptions=True)
+                for outcome in outcomes:
+                    if isinstance(outcome, Exception):
+                        logger.warning(
+                            "Failed to send deploy progress for %s: %s",
+                            deploy_id,
+                            outcome,
+                        )
         if result == "deferred":
             logger.info(
                 "Deploy %s deferred; result will be sent after restart", deploy_id

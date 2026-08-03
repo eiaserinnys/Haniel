@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from ..config import (
     BackoffConfig,
@@ -1011,7 +1011,11 @@ class ServiceRunner:
             )
         return services
 
-    def _handle_deploy_approval(self, approval: dict) -> str | dict | None:
+    def _handle_deploy_approval(
+        self,
+        approval: dict,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> str | dict | None:
         """Revalidate the immutable plan, then enter its sole allowed mode."""
         deploy_id = approval["deploy_id"]
         _node_id, repo, branch, _target = deploy_id.split(":", 3)
@@ -1064,7 +1068,13 @@ class ServiceRunner:
                 daemon=True,
             ).start()
             return "deferred"
-        return execute_approved_plan(self, approval, probe, planner)
+        return execute_approved_plan(
+            self,
+            approval,
+            probe,
+            planner,
+            progress_callback=progress_callback,
+        )
 
     def _handle_deploy_plan_probe(self, probe: dict) -> dict:
         """Return a side-effect-free proposal and retain its immutable snapshot."""
@@ -1259,6 +1269,7 @@ class ServiceRunner:
         node_id: str | None = None,
         branch: str | None = None,
         target_head: str | None = None,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> None:
         """Pull changes for a repository and restart affected services.
 
@@ -1351,6 +1362,11 @@ class ServiceRunner:
 
                 if state.config.release_manifest:
                     assert previous_head is not None
+                    progress_kwargs = (
+                        {"progress_callback": progress_callback}
+                        if progress_callback is not None
+                        else {}
+                    )
                     run_manifest_deployment(
                         self,
                         repo_name,
@@ -1360,6 +1376,7 @@ class ServiceRunner:
                         node_id=node_id,
                         branch=resolved_branch,
                         journal_attempt_id=journal_attempt_id,
+                        **progress_kwargs,
                     )
                 else:
                     self._restart_after_pull_legacy(repo_name, affected)
@@ -1962,6 +1979,7 @@ class ServiceRunner:
         state = self._repo_states[repo]
         before = self._capture_orchestrator_repo_snapshot(repo, state.config.branch)
         permit = self._orch_client.request_auto_attempt(before)
+        progress = self._orch_client.start_deploy_progress(permit)
         started = time.monotonic()
         operation_error: str | None = None
         try:
@@ -1975,10 +1993,16 @@ class ServiceRunner:
             }
             probe = self._orchestrated_deploys.consume_approval(approval)
             execute_approved_plan(
-                self, approval, probe, self._deploy_retry_planner(repo)
+                self,
+                approval,
+                probe,
+                self._deploy_retry_planner(repo),
+                progress_callback=progress.transition,
             )
         except Exception as exc:
             operation_error = str(exc)
+        finally:
+            progress.stop()
         settled = self._capture_orchestrator_repo_snapshot(
             repo, state.config.branch, before.deploy_id
         )

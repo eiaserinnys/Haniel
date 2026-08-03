@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import threading
+import time
 
 import pytest
 
@@ -58,12 +59,17 @@ async def test_manual_success_return_with_mismatch_sends_failed_then_settled() -
     async def send_json(message: dict) -> None:
         sent.append(message)
 
-    handler = MagicMock(return_value=None)
+    def handler(_approval, progress):
+        progress("build")
+        time.sleep(0.035)
+        return None
+
     reporter = DeployReporter(
         node_id="node-a",
         approval_handler=handler,
         snapshot_handler=lambda repo, branch, deploy_id: snapshot(in_sync=False),
         send_json=send_json,
+        progress_interval_sec=0.01,
     )
 
     await reporter.handle_approval(
@@ -76,17 +82,56 @@ async def test_manual_success_return_with_mismatch_sends_failed_then_settled() -
         }
     )
 
-    assert [message["type"] for message in sent] == [
+    types = [message["type"] for message in sent]
+    assert types[-2:] == [
         "deploy_result",
         "repo_reconciliation",
     ]
+    progress = [message for message in sent if message["type"] == "deploy_progress"]
+    assert progress[0]["stage"] == "preparing"
+    assert any(message["stage"] == "build" for message in progress)
+    assert sum(message["stage"] == "build" for message in progress) >= 2
     # Raw operation success and settled HEAD are independent evidence. The
     # server combines them and turns this mismatch into retryable failure.
-    assert sent[0]["status"] == "success"
-    assert sent[0]["orchestrator_attempt_id"] == "orch-1"
-    assert sent[1]["phase"] == "settled"
-    assert sent[1]["orchestrator_attempt_id"] == "orch-1"
-    assert sent[1]["deploy_id"] == "node-a:repo-a:main:remote-head"
+    result, reconciliation = sent[-2:]
+    assert result["status"] == "success"
+    assert result["orchestrator_attempt_id"] == "orch-1"
+    assert reconciliation["phase"] == "settled"
+    assert reconciliation["orchestrator_attempt_id"] == "orch-1"
+    assert reconciliation["deploy_id"] == "node-a:repo-a:main:remote-head"
+
+
+async def test_progress_emitter_stops_when_handler_finishes() -> None:
+    sent: list[dict] = []
+
+    async def send_json(message: dict) -> None:
+        sent.append(message)
+
+    finished = threading.Event()
+
+    def handler(_approval, progress):
+        progress("verifying")
+        finished.set()
+        return "deferred"
+
+    reporter = DeployReporter(
+        node_id="node-a",
+        approval_handler=handler,
+        snapshot_handler=None,
+        send_json=send_json,
+        progress_interval_sec=0.01,
+    )
+    await reporter.handle_approval(
+        {
+            "deploy_id": "node-a:repo-a:main:remote-head",
+            "orchestrator_attempt_id": "orch-1",
+            "connection_generation": "generation-1",
+        }
+    )
+    assert finished.is_set()
+    count = len(sent)
+    await __import__("asyncio").sleep(0.03)
+    assert len(sent) == count
 
 
 async def test_attempt_snapshot_id_never_enters_node_wire() -> None:

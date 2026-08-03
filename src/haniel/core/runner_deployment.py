@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable
 
 from .deployment import (
     DeploymentCallbacks,
@@ -21,6 +21,46 @@ if TYPE_CHECKING:
     from .runner import ServiceRunner
 
 logger = logging.getLogger(__name__)
+
+ProgressCallback = Callable[[str], None]
+_PROGRESS_STATES = frozenset(
+    {
+        "build",
+        "preflight",
+        "backing_up",
+        "migrating",
+        "starting",
+        "verifying",
+        "recovering",
+    }
+)
+
+
+class ReportingDeploymentStateStore(DeploymentStateStore):
+    """Persist journal truth, then report nonterminal phase changes."""
+
+    def __init__(
+        self, directory: Path, progress_callback: ProgressCallback | None
+    ) -> None:
+        super().__init__(directory)
+        self._progress_callback = progress_callback
+
+    def begin(self, *args: Any, **kwargs: Any) -> str:
+        journal_attempt_id = super().begin(*args, **kwargs)
+        self._report("build")
+        return journal_attempt_id
+
+    def transition(self, repo_name: str, state: str, **kwargs: Any) -> None:
+        super().transition(repo_name, state, **kwargs)
+        self._report(state)
+
+    def _report(self, state: str) -> None:
+        if self._progress_callback is None or state not in _PROGRESS_STATES:
+            return
+        try:
+            self._progress_callback(state)
+        except Exception as exc:
+            logger.warning("Failed to report deploy progress %s: %s", state, exc)
 
 
 class RunnerDeploymentAdapter:
@@ -167,6 +207,7 @@ def run_manifest_deployment(
     node_id: str | None = None,
     branch: str | None = None,
     journal_attempt_id: str | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> None:
     """Load the pulled release manifest and run the auditable handover."""
 
@@ -186,7 +227,9 @@ def run_manifest_deployment(
         previous_head,
         desired_running,
     )
-    state_store = DeploymentStateStore(runner.config_dir / ".haniel" / "deployments")
+    state_store = ReportingDeploymentStateStore(
+        runner.config_dir / ".haniel" / "deployments", progress_callback
+    )
     target_head = get_head(repo_path)
 
     try:

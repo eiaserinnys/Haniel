@@ -9,6 +9,8 @@ from haniel_orch.protocol import (
     AcceptedDeployAttemptAck,
     ChangeNotification,
     DeployApproval,
+    DeployProgress,
+    DeployReportAck,
     DeployAttemptTerminal,
     DeployPlanProposal,
     DeployReject,
@@ -175,6 +177,28 @@ class TestDeployResult:
         assert msg.error == "exit code 1"
 
 
+class TestDeployProgress:
+    def test_parse_progress_heartbeat(self):
+        raw = (
+            '{"type":"deploy_progress","deploy_id":"n:r:main:h",'
+            '"node_id":"n","orchestrator_attempt_id":"a1",'
+            '"connection_generation":"g1","stage":"build"}'
+        )
+        msg = parse_node_message(raw)
+        assert isinstance(msg, DeployProgress)
+        assert msg.stage == "build"
+
+    def test_stage_inventory_is_closed(self):
+        with pytest.raises(ValidationError):
+            DeployProgress(
+                deploy_id="n:r:main:h",
+                node_id="n",
+                orchestrator_attempt_id="a1",
+                connection_generation="g1",
+                stage="unknown",
+            )
+
+
 class TestRepoReconciliation:
     def test_parse_settled_snapshot(self):
         raw = (
@@ -239,6 +263,17 @@ class TestServerMessages:
         msg = DeployReject(deploy_id="d1", reason="not ready")
         assert msg.type == "deploy_reject"
         assert msg.reason == "not ready"
+
+    def test_ignored_deploy_report_ack(self):
+        msg = DeployReportAck(
+            deploy_id="d1",
+            orchestrator_attempt_id="a1",
+            report_type="deploy_result",
+            status="ignored",
+            reason="terminal_attempt",
+        )
+        assert msg.type == "deploy_report_ack"
+        assert msg.reason == "terminal_attempt"
 
 
 class TestParseNodeMessage:

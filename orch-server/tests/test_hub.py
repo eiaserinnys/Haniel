@@ -17,6 +17,8 @@ from haniel_orch.protocol import (
     ChangeNotification,
     DeployApproval,
     DeployPlanProposal,
+    DeployProgress,
+    DeployReportAck,
     DeployResult,
     NodeHello,
     RepoReconciliation,
@@ -1255,6 +1257,149 @@ class TestDeployTimeout:
         sent = [json.loads(c.args[0]) for c in ws_dash.send_text.call_args_list]
         statuses = [p["status"] for p in sent if p.get("type") == "status_change"]
         assert statuses == ["success"]
+
+    async def test_progress_renews_idle_deadline_and_allows_success(
+        self, registry, store
+    ):
+        hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=0.08)
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        await store.create_deploy_event(
+            deploy_id="d1",
+            node_id="n1",
+            repo="r",
+            branch="main",
+            commits=["h msg"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+        )
+        await begin_attempt(
+            store,
+            "d1",
+            deadline_at=(
+                datetime.now(timezone.utc) + timedelta(milliseconds=45)
+            ).isoformat(),
+        )
+        bind_generation(hub)
+        await hub.deploy_coordinator.restore_deadlines()
+        await asyncio.sleep(0.03)
+
+        await hub.deploy_coordinator.handle_progress(
+            DeployProgress(
+                deploy_id="d1",
+                node_id="n1",
+                orchestrator_attempt_id="attempt-d1",
+                connection_generation="g1",
+                stage="build",
+            )
+        )
+        await asyncio.sleep(0.04)
+
+        assert (await store.attempts.get_attempt("attempt-d1"))["outcome"] == "active"
+        await hub._handle_deploy_result(deploy_result("d1", status="success"))
+        await hub.deploy_coordinator.handle_settled(settled("d1"))
+        assert (await store.get_deploy_event("d1"))["status"] == "success"
+
+    async def test_progress_deadline_never_exceeds_four_times_initial_lease(
+        self, registry, store
+    ):
+        hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
+        await self._seed_deploying(store, "d1")
+        bind_generation(hub)
+        progress = DeployProgress(
+            deploy_id="d1",
+            node_id="n1",
+            orchestrator_attempt_id="attempt-d1",
+            connection_generation="g1",
+            stage="verifying",
+        )
+        for _ in range(5):
+            await hub.deploy_coordinator.handle_progress(progress)
+
+        attempt = await store.attempts.get_attempt("attempt-d1")
+        started = datetime.fromisoformat(attempt["started_at"])
+        deadline_at = datetime.fromisoformat(attempt["deadline_at"])
+        assert deadline_at <= started + timedelta(seconds=40)
+
+    async def test_progress_requires_current_node_generation(self, registry, store):
+        hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
+        await self._seed_deploying(store, "d1")
+        bind_generation(hub)
+        original = await store.attempts.get_attempt("attempt-d1")
+
+        for node_id, generation in (("n2", "g1"), ("n1", "stale-g0")):
+            await hub.deploy_coordinator.handle_progress(
+                DeployProgress(
+                    deploy_id="d1",
+                    node_id=node_id,
+                    orchestrator_attempt_id="attempt-d1",
+                    connection_generation=generation,
+                    stage="build",
+                )
+            )
+
+        current = await store.attempts.get_attempt("attempt-d1")
+        assert current["deadline_at"] == original["deadline_at"]
+
+    async def test_late_result_is_logged_and_acknowledged(
+        self, registry, store, caplog
+    ):
+        hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
+        await self._seed_deploying(store, "d1")
+        bind_generation(hub)
+        sent: list[object] = []
+
+        async def capture(_node_id: str, _generation: str, message: object) -> bool:
+            sent.append(message)
+            return True
+
+        hub.deploy_coordinator._send = capture
+        await store.attempts.fail_active_attempt(
+            "attempt-d1",
+            kind="attempt_timeout",
+            stage="deadline",
+            reason="attempt_evidence_timeout",
+            error="timed out",
+        )
+
+        with caplog.at_level("WARNING"):
+            await hub._handle_deploy_result(deploy_result("d1", status="success"))
+
+        assert "attempt_id=attempt-d1" in caplog.text
+        assert "outcome=failed" in caplog.text
+        ack = next(message for message in sent if isinstance(message, DeployReportAck))
+        assert ack.status == "ignored"
+        assert ack.reason == "terminal_attempt"
+
+    async def test_late_settled_is_logged_and_acknowledged(
+        self, registry, store, caplog
+    ):
+        hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
+        await self._seed_deploying(store, "d1")
+        bind_generation(hub)
+        sent: list[object] = []
+
+        async def capture(_node_id: str, _generation: str, message: object) -> bool:
+            sent.append(message)
+            return True
+
+        hub.deploy_coordinator._send = capture
+        await store.attempts.fail_active_attempt(
+            "attempt-d1",
+            kind="attempt_timeout",
+            stage="deadline",
+            reason="attempt_evidence_timeout",
+            error="timed out",
+        )
+
+        with caplog.at_level("WARNING"):
+            await hub.deploy_coordinator.handle_settled(settled("d1"))
+
+        assert "report_type=repo_reconciliation" in caplog.text
+        ack = next(message for message in sent if isinstance(message, DeployReportAck))
+        assert ack.report_type == "repo_reconciliation"
+        assert ack.reason == "terminal_attempt"
 
     async def test_disconnect_keeps_active_attempt_for_result_or_deadline(
         self, registry, store

@@ -10,6 +10,7 @@ from typing import Any
 import aiosqlite
 
 from .deploy_attempt_generation_store import DeployAttemptGenerationStore
+from .deploy_attempt_progress_store import DeployAttemptProgressStore
 from .deploy_attempt_store_support import DeployAttemptStoreSupport
 from .protocol import (
     DeployAttemptTerminal,
@@ -27,7 +28,11 @@ def _expired(deadline: str) -> bool:
     return datetime.fromisoformat(deadline) <= datetime.now(timezone.utc)
 
 
-class DeployAttemptStore(DeployAttemptGenerationStore, DeployAttemptStoreSupport):
+class DeployAttemptStore(
+    DeployAttemptGenerationStore,
+    DeployAttemptProgressStore,
+    DeployAttemptStoreSupport,
+):
     """One-lock transaction boundary for probes, attempts, and retry markers."""
 
     def __init__(self, db: aiosqlite.Connection, mutation_lock: asyncio.Lock) -> None:

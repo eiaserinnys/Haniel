@@ -294,7 +294,7 @@ class TestHandleDeployApproval:
     async def test_success_sends_success(self, config):
         called = []
 
-        def handler(approval):
+        def handler(approval, _progress):
             called.append(approval)
             return None
 
@@ -308,12 +308,13 @@ class TestHandleDeployApproval:
         approval = self._approval(config)
         await client._handle_deploy_approval(approval)
         assert called == [approval]
-        assert sent[0]["status"] == "success"
-        assert sent[0]["error"] is None
-        assert sent[0]["duration_ms"] is not None
-        assert sent[0]["duration_ms"] >= 0
-        assert sent[0]["orchestrator_attempt_id"] == "orch-1"
-        assert sent[1]["type"] == "repo_reconciliation"
+        assert sent[0]["type"] == "deploy_progress"
+        assert sent[-2]["status"] == "success"
+        assert sent[-2]["error"] is None
+        assert sent[-2]["duration_ms"] is not None
+        assert sent[-2]["duration_ms"] >= 0
+        assert sent[-2]["orchestrator_attempt_id"] == "orch-1"
+        assert sent[-1]["type"] == "repo_reconciliation"
 
     async def test_success_is_not_sent_until_handler_finishes_verification(
         self, config
@@ -323,7 +324,7 @@ class TestHandleDeployApproval:
 
         verification_done = threading.Event()
 
-        def handler(_approval):
+        def handler(_approval, _progress):
             verification_done.wait(timeout=2)
             return None
 
@@ -338,15 +339,15 @@ class TestHandleDeployApproval:
             client._handle_deploy_approval(self._approval(config))
         )
         await asyncio.sleep(0.02)
-        assert sent == []
+        assert all(message["type"] == "deploy_progress" for message in sent)
 
         verification_done.set()
         await pending
 
-        assert sent[0]["status"] == "success"
+        assert sent[-2]["status"] == "success"
 
     async def test_handler_raises_sends_failed(self, config):
-        def handler(_approval):
+        def handler(_approval, _progress):
             raise RuntimeError("boom")
 
         client = OrchestratorClient(
@@ -357,12 +358,13 @@ class TestHandleDeployApproval:
         )
         sent = self._capture_send_json(client)
         await client._handle_deploy_approval(self._approval(config))
-        assert sent[0]["status"] == "failed"
-        assert sent[0]["error"] == "boom"
-        assert sent[0]["duration_ms"] is not None
+        result = next(message for message in sent if message["type"] == "deploy_result")
+        assert result["status"] == "failed"
+        assert result["error"] == "boom"
+        assert result["duration_ms"] is not None
 
     async def test_deferred_does_not_send(self, config):
-        def handler(_approval):
+        def handler(_approval, _progress):
             return "deferred"
 
         client = OrchestratorClient(
@@ -372,7 +374,26 @@ class TestHandleDeployApproval:
         )
         sent = self._capture_send_json(client)
         await client._handle_deploy_approval(self._approval(config))
-        assert sent == []
+        assert [message["type"] for message in sent] == ["deploy_progress"]
+
+    async def test_ignored_report_ack_is_logged(self, config, caplog):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+
+        with caplog.at_level("WARNING"):
+            await client._handle_server_message(
+                {
+                    "type": "deploy_report_ack",
+                    "deploy_id": "d1",
+                    "orchestrator_attempt_id": "orch-1",
+                    "report_type": "deploy_result",
+                    "status": "ignored",
+                    "reason": "terminal_attempt",
+                    "attempt_outcome": "failed",
+                }
+            )
+
+        assert "attempt_id=orch-1" in caplog.text
+        assert "reason=terminal_attempt" in caplog.text
 
 
 class TestDeployPlanProbe:

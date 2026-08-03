@@ -20,6 +20,7 @@ from .protocol import (
     ChangeNotification,
     DeployAttemptTerminal,
     DeployPlanProposal,
+    DeployProgress,
     DeployResult,
     DeployStatus,
     ManifestRecoveryEvidence,
@@ -179,6 +180,8 @@ class WebSocketHub:
                     )
                 elif isinstance(incoming, DeployResult):
                     await self._handle_deploy_result(incoming)
+                elif isinstance(incoming, DeployProgress):
+                    await self.deploy_coordinator.handle_progress(incoming)
                 elif isinstance(incoming, RepoReconciliation):
                     if incoming.phase == "observed":
                         await self._repo_reconciler.handle(incoming)

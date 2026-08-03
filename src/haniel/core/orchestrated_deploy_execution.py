@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..integrations.deploy_reporting import ApprovalRevalidationError
 from .git import get_head, get_pending_changes, get_remote_head
-from .runner_deployment import run_manifest_deployment
+from .runner_deployment import ProgressCallback, run_manifest_deployment
 
 if TYPE_CHECKING:
     from .deploy_retry_planner import DeployRetryPlanner, RetryPlan
@@ -38,6 +38,8 @@ def execute_approved_plan(
     approval: dict[str, Any],
     probe: dict[str, Any] | None,
     planner: "DeployRetryPlanner",
+    *,
+    progress_callback: ProgressCallback | None = None,
 ) -> str | dict[str, Any] | None:
     """Revalidate then enter exactly the mode fixed by the server."""
     deploy_id = approval["deploy_id"]
@@ -52,12 +54,27 @@ def execute_approved_plan(
             raise ApprovalRevalidationError(
                 "approval without a probe must use execute mode"
             )
-        _execute_normal(runner, approval, repo, branch, _target)
+        _execute_normal(
+            runner,
+            approval,
+            repo,
+            branch,
+            _target,
+            progress_callback=progress_callback,
+        )
         return None
     plan = validate_approved_plan(planner, probe, approval)
     if plan.mode == "evidence_recovery":
         return build_recovery_evidence(approval, probe, plan)
-    _execute_retry(runner, approval, probe, plan, repo, branch)
+    _execute_retry(
+        runner,
+        approval,
+        probe,
+        plan,
+        repo,
+        branch,
+        progress_callback=progress_callback,
+    )
     return None
 
 
@@ -79,6 +96,8 @@ def _execute_normal(
     repo: str,
     branch: str,
     target: str,
+    *,
+    progress_callback: ProgressCallback | None,
 ) -> None:
     state = runner._repo_states[repo]
     if runner._pull_locks[repo].locked():
@@ -92,6 +111,11 @@ def _execute_normal(
             raise RuntimeError(
                 f"approval target {target} is not present and no pending change is available"
             )
+    progress_kwargs = (
+        {"progress_callback": progress_callback}
+        if progress_callback is not None
+        else {}
+    )
     runner.trigger_pull(
         repo,
         auto=False,
@@ -99,6 +123,7 @@ def _execute_normal(
         node_id=approval["deploy_id"].split(":", 1)[0],
         branch=branch,
         target_head=target,
+        **progress_kwargs,
     )
 
 
@@ -129,6 +154,8 @@ def _execute_retry(
     plan: "RetryPlan",
     repo: str,
     branch: str,
+    *,
+    progress_callback: ProgressCallback | None,
 ) -> None:
     state = runner._repo_states[repo]
     repo_path = runner.config_dir / state.config.path
@@ -139,6 +166,11 @@ def _execute_retry(
             from .git import get_pending_changes
 
             state.pending_changes = get_pending_changes(repo_path, branch)
+        progress_kwargs = (
+            {"progress_callback": progress_callback}
+            if progress_callback is not None
+            else {}
+        )
         runner.trigger_pull(
             repo,
             auto=False,
@@ -146,6 +178,7 @@ def _execute_retry(
             node_id=probe["node_id"],
             branch=branch,
             target_head=target,
+            **progress_kwargs,
         )
         return
 
@@ -163,6 +196,11 @@ def _execute_retry(
             raise ApprovalRevalidationError(
                 "manifest retry has no durable original previous_head"
             )
+        progress_kwargs = (
+            {"progress_callback": progress_callback}
+            if progress_callback is not None
+            else {}
+        )
         run_manifest_deployment(
             runner,
             repo,
@@ -171,6 +209,7 @@ def _execute_retry(
             orchestrator_attempt_id=approval["orchestrator_attempt_id"],
             node_id=probe["node_id"],
             branch=branch,
+            **progress_kwargs,
         )
     finally:
         runner._release_restart_suppression(affected)
