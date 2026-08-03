@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -10,7 +11,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from haniel.config import HanielConfig, RepoConfig, ServiceConfig
-from haniel.core.deployment import CommandSpec, DeploymentCoordinator, DeploymentError
+from haniel.core.deploy_retry_planner import DeployRetryPlanner
+from haniel.core.deployment import (
+    CommandSpec,
+    DeploymentCoordinator,
+    DeploymentError,
+    DeploymentStateStore,
+)
 from haniel.core.git import get_head
 from haniel.core.runner import ServiceRunner
 from haniel.core.runner_deployment import run_manifest_deployment
@@ -143,6 +150,62 @@ def capture_manifest_command_environment(
         run_manifest_deployment(runner, "app", affected, previous_head)
 
     return captured
+
+
+def test_manifest_handover_digest_matches_retry_plan_with_crlf_worktree(
+    manifest_runner: tuple[ServiceRunner, Path, str],
+) -> None:
+    runner, repo, previous_head = manifest_runner
+    manifest_path = repo / "deploy" / "release.json"
+    committed_bytes = (json.dumps(release_manifest(), indent=2) + "\n").encode()
+    manifest_path.write_bytes(committed_bytes)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "commit LF manifest"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    target_head = get_head(repo)
+
+    manifest_path.write_bytes(committed_bytes.replace(b"\n", b"\r\n"))
+    working_tree_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    committed_digest = hashlib.sha256(committed_bytes).hexdigest()
+    assert working_tree_digest != committed_digest
+
+    planner = DeployRetryPlanner(
+        repo_path=repo,
+        manifest_path="deploy/release.json",
+        journal_store=DeploymentStateStore(
+            runner.config_dir / ".haniel" / "deployments"
+        ),
+    )
+    plan = planner.plan(
+        {
+            "target_head": target_head,
+            "repo": "app",
+            "node_id": "windows-node",
+            "branch": "main",
+            "expected_manifest_identity": "deploy/release.json",
+            "expected_manifest_digest": committed_digest,
+        }
+    )
+
+    captured: dict[str, object] = {}
+
+    def capture_execute(_coordinator: DeploymentCoordinator, **kwargs) -> None:
+        captured.update(kwargs)
+
+    with patch.object(
+        DeploymentCoordinator,
+        "execute",
+        autospec=True,
+        side_effect=capture_execute,
+    ):
+        run_manifest_deployment(runner, "app", ["app"], previous_head)
+
+    assert plan.evidence["manifest_digest"] == committed_digest
+    assert captured["manifest_digest"] == plan.evidence["manifest_digest"]
 
 
 def test_manifest_command_infers_single_repo_service_cwd(

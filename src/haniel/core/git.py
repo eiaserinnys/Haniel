@@ -5,6 +5,7 @@ Provides functions for git operations: clone, fetch, pull, and change detection.
 haniel doesn't care what it clones - it just executes git commands as specified.
 """
 
+import hashlib
 import logging
 import os
 import re
@@ -249,6 +250,11 @@ def read_file_at_commit(path: Path, commit: str, relative_path: str) -> bytes:
             f"Failed to read {relative_path} at {commit}: "
             f"{exc.stderr.decode('utf-8', errors='replace').strip()}"
         ) from exc
+
+
+def sha256_file_at_commit(path: Path, commit: str, relative_path: str) -> str:
+    """Hash one tracked file using its committed bytes."""
+    return hashlib.sha256(read_file_at_commit(path, commit, relative_path)).hexdigest()
 
 
 def clone_repo(
