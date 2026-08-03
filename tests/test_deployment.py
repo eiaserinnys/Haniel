@@ -220,6 +220,54 @@ def test_new_begin_aborts_unfinished_live_intent_before_archiving(
     assert previous["history"][-1]["state"] == "aborted"
 
 
+def test_new_begin_inherits_active_orchestrator_link_when_superseding(
+    tmp_path: Path,
+) -> None:
+    store = DeploymentStateStore(tmp_path / "state")
+    store.begin(
+        "soulstream",
+        "old",
+        "target",
+        "approved-pull-pending",
+        orchestrator_attempt_id="orch-1",
+        node_id="node-a",
+        branch="main",
+    )
+
+    store.begin("soulstream", "old", "target", "release-042")
+
+    current = store.read("soulstream")
+    assert current is not None
+    assert current["orchestrator_attempt_id"] == "orch-1"
+    assert current["node_id"] == "node-a"
+    assert current["branch"] == "main"
+    assert current["previous_attempts"][-1]["state"] == "aborted"
+
+
+def test_new_begin_does_not_inherit_terminal_orchestrator_link(
+    tmp_path: Path,
+) -> None:
+    store = DeploymentStateStore(tmp_path / "state")
+    store.begin(
+        "soulstream",
+        "old",
+        "first-target",
+        "release-041",
+        orchestrator_attempt_id="orch-old",
+        node_id="node-a",
+        branch="main",
+    )
+    store.transition("soulstream", "success")
+
+    store.begin("soulstream", "first-target", "next-target", "release-042")
+
+    current = store.read("soulstream")
+    assert current is not None
+    assert current["orchestrator_attempt_id"] is None
+    assert current["node_id"] is None
+    assert current["branch"] is None
+
+
 def test_destructive_manifest_requires_backup_verify_and_recovery() -> None:
     with pytest.raises(ValidationError, match="verify_backup"):
         ReleaseManifest.model_validate(
@@ -370,7 +418,7 @@ def test_failed_command_persists_bounded_stderr_and_stdout_in_journal(
         command_runner=subprocess_command_runner(tmp_path),
     )
 
-    with patch("haniel.core.deployment.subprocess.run") as run:
+    with patch("haniel.core.deployment_command_runner.subprocess.run") as run:
         run.side_effect = subprocess.CalledProcessError(
             1,
             ["run-preflight"],

@@ -100,17 +100,19 @@ def _execute_normal(
     progress_callback: ProgressCallback | None,
 ) -> None:
     state = runner._repo_states[repo]
-    if runner._pull_locks[repo].locked():
-        raise RuntimeError(f"already pulling {repo}")
     if not state.pending_changes:
         repo_path = runner.config_dir / state.config.path
-        if get_head(repo_path) == target:
+        current_head = get_head(repo_path)
+        if current_head == target and repo not in runner._startup_repo_locks:
             return
-        state.pending_changes = get_pending_changes(repo_path, state.config.branch)
-        if not state.pending_changes.get("commits"):
-            raise RuntimeError(
-                f"approval target {target} is not present and no pending change is available"
+        if current_head != target:
+            state.pending_changes = get_pending_changes(
+                repo_path, state.config.branch
             )
+            if not state.pending_changes.get("commits"):
+                raise RuntimeError(
+                    f"approval target {target} is not present and no pending change is available"
+                )
     progress_kwargs = (
         {"progress_callback": progress_callback}
         if progress_callback is not None

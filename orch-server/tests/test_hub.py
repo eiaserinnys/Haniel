@@ -1435,6 +1435,75 @@ class TestDeployTimeout:
         assert [row["orchestrator_attempt_id"] for row in active] == ["attempt-d1"]
         assert (await store.get_deploy_event("d1"))["status"] == "deploying"
 
+    async def test_reconnected_node_reports_original_attempt_success(
+        self, registry, store
+    ):
+        hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
+        deploy_id = "n1:r:main:target"
+        await store.create_deploy_event(
+            deploy_id=deploy_id,
+            node_id="n1",
+            repo="r",
+            branch="main",
+            commits=["target update"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+            target_head="target",
+        )
+        bind_generation(hub, generation="g1", connection_token="token-g1")
+        await begin_attempt(store, deploy_id, generation="g1")
+
+        disconnecting = await hub.deploy_coordinator.begin_disconnect(
+            "n1", "g1", "token-g1"
+        )
+        assert disconnecting is not None
+        await hub.deploy_coordinator.finalize_disconnect("n1", disconnecting)
+        bind_generation(hub, generation="g2", connection_token="token-g2")
+
+        await hub._handle_deploy_result(deploy_result(deploy_id, status="success"))
+        await hub.deploy_coordinator.handle_settled(settled(deploy_id))
+
+        attempt = await store.attempts.get_attempt(f"attempt-{deploy_id}")
+        assert attempt["outcome"] == "success"
+        assert (await store.get_deploy_event(deploy_id))["status"] == "success"
+
+    async def test_disconnected_node_attempt_still_expires(
+        self, registry, store
+    ):
+        hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=0.05)
+        await store.create_deploy_event(
+            deploy_id="d1",
+            node_id="n1",
+            repo="r",
+            branch="main",
+            commits=["h msg"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+        )
+        bind_generation(hub)
+        await begin_attempt(
+            store,
+            "d1",
+            deadline_at=(
+                datetime.now(timezone.utc) + timedelta(seconds=0.05)
+            ).isoformat(),
+        )
+        await hub.deploy_coordinator.restore_deadlines()
+
+        disconnecting = await hub.deploy_coordinator.begin_disconnect(
+            "n1", "g1", "token-g1"
+        )
+        assert disconnecting is not None
+        await hub.deploy_coordinator.finalize_disconnect("n1", disconnecting)
+        await asyncio.sleep(0.08)
+
+        attempt = await store.attempts.get_attempt("attempt-d1")
+        assert attempt["outcome"] == "failed"
+        assert attempt["terminal_kind"] == "attempt_timeout"
+        assert (await store.get_deploy_event("d1"))["status"] == "pending"
+
     async def test_restart_closes_old_probe_without_opening_attempt(
         self, registry, store
     ):

@@ -359,6 +359,7 @@ class ServiceRunner:
         self._post_pull_executed = False
         self._startup_updated_repos: set[str] = set()
         self._startup_manifest_updates: dict[str, str] = {}
+        self._startup_repo_locks: set[str] = set()
 
         # Self-update (see ADR-0002)
         self._self_repo: str | None = (
@@ -537,6 +538,13 @@ class ServiceRunner:
             return False
 
     def start_services(self) -> None:
+        """Start services and always release startup deployment leases."""
+        try:
+            self._start_services_in_dependency_order()
+        finally:
+            self._release_startup_repo_locks()
+
+    def _start_services_in_dependency_order(self) -> None:
         """Start all enabled services in dependency order.
 
         On first start, executes post_pull hooks only for services whose repos
@@ -590,6 +598,14 @@ class ServiceRunner:
                     repo_name,
                     error,
                 )
+
+    def _release_startup_repo_locks(self) -> None:
+        """Release repo leases retained across startup manifest handover."""
+        for repo_name in tuple(self._startup_repo_locks):
+            lock = self._pull_locks.get(repo_name)
+            if lock is not None and lock.locked():
+                lock.release()
+            self._startup_repo_locks.discard(repo_name)
 
     def _start_service(self, name: str) -> bool:
         """Start a single service.
@@ -1278,8 +1294,8 @@ class ServiceRunner:
         - Slack "배포 승인" button (via approve_callback in Phase 2)
         - auto_apply=True (via _apply_changes)
 
-        Thread safety: uses per-repo Lock with acquire(blocking=False).
-        The lock itself serves as the pulling state — no separate bool flag.
+        Thread safety: uses one per-repo lock. Non-orchestrated duplicates return;
+        orchestrated attempts wait only for the bounded startup deployment owner.
 
         Args:
             repo_name: Repository to pull
@@ -1288,7 +1304,21 @@ class ServiceRunner:
         if repo_name not in self._pull_locks:
             raise ValueError(f"Unknown repo: {repo_name}")
 
-        if not self._pull_locks[repo_name].acquire(blocking=False):
+        pull_lock = self._pull_locks[repo_name]
+        if (
+            orchestrator_attempt_id is not None
+            and repo_name in self._startup_repo_locks
+        ):
+            if pull_lock.locked():
+                logger.info(
+                    "Waiting for startup deployment of %s before orchestrated attempt %s",
+                    repo_name,
+                    orchestrator_attempt_id,
+                )
+            pull_lock.acquire()
+        elif not pull_lock.acquire(blocking=False):
+            if orchestrator_attempt_id is not None:
+                raise RuntimeError(f"already pulling {repo_name}")
             logger.info("Already pulling %s, ignoring duplicate request", repo_name)
             return
 
@@ -1416,7 +1446,7 @@ class ServiceRunner:
                 self._ws_handler.broadcast_repo_pulling(repo_name, False)
             # Clear pending hash so new changes after this pull trigger fresh notifications
             self._last_pending_hash.pop(repo_name, None)
-            self._pull_locks[repo_name].release()
+            pull_lock.release()
 
     def _restart_after_pull_legacy(self, repo_name: str, affected: list[str]) -> None:
         """Preserve the pre-manifest restart contract for unrelated repositories."""
@@ -1555,6 +1585,10 @@ class ServiceRunner:
                 )
                 continue
 
+            pull_lock = self._pull_locks[name]
+            self._startup_repo_locks.add(name)
+            pull_lock.acquire()
+            retain_for_manifest_handover = False
             try:
                 has_updates = fetch_repo(
                     path=repo_path,
@@ -1590,10 +1624,17 @@ class ServiceRunner:
                     logger.debug("Startup update: %s is up to date", name)
                     self._queue_interrupted_manifest_deployment(name, activated)
 
+                if name in self._startup_manifest_updates:
+                    retain_for_manifest_handover = True
+
             except (GitError, ReleaseManifestActivationRequired) as e:
                 logger.error("Startup update failed for %s: %s", name, e)
                 state.fetch_error = str(e)
                 failed.append(name)
+            finally:
+                if not retain_for_manifest_handover:
+                    pull_lock.release()
+                    self._startup_repo_locks.discard(name)
 
         if updated:
             logger.info(

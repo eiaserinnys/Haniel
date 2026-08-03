@@ -1,15 +1,16 @@
 """Startup and approved pulls activate one release-manifest control path."""
 
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from haniel.core.runner import ServiceRunner
 from haniel.config import HanielConfig, RepoConfig, ServiceConfig, load_config
 from haniel.config.release_activation import DEFAULT_RELEASE_MANIFEST
 from haniel.core.deployment import DeploymentError
 from haniel.core.deployment import DeploymentStateStore
-from haniel.core.runner import ServiceRunner
 
 
 def config_text() -> str:
@@ -143,6 +144,88 @@ def test_manifest_repo_is_deferred_to_startup_handover(
     assert runner._startup_manifest_updates == {"soulstream": "old-head"}
     assert runner._startup_updated_repos == set()
     assert runner._repo_states["soulstream"].last_head == "new-head"
+
+
+@patch("haniel.core.runner.run_manifest_deployment")
+@patch("haniel.core.runner.get_head", side_effect=["old-head", "new-head"])
+@patch("haniel.core.runner.pull_repo")
+@patch("haniel.core.runner.fetch_repo", return_value=True)
+def test_startup_manifest_holds_repo_lock_through_handover(
+    mock_fetch,
+    mock_pull,
+    mock_head,
+    mock_deploy,
+    tmp_path: Path,
+) -> None:
+    make_repo(tmp_path)
+    config = HanielConfig(
+        repos={
+            "soulstream": RepoConfig(
+                url="git@test/soulstream",
+                path="./soulstream",
+                release_manifest=DEFAULT_RELEASE_MANIFEST,
+            )
+        },
+        services={
+            "soulstream-orch-server": ServiceConfig(
+                run="orch", repo="soulstream"
+            )
+        },
+    )
+    runner = ServiceRunner(config, config_dir=tmp_path)
+    runner._start_service = MagicMock(return_value=True)
+
+    runner._apply_startup_updates()
+
+    assert runner._pull_locks["soulstream"].locked()
+
+    def assert_locked_during_handover(*_args, **_kwargs) -> None:
+        assert runner._pull_locks["soulstream"].locked()
+
+    mock_deploy.side_effect = assert_locked_during_handover
+    runner.start_services()
+
+    assert not runner._pull_locks["soulstream"].locked()
+
+
+def test_orchestrated_pull_waits_for_startup_repo_lock(tmp_path: Path) -> None:
+    config = HanielConfig(
+        repos={
+            "soulstream": RepoConfig(
+                url="git@test/soulstream",
+                path="./soulstream",
+            )
+        },
+        services={},
+    )
+    runner = ServiceRunner(config, config_dir=tmp_path)
+    lock = runner._pull_locks["soulstream"]
+    runner._startup_repo_locks.add("soulstream")
+    lock.acquire()
+    finished = threading.Event()
+    errors: list[BaseException] = []
+
+    def approved_pull() -> None:
+        try:
+            runner.trigger_pull(
+                "soulstream",
+                orchestrator_attempt_id="orch-attempt",
+            )
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=approved_pull)
+    thread.start()
+    try:
+        assert not finished.wait(0.1)
+    finally:
+        lock.release()
+    thread.join(timeout=1)
+
+    assert finished.is_set()
+    assert errors == []
 
 
 @patch(
