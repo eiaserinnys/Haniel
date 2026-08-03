@@ -12,6 +12,7 @@ from .connection_lifecycle import (
 )
 from .deploy_attempt_connection_lifecycle import DeployAttemptConnectionLifecycle
 from .deploy_attempt_deadlines import DeployAttemptDeadlines
+from .deploy_attempt_progress import DeployAttemptProgress
 from .event_store import EventStore
 from .protocol import (
     AcceptedDeployAttemptAck,
@@ -40,7 +41,9 @@ class PlanRejected(RuntimeError):
 
 
 class DeployAttemptCoordinator(
-    DeployAttemptConnectionLifecycle, DeployAttemptDeadlines
+    DeployAttemptConnectionLifecycle,
+    DeployAttemptDeadlines,
+    DeployAttemptProgress,
 ):
     """The sole authority that turns evidence into deploy state transitions."""
 
@@ -311,6 +314,19 @@ class DeployAttemptCoordinator(
             error=msg.error,
             duration_ms=msg.duration_ms,
         )
+        if result.get("status") == "ignored":
+            await self._handle_ignored_report(
+                node_id=msg.node_id,
+                deploy_id=msg.deploy_id,
+                orchestrator_attempt_id=msg.orchestrator_attempt_id,
+                connection_generation=msg.connection_generation,
+                report_type="deploy_result",
+                summary=(
+                    f"status={msg.status} duration_ms={msg.duration_ms} "
+                    f"error={msg.error!r}"
+                ),
+            )
+            return
         await self._after_store_terminal(
             msg.node_id, msg.orchestrator_attempt_id, result
         )
@@ -325,6 +341,16 @@ class DeployAttemptCoordinator(
             local_head=msg.local_head,
             remote_head=msg.remote_head,
         )
+        if result.get("status") == "ignored":
+            await self._handle_ignored_report(
+                node_id=msg.node_id,
+                deploy_id=msg.deploy_id,
+                orchestrator_attempt_id=msg.orchestrator_attempt_id,
+                connection_generation=msg.connection_generation,
+                report_type="repo_reconciliation",
+                summary=f"local_head={msg.local_head} remote_head={msg.remote_head}",
+            )
+            return
         await self._after_store_terminal(
             msg.node_id, msg.orchestrator_attempt_id, result
         )

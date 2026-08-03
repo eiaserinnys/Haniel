@@ -113,6 +113,26 @@ class DeployResult(StrictMessage):
     connection_generation: str
 
 
+class DeployProgress(StrictMessage):
+    """Lease-bearing progress sent while one deploy attempt is executing."""
+
+    type: Literal["deploy_progress"] = "deploy_progress"
+    deploy_id: str
+    node_id: str
+    orchestrator_attempt_id: str
+    connection_generation: str
+    stage: Literal[
+        "preparing",
+        "build",
+        "preflight",
+        "backing_up",
+        "migrating",
+        "starting",
+        "verifying",
+        "recovering",
+    ]
+
+
 class RepoReconciliation(StrictMessage):
     """Node observation that reconciles dashboard activity with actual Git HEADs."""
 
@@ -269,6 +289,18 @@ class DeployReject(BaseModel):
     reason: str
 
 
+class DeployReportAck(StrictMessage):
+    """Tell the current node connection why a late report was ignored."""
+
+    type: Literal["deploy_report_ack"] = "deploy_report_ack"
+    deploy_id: str
+    orchestrator_attempt_id: str
+    report_type: Literal["deploy_result", "repo_reconciliation"]
+    status: Literal["ignored"] = "ignored"
+    reason: Literal["unknown_attempt", "terminal_attempt", "identity_mismatch"]
+    attempt_outcome: str | None = None
+
+
 class ServiceCommand(BaseModel):
     """Server instructs node to run a service/config lifecycle command."""
 
@@ -302,6 +334,7 @@ OrchestratorMessage = Union[
     AcceptedDeployAttemptAck,
     RejectedDeployAttemptAck,
     DeployReject,
+    DeployReportAck,
     ServiceCommand,
 ]
 NodeMessage = Union[
@@ -309,6 +342,7 @@ NodeMessage = Union[
     ChangeNotification,
     NodeStatus,
     DeployResult,
+    DeployProgress,
     RepoReconciliation,
     DeployPlanProposal,
     ManifestRecoveryEvidence,
@@ -322,6 +356,7 @@ _NODE_MESSAGE_TYPES: dict[str, type[NodeMessage]] = {
     "change_notification": ChangeNotification,
     "node_status": NodeStatus,
     "deploy_result": DeployResult,
+    "deploy_progress": DeployProgress,
     "repo_reconciliation": RepoReconciliation,
     "deploy_plan_proposal": DeployPlanProposal,
     "manifest_recovery_evidence": ManifestRecoveryEvidence,

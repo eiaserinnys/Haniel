@@ -19,6 +19,7 @@ from uuid import uuid4
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 
+from .deploy_progress import DeployProgressEmitter, ProgressCallback
 from .deploy_reporting import DeployReporter, parse_deploy_id
 from .deploy_attempt_gate import DeployAttemptGate
 
@@ -67,7 +68,8 @@ class OrchestratorClient:
             "Callable[[str, str, dict[str, Any] | None], Any] | None"
         ) = None,
         deploy_approval_handler: (
-            "Callable[[dict[str, Any]], str | dict[str, Any] | None] | None"
+            "Callable[[dict[str, Any], ProgressCallback], "
+            "str | dict[str, Any] | None] | None"
         ) = None,
         deploy_plan_probe_handler: "Callable[[dict[str, Any]], dict[str, Any]] | None" = None,
         repo_snapshot_handler: (
@@ -212,6 +214,24 @@ class OrchestratorClient:
             ),
             wait=False,
         )
+
+    def start_deploy_progress(self, permit: dict[str, Any]) -> DeployProgressEmitter:
+        """Start the bounded-lifetime heartbeat source for an auto attempt."""
+
+        def emit(message: dict) -> None:
+            self._schedule_report(
+                lambda message=message: self._send_json(message), wait=False
+            )
+
+        emitter = DeployProgressEmitter(
+            node_id=self._config.node_id,
+            deploy_id=permit["deploy_id"],
+            orchestrator_attempt_id=permit["begun_orchestrator_attempt_id"],
+            connection_generation=permit["connection_generation"],
+            emit=emit,
+        )
+        emitter.start()
+        return emitter
 
     def request_auto_attempt(
         self, snapshot: "RepoReconciliationSnapshot"
@@ -455,6 +475,15 @@ class OrchestratorClient:
         elif msg_type == "deploy_attempt_ack":
             self._deploy_attempt_gate.observe_generation(msg["connection_generation"])
             self._deploy_attempt_gate.accept_ack(msg)
+        elif msg_type == "deploy_report_ack":
+            logger.warning(
+                "Orchestrator ignored deploy report attempt_id=%s report_type=%s "
+                "reason=%s outcome=%s",
+                msg.get("orchestrator_attempt_id"),
+                msg.get("report_type"),
+                msg.get("reason"),
+                msg.get("attempt_outcome") or "missing",
+            )
         elif msg_type == "deploy_reject":
             logger.info(
                 f"Deploy rejected: {msg.get('deploy_id')} "

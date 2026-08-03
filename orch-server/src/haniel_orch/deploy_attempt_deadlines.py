@@ -23,11 +23,18 @@ class DeployAttemptDeadlines:
         )
 
     def _schedule_attempt(self, orchestrator_attempt_id: str, deadline_at: str) -> None:
+        key = f"attempt:{orchestrator_attempt_id}"
+        previous = self._timers.get(key)
+        current = asyncio.current_task()
+        if previous is not None and previous is not current:
+            previous.cancel()
         delay = max(
             0.0,
-            (datetime.fromisoformat(deadline_at) - datetime.now(timezone.utc)).total_seconds(),
+            (
+                datetime.fromisoformat(deadline_at) - datetime.now(timezone.utc)
+            ).total_seconds(),
         )
-        self._timers[f"attempt:{orchestrator_attempt_id}"] = asyncio.create_task(
+        self._timers[key] = asyncio.create_task(
             self._attempt_timeout(orchestrator_attempt_id, delay)
         )
 
@@ -45,13 +52,19 @@ class DeployAttemptDeadlines:
         ):
             self._resolve_probe(probe_id, self._plan_rejected("preflight timeout", 504))
 
-    async def _attempt_timeout(self, orchestrator_attempt_id: str, delay: float) -> None:
+    async def _attempt_timeout(
+        self, orchestrator_attempt_id: str, delay: float
+    ) -> None:
         try:
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
             return
         attempt = await self.attempts.get_attempt(orchestrator_attempt_id)
         if attempt is None or attempt["outcome"] != "active":
+            return
+        durable_deadline = attempt["deadline_at"]
+        if datetime.fromisoformat(durable_deadline) > datetime.now(timezone.utc):
+            self._schedule_attempt(orchestrator_attempt_id, durable_deadline)
             return
         if attempt["execution_mode"] == "evidence_recovery":
             reason = "recovery_evidence_timeout"
@@ -65,13 +78,17 @@ class DeployAttemptDeadlines:
         else:
             reason = "attempt_evidence_timeout"
             error = "deploy result and settled HEAD evidence were not received before the attempt deadline"
-        result = await self.attempts.fail_active_attempt(
+        result = await self.attempts.fail_attempt_if_deadline_due(
             orchestrator_attempt_id,
+            expected_deadline_at=durable_deadline,
             kind="attempt_timeout",
             stage="deadline",
             reason=reason,
             error=error,
         )
+        if result.get("status") == "deadline_changed":
+            self._schedule_attempt(orchestrator_attempt_id, result["deadline_at"])
+            return
         if result.get("deploy_id"):
             await self._after_store_terminal(
                 attempt["node_id"], orchestrator_attempt_id, result

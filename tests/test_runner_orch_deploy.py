@@ -238,13 +238,22 @@ class TestAutoDeployReconciliation:
         runner._orch_client.request_auto_attempt.side_effect = lambda snapshot: (
             order.append("attempt_started") or permit
         )
+        progress = MagicMock()
+        progress.stop.side_effect = lambda: order.append("progress_stopped")
+        runner._orch_client.start_deploy_progress.side_effect = lambda _permit: (
+            order.append("progress_started") or progress
+        )
         runner._orchestrated_deploys.record_probe({"probe_id": "probe-1"})
         runner._orch_client.report_deploy_attempt.side_effect = lambda *args, **kwargs: (
             order.append("settled_report")
         )
         with patch(
             "haniel.core.runner.execute_approved_plan",
-            side_effect=lambda *args, **kwargs: order.append("execute"),
+            side_effect=lambda *args, **kwargs: (
+                order.append("execute")
+                if kwargs["progress_callback"] is progress.transition
+                else (_ for _ in ()).throw(AssertionError("wrong progress callback"))
+            ),
         ):
             runner._run_auto_deploy("appA")
 
@@ -253,7 +262,14 @@ class TestAutoDeployReconciliation:
         args = runner._orch_client.report_deploy_attempt.call_args.args
         assert args[0] == settled
         assert args[1] is None
-        assert order == ["attempt_started", "execute", "settled_report"]
+        runner._orch_client.start_deploy_progress.assert_called_once_with(permit)
+        assert order == [
+            "attempt_started",
+            "progress_started",
+            "execute",
+            "progress_stopped",
+            "settled_report",
+        ]
 
 
 class TestImmutableRetryExecution:

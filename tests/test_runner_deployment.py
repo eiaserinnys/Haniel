@@ -332,6 +332,7 @@ def test_manifest_handover_waits_for_readiness_and_post_verify(
 ) -> None:
     runner, _repo, previous_head = manifest_runner
     events: list[str] = []
+    progress: list[str] = []
     configure_processes(runner, events)
     runner.execute_hook = MagicMock(
         side_effect=lambda name, hook: events.append(f"{hook}:{name}") or True
@@ -346,7 +347,13 @@ def test_manifest_handover_waits_for_readiness_and_post_verify(
         "haniel.core.runner_deployment.subprocess_command_runner",
         return_value=run_command,
     ):
-        run_manifest_deployment(runner, "app", ["app"], previous_head)
+        run_manifest_deployment(
+            runner,
+            "app",
+            ["app"],
+            previous_head,
+            progress_callback=progress.append,
+        )
 
     assert events == [
         "post_pull:app",
@@ -360,6 +367,42 @@ def test_manifest_handover_waits_for_readiness_and_post_verify(
         "verify-http",
         "verify-mcp",
     ]
+    assert progress == [
+        "build",
+        "preflight",
+        "backing_up",
+        "migrating",
+        "starting",
+        "verifying",
+    ]
+
+
+def test_progress_reporting_failure_does_not_abort_manifest_handover(
+    manifest_runner: tuple[ServiceRunner, Path, str], caplog
+) -> None:
+    runner, _repo, previous_head = manifest_runner
+    configure_processes(runner, [])
+    runner.execute_hook = MagicMock(return_value=True)
+
+    def fail_progress(stage: str) -> None:
+        raise RuntimeError(f"progress transport unavailable at {stage}")
+
+    with (
+        patch(
+            "haniel.core.runner_deployment.subprocess_command_runner",
+            return_value=lambda _spec, _env: None,
+        ),
+        caplog.at_level("WARNING"),
+    ):
+        run_manifest_deployment(
+            runner,
+            "app",
+            ["app"],
+            previous_head,
+            progress_callback=fail_progress,
+        )
+
+    assert "Failed to report deploy progress build" in caplog.text
 
 
 def test_build_failure_restores_code_without_stopping_old_process(
