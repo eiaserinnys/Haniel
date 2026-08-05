@@ -18,6 +18,7 @@ export interface Deploy {
   duration_ms: number | null;
   created_at: string;
   updated_at: string;
+  is_self_update?: boolean;
 }
 
 // Service status is split into three axes so the dashboard can show process

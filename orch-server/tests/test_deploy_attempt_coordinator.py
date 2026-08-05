@@ -153,6 +153,132 @@ async def make_retry(store: EventStore, generation: str) -> None:
     )
 
 
+async def seed_named(
+    store: EventStore,
+    *,
+    deploy_id: str,
+    node_id: str,
+    repo: str,
+    is_self_update: bool = False,
+) -> dict:
+    await store.create_deploy_event(
+        deploy_id=deploy_id,
+        node_id=node_id,
+        repo=repo,
+        branch="main",
+        commits=["target change"],
+        affected_services=[],
+        diff_stat=None,
+        detected_at="2026-08-01T00:00:00Z",
+        target_head="target",
+        is_self_update=is_self_update,
+    )
+    event = await store.get_deploy_event(deploy_id)
+    assert event is not None
+    return event
+
+
+class TestSelfUpdatePriority:
+    @pytest.mark.parametrize("status", [DeployStatus.PENDING, DeployStatus.DEPLOYING])
+    async def test_active_self_update_blocks_other_repo_on_same_node(
+        self, store: EventStore, status: DeployStatus
+    ):
+        self_event = await seed_named(
+            store,
+            deploy_id="self",
+            node_id="n",
+            repo="haniel",
+            is_self_update=True,
+        )
+        if status is DeployStatus.DEPLOYING:
+            await store.update_deploy_status(self_event["deploy_id"], status)
+        regular = await seed_named(
+            store, deploy_id="regular", node_id="n", repo="soulstream"
+        )
+        harness = Harness(store)
+        try:
+            with pytest.raises(
+                PlanRejected, match="self-update self must be approved or postponed"
+            ) as rejected:
+                await harness.coordinator.approve_manual(
+                    regular, approved_by="director", source="manual_single"
+                )
+
+            assert rejected.value.status_code == 409
+            assert harness.sent == []
+            assert (await store.get_deploy_event("regular"))["status"] == "pending"
+        finally:
+            await harness.close()
+
+    @pytest.mark.parametrize(
+        "terminal",
+        [DeployStatus.REJECTED, DeployStatus.FAILED, DeployStatus.SUCCESS],
+    )
+    async def test_terminal_self_update_unblocks_other_repo(
+        self, store: EventStore, terminal: DeployStatus
+    ):
+        await seed_named(
+            store,
+            deploy_id="self",
+            node_id="n",
+            repo="haniel",
+            is_self_update=True,
+        )
+        await store.update_deploy_status("self", terminal)
+        regular = await seed_named(
+            store, deploy_id="regular", node_id="n", repo="soulstream"
+        )
+        harness = Harness(store)
+        try:
+            await harness.coordinator.approve_manual(
+                regular, approved_by="director", source="manual_single"
+            )
+
+            assert (await store.get_deploy_event("regular"))["status"] == "deploying"
+        finally:
+            await harness.close()
+
+    async def test_self_update_can_approve_itself(self, store: EventStore):
+        self_event = await seed_named(
+            store,
+            deploy_id="self",
+            node_id="n",
+            repo="haniel",
+            is_self_update=True,
+        )
+        harness = Harness(store)
+        try:
+            await harness.coordinator.approve_manual(
+                self_event, approved_by="director", source="manual_single"
+            )
+
+            assert (await store.get_deploy_event("self"))["status"] == "deploying"
+        finally:
+            await harness.close()
+
+    async def test_self_update_does_not_block_another_node(self, store: EventStore):
+        await seed_named(
+            store,
+            deploy_id="self",
+            node_id="n",
+            repo="haniel",
+            is_self_update=True,
+        )
+        other = await seed_named(
+            store, deploy_id="other", node_id="n2", repo="soulstream"
+        )
+        harness = Harness(store)
+        harness.coordinator._connections["n2"] = ActiveConnection("g2", "token-g2")
+        try:
+            await harness.coordinator.approve_manual(
+                other, approved_by="director", source="manual_single"
+            )
+
+            assert (await store.get_deploy_event("other"))["status"] == "deploying"
+        finally:
+            await harness.close()
+
+
 class TestAutoPermission:
     async def test_new_change_begins_before_accepted_ack(self, store: EventStore):
         await seed(store)

@@ -1954,6 +1954,7 @@ class ServiceRunner:
                     deployment_kind="manifest" if manifest_identity else "legacy",
                     expected_manifest_identity=manifest_identity,
                     expected_manifest_digest=manifest_digest,
+                    is_self_update=name == self._self_repo,
                     wait=True,
                 )
         if self_restart_required:

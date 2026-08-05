@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
 from typing import Any
 
 import aiosqlite
@@ -12,6 +11,8 @@ import aiosqlite
 from . import event_store_mutations, event_store_nodes
 from .deploy_attempt_schema import initialize_attempt_schema
 from .deploy_attempt_store import DeployAttemptStore
+from .event_store_lifecycle import EventStoreLifecycleMixin
+from .event_store_rows import decode_deploy_row, now_iso
 from .protocol import DeployStatus
 
 _CREATE_TABLES = """
@@ -30,7 +31,8 @@ CREATE TABLE IF NOT EXISTS deploy_events (
     error TEXT,
     duration_ms INTEGER,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    is_self_update INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS nodes (
@@ -57,16 +59,7 @@ CREATE TABLE IF NOT EXISTS device_tokens (
 """
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _row_to_dict(cursor: aiosqlite.Cursor, row: tuple) -> dict[str, Any]:
-    """Convert a row tuple to a dict using cursor.description."""
-    return {col[0]: val for col, val in zip(cursor.description, row)}
-
-
-class EventStore:
+class EventStore(EventStoreLifecycleMixin):
     """Async SQLite store for deploy events and nodes."""
 
     def __init__(self, db_path: str) -> None:
@@ -105,6 +98,7 @@ class EventStore:
         deployment_kind: str = "legacy",
         expected_manifest_identity: str | None = None,
         expected_manifest_digest: str | None = None,
+        is_self_update: bool = False,
     ) -> bool:
         """Create a deploy event.
 
@@ -112,15 +106,16 @@ class EventStore:
         silently ignored and returns False.
         """
         async with self._mutation_lock:
-            now = _now_iso()
+            now = now_iso()
             try:
                 cursor = await self._db.execute(
                     """INSERT OR IGNORE INTO deploy_events
                        (deploy_id, node_id, repo, branch, status,
                         commits_json, affected_services_json, diff_stat, detected_at,
                         created_at, updated_at, target_head, deployment_kind,
-                        expected_manifest_identity, expected_manifest_digest)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        expected_manifest_identity, expected_manifest_digest,
+                        is_self_update)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         deploy_id,
                         node_id,
@@ -137,6 +132,7 @@ class EventStore:
                         deployment_kind,
                         expected_manifest_identity,
                         expected_manifest_digest,
+                        int(is_self_update),
                     ),
                 )
                 if cursor.rowcount > 0:
@@ -246,7 +242,7 @@ class EventStore:
                          )""",
                     (
                         DeployStatus.SUCCESS.value,
-                        _now_iso(),
+                        now_iso(),
                         deploy_id,
                         node_id,
                         repo,
@@ -271,10 +267,7 @@ class EventStore:
         row = await cursor.fetchone()
         if row is None:
             return None
-        result = _row_to_dict(cursor, row)
-        result["commits"] = json.loads(result.pop("commits_json"))
-        result["affected_services"] = json.loads(result.pop("affected_services_json"))
-        return result
+        return decode_deploy_row(cursor, row)
 
     async def get_pending_deploys(self) -> list[dict[str, Any]]:
         """Get all events with status='pending'.
@@ -289,13 +282,7 @@ class EventStore:
             (DeployStatus.PENDING.value,),
         )
         rows = await cursor.fetchall()
-        results = []
-        for row in rows:
-            d = _row_to_dict(cursor, row)
-            d["commits"] = json.loads(d.pop("commits_json"))
-            d["affected_services"] = json.loads(d.pop("affected_services_json"))
-            results.append(d)
-        return results
+        return [decode_deploy_row(cursor, row) for row in rows]
 
     async def get_active_deploys(self) -> list[dict[str, Any]]:
         """Get pending + deploying events (newest first).
@@ -311,13 +298,24 @@ class EventStore:
             (DeployStatus.PENDING.value, DeployStatus.DEPLOYING.value),
         )
         rows = await cursor.fetchall()
-        results = []
-        for row in rows:
-            d = _row_to_dict(cursor, row)
-            d["commits"] = json.loads(d.pop("commits_json"))
-            d["affected_services"] = json.loads(d.pop("affected_services_json"))
-            results.append(d)
-        return results
+        return [decode_deploy_row(cursor, row) for row in rows]
+
+    async def get_active_self_update_for_node(
+        self, node_id: str
+    ) -> dict[str, Any] | None:
+        """Return one active self-update that blocks other deploys on a node."""
+        cursor = await self._db.execute(
+            "SELECT * FROM deploy_events "
+            "WHERE node_id = ? AND is_self_update = 1 AND status IN (?, ?) "
+            "ORDER BY detected_at DESC, created_at DESC, deploy_id DESC LIMIT 1",
+            (
+                node_id,
+                DeployStatus.PENDING.value,
+                DeployStatus.DEPLOYING.value,
+            ),
+        )
+        row = await cursor.fetchone()
+        return None if row is None else decode_deploy_row(cursor, row)
 
     async def supersede_stale_pending_deploys(self) -> list[str]:
         """Reject older PENDING deploys per (node, repo, branch).
@@ -355,13 +353,7 @@ class EventStore:
             (node_id, repo, branch, DeployStatus.PENDING.value),
         )
         rows = await cursor.fetchall()
-        results = []
-        for row in rows:
-            d = _row_to_dict(cursor, row)
-            d["commits"] = json.loads(d.pop("commits_json"))
-            d["affected_services"] = json.loads(d.pop("affected_services_json"))
-            results.append(d)
-        return results
+        return [decode_deploy_row(cursor, row) for row in rows]
 
     async def supersede_pending_for_branch(
         self, node_id: str, repo: str, branch: str
@@ -384,286 +376,4 @@ class EventStore:
             (DeployStatus.REJECTED.value, f"superseded by {deploy_id}"),
         )
         rows = await cursor.fetchall()
-        results = []
-        for row in rows:
-            item = _row_to_dict(cursor, row)
-            item["commits"] = json.loads(item.pop("commits_json"))
-            item["affected_services"] = json.loads(item.pop("affected_services_json"))
-            results.append(item)
-        return results
-
-    async def get_deploy_history(
-        self,
-        limit: int = 50,
-        *,
-        include_superseded: bool = False,
-    ) -> list[dict[str, Any]]:
-        """Get deploy events newest first.
-
-        By default, auto-supersede entries (status=rejected with
-        reject_reason starting with 'superseded by ') are excluded so the
-        dashboard history shows actionable deploys only. Pass
-        ``include_superseded=True`` to include them (audit view exposed via
-        ``GET /api/orch/history?include_superseded=1``).
-
-        Manual rejects (operator-provided reject_reason) are NOT filtered —
-        only the auto-supersede marker prefix is recognised.
-        """
-        if include_superseded:
-            sql = "SELECT * FROM deploy_events"
-            params: tuple[Any, ...] = ()
-        else:
-            sql = (
-                "SELECT * FROM deploy_events "
-                "WHERE NOT (status = ? AND reject_reason LIKE 'superseded by %') "
-                ""
-            )
-            params = (DeployStatus.REJECTED.value,)
-        cursor = await self._db.execute(sql, params)
-        rows = await cursor.fetchall()
-        results = []
-        for row in rows:
-            d = _row_to_dict(cursor, row)
-            d["commits"] = json.loads(d.pop("commits_json"))
-            d["affected_services"] = json.loads(d.pop("affected_services_json"))
-            d.update(
-                terminal_kind=None,
-                terminal_stage=None,
-                terminal_reason=None,
-                terminal_error=None,
-            )
-            results.append(d)
-        if self.attempts is not None:
-            success_metadata = await self.attempts.success_metadata()
-            for item in results:
-                metadata = success_metadata.get(item["deploy_id"])
-                if (
-                    metadata is not None
-                    and item["status"] == DeployStatus.SUCCESS.value
-                ):
-                    item.update(metadata)
-            results.extend(await self.attempts.history_rows(include_superseded))
-        results.sort(
-            key=lambda item: (
-                item.get("updated_at") or item.get("created_at") or "",
-                item["deploy_id"],
-            ),
-            reverse=True,
-        )
-        return results[:limit]
-
-    async def update_deploy_status(
-        self,
-        deploy_id: str,
-        status: DeployStatus,
-        approved_by: str | None = None,
-        reject_reason: str | None = None,
-        error: str | None = None,
-        duration_ms: int | None = None,
-    ) -> None:
-        """Update event status and optional fields. Only non-None args are SET."""
-        async with self._mutation_lock:
-            try:
-                await self._update_deploy_status_unlocked(
-                    deploy_id, status, approved_by, reject_reason, error, duration_ms
-                )
-                if status in (DeployStatus.REJECTED, DeployStatus.SUCCESS):
-                    await self._db.execute(
-                        "DELETE FROM deploy_retry_requirements WHERE deploy_id = ?",
-                        (deploy_id,),
-                    )
-                    await self._db.execute(
-                        "DELETE FROM deploy_retry_source_attempts WHERE deploy_id = ?",
-                        (deploy_id,),
-                    )
-                    await self._db.execute(
-                        """UPDATE deploy_plan_probes
-                           SET status = 'terminal', terminal_kind = 'preflight_stale',
-                               terminal_stage = 'canonical_status_update',
-                               terminal_reason = 'canonical_terminal',
-                               terminal_error = ?, completed_at = ?
-                           WHERE deploy_id = ? AND status IN ('active','proposed')""",
-                        (
-                            f"canonical became {status.value} during preflight",
-                            _now_iso(),
-                            deploy_id,
-                        ),
-                    )
-                await self._db.commit()
-            except Exception:
-                await self._db.rollback()
-                raise
-
-    async def _update_deploy_status_unlocked(
-        self,
-        deploy_id: str,
-        status: DeployStatus,
-        approved_by: str | None = None,
-        reject_reason: str | None = None,
-        error: str | None = None,
-        duration_ms: int | None = None,
-    ) -> None:
-        updates = ["status = ?", "updated_at = ?"]
-        params: list[Any] = [status.value, _now_iso()]
-
-        if approved_by is not None:
-            updates.append("approved_by = ?")
-            params.append(approved_by)
-        if reject_reason is not None:
-            updates.append("reject_reason = ?")
-            params.append(reject_reason)
-        if error is not None:
-            updates.append("error = ?")
-            params.append(error)
-        if duration_ms is not None:
-            updates.append("duration_ms = ?")
-            params.append(duration_ms)
-
-        params.append(deploy_id)
-        await self._db.execute(
-            f"UPDATE deploy_events SET {', '.join(updates)} WHERE deploy_id = ?",
-            params,
-        )
-
-    async def get_deploying_events_for_node(self, node_id: str) -> list[dict[str, Any]]:
-        """Get events in DEPLOYING state for diagnostics."""
-        cursor = await self._db.execute(
-            "SELECT * FROM deploy_events WHERE node_id = ? AND status = ?",
-            (node_id, DeployStatus.DEPLOYING.value),
-        )
-        rows = await cursor.fetchall()
-        results = []
-        for row in rows:
-            d = _row_to_dict(cursor, row)
-            d["commits"] = json.loads(d.pop("commits_json"))
-            d["affected_services"] = json.loads(d.pop("affected_services_json"))
-            results.append(d)
-        return results
-
-    async def reject_pending_deploys_for_nodes(
-        self, node_ids: list[str], reject_reason: str
-    ) -> list[dict[str, Any]]:
-        """Reject all PENDING deploys for the given nodes and return them."""
-        if not node_ids:
-            return []
-        async with self._mutation_lock:
-            try:
-                rejected = await event_store_mutations.reject_pending_deploys_for_nodes(
-                    self._db, node_ids, reject_reason
-                )
-                await self._db.commit()
-                return rejected
-            except Exception:
-                await self._db.rollback()
-                raise
-
-    # --- nodes CRUD ---
-
-    async def upsert_node(
-        self,
-        node_id: str,
-        hostname: str,
-        os: str,
-        arch: str,
-        haniel_version: str,
-        connected: bool = True,
-        connection_generation: str | None = None,
-        connection_token: str | None = None,
-    ) -> None:
-        """Register or update a node and its durable connection generation."""
-        async with self._mutation_lock:
-            try:
-                await event_store_nodes.upsert_node(
-                    self._db,
-                    node_id,
-                    hostname,
-                    os,
-                    arch,
-                    haniel_version,
-                    connected,
-                    connection_generation,
-                    connection_token,
-                )
-                await self._db.commit()
-            except Exception:
-                await self._db.rollback()
-                raise
-
-    async def update_node_heartbeat(
-        self,
-        node_id: str,
-        expected_generation: str | None = None,
-        expected_connection_token: str | None = None,
-    ) -> bool:
-        """Update last_seen timestamp for a node."""
-        async with self._mutation_lock:
-            try:
-                updated = await event_store_nodes.update_node_heartbeat(
-                    self._db,
-                    node_id,
-                    expected_generation,
-                    expected_connection_token,
-                )
-                await self._db.commit()
-                return updated
-            except Exception:
-                await self._db.rollback()
-                raise
-
-    async def mark_node_disconnected(
-        self,
-        node_id: str,
-        expected_generation: str,
-        expected_connection_token: str,
-    ) -> bool:
-        """Mark only the expected live generation disconnected."""
-        async with self._mutation_lock:
-            try:
-                updated = await event_store_nodes.mark_node_disconnected(
-                    self._db,
-                    node_id,
-                    expected_generation,
-                    expected_connection_token,
-                )
-                await self._db.commit()
-                return updated
-            except Exception:
-                await self._db.rollback()
-                raise
-
-    async def get_node_connection_generation(self, node_id: str) -> str | None:
-        """Return the durable connection generation for race assertions."""
-        cursor = await self._db.execute(
-            "SELECT connection_generation FROM nodes WHERE node_id = ?", (node_id,)
-        )
-        row = await cursor.fetchone()
-        return None if row is None else row[0]
-
-    async def get_node_connection_identity(
-        self, node_id: str
-    ) -> tuple[str | None, str | None] | None:
-        """Return the durable generation and token used by disconnect CAS."""
-        cursor = await self._db.execute(
-            "SELECT connection_generation, connection_token FROM nodes WHERE node_id = ?",
-            (node_id,),
-        )
-        row = await cursor.fetchone()
-        return None if row is None else (row[0], row[1])
-
-    async def get_nodes(self) -> list[dict[str, Any]]:
-        """Get all nodes (connected and disconnected)."""
-        cursor = await self._db.execute(
-            "SELECT node_id, hostname, os, arch, haniel_version, connected, "
-            "last_seen, created_at FROM nodes ORDER BY last_seen DESC"
-        )
-        rows = await cursor.fetchall()
-        return [_row_to_dict(cursor, row) for row in rows]
-
-    async def get_node_ids_by_hostname(self, hostname: str) -> list[str]:
-        """Return node IDs that have reported the given hostname."""
-        cursor = await self._db.execute(
-            "SELECT node_id FROM nodes WHERE hostname = ?",
-            (hostname,),
-        )
-        rows = await cursor.fetchall()
-        return [row[0] for row in rows]
+        return [decode_deploy_row(cursor, row) for row in rows]

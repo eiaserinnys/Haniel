@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { PendingView } from './PendingView';
 import type { Deploy } from '@/types';
@@ -20,11 +20,62 @@ function deploy(overrides: Partial<Deploy> = {}): Deploy {
     duration_ms: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
+    is_self_update: false,
     ...overrides,
   };
 }
 
 describe('PendingView', () => {
+  it('prioritizes self-updates and blocks only regular deploys on the same node', async () => {
+    const onApproveAll = vi.fn().mockResolvedValue([]);
+    render(
+      <PendingView
+        deploys={[
+          deploy({ deploy_id: 'self', repo: 'haniel', node_id: 'node-1', is_self_update: true }),
+          deploy({ deploy_id: 'blocked', repo: 'soulstream', node_id: 'node-1' }),
+          deploy({ deploy_id: 'other', repo: 'website', node_id: 'node-2' }),
+        ]}
+        onApprove={vi.fn().mockResolvedValue(false)}
+        onReject={vi.fn()}
+        onApproveAll={onApproveAll}
+      />,
+    );
+
+    const selfHeading = screen.getByRole('heading', { name: 'Self-updates' });
+    const repoHeading = screen.getByRole('heading', { name: 'Repository updates' });
+    expect(selfHeading.compareDocumentPosition(repoHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    const selfCard = screen.getByText('haniel').closest('.pending-card') as HTMLElement;
+    const blockedCard = screen.getByText('soulstream').closest('.pending-card') as HTMLElement;
+    const otherCard = screen.getByText('website').closest('.pending-card') as HTMLElement;
+
+    expect(within(selfCard).getByRole('button', { name: 'Postpone' })).toBeEnabled();
+    expect(within(blockedCard).getByRole('button', { name: 'Approve' })).toBeDisabled();
+    expect(within(blockedCard).getByRole('checkbox')).toBeDisabled();
+    expect(within(blockedCard).getByText('Self-update required first')).toBeInTheDocument();
+    expect(within(otherCard).getByRole('button', { name: 'Approve' })).toBeEnabled();
+
+    fireEvent.click(screen.getByText('Select all'));
+    fireEvent.click(screen.getByRole('button', { name: 'Approve 2 selected' }));
+    await waitFor(() => expect(onApproveAll).toHaveBeenCalledWith(['self', 'other']));
+  });
+
+  it('labels the self-update rejection flow as postponement', () => {
+    render(
+      <PendingView
+        deploys={[deploy({ deploy_id: 'self', repo: 'haniel', is_self_update: true })]}
+        onApprove={vi.fn().mockResolvedValue(false)}
+        onReject={vi.fn()}
+        onApproveAll={vi.fn().mockResolvedValue([])}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Postpone' }));
+
+    expect(screen.getByRole('heading', { name: 'Postpone self-update' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Postpone self-update' })).toBeDisabled();
+  });
+
   it('preserves line breaks for git diff stat in expanded deploy cards', () => {
     render(
       <PendingView

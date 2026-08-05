@@ -694,6 +694,34 @@ class TestHandleChangeNotification:
         assert broadcast_data["type"] == "new_pending"
         assert broadcast_data["deploy_id"] == "n1:repo:main:abc1234"
 
+    @pytest.mark.parametrize(
+        ("repo", "marker", "expected"),
+        [
+            ("haniel", None, True),
+            ("haniel", False, False),
+            ("custom-runner", True, True),
+            ("regular", None, False),
+        ],
+    )
+    async def test_resolves_explicit_and_legacy_self_update_markers(
+        self, hub: WebSocketHub, store: EventStore, repo, marker, expected
+    ):
+        notification = ChangeNotification(
+            deploy_id=f"n1:{repo}:main:abc1234",
+            node_id="n1",
+            repo=repo,
+            branch="main",
+            commits=["abc1234 update"],
+            affected_services=[],
+            detected_at="2026-05-05T00:00:00Z",
+            is_self_update=marker,
+        )
+
+        await hub._handle_change_notification(notification)
+
+        event = await store.get_deploy_event(notification.deploy_id)
+        assert event["is_self_update"] is expected
+
 
 class TestHandleChangeNotificationSupersede:
     """change_notification 수신 시점 supersede — 같은 (node, repo, branch)
@@ -1468,9 +1496,7 @@ class TestDeployTimeout:
         assert attempt["outcome"] == "success"
         assert (await store.get_deploy_event(deploy_id))["status"] == "success"
 
-    async def test_disconnected_node_attempt_still_expires(
-        self, registry, store
-    ):
+    async def test_disconnected_node_attempt_still_expires(self, registry, store):
         hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=0.05)
         await store.create_deploy_event(
             deploy_id="d1",

@@ -99,6 +99,7 @@ CANONICAL_COLUMNS = {
     "deployment_kind": "TEXT NOT NULL DEFAULT 'legacy'",
     "expected_manifest_identity": "TEXT",
     "expected_manifest_digest": "TEXT",
+    "is_self_update": "INTEGER NOT NULL DEFAULT 0",
 }
 
 ATTEMPT_COLUMNS = {
@@ -109,16 +110,24 @@ ATTEMPT_COLUMNS = {
 
 async def _ensure_columns(
     db: aiosqlite.Connection, table: str, columns: dict[str, str]
-) -> None:
+) -> set[str]:
     cursor = await db.execute(f"PRAGMA table_info({table})")
     existing = {row[1] for row in await cursor.fetchall()}
+    added: set[str] = set()
     for name, declaration in columns.items():
         if name not in existing:
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+            added.add(name)
+    return added
 
 
 async def initialize_attempt_schema(db: aiosqlite.Connection) -> None:
     """Add v16 tables without reopening historical FAILED rows or journals."""
-    await _ensure_columns(db, "deploy_events", CANONICAL_COLUMNS)
+    canonical_added = await _ensure_columns(db, "deploy_events", CANONICAL_COLUMNS)
+    if "is_self_update" in canonical_added:
+        await db.execute(
+            """UPDATE deploy_events SET is_self_update = 1
+               WHERE lower(repo) = 'haniel' AND status IN ('pending', 'deploying')"""
+        )
     await db.executescript(ATTEMPT_TABLES_SQL)
     await _ensure_columns(db, "deploy_attempts", ATTEMPT_COLUMNS)

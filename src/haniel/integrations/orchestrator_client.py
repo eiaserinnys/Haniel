@@ -140,6 +140,7 @@ class OrchestratorClient:
         deployment_kind: str = "legacy",
         expected_manifest_identity: str | None = None,
         expected_manifest_digest: str | None = None,
+        is_self_update: bool = False,
         wait: bool = False,
     ) -> None:
         """Notify the orchestrator of detected changes. Thread-safe.
@@ -171,6 +172,7 @@ class OrchestratorClient:
             "deployment_kind": deployment_kind,
             "expected_manifest_identity": expected_manifest_identity,
             "expected_manifest_digest": expected_manifest_digest,
+            "is_self_update": is_self_update,
         }
 
         try:
