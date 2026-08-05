@@ -418,7 +418,13 @@ def test_failed_command_persists_bounded_stderr_and_stdout_in_journal(
         command_runner=subprocess_command_runner(tmp_path),
     )
 
-    with patch("haniel.core.deployment_command_runner.subprocess.run") as run:
+    with (
+        patch(
+            "haniel.core.deployment_command_runner.shutil.which",
+            return_value="/tools/run-preflight",
+        ),
+        patch("haniel.core.deployment_command_runner.subprocess.run") as run,
+    ):
         run.side_effect = subprocess.CalledProcessError(
             1,
             ["run-preflight"],

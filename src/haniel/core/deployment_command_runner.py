@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+import shutil
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -61,9 +62,17 @@ def subprocess_command_runner(repo_path: Path) -> CommandRunner:
     def run(command: CommandSpec, deploy_env: dict[str, str]) -> None:
         env = sanitized_child_env()
         env.update(deploy_env)
+        argv = shlex.split(command.command)
+        executable = argv[0] if argv else ""
+        resolved_executable = shutil.which(executable, path=env.get("PATH"))
+        if resolved_executable is None:
+            raise RuntimeError(
+                f"command {command.name!r} executable not found: {executable!r}"
+            )
+        argv[0] = resolved_executable
         try:
             subprocess.run(
-                shlex.split(command.command),
+                argv,
                 cwd=repo_path,
                 env=env,
                 check=True,
@@ -73,5 +82,10 @@ def subprocess_command_runner(repo_path: Path) -> CommandRunner:
             )
         except subprocess.CalledProcessError as error:
             raise RuntimeError(_command_failure_message(command, error)) from error
+        except FileNotFoundError as error:
+            raise RuntimeError(
+                f"command {command.name!r} could not start executable "
+                f"{resolved_executable!r}: {error}"
+            ) from error
 
     return run
