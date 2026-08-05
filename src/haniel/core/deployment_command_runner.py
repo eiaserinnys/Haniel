@@ -85,7 +85,7 @@ def subprocess_command_runner(repo_path: Path) -> CommandRunner:
         except FileNotFoundError as error:
             raise RuntimeError(
                 f"command {command.name!r} could not start executable "
-                f"{resolved_executable!r}: {error}"
+                f"{resolved_executable}: {error}"
             ) from error
 
     return run
