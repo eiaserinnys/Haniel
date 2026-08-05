@@ -226,6 +226,11 @@ class WebSocketHub:
         approve-time supersede in api.approve_deploy/approve_all remains as a
         defensive secondary gate.
         """
+        is_self_update = (
+            msg.is_self_update
+            if msg.is_self_update is not None
+            else msg.repo.casefold() == "haniel"
+        )
         inserted = await self._store.create_deploy_event(
             deploy_id=msg.deploy_id,
             node_id=msg.node_id,
@@ -239,6 +244,7 @@ class WebSocketHub:
             deployment_kind=msg.deployment_kind,
             expected_manifest_identity=msg.expected_manifest_identity,
             expected_manifest_digest=msg.expected_manifest_digest,
+            is_self_update=is_self_update,
         )
         if not inserted:
             return

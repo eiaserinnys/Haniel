@@ -2,7 +2,7 @@
 
 import asyncio
 import threading
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -136,6 +136,29 @@ class TestNotifyChange:
         first_hash = commits[0].split()[0]
         expected_id = f"{config.node_id}:myrepo:main:{first_hash}"
         assert expected_id == "test-node-1:myrepo:main:abc1234"
+
+    def test_self_update_marker_is_sent_on_change_notification(self, config):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+        client._loop = MagicMock()
+        client._connected = True
+        client._ws = MagicMock()
+        client._send_json = AsyncMock()
+
+        def close_coroutine(coro, _loop):
+            coro.close()
+            return MagicMock()
+
+        with patch("asyncio.run_coroutine_threadsafe", side_effect=close_coroutine):
+            client.notify_change(
+                repo="haniel",
+                branch="main",
+                commits=["abc1234 self update"],
+                affected_services=[],
+                is_self_update=True,
+            )
+
+        payload = client._send_json.call_args.args[0]
+        assert payload["is_self_update"] is True
 
 
 class TestBackoff:

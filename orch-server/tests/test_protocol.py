@@ -114,6 +114,21 @@ class TestChangeNotification:
         )
         assert msg.diff_stat is None
 
+    def test_self_update_marker_is_optional_and_additive(self):
+        legacy = ChangeNotification(
+            deploy_id="n:r:b:h",
+            node_id="n",
+            repo="r",
+            branch="b",
+            commits=["h msg"],
+            affected_services=[],
+            detected_at="2026-01-01T00:00:00Z",
+        )
+        marked = legacy.model_copy(update={"is_self_update": True})
+
+        assert legacy.is_self_update is None
+        assert marked.model_dump()["is_self_update"] is True
+
     def test_manifest_identity_without_digest_is_a_fail_closed_snapshot(self):
         msg = ChangeNotification(
             deploy_id="n:r:b:h",

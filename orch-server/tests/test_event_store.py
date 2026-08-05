@@ -5,6 +5,8 @@ import ast
 import inspect
 import textwrap
 
+import aiosqlite
+
 from haniel_orch.event_store import EventStore
 from haniel_orch.protocol import DeployStatus
 
@@ -83,6 +85,82 @@ class TestCreateDeployEvent:
         event = await store.get_deploy_event("no-stat")
         assert event["diff_stat"] is None
 
+    async def test_self_update_marker_round_trips_as_boolean(self, store: EventStore):
+        await store.create_deploy_event(
+            deploy_id="self-update",
+            node_id="n1",
+            repo="custom-runner",
+            branch="main",
+            commits=["h update"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+            is_self_update=True,
+        )
+
+        event = await store.get_deploy_event("self-update")
+        assert event["is_self_update"] is True
+        assert (await store.get_active_deploys())[0]["is_self_update"] is True
+
+    async def test_schema_backfills_active_legacy_haniel_rows(self, tmp_path):
+        db_path = tmp_path / "legacy.sqlite"
+        db = await aiosqlite.connect(db_path)
+        await db.execute(
+            """CREATE TABLE deploy_events (
+                deploy_id TEXT PRIMARY KEY, node_id TEXT NOT NULL,
+                repo TEXT NOT NULL, branch TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                commits_json TEXT NOT NULL, affected_services_json TEXT NOT NULL,
+                diff_stat TEXT, detected_at TEXT NOT NULL, approved_by TEXT,
+                reject_reason TEXT, error TEXT, duration_ms INTEGER,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )"""
+        )
+        await db.execute(
+            """INSERT INTO deploy_events
+               (deploy_id, node_id, repo, branch, status, commits_json,
+                affected_services_json, detected_at, created_at, updated_at)
+               VALUES ('legacy-self-update', 'n1', 'haniel', 'main', 'pending',
+                       '[\"h update\"]', '[]', '2026-01-01T00:00:00Z',
+                       '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"""
+        )
+        await db.commit()
+        await db.close()
+
+        migrated = EventStore(str(db_path))
+        await migrated.initialize()
+        try:
+            event = await migrated.get_deploy_event("legacy-self-update")
+            assert event["is_self_update"] is True
+        finally:
+            await migrated.close()
+
+    async def test_schema_does_not_overwrite_explicit_false_on_restart(self, tmp_path):
+        db_path = tmp_path / "current.sqlite"
+        store = EventStore(str(db_path))
+        await store.initialize()
+        await store.create_deploy_event(
+            deploy_id="explicit-regular",
+            node_id="n1",
+            repo="haniel",
+            branch="main",
+            commits=["h regular"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+            is_self_update=False,
+        )
+        await store.close()
+
+        reopened = EventStore(str(db_path))
+        await reopened.initialize()
+        try:
+            event = await reopened.get_deploy_event("explicit-regular")
+            assert event["is_self_update"] is False
+        finally:
+            await reopened.close()
+
+
 class TestMutationBoundary:
     PUBLIC_MUTATIONS = {
         "initialize",
@@ -111,6 +189,7 @@ class TestMutationBoundary:
                 and call.func.attr in self.PUBLIC_MUTATIONS
             }
             assert nested == set(), (name, nested)
+
 
 class TestGetPendingDeploys:
     async def test_returns_only_pending(self, store: EventStore):
@@ -143,11 +222,23 @@ class TestGetPendingDeploys:
         self, store: EventStore
     ):
         await store.create_deploy_event(
-            "new", "n1", "r", "main", ["new"], [], None,
+            "new",
+            "n1",
+            "r",
+            "main",
+            ["new"],
+            [],
+            None,
             "2026-08-02T00:00:00Z",
         )
         await store.create_deploy_event(
-            "late-old", "n1", "r", "main", ["old"], [], None,
+            "late-old",
+            "n1",
+            "r",
+            "main",
+            ["old"],
+            [],
+            None,
             "2026-08-01T00:00:00Z",
         )
 
@@ -159,11 +250,23 @@ class TestGetPendingDeploys:
         self, store: EventStore
     ):
         await store.create_deploy_event(
-            "detected-new", "n1", "r", "new-branch", ["new"], [], None,
+            "detected-new",
+            "n1",
+            "r",
+            "new-branch",
+            ["new"],
+            [],
+            None,
             "2026-08-02T00:00:00Z",
         )
         await store.create_deploy_event(
-            "inserted-late-old", "n1", "r", "old-branch", ["old"], [], None,
+            "inserted-late-old",
+            "n1",
+            "r",
+            "old-branch",
+            ["old"],
+            [],
+            None,
             "2026-08-01T00:00:00Z",
         )
         await store._db.execute(
@@ -176,7 +279,9 @@ class TestGetPendingDeploys:
 
         assert superseded == ["inserted-late-old"]
         assert (await store.get_deploy_event("detected-new"))["status"] == "pending"
-        assert (await store.get_deploy_event("inserted-late-old"))["status"] == "rejected"
+        assert (await store.get_deploy_event("inserted-late-old"))[
+            "status"
+        ] == "rejected"
 
 
 class TestGetActiveDeploys:
@@ -265,9 +370,7 @@ class TestGetActiveDeploys:
             detected_at="2026-01-01T00:00:00Z",
         )
 
-        assert [row["deploy_id"] for row in await store.get_active_deploys()] == [
-            "new"
-        ]
+        assert [row["deploy_id"] for row in await store.get_active_deploys()] == ["new"]
         stale = await store.get_deploy_event("old-late")
         assert stale["status"] == "rejected"
         assert stale["reject_reason"] == "superseded by new"
@@ -305,6 +408,34 @@ class TestGetActiveDeploys:
     async def test_empty_when_none_active(self, store: EventStore):
         active = await store.get_active_deploys()
         assert active == []
+
+    async def test_active_self_update_is_scoped_to_node(self, store: EventStore):
+        await store.create_deploy_event(
+            "self",
+            "n1",
+            "haniel",
+            "main",
+            ["h"],
+            [],
+            None,
+            "2026-01-01T00:00:00Z",
+            is_self_update=True,
+        )
+        await store.create_deploy_event(
+            "other",
+            "n2",
+            "repo",
+            "main",
+            ["h"],
+            [],
+            None,
+            "2026-01-01T00:00:00Z",
+        )
+
+        assert (await store.get_active_self_update_for_node("n1"))[
+            "deploy_id"
+        ] == "self"
+        assert await store.get_active_self_update_for_node("n2") is None
 
 
 class TestGetPendingDeploysForBranch:

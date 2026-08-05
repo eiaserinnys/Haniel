@@ -975,6 +975,7 @@ class TestServiceRunnerPollCycle:
             deployment_kind="legacy",
             expected_manifest_identity=None,
             expected_manifest_digest=None,
+            is_self_update=True,
             wait=True,
         )
         assert runner._orch_client.notify_change.call_args_list == [
@@ -1044,6 +1045,9 @@ class TestServiceRunnerPollCycle:
             runner._poll_cycle()
 
         runner._orch_client.notify_change.assert_called_once()
+        assert (
+            runner._orch_client.notify_change.call_args.kwargs["is_self_update"] is True
+        )
         runner._orch_client.notify_repo_reconciliation.assert_called_once()
         snapshot = runner._orch_client.notify_repo_reconciliation.call_args.args[0]
         assert snapshot.deploy_id == "node-a:haniel:main:new-head"

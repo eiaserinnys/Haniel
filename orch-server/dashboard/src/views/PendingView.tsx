@@ -21,11 +21,27 @@ export function PendingView({
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [rejectTarget, setRejectTarget] = useState<Deploy | null>(null);
 
+  const selfUpdateDeploys = useMemo(
+    () => deploys.filter(deploy => deploy.is_self_update),
+    [deploys],
+  );
+  const regularDeploys = useMemo(
+    () => deploys.filter(deploy => !deploy.is_self_update),
+    [deploys],
+  );
+  const blockedNodeIds = useMemo(
+    () => new Set(selfUpdateDeploys.map(deploy => deploy.node_id)),
+    [selfUpdateDeploys],
+  );
+
   // Deploying cards are display-only (server returns 409 if you try to
   // approve them again) — exclude them from selection-driven actions.
   const selectableDeploys = useMemo(
-    () => deploys.filter(d => d.status === 'pending'),
-    [deploys],
+    () => deploys.filter(
+      deploy => deploy.status === 'pending'
+        && (deploy.is_self_update || !blockedNodeIds.has(deploy.node_id)),
+    ),
+    [blockedNodeIds, deploys],
   );
   const selectionTokens = useMemo(
     () => new Map(
@@ -116,11 +132,14 @@ export function PendingView({
     );
   }
 
-  const pendingCount = selectableDeploys.length;
+  const pendingCount = deploys.filter(deploy => deploy.status === 'pending').length;
   const deployingCount = deploys.length - pendingCount;
+  const blockedCount = regularDeploys.filter(
+    deploy => deploy.status === 'pending' && blockedNodeIds.has(deploy.node_id),
+  ).length;
   const subtitle =
     deployingCount > 0
-      ? `${pendingCount} pending · ${deployingCount} deploying`
+      ? `${pendingCount} pending · ${deployingCount} deploying${blockedCount ? ` · ${blockedCount} waiting for self-update` : ''}`
       : `${pendingCount} change${pendingCount !== 1 ? 's' : ''} detected · awaiting approval`;
 
   return (
@@ -134,6 +153,7 @@ export function PendingView({
             type="checkbox"
             className="native-checkbox"
             checked={allSelected}
+            disabled={selectableDeploys.length === 0}
             onChange={toggleSelectAll}
           />
           <span className="select-all-text">Select all</span>
@@ -146,21 +166,36 @@ export function PendingView({
         )}
       </div>
 
-      <div className="pending-list">
-        {deploys.map(deploy => (
-          <PendingCard
-            key={deploy.deploy_id}
-            deploy={deploy}
-            isDeploying={deploy.status === 'deploying'}
-            isSelected={activeSelected.has(deploy.deploy_id)}
-            isExpanded={expanded.has(deploy.deploy_id)}
-            onToggleSelect={() => toggleSelect(deploy)}
-            onToggleExpand={() => toggleExpand(deploy.deploy_id)}
-            onApprove={() => handleApproveOne(deploy)}
-            onReject={() => setRejectTarget(deploy)}
-          />
-        ))}
-      </div>
+      {selfUpdateDeploys.length > 0 && (
+        <PendingSection
+          title="Self-updates"
+          description="Update Haniel first so later deployments use the newest runner."
+          priority
+          deploys={selfUpdateDeploys}
+          blockedNodeIds={blockedNodeIds}
+          activeSelected={activeSelected}
+          expanded={expanded}
+          onToggleSelect={toggleSelect}
+          onToggleExpand={toggleExpand}
+          onApprove={handleApproveOne}
+          onReject={setRejectTarget}
+        />
+      )}
+
+      {regularDeploys.length > 0 && (
+        <PendingSection
+          title="Repository updates"
+          description={blockedCount > 0 ? `${blockedCount} update${blockedCount === 1 ? '' : 's'} waiting for Haniel on the same node.` : undefined}
+          deploys={regularDeploys}
+          blockedNodeIds={blockedNodeIds}
+          activeSelected={activeSelected}
+          expanded={expanded}
+          onToggleSelect={toggleSelect}
+          onToggleExpand={toggleExpand}
+          onApprove={handleApproveOne}
+          onReject={setRejectTarget}
+        />
+      )}
 
       {rejectTarget && (
         <RejectModal
@@ -177,11 +212,75 @@ function sameSet(left: Set<string>, right: Set<string>): boolean {
   return left.size === right.size && Array.from(left).every(value => right.has(value));
 }
 
+interface PendingSectionProps {
+  title: string;
+  description?: string;
+  priority?: boolean;
+  deploys: Deploy[];
+  blockedNodeIds: Set<string>;
+  activeSelected: Set<string>;
+  expanded: Set<string>;
+  onToggleSelect: (deploy: Deploy) => void;
+  onToggleExpand: (id: string) => void;
+  onApprove: (deploy: Deploy) => void;
+  onReject: (deploy: Deploy) => void;
+}
+
+function PendingSection({
+  title,
+  description,
+  priority = false,
+  deploys,
+  blockedNodeIds,
+  activeSelected,
+  expanded,
+  onToggleSelect,
+  onToggleExpand,
+  onApprove,
+  onReject,
+}: PendingSectionProps) {
+  const headingId = `pending-section-${title.toLowerCase().replaceAll(' ', '-')}`;
+
+  return (
+    <section className={cn('pending-section', priority && 'is-priority')} aria-labelledby={headingId}>
+      <div className="pending-section-header">
+        <div>
+          <h2 id={headingId}>{title}</h2>
+          {description && <p>{description}</p>}
+        </div>
+        <span className="pending-section-count">{deploys.length}</span>
+      </div>
+      <div className="pending-list">
+        {deploys.map(deploy => {
+          const approvalBlockedReason = !deploy.is_self_update && blockedNodeIds.has(deploy.node_id)
+            ? 'Self-update required first'
+            : undefined;
+          return (
+            <PendingCard
+              key={deploy.deploy_id}
+              deploy={deploy}
+              isDeploying={deploy.status === 'deploying'}
+              approvalBlockedReason={approvalBlockedReason}
+              isSelected={activeSelected.has(deploy.deploy_id)}
+              isExpanded={expanded.has(deploy.deploy_id)}
+              onToggleSelect={() => onToggleSelect(deploy)}
+              onToggleExpand={() => onToggleExpand(deploy.deploy_id)}
+              onApprove={() => onApprove(deploy)}
+              onReject={() => onReject(deploy)}
+            />
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 /* ── PendingCard ─────────────────────────────────────── */
 
 interface PendingCardProps {
   deploy: Deploy;
   isDeploying: boolean;
+  approvalBlockedReason?: string;
   isSelected: boolean;
   isExpanded: boolean;
   onToggleSelect: () => void;
@@ -193,6 +292,7 @@ interface PendingCardProps {
 function PendingCard({
   deploy,
   isDeploying,
+  approvalBlockedReason,
   isSelected,
   isExpanded,
   onToggleSelect,
@@ -217,6 +317,7 @@ function PendingCard({
         'pending-card',
         isSelected && 'is-selected',
         isDeploying && 'is-deploying',
+        approvalBlockedReason && 'is-approval-blocked',
       )}
     >
       <div className="pending-card-header">
@@ -224,7 +325,7 @@ function PendingCard({
           type="checkbox"
           className="native-checkbox"
           checked={isSelected}
-          disabled={isDeploying}
+          disabled={isDeploying || Boolean(approvalBlockedReason)}
           onChange={onToggleSelect}
         />
         <button
@@ -259,8 +360,15 @@ function PendingCard({
             </span>
           ) : (
             <>
-              <button className="btn-reject" onClick={onReject}>Reject</button>
-              <button className="btn-approve" onClick={onApprove}>
+              <button className="btn-reject" onClick={onReject}>
+                {deploy.is_self_update ? 'Postpone' : 'Reject'}
+              </button>
+              <button
+                className="btn-approve"
+                onClick={onApprove}
+                disabled={Boolean(approvalBlockedReason)}
+                title={approvalBlockedReason}
+              >
                 <Icon name="check" size={12} />
                 Approve
               </button>
@@ -268,6 +376,12 @@ function PendingCard({
           )}
         </div>
       </div>
+
+      {approvalBlockedReason && (
+        <div className="approval-blocked-reason" role="note">
+          {approvalBlockedReason}
+        </div>
+      )}
 
       {isExpanded && (
         <div className="pending-card-body">

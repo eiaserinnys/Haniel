@@ -483,6 +483,41 @@ h1 {
 }
 .btn-approve-all:hover { opacity: 0.9; }
 
+.pending-section + .pending-section { margin-top: 24px; }
+.pending-section.is-priority {
+  padding: 14px;
+  border: 1px solid color-mix(in oklab, var(--amber) 35%, var(--border));
+  border-radius: var(--radius-2);
+  background: color-mix(in oklab, var(--amber) 6%, var(--surface));
+}
+.pending-section-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.pending-section-header h2 {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--t-md);
+  font-weight: 600;
+}
+.pending-section-header p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: var(--t-xs);
+}
+.pending-section-count {
+  min-width: 22px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--inset-tint);
+  color: var(--fg-2);
+  font-size: var(--t-xs);
+  text-align: center;
+}
+
 .pending-list { display: flex; flex-direction: column; gap: 8px; }
 
 .pending-card {
@@ -493,6 +528,7 @@ h1 {
   transition: border-color 0.15s;
 }
 .pending-card.is-selected { border-color: var(--blue); }
+.pending-card.is-approval-blocked { border-color: color-mix(in oklab, var(--amber) 24%, var(--border)); }
 
 .pending-card-header {
   display: flex;
@@ -556,6 +592,17 @@ h1 {
   cursor: pointer;
 }
 .btn-approve:hover { background: color-mix(in oklab, var(--green) 20%, transparent); }
+.btn-approve:disabled,
+.native-checkbox:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.btn-approve:disabled:hover { background: color-mix(in oklab, var(--green) 12%, transparent); }
+.approval-blocked-reason {
+  margin: -4px 14px 10px 46px;
+  color: var(--amber);
+  font-size: var(--t-xs);
+}
 
 /* Expand button */
 .expand-btn {

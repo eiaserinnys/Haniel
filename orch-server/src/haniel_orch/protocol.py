@@ -79,6 +79,7 @@ class ChangeNotification(BaseModel):
     deployment_kind: Literal["legacy", "manifest"] = "legacy"
     expected_manifest_identity: str | None = None
     expected_manifest_digest: str | None = None
+    is_self_update: bool | None = None
 
     @model_validator(mode="after")
     def validate_manifest_snapshot(self) -> "ChangeNotification":

@@ -34,6 +34,7 @@ async def _seed_pending(
     node_id: str = "n1",
     repo: str = "myrepo",
     branch: str = "main",
+    is_self_update: bool = False,
 ):
     """Helper: create a pending deploy event."""
     await store.create_deploy_event(
@@ -45,6 +46,7 @@ async def _seed_pending(
         affected_services=["bot"],
         diff_stat="+10 -3",
         detected_at="2026-01-01T00:00:00Z",
+        is_self_update=is_self_update,
     )
 
 
@@ -340,6 +342,37 @@ class TestGetHistory:
 
 
 class TestApproveDeploy:
+    async def test_self_update_priority_is_enforced_by_server(
+        self, hub, registry, store, routes
+    ):
+        await _seed_pending(store, "self", "n1", repo="haniel", is_self_update=True)
+        await _seed_pending(store, "regular", "n1", repo="soulstream")
+        await _register_node(
+            hub,
+            registry,
+            AsyncMock(),
+            NodeHello(
+                node_id="n1",
+                token="t",
+                hostname="h",
+                os="Linux",
+                arch="x86_64",
+                haniel_version="0.1.0",
+            ),
+        )
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        response = TestClient(Starlette(routes=routes)).post(
+            "/api/orch/approve", json={"deploy_id": "regular"}
+        )
+
+        assert response.status_code == 409
+        assert response.json()["error"].startswith(
+            "self-update self must be approved or postponed"
+        )
+        assert (await store.get_deploy_event("regular"))["status"] == "pending"
+
     async def test_deploying_state_exists_before_node_can_return_result(
         self, hub, registry, store, routes
     ):
@@ -565,6 +598,41 @@ class TestRejectDeploy:
 
 
 class TestApproveAll:
+    async def test_approve_all_cannot_bypass_self_update_priority(
+        self, hub, registry, store, routes
+    ):
+        await _seed_pending(store, "self", "n1", repo="haniel", is_self_update=True)
+        await _seed_pending(store, "regular", "n1", repo="soulstream")
+        await _register_node(
+            hub,
+            registry,
+            AsyncMock(),
+            NodeHello(
+                node_id="n1",
+                token="t",
+                hostname="h",
+                os="Linux",
+                arch="x86_64",
+                haniel_version="0.1.0",
+            ),
+        )
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        response = TestClient(Starlette(routes=routes)).post("/api/orch/approve-all")
+        data = response.json()
+
+        assert response.status_code == 200
+        assert data["approved"] == ["self"]
+        assert data["failed"] == [
+            {
+                "deploy_id": "regular",
+                "reason": "self-update self must be approved or postponed before other deployments on node n1",
+            }
+        ]
+        assert (await store.get_deploy_event("self"))["status"] == "deploying"
+        assert (await store.get_deploy_event("regular"))["status"] == "pending"
+
     async def test_approve_all_with_connected_nodes(self, hub, registry, store, routes):
         # Two deploys on different branches → distinct (node, repo, branch)
         # groups, so both should be approved (no auto-supersede).

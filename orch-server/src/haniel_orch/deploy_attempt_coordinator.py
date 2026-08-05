@@ -112,6 +112,15 @@ class DeployAttemptCoordinator(
         self, event: dict, *, approved_by: str, source: str
     ) -> str:
         async with self._coordination_lock:
+            blocking_self_update = await self._store.get_active_self_update_for_node(
+                event["node_id"]
+            )
+            if not event.get("is_self_update") and blocking_self_update is not None:
+                raise PlanRejected(
+                    f"self-update {blocking_self_update['deploy_id']} must be approved "
+                    f"or postponed before other deployments on node {event['node_id']}",
+                    409,
+                )
             generation = self._require_generation(event["node_id"])
             retry_required = await self.attempts.has_retry_requirement(
                 event["deploy_id"]

@@ -25,6 +25,7 @@ interface RejectModalProps {
 
 export function RejectModal({ deploy, onConfirm, onClose }: RejectModalProps) {
   const [reason, setReason] = useState('');
+  const isPostpone = Boolean(deploy.is_self_update);
 
   const handlePreset = (preset: string) => {
     setReason(preset);
@@ -40,7 +41,7 @@ export function RejectModal({ deploy, onConfirm, onClose }: RejectModalProps) {
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent className="sm:max-w-md" showCloseButton={false}>
         <DialogHeader>
-          <DialogTitle>Reject deploy</DialogTitle>
+          <DialogTitle>{isPostpone ? 'Postpone self-update' : 'Reject deploy'}</DialogTitle>
           <DialogDescription>
             {deploy.repo} · {deploy.node_id} · {deploy.commits.length} commit{deploy.commits.length !== 1 ? 's' : ''}
           </DialogDescription>
@@ -49,7 +50,7 @@ export function RejectModal({ deploy, onConfirm, onClose }: RejectModalProps) {
         <div className="reject-body">
           <textarea
             className="reject-textarea"
-            placeholder="Reason for rejection..."
+            placeholder={isPostpone ? 'Reason for postponing...' : 'Reason for rejection...'}
             value={reason}
             onChange={(e) => setReason(e.target.value)}
             rows={3}
@@ -75,7 +76,7 @@ export function RejectModal({ deploy, onConfirm, onClose }: RejectModalProps) {
             disabled={!reason.trim()}
             onClick={handleSubmit}
           >
-            Reject deploy
+            {isPostpone ? 'Postpone self-update' : 'Reject deploy'}
           </Button>
         </DialogFooter>
       </DialogContent>
