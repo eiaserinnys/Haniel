@@ -159,6 +159,16 @@ def test_startup_failure_recovers_availability_without_duplicate_legacy_start(
     runner.process_manager.stop_service = MagicMock(side_effect=stop)
     runner.process_manager.wait_for_ready = MagicMock(side_effect=ready)
     runner.process_manager.is_running = MagicMock(side_effect=is_running)
+    runner.process_manager.get_pid = MagicMock(
+        side_effect=lambda name: 1000 if running[name] else None
+    )
+    port_services = {
+        5200: "soulstream-orch-server",
+        3105: "soulstream-soul-server-ts",
+    }
+    runner.process_manager.platform.is_port_owned_by_process_tree = MagicMock(
+        side_effect=lambda port, _pid: running[port_services[port]]
+    )
 
     with patch(
         "haniel.core.runner_deployment.subprocess_command_runner",

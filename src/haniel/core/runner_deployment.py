@@ -82,9 +82,6 @@ class RunnerDeploymentAdapter:
         self.previous_head = previous_head
         self.desired_running = desired_running
         self.handover_started = False
-        self.originally_running = {
-            name for name in affected if runner.process_manager.is_running(name)
-        }
 
     def callbacks(self) -> DeploymentCallbacks:
         return DeploymentCallbacks(
@@ -173,10 +170,16 @@ class RunnerDeploymentAdapter:
         recovery_services = (
             self.desired_running
             if self.desired_running is not None
-            else self.originally_running
+            else set(self.affected)
         )
         if self.handover_started or self.desired_running is not None:
-            self.start_and_wait(recovery_services)
+            try:
+                self.start_and_wait(recovery_services)
+            except Exception as error:
+                raise RuntimeError(
+                    f"availability down after rollback: {error}"
+                ) from error
+        self._assert_recovery_availability(recovery_services)
 
     def prepare_roll_forward(self) -> None:
         self.handover_started = True
@@ -194,6 +197,27 @@ class RunnerDeploymentAdapter:
                 if not self.runner.process_manager.stop_service(service):
                     raise RuntimeError(f"failed to stop {service}")
             self.runner._cancel_pending_restart(service)
+
+    def _assert_recovery_availability(self, services: set[str]) -> None:
+        down: list[str] = []
+        for name in sorted(services):
+            pid = self.runner.process_manager.get_pid(name)
+            if pid is None:
+                down.append(f"{name} (process not running)")
+                continue
+            service = self.runner._enabled_services[name]
+            if service.ready and service.ready.startswith("port:"):
+                try:
+                    port = int(service.ready.removeprefix("port:"))
+                except ValueError:
+                    down.append(f"{name} (invalid ready port: {service.ready})")
+                    continue
+                if not self.runner.process_manager.platform.is_port_owned_by_process_tree(
+                    port, pid
+                ):
+                    down.append(f"{name} (port {port} not owned by process {pid})")
+        if down:
+            raise RuntimeError("availability down after rollback: " + ", ".join(down))
 
 
 def run_manifest_deployment(

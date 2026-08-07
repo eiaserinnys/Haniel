@@ -99,11 +99,17 @@ def configure_processes(runner: ServiceRunner, events: list[str]) -> dict[str, b
     runner.process_manager.is_running = MagicMock(
         side_effect=lambda name: running[name]
     )
+    runner.process_manager.get_pid = MagicMock(
+        side_effect=lambda name: 1000 if running[name] else None
+    )
     runner.process_manager.stop_service = MagicMock(side_effect=stop)
     runner.process_manager.wait_for_ready = MagicMock(
         side_effect=lambda name: events.append(f"ready:{name}") or True
     )
     runner._start_service = MagicMock(side_effect=start)
+    runner.process_manager.platform.is_port_owned_by_process_tree = MagicMock(
+        side_effect=lambda _port, _pid: running["app"]
+    )
     return running
 
 
@@ -499,3 +505,82 @@ def test_readiness_failure_runs_roll_forward_and_recovers_availability(
     assert events.count("stop:app") == 2
     assert "recover" in events
     assert events[-2:] == ["verify-http", "verify-mcp"]
+
+
+def test_rollback_without_restarted_service_is_reported_as_availability_down(
+    manifest_runner: tuple[ServiceRunner, Path, str],
+) -> None:
+    runner, _repo, previous_head = manifest_runner
+    events: list[str] = []
+    running = configure_processes(runner, events)
+    running["app"] = False
+    start_results = iter([True, True, False])
+
+    def start(name: str) -> bool:
+        events.append(f"start:{name}")
+        started = next(start_results)
+        running[name] = started
+        return started
+
+    runner._start_service = MagicMock(side_effect=start)
+    runner.execute_hook = MagicMock(
+        side_effect=lambda name, hook: events.append(f"{hook}:{name}") or True
+    )
+
+    def run_command(spec, _env):
+        events.append(spec.name)
+        if spec.name == "verify-http":
+            raise RuntimeError("verification failed")
+
+    with patch(
+        "haniel.core.runner_deployment.subprocess_command_runner",
+        return_value=run_command,
+    ):
+        with pytest.raises(DeploymentError) as exc_info:
+            run_manifest_deployment(runner, "app", ["app"], previous_head)
+
+    assert exc_info.value.recovered is False
+    assert "availability down" in str(exc_info.value)
+    assert events.count("start:app") == 3
+    journal = DeploymentStateStore(runner.config_dir / ".haniel" / "deployments").read(
+        "app"
+    )
+    assert journal is not None
+    assert journal["state"] == "failed"
+    assert journal["recovered"] is False
+    assert "availability down" in journal["history"][-1]["message"]
+
+
+def test_rollback_process_without_ready_port_is_reported_as_availability_down(
+    manifest_runner: tuple[ServiceRunner, Path, str],
+) -> None:
+    runner, _repo, previous_head = manifest_runner
+    events: list[str] = []
+    running = configure_processes(runner, events)
+    running["app"] = False
+    runner.process_manager.platform.is_port_owned_by_process_tree = MagicMock(
+        return_value=False
+    )
+    runner.execute_hook = MagicMock(return_value=True)
+
+    def run_command(spec, _env):
+        if spec.name == "verify-http":
+            raise RuntimeError("verification failed")
+
+    with patch(
+        "haniel.core.runner_deployment.subprocess_command_runner",
+        return_value=run_command,
+    ):
+        with pytest.raises(DeploymentError) as exc_info:
+            run_manifest_deployment(runner, "app", ["app"], previous_head)
+
+    assert exc_info.value.recovered is False
+    assert running["app"] is True
+    journal = DeploymentStateStore(runner.config_dir / ".haniel" / "deployments").read(
+        "app"
+    )
+    assert journal is not None
+    assert journal["recovered"] is False
+    assert "app (port 9999 not owned by process 1000)" in journal["history"][-1][
+        "message"
+    ]
