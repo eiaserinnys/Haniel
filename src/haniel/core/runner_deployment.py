@@ -179,7 +179,7 @@ class RunnerDeploymentAdapter:
                 raise RuntimeError(
                     f"availability down after rollback: {error}"
                 ) from error
-        self._assert_recovery_availability(recovery_services)
+            self._assert_recovery_availability(recovery_services)
 
     def prepare_roll_forward(self) -> None:
         self.handover_started = True

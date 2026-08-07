@@ -438,6 +438,35 @@ def test_build_failure_restores_code_without_stopping_old_process(
     assert (repo / "app.txt").read_text(encoding="utf-8") == "old"
 
 
+def test_build_failure_does_not_probe_service_already_down_before_deployment(
+    manifest_runner: tuple[ServiceRunner, Path, str],
+) -> None:
+    runner, repo, previous_head = manifest_runner
+    events: list[str] = []
+    running = configure_processes(runner, events)
+    running["app"] = False
+    hook_results = iter([False, True])
+    runner.execute_hook = MagicMock(
+        side_effect=lambda name, hook: (
+            events.append(f"{hook}:{name}") or next(hook_results)
+        )
+    )
+
+    with patch(
+        "haniel.core.runner_deployment.subprocess_command_runner",
+        return_value=lambda _spec, _env: None,
+    ):
+        with pytest.raises(DeploymentError) as exc_info:
+            run_manifest_deployment(runner, "app", ["app"], previous_head)
+
+    assert exc_info.value.recovered is True
+    assert running["app"] is False
+    runner.process_manager.get_pid.assert_not_called()
+    runner.process_manager.platform.is_port_owned_by_process_tree.assert_not_called()
+    assert not any(event.startswith(("start:", "stop:")) for event in events)
+    assert get_head(repo) == previous_head
+
+
 def test_backup_verification_failure_restarts_previous_release(
     manifest_runner: tuple[ServiceRunner, Path, str],
 ) -> None:
@@ -581,6 +610,6 @@ def test_rollback_process_without_ready_port_is_reported_as_availability_down(
     )
     assert journal is not None
     assert journal["recovered"] is False
-    assert "app (port 9999 not owned by process 1000)" in journal["history"][-1][
-        "message"
-    ]
+    assert (
+        "app (port 9999 not owned by process 1000)" in journal["history"][-1]["message"]
+    )
