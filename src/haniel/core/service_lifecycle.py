@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -18,7 +19,6 @@ from ..config.io import backup_config, read_config, restore_config, write_config
 from ..config.model import HanielConfig, RepoConfig, ServiceConfig
 from ..config.validators import validate_config
 from .git import clone_repo
-from .runner import DependencyGraph
 
 if TYPE_CHECKING:
     from .runner import ServiceRunner
@@ -26,6 +26,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 CONFIG_WRITE_LOCK = threading.Lock()
+
+
+@contextmanager
+def config_write_transaction(runner: "ServiceRunner"):
+    """Serialize disk config bytes and the resident snapshot in one order."""
+
+    with CONFIG_WRITE_LOCK, runner._config_reload_lock:
+        yield
 
 
 def _require_config_path(runner: "ServiceRunner") -> Path:
@@ -139,15 +147,6 @@ def _maybe_run_repo_post_pull(
     return True
 
 
-def _rebuild_service_indexes(runner: "ServiceRunner") -> None:
-    runner._enabled_services = {
-        name: service
-        for name, service in runner.config.services.items()
-        if service.enabled
-    }
-    runner._dependency_graph = DependencyGraph(runner._enabled_services)
-
-
 def _stop_if_running(runner: "ServiceRunner", service: str) -> bool:
     if not runner.process_manager.is_running(service):
         return False
@@ -220,7 +219,7 @@ def register_service(
     created_clone_path: Path | None = None
     repo_post_pull = False
 
-    with CONFIG_WRITE_LOCK:
+    with config_write_transaction(runner):
         config = read_config(config_path)
         if name in config.services:
             raise ValueError(f"Service already exists: {name}")
@@ -300,7 +299,7 @@ def register_repo(
         raise ValueError("Repo name is required")
 
     config_path = _require_config_path(runner)
-    with CONFIG_WRITE_LOCK:
+    with config_write_transaction(runner):
         config = read_config(config_path)
         if name in config.repos:
             raise ValueError(f"Repo already exists: {name}")
@@ -318,25 +317,30 @@ def reload_service_definition(runner: "ServiceRunner", service: str) -> dict[str
         raise ValueError("Service name is required")
 
     config_path = _require_config_path(runner)
-    new_config = read_config(config_path)
-    if service not in new_config.services:
-        raise KeyError(f"Service not found: {service}")
-    _validate_or_raise(new_config)
+    # Configuration mutations use one global order: CONFIG_WRITE_LOCK first,
+    # then the resident snapshot lock. Read, validate, atomically replace the
+    # snapshot, and restart while both identities remain stable.
+    with config_write_transaction(runner):
+        disk_config = read_config(config_path)
+        if service not in disk_config.services:
+            raise KeyError(f"Service not found: {service}")
+        _validate_or_raise(disk_config)
 
-    new_service = new_config.services[service]
-    if new_service.repo and new_service.repo not in runner._repo_states:
-        raise ValueError(
-            f"Service '{service}' references repo '{new_service.repo}', "
-            "but that repo is not loaded; run full reload or register_service"
-        )
+        new_service = disk_config.services[service]
+        if new_service.repo and new_service.repo not in runner._repo_states:
+            raise ValueError(
+                f"Service '{service}' references repo '{new_service.repo}', "
+                "but that repo is not loaded; run full reload or register_service"
+            )
 
-    runner.config.services[service] = new_service
-    _rebuild_service_indexes(runner)
+        candidate = runner.config.model_copy(deep=True)
+        candidate.services[service] = new_service
+        runner._apply_config_snapshot(candidate)
 
-    stopped = _stop_if_running(runner, service)
-    restarted = False
-    if new_service.enabled:
-        restarted = _start_enabled_service(runner, service)
+        stopped = _stop_if_running(runner, service)
+        restarted = False
+        if new_service.enabled:
+            restarted = _start_enabled_service(runner, service)
 
     return {
         "ok": True,
@@ -354,7 +358,7 @@ def disable_service(runner: "ServiceRunner", service: str) -> dict[str, Any]:
         raise ValueError("Service name is required")
 
     config_path = _require_config_path(runner)
-    with CONFIG_WRITE_LOCK:
+    with config_write_transaction(runner):
         config = read_config(config_path)
         if service not in config.services:
             raise KeyError(f"Service not found: {service}")
@@ -394,7 +398,7 @@ def delete_service_config(
     config_path = _require_config_path(runner)
     purge_path: Path | None = None
 
-    with CONFIG_WRITE_LOCK:
+    with config_write_transaction(runner):
         config = read_config(config_path)
         if service not in config.services:
             raise KeyError(f"Service not found: {service}")

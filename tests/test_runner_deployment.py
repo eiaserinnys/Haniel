@@ -402,6 +402,18 @@ def test_manifest_handover_waits_for_readiness_and_post_verify(
     ]
 
 
+def test_manifest_requiring_service_env_rejects_legacy_runtime_without_digest(
+    manifest_runner: tuple[ServiceRunner, Path, str],
+) -> None:
+    runner, repo, previous_head = manifest_runner
+    payload = release_manifest()
+    payload["requires_service_env_file"] = True
+    (repo / "deploy" / "release.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="CONFIG_DIGEST_REQUIRED"):
+        run_manifest_deployment(runner, "app", ["app"], previous_head)
+
+
 def test_progress_reporting_failure_does_not_abort_manifest_handover(
     manifest_runner: tuple[ServiceRunner, Path, str], caplog
 ) -> None:
@@ -669,6 +681,40 @@ def test_existing_runtime_request_identity_mismatch_blocks_before_mutation(
                 previous_head,
                 expected_operation="upgrade",
                 request_id="request-1",
+            )
+
+    hook.assert_not_called()
+    assert not (runner.config_dir / ".haniel" / "deployments" / "app.json").exists()
+
+
+def test_digest_bound_runtime_request_rejects_legacy_digest_omission(
+    manifest_runner: tuple[ServiceRunner, Path, str],
+) -> None:
+    runner, repo, previous_head = manifest_runner
+    target_head = get_head(repo)
+    payload = {
+        "kind": "runtime-handover",
+        "repo": "app",
+        "target_ref": target_head,
+        "expected_operation": "upgrade",
+        "executor_instance": "owner-1",
+        "config_digest": "a" * 64,
+    }
+
+    with resident_owner(runner):
+        runner.lifecycle_control.submit_request("request-1", payload)
+        with (
+            patch.object(runner, "execute_hook") as hook,
+            pytest.raises(LifecycleConflict, match="REQUEST_IDENTITY_CONFLICT"),
+        ):
+            run_manifest_deployment(
+                runner,
+                "app",
+                ["app"],
+                previous_head,
+                expected_operation="upgrade",
+                request_id="request-1",
+                config_digest=None,
             )
 
     hook.assert_not_called()

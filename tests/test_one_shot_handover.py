@@ -1,5 +1,6 @@
 """Operation-aware one-shot deployment and command-result contracts."""
 
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -431,6 +432,7 @@ def test_fresh_owner_promotes_initial_clone_only_after_probe(tmp_path: Path) -> 
     runner = SimpleNamespace(
         config_dir=tmp_path,
         _repo_states={"app": repo_state},
+        _config_reload_lock=threading.RLock(),
         lifecycle_instance_id="owner-1",
         get_affected_services=lambda _repo: ["app"],
     )
@@ -513,6 +515,7 @@ def test_one_shot_terminal_prioritizes_recovery_failure_code(tmp_path: Path) -> 
     runner = SimpleNamespace(
         config_dir=tmp_path,
         _repo_states={"app": repo_state},
+        _config_reload_lock=threading.RLock(),
         lifecycle_instance_id="owner-1",
         get_affected_services=lambda _repo: ["app"],
     )

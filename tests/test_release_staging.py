@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+from haniel.config import HanielConfig, RepoConfig, ServiceConfig, load_config
+from haniel.core.handover_config import handover_config_digest
 from haniel.core.deployment_command_runner import CommandResult
 from haniel.core.git import (
     GitPullError,
@@ -16,6 +19,8 @@ from haniel.core.git import (
     get_remote_head,
 )
 from haniel.core.release_staging import ReleaseIdentityError, stage_release
+from haniel.core.one_shot_handover import probe_manifest_target
+from haniel.core.runner import ServiceRunner
 
 
 def git(path: Path, *args: str) -> str:
@@ -168,6 +173,119 @@ def test_legacy_manifest_without_probe_stages_without_command_execution(
     assert get_head(live) == previous
     assert calls == []
     assert not (tmp_path / "staging" / "request-1" / "app").exists()
+
+
+def test_required_manifest_without_config_identity_fails_before_live_activation(
+    tmp_path: Path,
+) -> None:
+    manifest = base_manifest(with_probe=False)
+    manifest.update(
+        {
+            "environment_service": "writer",
+            "requires_service_env_file": True,
+        }
+    )
+    live, remote, previous = make_remote(tmp_path, manifest)
+    env_file = tmp_path / "writer.env"
+    env_file.write_text("DATABASE_URL=sqlite:///isolated\n", encoding="utf-8")
+    runner = ServiceRunner(
+        HanielConfig(
+            repos={
+                "app": RepoConfig(
+                    url=str(remote),
+                    path=str(live),
+                    release_manifest="deploy/release.json",
+                )
+            },
+            services={
+                "writer": ServiceConfig(
+                    run="writer",
+                    repo="app",
+                    release_env_file=str(env_file),
+                )
+            },
+        ),
+        config_dir=tmp_path,
+    )
+
+    with pytest.raises(ReleaseIdentityError, match="CONFIG_DIGEST_REQUIRED"):
+        probe_manifest_target(
+            runner,
+            "app",
+            target_ref="origin/main",
+            expected_operation="upgrade",
+            request_id="required-without-config-identity",
+        )
+
+    assert get_head(live) == previous
+    assert not (
+        tmp_path
+        / ".haniel"
+        / "staging"
+        / "required-without-config-identity"
+        / "app"
+    ).exists()
+
+
+@pytest.mark.parametrize("caller", ["manual", "startup"])
+def test_required_manifest_public_callers_bind_config_before_live_activation(
+    tmp_path: Path,
+    caller: str,
+) -> None:
+    manifest = base_manifest(with_probe=False)
+    manifest.update(
+        {
+            "environment_service": "writer",
+            "requires_service_env_file": True,
+        }
+    )
+    live, remote, previous = make_remote(tmp_path, manifest)
+    env_file = tmp_path / "writer.env"
+    env_file.write_text("DATABASE_URL=sqlite:///isolated\n", encoding="utf-8")
+    config_path = tmp_path / "haniel.yaml"
+    config_path.write_text(
+        json.dumps(
+            {
+                "repos": {
+                    "app": {
+                        "url": str(remote),
+                        "path": str(live),
+                        "release_manifest": "deploy/release.json",
+                    }
+                },
+                "services": {
+                    "writer": {
+                        "run": "writer",
+                        "repo": "app",
+                        "release_env_file": str(env_file),
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    runner = ServiceRunner(
+        load_config(config_path),
+        config_dir=tmp_path,
+        config_path=config_path,
+    )
+    if caller == "manual":
+        git(live, "fetch", "origin", "main")
+        runner._repo_states["app"].pending_changes = {"commits": ["target"]}
+
+    with patch("haniel.core.runner.run_manifest_deployment") as deploy:
+        if caller == "manual":
+            runner.trigger_pull("app")
+        else:
+            runner._apply_startup_updates()
+            runner.start_services()
+
+    assert get_head(live) != previous
+    kwargs = deploy.call_args.kwargs
+    assert kwargs["config_digest"] == handover_config_digest(config_path)
+    binding = kwargs["service_environment_bindings"]["writer"]
+    assert binding.path == str(env_file.resolve())
+    assert kwargs["quiesce_services"] == ["writer"]
 
 
 def test_remote_move_after_probe_cannot_activate_unverified_commit(

@@ -28,6 +28,13 @@ def deployment_error_code(error: Exception) -> str:
         "LIFECYCLE_OWNER_CONFLICT",
         "DEPLOYMENT_LEASE_CONFLICT",
         "RUNTIME_OWNER_LOST",
+        "CONFIG_DIGEST_REQUIRED",
+        "CONFIG_DIGEST_MISMATCH",
+        "CONFIG_RELOAD_FAILED",
+        "CONFIG_RELOAD_UNSAFE",
+        "SERVICE_ENV_FILE_REQUIRED",
+        "SERVICE_ENV_FILE_INVALID",
+        "SERVICE_ENV_FILE_CHANGED",
     ):
         if code in message:
             return code
@@ -42,6 +49,7 @@ def validate_lifecycle_request(
     repo_name: str,
     target_head: str,
     expected_operation: str,
+    config_digest: str | None = None,
 ) -> None:
     path = lifecycle.request_path(request_id)
     if not path.exists():
@@ -55,9 +63,14 @@ def validate_lifecycle_request(
         raise LifecycleConflict(
             "REQUEST_IDENTITY_CONFLICT: request kind is not a deployment"
         )
+    stored_config_digest = payload.get("config_digest")
     if (
         payload.get("repo") != repo_name
         or payload.get("expected_operation") != expected_operation
+        or (
+            (stored_config_digest is not None or config_digest is not None)
+            and stored_config_digest != config_digest
+        )
     ):
         raise LifecycleConflict(
             "REQUEST_IDENTITY_CONFLICT: deployment request identity changed"

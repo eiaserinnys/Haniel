@@ -28,6 +28,7 @@ class HandoverResult:
     recovered: bool
     retryable: bool
     error: dict[str, str] | None = None
+    config_digest: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -46,6 +47,7 @@ def build_handover_result(
     recovered: bool,
     retryable: bool,
     error: dict[str, str] | None = None,
+    config_digest: str | None = None,
 ) -> HandoverResult:
     repo = None
     request_path = control.request_path(request_id)
@@ -71,6 +73,7 @@ def build_handover_result(
         recovered=recovered,
         retryable=retryable,
         error=error,
+        config_digest=config_digest,
     )
 
 
@@ -80,6 +83,8 @@ def handover_error_code(error: Exception) -> str:
     message = str(error)
     for code in (
         "OPERATION_MISMATCH",
+        "CONFIG_DIGEST_MISMATCH",
+        "SERVICE_ENV_FILE_CHANGED",
         "PULL_FAILED",
         "PREFLIGHT_FAILED",
         "QUIESCENCE_REQUIRED",
@@ -99,6 +104,11 @@ def handover_error_code(error: Exception) -> str:
         "RUNTIME_OWNER_LOST",
         "REQUEST_TIMEOUT",
         "OWNER_START_FAILED",
+        "CONFIG_DIGEST_REQUIRED",
+        "CONFIG_RELOAD_FAILED",
+        "CONFIG_RELOAD_UNSAFE",
+        "SERVICE_ENV_FILE_REQUIRED",
+        "SERVICE_ENV_FILE_INVALID",
     ):
         if code in message:
             return code

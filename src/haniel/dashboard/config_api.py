@@ -19,7 +19,7 @@ from ..config.model import HanielConfig, RepoConfig, ServiceConfig
 from ..config.validators import validate_config
 from ..config.io import backup_config, read_config, restore_config, write_config
 from ..core.service_lifecycle import (
-    CONFIG_WRITE_LOCK,
+    config_write_transaction,
     delete_service_config,
     register_repo,
     register_service,
@@ -29,11 +29,6 @@ if TYPE_CHECKING:
     from ..core.runner import ServiceRunner
 
 logger = logging.getLogger(__name__)
-
-# Module-level write lock — shared across all config mutation requests.
-# Prevents concurrent read-modify-write races on the YAML file.
-_write_lock = CONFIG_WRITE_LOCK
-
 
 def _error(message: str, status: int = 400) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status)
@@ -51,7 +46,7 @@ def _config_to_response(config: HanielConfig) -> dict:
 def _commit_config(config_path, config: HanielConfig, runner: "ServiceRunner") -> None:
     """Atomically backup, write, and reload config.
 
-    Must be called while holding _write_lock.
+    Must be called inside config_write_transaction(runner).
 
     Raises:
         RuntimeError: If writing the config file fails (restores from backup first)
@@ -144,7 +139,7 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
             except ValidationError as e:
                 raise ValueError(str(e)) from e
 
-            with _write_lock:
+            with config_write_transaction(runner):
                 config = read_config(config_path)
 
                 if name not in config.services:
@@ -194,7 +189,7 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
             except ValidationError as e:
                 raise ValueError(str(e)) from e
 
-            with _write_lock:
+            with config_write_transaction(runner):
                 config = read_config(config_path)
 
                 if svc_name in config.services:
@@ -308,7 +303,7 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
             except ValidationError as e:
                 raise ValueError(str(e)) from e
 
-            with _write_lock:
+            with config_write_transaction(runner):
                 config = read_config(config_path)
 
                 if name not in config.repos:
@@ -380,7 +375,7 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
         loop = asyncio.get_running_loop()
 
         def _do_delete():
-            with _write_lock:
+            with config_write_transaction(runner):
                 config = read_config(config_path)
 
                 if name not in config.repos:

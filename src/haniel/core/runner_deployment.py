@@ -16,6 +16,7 @@ from .deployment import (
     subprocess_command_runner,
 )
 from .git import get_head, reset_repo_to, sha256_file_at_commit
+from .handover_config import BoundServiceEnvironment, require_handover_config_digest
 from .reporting_deployment_state import (
     ProgressCallback,
     ReportingDeploymentStateStore,
@@ -25,7 +26,12 @@ from .runner_deployment_identity import (
     require_resident_owner,
     validate_lifecycle_request,
 )
-from .release_manifest import resolve_manifest_service_cwd
+from .release_manifest import (
+    ManifestServiceEnvironment,
+    resolve_manifest_service_cwd,
+    resolve_manifest_service_environment,
+)
+from .service_environment import ServiceEnvironmentFile
 from .safety_redaction import bounded_redact_text
 
 if TYPE_CHECKING:
@@ -48,6 +54,11 @@ class RunnerDeploymentAdapter:
         request_id: str | None = None,
         quiescence_callback: Callable[[dict[str, Any]], None] | None = None,
         desired_running: set[str] | None = None,
+        quiesce_services: list[str] | None = None,
+        config_digest: str | None = None,
+        service_environment_bindings: (
+            dict[str, BoundServiceEnvironment] | None
+        ) = None,
     ) -> None:
         self.runner = runner
         self.repo_name = repo_name
@@ -58,6 +69,9 @@ class RunnerDeploymentAdapter:
         self.request_id = request_id
         self.quiescence_callback = quiescence_callback
         self.desired_running = desired_running
+        self.quiesce_services = sorted(set(quiesce_services or affected))
+        self.config_digest = config_digest
+        self.service_environment_bindings = service_environment_bindings
         self.handover_started = False
         self.quiescence_nonce = uuid4().hex
 
@@ -69,9 +83,10 @@ class RunnerDeploymentAdapter:
             rollback=self.rollback,
             prepare_roll_forward=self.prepare_roll_forward,
             stop_partial=self.stop_partial,
-            writer_services=tuple(sorted(self.affected)),
+            writer_services=tuple(self.quiesce_services),
             owner_instance=self._owner_instance(),
             quiescence_nonce=self.quiescence_nonce,
+            config_digest=self.config_digest,
             acknowledge_quiesced=self.quiescence_callback,
         )
 
@@ -87,6 +102,56 @@ class RunnerDeploymentAdapter:
             self.runner, self.repo_name, self.affected, None
         )
 
+    def service_environment(
+        self,
+        service_name: str | None,
+        *,
+        requires_env_file: bool,
+    ) -> ManifestServiceEnvironment:
+        binding = (
+            self.service_environment_bindings.get(service_name)
+            if self.service_environment_bindings is not None
+            and service_name is not None
+            else None
+        )
+        if (
+            self.config_digest is not None
+            and requires_env_file
+            and binding is None
+        ):
+            raise ValueError(
+                "SERVICE_ENV_FILE_CHANGED: request config has no bound service env file"
+            )
+        if binding is not None:
+            cwd = resolve_manifest_service_cwd(
+                self.runner,
+                self.repo_name,
+                self.affected,
+                service_name,
+            )
+            return ManifestServiceEnvironment(
+                cwd=cwd,
+                env_file=Path(binding.path),
+                env_file_sha256=binding.sha256,
+            )
+        return resolve_manifest_service_environment(
+            self.runner,
+            self.repo_name,
+            self.affected,
+            service_name,
+            requires_env_file=requires_env_file,
+            expected_env_path=binding.path if binding is not None else None,
+            expected_env_sha256=binding.sha256 if binding is not None else None,
+        )
+
+    def approved_service_environment(
+        self, service_name: str | None
+    ) -> ServiceEnvironmentFile | None:
+        if self.service_environment_bindings is None or service_name is None:
+            return None
+        binding = self.service_environment_bindings.get(service_name)
+        return binding.snapshot if binding is not None else None
+
     def build(self) -> None:
         failed = [
             service
@@ -99,6 +164,9 @@ class RunnerDeploymentAdapter:
             )
 
     def stop(self) -> dict[str, Any]:
+        if self.config_digest is not None:
+            assert self.runner.config_path is not None
+            require_handover_config_digest(self.runner.config_path, self.config_digest)
         self.handover_started = True
         stopped, already_stopped = self._stop_running()
         receipt = {
@@ -107,11 +175,13 @@ class RunnerDeploymentAdapter:
             "target_head": self.target_head,
             "stopped_services": stopped,
             "already_stopped_services": already_stopped,
-            "quiesced_services": sorted(self.affected),
+            "quiesced_services": self.quiesce_services,
             "owner_instance": self._owner_instance(),
             "quiescence_nonce": self.quiescence_nonce,
             "quiesced_at": datetime.now(timezone.utc).isoformat(),
         }
+        if self.config_digest is not None:
+            receipt["config_digest"] = self.config_digest
         return receipt
 
     def start_and_wait(self, selected: set[str]) -> None:
@@ -131,7 +201,31 @@ class RunnerDeploymentAdapter:
                 if not self.runner.process_manager.stop_service(service):
                     raise RuntimeError(f"failed to stop already-running {service}")
                 self.runner._cancel_pending_restart(service)
-            if not self.runner._start_service(service):
+            binding = (
+                self.service_environment_bindings.get(service)
+                if self.service_environment_bindings is not None
+                else None
+            )
+            if (
+                self.config_digest is not None
+                and self.runner._enabled_services[service].release_env_file is not None
+                and binding is None
+            ):
+                raise RuntimeError(
+                    "SERVICE_ENV_FILE_CHANGED: request has no approved runtime env snapshot"
+                )
+            started = (
+                self.runner._start_service(service)
+                if binding is None
+                else self.runner._start_service(
+                    service,
+                    expected_env_path=binding.path,
+                    expected_env_sha256=binding.sha256,
+                    approved_env_snapshot=binding.snapshot,
+                    propagate_failure=True,
+                )
+            )
+            if not started:
                 raise RuntimeError(f"failed to start {service}")
             if not self.runner.process_manager.wait_for_ready(service):
                 raise RuntimeError(f"readiness timeout for {service}")
@@ -173,8 +267,13 @@ class RunnerDeploymentAdapter:
         shutdown_order = [
             service
             for service in self.runner.get_shutdown_order()
-            if service in self.affected
+            if service in self.quiesce_services
         ]
+        shutdown_order.extend(
+            service
+            for service in sorted(self.quiesce_services, reverse=True)
+            if service not in shutdown_order
+        )
         for service in shutdown_order:
             self.runner._cancel_pending_restart(service)
             if self.runner.process_manager.is_running(service):
@@ -186,7 +285,7 @@ class RunnerDeploymentAdapter:
             self.runner._cancel_pending_restart(service)
         remaining = [
             service
-            for service in self.affected
+            for service in self.quiesce_services
             if self.runner.process_manager.is_running(service)
         ]
         if remaining:
@@ -235,6 +334,9 @@ def run_manifest_deployment(
     expected_operation: str | None = None,
     request_id: str | None = None,
     quiescence_callback: Callable[[dict[str, Any]], None] | None = None,
+    quiesce_services: list[str] | None = None,
+    config_digest: str | None = None,
+    service_environment_bindings: dict[str, BoundServiceEnvironment] | None = None,
 ) -> None:
     """Load the pulled release manifest and run the auditable handover."""
 
@@ -260,15 +362,18 @@ def run_manifest_deployment(
         ):
             journal_attempt_id = existing.get("journal_attempt_id")
     adapter = RunnerDeploymentAdapter(
-        runner,
-        repo_name,
-        affected,
-        repo_path,
-        previous_head,
-        target_head,
-        request_id,
-        quiescence_callback,
-        desired_running,
+        runner=runner,
+        repo_name=repo_name,
+        affected=affected,
+        repo_path=repo_path,
+        previous_head=previous_head,
+        target_head=target_head,
+        request_id=request_id,
+        quiescence_callback=quiescence_callback,
+        desired_running=desired_running,
+        quiesce_services=quiesce_services,
+        config_digest=config_digest,
+        service_environment_bindings=service_environment_bindings,
     )
     lifecycle = getattr(runner, "lifecycle_control", None)
     owner_instance = getattr(runner, "lifecycle_instance_id", None)
@@ -282,6 +387,7 @@ def run_manifest_deployment(
             repo_name=repo_name,
             target_head=target_head,
             expected_operation=expected_operation or "upgrade",
+            config_digest=config_digest,
         )
 
     try:
@@ -342,14 +448,34 @@ def run_manifest_deployment(
             recovered=True,
         ) from error
 
+    if manifest.requires_service_env_file and config_digest is None:
+        raise RuntimeError(
+            "CONFIG_DIGEST_REQUIRED: manifest service environment requires "
+            "the one-shot config identity boundary"
+        )
+
     contract_mode = bool(manifest.migration and manifest.migration.operation)
     resolved_operation = expected_operation or ("upgrade" if contract_mode else None)
     if contract_mode and expected_operation is None:
         require_resident_owner(lifecycle, owner_instance, request_id)
 
-    base_runner = subprocess_command_runner(repo_path)
+    approved_environment = adapter.approved_service_environment(
+        manifest.environment_service
+    )
+    base_runner = subprocess_command_runner(
+        repo_path,
+        approved_service_environment=approved_environment,
+    )
+    apply_started = False
 
     def run_command(command, environment):
+        nonlocal apply_started
+        is_recovery = environment.get("HANIEL_DATABASE_OPERATION") == "recovery"
+        if config_digest is not None and not apply_started and not is_recovery:
+            assert runner.config_path is not None
+            require_handover_config_digest(runner.config_path, config_digest)
+        if manifest.migration is not None and command is manifest.migration.apply:
+            apply_started = True
         backup_dir = (
             runner.config_dir / ".haniel" / "backups" / repo_name / manifest.release_id
         )
@@ -358,13 +484,11 @@ def run_manifest_deployment(
             **environment,
             "HANIEL_BACKUP_DIR": str(backup_dir),
         }
-        service_cwd = (
-            adapter.service_cwd(manifest.environment_service)
-            if manifest.environment_service
-            else adapter.derive_service_cwd()
+        service_environment = adapter.service_environment(
+            manifest.environment_service,
+            requires_env_file=manifest.requires_service_env_file,
         )
-        if service_cwd is not None:
-            command_environment["HANIEL_SERVICE_CWD"] = str(service_cwd)
+        command_environment.update(service_environment.child_environment())
         return base_runner(
             command,
             command_environment,
@@ -379,16 +503,16 @@ def run_manifest_deployment(
     try:
         if lifecycle is not None and request_id is not None:
             if not lifecycle.request_path(request_id).exists():
-                lifecycle.submit_request(
-                    request_id,
-                    {
-                        "kind": "runtime-handover",
-                        "repo": repo_name,
-                        "target_ref": target_head,
-                        "expected_operation": expected_operation or "upgrade",
-                        "executor_instance": owner_instance,
-                    },
-                )
+                runtime_payload = {
+                    "kind": "runtime-handover",
+                    "repo": repo_name,
+                    "target_ref": target_head,
+                    "expected_operation": expected_operation or "upgrade",
+                    "executor_instance": owner_instance,
+                }
+                if config_digest is not None:
+                    runtime_payload["config_digest"] = config_digest
+                lifecycle.submit_request(request_id, runtime_payload)
                 lifecycle.ack(
                     request_id,
                     "accepted",
@@ -397,6 +521,7 @@ def run_manifest_deployment(
                         "owner_instance": getattr(
                             runner, "lifecycle_instance_id", None
                         ),
+                        "config_digest": config_digest,
                     },
                 )
                 owns_spool_request = True
@@ -421,6 +546,7 @@ def run_manifest_deployment(
             journal_attempt_id=journal_attempt_id,
             expected_operation=(resolved_operation),
             request_id=request_id,
+            config_digest=config_digest,
         )
     except Exception as error:
         if owns_spool_request:
@@ -435,6 +561,7 @@ def run_manifest_deployment(
                         "code": deployment_error_code(error),
                         "message": bounded_redact_text(str(error)),
                     },
+                    "config_digest": config_digest,
                 },
             )
         raise
@@ -449,6 +576,7 @@ def run_manifest_deployment(
                     "request_id": request_id,
                     "repo": repo_name,
                     "target_head": target_head,
+                    "config_digest": config_digest,
                 },
             )
     finally:

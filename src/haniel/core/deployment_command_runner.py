@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,7 +16,17 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from .child_env import sanitized_child_env
-from .safety_redaction import redact_text, redact_value, sensitive_values
+from .safety_redaction import (
+    redact_text,
+    redact_value,
+    sensitive_values,
+)
+from .service_environment import (
+    DATABASE_ENVIRONMENT_KEYS,
+    ServiceEnvironmentFile,
+    read_service_environment_file,
+)
+from .path_identity import canonical_path_text
 
 
 class CommandSpec(BaseModel):
@@ -82,53 +94,120 @@ def _command_failure_message(
     return "\n".join(parts)
 
 
-def subprocess_command_runner(repo_path: Path) -> CommandRunner:
+def subprocess_command_runner(
+    repo_path: Path,
+    *,
+    approved_service_environment: ServiceEnvironmentFile | None = None,
+) -> CommandRunner:
     """Create a non-shell command runner rooted at one repository."""
 
     def run(command: CommandSpec, deploy_env: dict[str, str]) -> CommandResult:
         env = sanitized_child_env()
-        env.update(deploy_env)
-        secret_values = sensitive_values(env)
-        argv = shlex.split(command.command)
-        executable = argv[0] if argv else ""
-        resolved_executable = shutil.which(executable, path=env.get("PATH"))
-        if resolved_executable is None:
-            raise RuntimeError(
-                f"command {command.name!r} executable not found: {executable!r}"
+        service_env_secret_values: tuple[str, ...] = ()
+        snapshot_directory: tempfile.TemporaryDirectory[str] | None = None
+        service_env_file = deploy_env.get("HANIEL_SERVICE_ENV_FILE")
+        if service_env_file:
+            for key in DATABASE_ENVIRONMENT_KEYS:
+                env.pop(key, None)
+            expected_digest = deploy_env.get("HANIEL_SERVICE_ENV_FILE_SHA256")
+            if approved_service_environment is None:
+                try:
+                    snapshot = read_service_environment_file(Path(service_env_file))
+                except RuntimeError as error:
+                    raise RuntimeError(str(error)) from error
+            else:
+                snapshot = approved_service_environment
+                if canonical_path_text(Path(service_env_file)) != canonical_path_text(
+                    snapshot.path
+                ):
+                    raise RuntimeError(
+                        "SERVICE_ENV_FILE_CHANGED: release env file path changed"
+                    )
+            if expected_digest is None or snapshot.sha256 != expected_digest:
+                raise RuntimeError(
+                    "SERVICE_ENV_FILE_CHANGED: release env file identity changed"
+                )
+            service_env_secret_values = sensitive_values(snapshot.values)
+            snapshot_directory = tempfile.TemporaryDirectory(
+                prefix="haniel-release-env-"
             )
-        argv[0] = resolved_executable
+            snapshot_path = Path(snapshot_directory.name) / "service.env"
+            _write_private_snapshot(snapshot_path, snapshot.normalized)
+            deploy_env = {
+                **deploy_env,
+                "HANIEL_SERVICE_ENV_FILE": str(snapshot_path),
+            }
         try:
-            completed = subprocess.run(
-                argv,
-                cwd=repo_path,
-                env=env,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=command.timeout_seconds,
+            env.update(deploy_env)
+            secret_values = tuple(
+                dict.fromkeys((*sensitive_values(env), *service_env_secret_values))
             )
-        except subprocess.CalledProcessError as error:
-            raise RuntimeError(
-                _command_failure_message(command, error, secret_values)
-            ) from error
-        except FileNotFoundError as error:
-            raise RuntimeError(
-                f"command {command.name!r} could not start executable "
-                f"{resolved_executable}: {error}"
-            ) from error
-
-        raw_stdout = completed.stdout.rstrip()
-        raw_stderr = completed.stderr.rstrip()
-        json_data = _parse_json_result(command, raw_stdout)
-        safe_stdout = redact_text(raw_stdout, secret_values)
-        safe_stderr = redact_text(raw_stderr, secret_values)
-        return CommandResult(
-            stdout=_output_tail(safe_stdout, _STDOUT_TAIL_CHARS) or "",
-            stderr=_output_tail(safe_stderr, _STDERR_TAIL_CHARS) or "",
-            json_data=redact_value(json_data, secret_values),
-        )
+            return _execute_subprocess(command, repo_path, env, secret_values)
+        finally:
+            if snapshot_directory is not None:
+                snapshot_directory.cleanup()
 
     return run
+
+
+def _write_private_snapshot(path: Path, content: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _execute_subprocess(
+    command: CommandSpec,
+    repo_path: Path,
+    env: dict[str, str],
+    secret_values: tuple[str, ...],
+) -> CommandResult:
+    argv = shlex.split(command.command)
+    executable = argv[0] if argv else ""
+    resolved_executable = shutil.which(executable, path=env.get("PATH"))
+    if resolved_executable is None:
+        raise RuntimeError(
+            f"command {command.name!r} executable not found: {executable!r}"
+        )
+    argv[0] = resolved_executable
+    try:
+        completed = subprocess.run(
+            argv,
+            cwd=repo_path,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=command.timeout_seconds,
+        )
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(
+            _command_failure_message(command, error, secret_values)
+        ) from error
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            f"command {command.name!r} could not start executable "
+            f"{resolved_executable}: {error}"
+        ) from error
+
+    raw_stdout = completed.stdout.rstrip()
+    raw_stderr = completed.stderr.rstrip()
+    json_data = _parse_json_result(command, raw_stdout)
+    safe_stdout = redact_text(raw_stdout, secret_values)
+    safe_stderr = redact_text(raw_stderr, secret_values)
+    return CommandResult(
+        stdout=_output_tail(safe_stdout, _STDOUT_TAIL_CHARS) or "",
+        stderr=_output_tail(safe_stderr, _STDERR_TAIL_CHARS) or "",
+        json_data=redact_value(json_data, secret_values),
+    )
 
 
 def _parse_json_result(command: CommandSpec, stdout: str) -> dict[str, Any] | None:

@@ -29,6 +29,7 @@ class DeploymentCallbacks:
     writer_services: tuple[str, ...] = ()
     owner_instance: str | None = None
     quiescence_nonce: str | None = None
+    config_digest: str | None = None
     acknowledge_quiesced: Callable[[dict[str, Any]], None] | None = None
 
 
@@ -82,6 +83,7 @@ class DeploymentCoordinator:
         journal_attempt_id: str | None = None,
         expected_operation: Literal["fresh_install", "upgrade"] | None = None,
         request_id: str | None = None,
+        config_digest: str | None = None,
     ) -> DeploymentResult:
         if self.state_store.is_success(repo_name, target_head, manifest.release_id):
             return DeploymentResult(status="success", recovered=False, skipped=True)
@@ -100,6 +102,8 @@ class DeploymentCoordinator:
             environment["HANIEL_REQUEST_ID"] = request_id
         if expected_operation is not None:
             environment["HANIEL_DATABASE_OPERATION"] = expected_operation
+        if config_digest is not None:
+            environment["HANIEL_CONFIG_DIGEST"] = config_digest
         migration_started = False
         target_start_attempted = False
         operation = expected_operation
@@ -117,6 +121,7 @@ class DeploymentCoordinator:
             journal_attempt_id=journal_attempt_id,
             request_id=request_id,
             expected_operation=expected_operation,
+            config_digest=config_digest,
         )
 
         try:
@@ -365,6 +370,8 @@ class DeploymentCoordinator:
             "owner_instance": callbacks.owner_instance,
             "quiescence_nonce": callbacks.quiescence_nonce,
         }
+        if callbacks.config_digest is not None:
+            expected_fields["config_digest"] = callbacks.config_digest
         mismatched = [
             key
             for key, expected in expected_fields.items()
@@ -435,6 +442,8 @@ class DeploymentCoordinator:
                 "JOURNAL_GATE_FAILED",
                 "AMBIGUOUS_COMMIT_STATE",
                 "OPERATION_MISMATCH",
+                "CONFIG_DIGEST_MISMATCH",
+                "SERVICE_ENV_FILE_CHANGED",
             )
             if any(code in message for code in preserved_codes):
                 raise

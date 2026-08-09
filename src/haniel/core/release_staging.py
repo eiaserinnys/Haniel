@@ -52,6 +52,9 @@ def stage_release(
     expected_operation: Literal["fresh_install", "upgrade"],
     command_runner: CommandRunner | None = None,
     service_cwd_resolver: Callable[[ReleaseManifest], Path | None] | None = None,
+    service_environment_resolver: (
+        Callable[[ReleaseManifest], dict[str, str]] | None
+    ) = None,
     target_ref: str | None = None,
 ) -> Iterator[StagedRelease]:
     """Fetch, inspect, and probe a target without changing the live HEAD."""
@@ -92,6 +95,8 @@ def stage_release(
                 service_cwd = service_cwd_resolver(manifest)
                 if service_cwd is not None:
                     environment["HANIEL_SERVICE_CWD"] = str(service_cwd)
+            if service_environment_resolver is not None:
+                environment.update(service_environment_resolver(manifest))
             stage_runner(provenance_probe.prepare, environment)
             result = stage_runner(provenance_probe.probe, environment)
             probe_payload = result.json_data if result is not None else None

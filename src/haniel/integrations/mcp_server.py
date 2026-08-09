@@ -20,7 +20,7 @@ from typing import Any, TYPE_CHECKING, Optional
 from urllib.parse import parse_qs, urlparse
 
 from ..core.service_lifecycle import (
-    CONFIG_WRITE_LOCK,
+    config_write_transaction,
     delete_service_config,
     disable_service,
     register_service,
@@ -856,10 +856,8 @@ class HanielMcpServer:
 
     # --- Config CRUD tool handlers ---
 
-    _config_lock = CONFIG_WRITE_LOCK
-
     def _get_config_lock(self):
-        return self._config_lock
+        return config_write_transaction(self.runner)
 
     async def _update_service_config(self, arguments: dict[str, Any]) -> str:
         from ..config.io import (

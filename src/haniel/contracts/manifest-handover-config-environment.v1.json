@@ -1,0 +1,33 @@
+{
+  "schema_version": "haniel.handover.config-environment.v1",
+  "config_content_digest": {
+    "algorithm": "sha256",
+    "request_field": "config_digest",
+    "result_field": "config_digest",
+    "deployment_journal_field": "config_digest",
+    "canonical_paths": true,
+    "referenced_env_content_bound": true
+  },
+  "service_environment": {
+    "service_config_field": "release_env_file",
+    "manifest_required_field": "requires_service_env_file",
+    "child_path_env": "HANIEL_SERVICE_ENV_FILE",
+    "child_digest_env": "HANIEL_SERVICE_ENV_FILE_SHA256",
+    "ambient_database_variables_removed": true,
+    "runtime_consumes_declared_file": true,
+    "request_snapshot_used_through_recovery": true
+  },
+  "legacy_policy": {
+    "manifest_without_required_field_allowed": true,
+    "public_manifest_handover_requires_config_digest": true
+  },
+  "stable_error_codes": [
+    "CONFIG_DIGEST_REQUIRED",
+    "CONFIG_DIGEST_MISMATCH",
+    "CONFIG_RELOAD_FAILED",
+    "CONFIG_RELOAD_UNSAFE",
+    "SERVICE_ENV_FILE_REQUIRED",
+    "SERVICE_ENV_FILE_INVALID",
+    "SERVICE_ENV_FILE_CHANGED"
+  ]
+}
