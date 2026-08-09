@@ -4,6 +4,7 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 from haniel.config.model import RepoConfig, ServiceConfig
@@ -43,7 +44,9 @@ done
 def _git_repo(path: Path) -> str:
     path.mkdir()
     subprocess.run(["git", "init", "-q", path], check=True)
-    subprocess.run(["git", "-C", path, "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(
+        ["git", "-C", path, "config", "user.email", "test@example.com"], check=True
+    )
     subprocess.run(["git", "-C", path, "config", "user.name", "Test"], check=True)
     (path / "source.txt").write_text("source\n", encoding="utf-8")
     subprocess.run(["git", "-C", path, "add", "source.txt"], check=True)
@@ -56,7 +59,9 @@ def _git_repo(path: Path) -> str:
     ).stdout.strip()
 
 
-def _run_hook(tmp_path: Path, *, fail_build: bool = False) -> subprocess.CompletedProcess[str]:
+def _run_hook(
+    tmp_path: Path, *, fail_build: bool = False
+) -> subprocess.CompletedProcess[str]:
     project_root = tmp_path / "project-z"
     publish_root = tmp_path / "publish"
     fake_bin = tmp_path / "bin"
@@ -104,7 +109,9 @@ def test_project_z_haniel_fragment_matches_runtime_schema() -> None:
     assert repo.path == "./services/project-z"
     assert service.repo == "project-z"
     assert service.hooks is not None
-    assert service.hooks.post_pull == "/home/eias/services/haniel/bin/build-project-z.sh"
+    assert (
+        service.hooks.post_pull == "/home/eias/services/haniel/bin/build-project-z.sh"
+    )
 
 
 def test_project_z_nginx_contract_separates_assets_and_spa_fallback() -> None:
@@ -118,17 +125,30 @@ def test_project_z_nginx_contract_separates_assets_and_spa_fallback() -> None:
     assert 'Cache-Control "no-cache"' in config
 
 
-def test_project_z_build_publishes_a_complete_release_atomically(tmp_path: Path) -> None:
+@pytest.mark.skipif(os.name == "nt", reason="production hook targets Linux")
+def test_project_z_build_publishes_a_complete_release_atomically(
+    tmp_path: Path,
+) -> None:
     result = _run_hook(tmp_path)
     publish_root = result.publish_root  # type: ignore[attr-defined]
 
     assert result.returncode == 0, result.stderr
     assert publish_root.joinpath("current").is_symlink()
-    assert publish_root.joinpath("current", "index.html").read_text() == "<main>new release</main>\n"
-    assert publish_root.joinpath("current", ".release-sha").read_text().strip() == result.expected_sha  # type: ignore[attr-defined]
-    assert publish_root.joinpath("releases", "old", "index.html").read_text() == "old release\n"
+    assert (
+        publish_root.joinpath("current", "index.html").read_text()
+        == "<main>new release</main>\n"
+    )
+    assert (
+        publish_root.joinpath("current", ".release-sha").read_text().strip()
+        == result.expected_sha
+    )  # type: ignore[attr-defined]
+    assert (
+        publish_root.joinpath("releases", "old", "index.html").read_text()
+        == "old release\n"
+    )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="production hook targets Linux")
 def test_project_z_build_failure_preserves_current_release(tmp_path: Path) -> None:
     result = _run_hook(tmp_path, fail_build=True)
     publish_root = result.publish_root  # type: ignore[attr-defined]
