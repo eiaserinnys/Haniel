@@ -35,8 +35,12 @@ timeout "$PROJECT_Z_BUILD_TIMEOUT_SECONDS" bash -c '
   next_link="$publish_root/.current-${release_sha:0:12}-$$"
 
   cleanup() {
-    rm -rf -- "$staging_dir"
-    rm -f -- "$next_link"
+    if [[ -n "$staging_dir" ]]; then
+      rm -rf -- "$staging_dir"
+    fi
+    if [[ -n "$next_link" ]]; then
+      rm -f -- "$next_link"
+    fi
   }
   trap cleanup EXIT
 
@@ -45,7 +49,8 @@ timeout "$PROJECT_Z_BUILD_TIMEOUT_SECONDS" bash -c '
   find "$staging_dir" -type d -exec chmod 755 {} +
   find "$staging_dir" -type f -exec chmod 644 {} +
 
-  release_dir="$publish_root/releases/${release_stamp}-${release_sha:0:12}"
+  staging_suffix=${staging_dir##*-}
+  release_dir="$publish_root/releases/${release_stamp}-${release_sha:0:12}-${staging_suffix}"
   mv "$staging_dir" "$release_dir"
   staging_dir=""
 

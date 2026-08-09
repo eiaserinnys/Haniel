@@ -146,6 +146,7 @@ def test_project_z_build_publishes_a_complete_release_atomically(
         publish_root.joinpath("releases", "old", "index.html").read_text()
         == "old release\n"
     )
+    assert list(publish_root.joinpath("releases").glob(".staging-*")) == []
 
 
 @pytest.mark.skipif(os.name == "nt", reason="production hook targets Linux")
@@ -156,3 +157,4 @@ def test_project_z_build_failure_preserves_current_release(tmp_path: Path) -> No
     assert result.returncode != 0
     assert os.readlink(publish_root / "current") == "releases/old"
     assert publish_root.joinpath("current", "index.html").read_text() == "old release\n"
+    assert list(publish_root.joinpath("releases").glob(".staging-*")) == []
