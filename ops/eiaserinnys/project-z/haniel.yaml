@@ -1,0 +1,19 @@
+repos:
+  project-z:
+    url: https://github.com/eiaserinnys/project-z.git
+    branch: main
+    path: ./services/project-z
+    auto_apply: true
+    pull_strategy: force
+services:
+  project-z-static:
+    run: /usr/bin/tail -f /home/eias/services/project-z/current/.release-sha
+    cwd: ./services/project-z
+    repo: project-z
+    restart_delay: 10
+    after: []
+    ready: delay:1
+    enabled: true
+    hooks:
+      post_pull: /home/eias/services/haniel/bin/build-project-z.sh
+    reflect: false
