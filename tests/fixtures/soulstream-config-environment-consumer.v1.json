@@ -4,6 +4,7 @@
     "repository": "eiaserinnys/soulstream",
     "commit": "1ada848e6b8d1efdcf2d7f50414361eb6cc510b5",
     "extract_root": "soulstream-1ada848e",
+    "byte_canonicalization": "crlf-to-lf",
     "manifests": [
       {
         "path": "deploy/release-manifest.json",

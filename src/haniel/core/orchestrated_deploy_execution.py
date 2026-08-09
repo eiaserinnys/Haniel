@@ -220,9 +220,7 @@ def _execute_retry(
             else runner.get_affected_services(repo)
         )
         suppressed = (
-            list(reload_plan.quiesce_services)
-            if reload_plan is not None
-            else affected
+            list(reload_plan.quiesce_services) if reload_plan is not None else affected
         )
         runner._suppress_pending_restarts(suppressed)
         previous_head = plan.evidence.get("original_previous_head")
@@ -239,9 +237,7 @@ def _execute_retry(
             {
                 "quiesce_services": suppressed,
                 "config_digest": reload_plan.config_digest,
-                "service_environment_bindings": (
-                    reload_plan.service_environment_map()
-                ),
+                "service_environment_bindings": (reload_plan.service_environment_map()),
             }
             if reload_plan is not None
             else {}

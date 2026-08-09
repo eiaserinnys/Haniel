@@ -85,10 +85,9 @@ def service_process_environment(
     snapshot = approved_snapshot or read_service_environment_file(
         config_dir / config.release_env_file
     )
-    if (
-        expected_env_path is not None
-        and canonical_path_text(snapshot.path) != expected_env_path
-    ):
+    if expected_env_path is not None and canonical_path_text(
+        snapshot.path
+    ) != canonical_path_text(Path(expected_env_path)):
         raise RuntimeError(
             "SERVICE_ENV_FILE_CHANGED: service env file path changed after binding"
         )

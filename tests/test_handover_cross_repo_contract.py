@@ -14,6 +14,12 @@ import pytest
 from haniel.core.handover_config import canonical_path_text, handover_config_digest
 
 
+def _canonical_source_bytes(raw: bytes) -> bytes:
+    """Match the pinned source contract independently of checkout EOL policy."""
+
+    return raw.replace(b"\r\n", b"\n")
+
+
 def _validate_pinned_soulstream_source(fixture: dict[str, object]) -> None:
     source = fixture["source"]
     assert isinstance(source, dict)
@@ -23,6 +29,7 @@ def _validate_pinned_soulstream_source(fixture: dict[str, object]) -> None:
     assert extract_root_name == f"soulstream-{commit[:8]}"
     extract_root = (Path(__file__).parent / "fixtures" / extract_root_name).resolve()
     manifests = source["manifests"]
+    assert source["byte_canonicalization"] == "crlf-to-lf"
     assert isinstance(manifests, list) and manifests
     observed_paths: set[str] = set()
     for evidence in manifests:
@@ -33,7 +40,7 @@ def _validate_pinned_soulstream_source(fixture: dict[str, object]) -> None:
         observed_paths.add(relative_path)
         source_path = (extract_root / relative_path).resolve()
         source_path.relative_to(extract_root)
-        raw = source_path.read_bytes()
+        raw = _canonical_source_bytes(source_path.read_bytes())
         assert hashlib.sha256(raw).hexdigest() == evidence["sha256"]
         document = json.loads(raw)
         assert document["schema_version"] == "haniel.release.v1"
@@ -108,6 +115,17 @@ def test_pinned_soulstream_fixture_consumes_packaged_haniel_contract() -> None:
         "request_snapshot_used_through_recovery",
     ):
         assert environment[field] == required[field]
+
+
+def test_pinned_soulstream_source_checksum_is_checkout_eol_independent() -> None:
+    source = b'{"schema_version":"haniel.release.v1"}\n'
+
+    assert (
+        hashlib.sha256(_canonical_source_bytes(source)).hexdigest()
+        == hashlib.sha256(
+            _canonical_source_bytes(source.replace(b"\n", b"\r\n"))
+        ).hexdigest()
+    )
 
 
 @pytest.mark.parametrize(

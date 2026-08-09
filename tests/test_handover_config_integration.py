@@ -27,6 +27,7 @@ from haniel.core.one_shot_handover import (
 )
 from haniel.core.release_manifest import ReleaseManifest
 from haniel.core.service_environment import service_process_environment
+from haniel.core.service_environment import read_service_environment_file
 from haniel.core.runner import ServiceRunner
 from haniel.core.runner_deployment import (
     RunnerDeploymentAdapter,
@@ -417,9 +418,7 @@ def test_request_bound_env_digest_rejects_swap_between_config_check_and_resolve(
     def check_then_swap(path: Path, expected: str) -> None:
         original_check(path, expected)
         replacement = tmp_path / "replacement.env"
-        replacement.write_text(
-            "DATABASE_URL=sqlite:///unapproved\n", encoding="utf-8"
-        )
+        replacement.write_text("DATABASE_URL=sqlite:///unapproved\n", encoding="utf-8")
         replacement.replace(env_file)
 
     with patch(
@@ -571,9 +570,7 @@ def test_bound_runtime_uses_approved_snapshot_after_source_swap(
         service_environment_bindings=plan.service_environment_map(),
     )
     replacement = tmp_path / "replacement-runtime.env"
-    replacement.write_text(
-        "DATABASE_URL=sqlite:///unapproved\n", encoding="utf-8"
-    )
+    replacement.write_text("DATABASE_URL=sqlite:///unapproved\n", encoding="utf-8")
     replacement.replace(env_file)
     try:
         adapter.start_and_wait({"app"})
@@ -789,7 +786,7 @@ def test_release_child_reads_immutable_env_snapshot_after_source_swap(
 ) -> None:
     env_file = tmp_path / "service.env"
     env_file.write_text("DATABASE_URL=sqlite:///approved\n", encoding="utf-8")
-    expected_digest = hashlib.sha256(env_file.read_bytes()).hexdigest()
+    expected_digest = read_service_environment_file(env_file).sha256
     ready = tmp_path / "ready"
     proceed = tmp_path / "proceed"
     script = tmp_path / "read_after_swap.py"
@@ -1205,10 +1202,7 @@ elif phase == "health":
     config_path.write_text(
         config_path.read_text(encoding="utf-8").replace(
             f"    release_env_file: {json.dumps(str(env_file))}",
-            (
-                f"    release_env_file: {json.dumps(str(env_file))}\n"
-                "    ready: delay:1"
-            ),
+            (f"    release_env_file: {json.dumps(str(env_file))}\n    ready: delay:1"),
         ),
         encoding="utf-8",
     )
@@ -1278,13 +1272,16 @@ elif phase == "health":
         assert not worker.is_alive()
         assert len(errors) == 1
         assert getattr(errors[0], "recovered", False) is True
-        assert subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=repo,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip() == previous_head
+        assert (
+            subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            == previous_head
+        )
         with sqlite3.connect(database) as connection:
             assert connection.execute(
                 "select value from release_ledger"
@@ -1292,9 +1289,7 @@ elif phase == "health":
         assert runner.process_manager.is_running("app")
         assert runtime_database.read_text(encoding="utf-8") == str(database)
         assert not (tmp_path / "unapproved.sqlite").exists()
-        journal = DeploymentStateStore(tmp_path / ".haniel" / "deployments").read(
-            "app"
-        )
+        journal = DeploymentStateStore(tmp_path / ".haniel" / "deployments").read("app")
         assert journal is not None
         assert journal["state"] == "failed"
         assert journal["recovered"] is True

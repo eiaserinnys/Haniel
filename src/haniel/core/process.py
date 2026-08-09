@@ -543,8 +543,7 @@ class ProcessManager:
 
         with self._lock:
             started = {
-                name: managed.config
-                for name, managed in self._processes.items()
+                name: managed.config for name, managed in self._processes.items()
             }
             running = {
                 name

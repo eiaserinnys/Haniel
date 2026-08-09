@@ -234,9 +234,10 @@ def execute_owner_handover(
     config_digest: str | None = None,
 ) -> HandoverResult:
     """Execute target staging, live checkout, deployment, and terminal result."""
-    with control.acquire_deployment(
-        repo_name, request_id
-    ) as lease, runner._config_reload_lock:
+    with (
+        control.acquire_deployment(repo_name, request_id) as lease,
+        runner._config_reload_lock,
+    ):
         existing = control.read_result(request_id)
         if lease.attached and existing.get("terminal"):
             return HandoverResult(**existing["terminal"])

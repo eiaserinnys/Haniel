@@ -288,10 +288,13 @@ def test_startup_cannot_mix_old_repo_target_with_reloaded_repo_identity(
         path.mkdir()
         (path / ".git").mkdir()
     config_path = tmp_path / "haniel.yaml"
-    old_text = config_text().replace("./soulstream", "./oldrepo").replace(
-        "    path: ./oldrepo\n",
-        "    path: ./oldrepo\n"
-        f"    release_manifest: {DEFAULT_RELEASE_MANIFEST}\n",
+    old_text = (
+        config_text()
+        .replace("./soulstream", "./oldrepo")
+        .replace(
+            "    path: ./oldrepo\n",
+            f"    path: ./oldrepo\n    release_manifest: {DEFAULT_RELEASE_MANIFEST}\n",
+        )
     )
     config_path.write_text(old_text, encoding="utf-8")
     runner = ServiceRunner(
@@ -326,9 +329,7 @@ def test_startup_cannot_mix_old_repo_target_with_reloaded_repo_identity(
     with (
         patch("haniel.core.runner.fetch_repo", return_value=True),
         patch("haniel.core.runner.get_head", return_value="old-head"),
-        patch(
-            "haniel.core.runner.get_remote_head", side_effect=resolve_old_target
-        ),
+        patch("haniel.core.runner.get_remote_head", side_effect=resolve_old_target),
         patch(
             "haniel.core.runner.probe_manifest_target",
             return_value=staged_release("old-target"),
@@ -529,9 +530,7 @@ def test_auto_deploy_waiting_for_deployment_lease_does_not_hold_config_lock(
                 path="./soulstream",
             )
         },
-        services={
-            "soulstream-server": ServiceConfig(run="server", repo="soulstream")
-        },
+        services={"soulstream-server": ServiceConfig(run="server", repo="soulstream")},
     )
     runner = ServiceRunner(config, config_dir=tmp_path)
     entered_lease = threading.Event()

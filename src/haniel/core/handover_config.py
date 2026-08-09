@@ -299,9 +299,7 @@ def _load_config_projection(
     raw = resolved.read_bytes()
     data = yaml.safe_load(raw.decode("utf-8"))
     config = HanielConfig.model_validate(data or {})
-    projection, environment_snapshots = _canonical_projection(
-        config, resolved.parent
-    )
+    projection, environment_snapshots = _canonical_projection(config, resolved.parent)
     if resolved.read_bytes() != raw:
         raise HandoverConfigError(
             "CONFIG_RELOAD_FAILED: configuration changed while it was read"

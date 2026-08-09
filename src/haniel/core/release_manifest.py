@@ -178,10 +178,9 @@ def resolve_manifest_service_environment(
         snapshot = read_service_environment_file(runner.config_dir / declared)
     except RuntimeError as error:
         raise ValueError(str(error)) from error
-    if (
-        expected_env_path is not None
-        and canonical_path_text(snapshot.path) != expected_env_path
-    ):
+    if expected_env_path is not None and canonical_path_text(
+        snapshot.path
+    ) != canonical_path_text(Path(expected_env_path)):
         raise ValueError(
             "SERVICE_ENV_FILE_CHANGED: service env file path changed after binding"
         )

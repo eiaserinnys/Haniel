@@ -394,9 +394,7 @@ class ServiceRunner:
         self._startup_manifest_updates: dict[str, str] = {}
         self._startup_manifest_request_ids: dict[str, str] = {}
         self._startup_manifest_operations: dict[str, str] = {}
-        self._startup_manifest_reload_plans: dict[
-            str, "HandoverReloadPlan"
-        ] = {}
+        self._startup_manifest_reload_plans: dict[str, "HandoverReloadPlan"] = {}
         self._startup_deployment_leases: dict[str, DeploymentLease] = {}
         self._startup_config_locks: set[str] = set()
         self._startup_repo_locks: set[str] = set()
@@ -2159,9 +2157,7 @@ class ServiceRunner:
             )
         if reload_plan is not None:
             assert self.config_path is not None
-            require_handover_config_digest(
-                self.config_path, reload_plan.config_digest
-            )
+            require_handover_config_digest(self.config_path, reload_plan.config_digest)
         store.bind_handover_target(
             repo_name,
             request_id=request_id,

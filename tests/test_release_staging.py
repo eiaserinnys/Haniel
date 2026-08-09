@@ -11,6 +11,7 @@ import pytest
 
 from haniel.config import HanielConfig, RepoConfig, ServiceConfig, load_config
 from haniel.core.handover_config import handover_config_digest
+from haniel.core.path_identity import canonical_path_text
 from haniel.core.deployment_command_runner import CommandResult
 from haniel.core.git import (
     GitPullError,
@@ -219,11 +220,7 @@ def test_required_manifest_without_config_identity_fails_before_live_activation(
 
     assert get_head(live) == previous
     assert not (
-        tmp_path
-        / ".haniel"
-        / "staging"
-        / "required-without-config-identity"
-        / "app"
+        tmp_path / ".haniel" / "staging" / "required-without-config-identity" / "app"
     ).exists()
 
 
@@ -284,7 +281,8 @@ def test_required_manifest_public_callers_bind_config_before_live_activation(
     kwargs = deploy.call_args.kwargs
     assert kwargs["config_digest"] == handover_config_digest(config_path)
     binding = kwargs["service_environment_bindings"]["writer"]
-    assert binding.path == str(env_file.resolve())
+    assert canonical_path_text(Path(binding.path)) == canonical_path_text(env_file)
+    assert binding.snapshot.path == env_file.resolve()
     assert kwargs["quiesce_services"] == ["writer"]
 
 

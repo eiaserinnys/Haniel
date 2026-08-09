@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib
 import json
 import sqlite3
@@ -24,6 +23,7 @@ from haniel.core.one_shot_handover import (
 )
 from haniel.core.release_manifest import ReleaseManifest
 from haniel.core.runner import ServiceRunner
+from haniel.core.service_environment import read_service_environment_file
 
 
 def _write_config(
@@ -240,9 +240,9 @@ print(json.dumps({"ok": True, "path_matches": path.name == "service.env"}))
         ),
         {
             "HANIEL_SERVICE_ENV_FILE": str(env_file.resolve()),
-            "HANIEL_SERVICE_ENV_FILE_SHA256": hashlib.sha256(
-                env_file.read_bytes()
-            ).hexdigest(),
+            "HANIEL_SERVICE_ENV_FILE_SHA256": read_service_environment_file(
+                env_file
+            ).sha256,
         },
     )
 
@@ -260,7 +260,7 @@ def test_release_child_rejects_env_file_changed_after_identity_binding(
 ) -> None:
     env_file = tmp_path / "service.env"
     env_file.write_text("DATABASE_URL=sqlite:///first\n", encoding="utf-8")
-    expected = hashlib.sha256(env_file.read_bytes()).hexdigest()
+    expected = read_service_environment_file(env_file).sha256
     env_file.write_text("DATABASE_URL=sqlite:///changed\n", encoding="utf-8")
     runner = subprocess_command_runner(tmp_path)
 
@@ -302,9 +302,9 @@ print(json.dumps({"ok": True, "value": secret}))
     )
     environment = {
         "HANIEL_SERVICE_ENV_FILE": str(env_file),
-        "HANIEL_SERVICE_ENV_FILE_SHA256": hashlib.sha256(
-            env_file.read_bytes()
-        ).hexdigest(),
+        "HANIEL_SERVICE_ENV_FILE_SHA256": read_service_environment_file(
+            env_file
+        ).sha256,
     }
     runner = subprocess_command_runner(tmp_path)
 

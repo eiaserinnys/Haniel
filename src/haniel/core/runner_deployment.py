@@ -114,11 +114,7 @@ class RunnerDeploymentAdapter:
             and service_name is not None
             else None
         )
-        if (
-            self.config_digest is not None
-            and requires_env_file
-            and binding is None
-        ):
+        if self.config_digest is not None and requires_env_file and binding is None:
             raise ValueError(
                 "SERVICE_ENV_FILE_CHANGED: request config has no bound service env file"
             )
