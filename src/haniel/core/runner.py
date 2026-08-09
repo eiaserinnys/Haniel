@@ -426,7 +426,9 @@ class ServiceRunner:
                 existing[name].config = repo_cfg
                 self._repo_states[name] = existing[name]
             else:
-                self._repo_states[name] = RepoState(name=name, config=repo_cfg)
+                state = RepoState(name=name, config=repo_cfg)
+                self._repo_states[name] = state
+                self._initialize_repo_state(name, state)
 
         # Sync pull locks — preserve existing locks, create new ones, drop removed
         self._pull_locks = {
@@ -1611,13 +1613,17 @@ class ServiceRunner:
     def _init_repo_states(self) -> None:
         """Initialize repo states with current HEAD."""
         for name, state in self._repo_states.items():
-            repo_path = self.config_dir / state.config.path
-            if repo_path.exists():
-                try:
-                    state.last_head = get_head(repo_path)
-                    logger.info(f"Repo {name} at HEAD: {state.last_head[:8]}")
-                except GitError as e:
-                    logger.warning(f"Failed to get HEAD for {name}: {e}")
+            self._initialize_repo_state(name, state)
+
+    def _initialize_repo_state(self, name: str, state: RepoState) -> None:
+        """Set a repository baseline from an existing local checkout."""
+        repo_path = self.config_dir / state.config.path
+        if repo_path.exists():
+            try:
+                state.last_head = get_head(repo_path)
+                logger.info(f"Repo {name} at HEAD: {state.last_head[:8]}")
+            except GitError as e:
+                logger.warning(f"Failed to get HEAD for {name}: {e}")
 
     def _clear_self_update_pending_state(self) -> None:
         """Clear user-visible self-update pending state.
