@@ -358,6 +358,8 @@ class TestImmutableRetryExecution:
             orchestrator_attempt_id="orch-1",
             node_id="node-a",
             branch="main",
+            expected_operation="upgrade",
+            request_id="orch-1",
         )
 
     def test_recovery_mode_returns_evidence_without_deploy_side_effects(

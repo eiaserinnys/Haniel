@@ -1,5 +1,6 @@
 """Tests for haniel CLI commands."""
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -27,6 +28,8 @@ class TestCLIBasics:
         assert "run" in result.output
         assert "status" in result.output
         assert "validate" in result.output
+        assert "handover" in result.output
+        assert "lifecycle" in result.output
 
     def test_version_flag(self, cli_runner: CliRunner):
         """--version should display version information."""
@@ -43,6 +46,24 @@ class TestInstallCommand:
         result = cli_runner.invoke(main, ["install", "--help"])
         assert result.exit_code == 0
         assert "install" in result.output.lower()
+        assert "--state-policy" in result.output
+        assert "--defer-manifest-handover" in result.output
+
+    def test_noninteractive_existing_state_never_prompts_without_policy(
+        self, cli_runner: CliRunner, tmp_config
+    ):
+        from haniel.installer.state import InstallState
+
+        InstallState().save(tmp_config.parent / "install.state")
+        with patch("haniel.commands.install.click.confirm") as confirm:
+            result = cli_runner.invoke(
+                main,
+                ["install", "--skip-interactive", str(tmp_config)],
+            )
+
+        assert result.exit_code == 1
+        assert "STATE_POLICY_REQUIRED" in result.output
+        confirm.assert_not_called()
 
     def test_install_requires_config(self, cli_runner: CliRunner):
         """install without config should show error or help."""
@@ -64,6 +85,43 @@ class TestInstallCommand:
         result = cli_runner.invoke(main, ["install", str(tmp_config)])
         # Skeleton just acknowledges the command
         assert result.exit_code == 0
+
+
+class TestHandoverCommand:
+    def test_json_failure_is_one_bounded_redacted_stable_envelope(
+        self, cli_runner: CliRunner, tmp_config
+    ) -> None:
+        secret = "super-secret-value"
+        with patch(
+            "haniel.commands.handover.execute_manifest_handover_once",
+            side_effect=RuntimeError(
+                f"LIFECYCLE_OWNER_MISSING: TOKEN={secret} " + ("x" * 10000)
+            ),
+        ):
+            result = cli_runner.invoke(
+                main,
+                [
+                    "handover",
+                    str(tmp_config),
+                    "app",
+                    "--target-ref",
+                    "origin/main",
+                    "--expected-operation",
+                    "fresh_install",
+                    "--request-id",
+                    "request-1",
+                    "--json",
+                ],
+            )
+
+        assert result.exit_code == 1
+        assert len(result.output.splitlines()) == 1
+        payload = json.loads(result.output)
+        assert payload["schema_version"] == "haniel.handover.result.v1"
+        assert payload["error"]["code"] == "LIFECYCLE_OWNER_MISSING"
+        assert secret not in result.output
+        assert "[REDACTED]" in payload["error"]["message"]
+        assert len(payload["error"]["message"]) <= 4096
 
 
 class TestRunCommand:

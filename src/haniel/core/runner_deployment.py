@@ -3,64 +3,35 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
+from uuid import uuid4
 
 from .deployment import (
     DeploymentCallbacks,
     DeploymentCoordinator,
     DeploymentError,
-    DeploymentStateStore,
     ReleaseManifest,
     subprocess_command_runner,
 )
 from .git import get_head, reset_repo_to, sha256_file_at_commit
+from .reporting_deployment_state import (
+    ProgressCallback,
+    ReportingDeploymentStateStore,
+)
+from .runner_deployment_identity import (
+    deployment_error_code,
+    require_resident_owner,
+    validate_lifecycle_request,
+)
+from .release_manifest import resolve_manifest_service_cwd
+from .safety_redaction import bounded_redact_text
 
 if TYPE_CHECKING:
-    from ..config import ServiceConfig
     from .runner import ServiceRunner
 
 logger = logging.getLogger(__name__)
-
-ProgressCallback = Callable[[str], None]
-_PROGRESS_STATES = frozenset(
-    {
-        "build",
-        "preflight",
-        "backing_up",
-        "migrating",
-        "starting",
-        "verifying",
-        "recovering",
-    }
-)
-
-
-class ReportingDeploymentStateStore(DeploymentStateStore):
-    """Persist journal truth, then report nonterminal phase changes."""
-
-    def __init__(
-        self, directory: Path, progress_callback: ProgressCallback | None
-    ) -> None:
-        super().__init__(directory)
-        self._progress_callback = progress_callback
-
-    def begin(self, *args: Any, **kwargs: Any) -> str:
-        journal_attempt_id = super().begin(*args, **kwargs)
-        self._report("build")
-        return journal_attempt_id
-
-    def transition(self, repo_name: str, state: str, **kwargs: Any) -> None:
-        super().transition(repo_name, state, **kwargs)
-        self._report(state)
-
-    def _report(self, state: str) -> None:
-        if self._progress_callback is None or state not in _PROGRESS_STATES:
-            return
-        try:
-            self._progress_callback(state)
-        except Exception as exc:
-            logger.warning("Failed to report deploy progress %s: %s", state, exc)
 
 
 class RunnerDeploymentAdapter:
@@ -73,6 +44,9 @@ class RunnerDeploymentAdapter:
         affected: list[str],
         repo_path: Path,
         previous_head: str,
+        target_head: str | None = None,
+        request_id: str | None = None,
+        quiescence_callback: Callable[[dict[str, Any]], None] | None = None,
         desired_running: set[str] | None = None,
     ) -> None:
         self.runner = runner
@@ -80,8 +54,12 @@ class RunnerDeploymentAdapter:
         self.affected = affected
         self.repo_path = repo_path
         self.previous_head = previous_head
+        self.target_head = target_head
+        self.request_id = request_id
+        self.quiescence_callback = quiescence_callback
         self.desired_running = desired_running
         self.handover_started = False
+        self.quiescence_nonce = uuid4().hex
 
     def callbacks(self) -> DeploymentCallbacks:
         return DeploymentCallbacks(
@@ -90,35 +68,23 @@ class RunnerDeploymentAdapter:
             start_and_wait=lambda: self.start_and_wait(set(self.affected)),
             rollback=self.rollback,
             prepare_roll_forward=self.prepare_roll_forward,
+            stop_partial=self.stop_partial,
+            writer_services=tuple(sorted(self.affected)),
+            owner_instance=self._owner_instance(),
+            quiescence_nonce=self.quiescence_nonce,
+            acknowledge_quiesced=self.quiescence_callback,
         )
 
     def service_cwd(self, service_name: str) -> Path:
-        if service_name not in self.affected:
-            raise ValueError(
-                f"manifest environment_service is not affected: {service_name}"
-            )
-        service = self.runner._enabled_services.get(service_name)
-        if service is None:
-            raise ValueError(
-                f"manifest environment_service is not enabled: {service_name}"
-            )
-        return self._resolve_service_cwd(service)
+        resolved = resolve_manifest_service_cwd(
+            self.runner, self.repo_name, self.affected, service_name
+        )
+        assert resolved is not None
+        return resolved
 
     def derive_service_cwd(self) -> Path | None:
-        service_cwds = {
-            self._resolve_service_cwd(service)
-            for service in self.runner._enabled_services.values()
-            if service.repo == self.repo_name
-        }
-        if len(service_cwds) != 1:
-            return None
-        return next(iter(service_cwds))
-
-    def _resolve_service_cwd(self, service: "ServiceConfig") -> Path:
-        return (
-            (self.runner.config_dir / service.cwd).resolve()
-            if service.cwd
-            else self.runner.config_dir.resolve()
+        return resolve_manifest_service_cwd(
+            self.runner, self.repo_name, self.affected, None
         )
 
     def build(self) -> None:
@@ -132,9 +98,21 @@ class RunnerDeploymentAdapter:
                 f"post_pull hook failed for: {', '.join(sorted(failed))}"
             )
 
-    def stop(self) -> None:
+    def stop(self) -> dict[str, Any]:
         self.handover_started = True
-        self._stop_running()
+        stopped, already_stopped = self._stop_running()
+        receipt = {
+            "request_id": self.request_id,
+            "repo": self.repo_name,
+            "target_head": self.target_head,
+            "stopped_services": stopped,
+            "already_stopped_services": already_stopped,
+            "quiesced_services": sorted(self.affected),
+            "owner_instance": self._owner_instance(),
+            "quiescence_nonce": self.quiescence_nonce,
+            "quiesced_at": datetime.now(timezone.utc).isoformat(),
+        }
+        return receipt
 
     def start_and_wait(self, selected: set[str]) -> None:
         startup_order = [
@@ -185,7 +163,13 @@ class RunnerDeploymentAdapter:
         self.handover_started = True
         self._stop_running()
 
-    def _stop_running(self) -> None:
+    def stop_partial(self) -> None:
+        """Stop only target processes; never mutate DB or repository state."""
+        self._stop_running()
+
+    def _stop_running(self) -> tuple[list[str], list[str]]:
+        stopped: list[str] = []
+        already_stopped: list[str] = []
         shutdown_order = [
             service
             for service in self.runner.get_shutdown_order()
@@ -196,7 +180,23 @@ class RunnerDeploymentAdapter:
             if self.runner.process_manager.is_running(service):
                 if not self.runner.process_manager.stop_service(service):
                     raise RuntimeError(f"failed to stop {service}")
+                stopped.append(service)
+            else:
+                already_stopped.append(service)
             self.runner._cancel_pending_restart(service)
+        remaining = [
+            service
+            for service in self.affected
+            if self.runner.process_manager.is_running(service)
+        ]
+        if remaining:
+            raise RuntimeError(
+                "writer services remain running: " + ", ".join(sorted(remaining))
+            )
+        return sorted(stopped), sorted(already_stopped)
+
+    def _owner_instance(self) -> str | None:
+        return getattr(self.runner, "lifecycle_instance_id", None)
 
     def _assert_recovery_availability(self, services: set[str]) -> None:
         down: list[str] = []
@@ -232,6 +232,9 @@ def run_manifest_deployment(
     branch: str | None = None,
     journal_attempt_id: str | None = None,
     progress_callback: ProgressCallback | None = None,
+    expected_operation: str | None = None,
+    request_id: str | None = None,
+    quiescence_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     """Load the pulled release manifest and run the auditable handover."""
 
@@ -243,18 +246,43 @@ def run_manifest_deployment(
     if not manifest_path.is_relative_to(repo_path):
         raise ValueError(f"release manifest escapes repository: {manifest_path}")
 
+    state_store = ReportingDeploymentStateStore(
+        runner.config_dir / ".haniel" / "deployments", progress_callback
+    )
+    target_head = get_head(repo_path)
+    if journal_attempt_id is None and request_id is not None:
+        existing = state_store.read(repo_name)
+        if (
+            existing is not None
+            and existing.get("request_id") == request_id
+            and existing.get("target_head") == target_head
+            and existing.get("state") not in state_store.TERMINAL_STATES
+        ):
+            journal_attempt_id = existing.get("journal_attempt_id")
     adapter = RunnerDeploymentAdapter(
         runner,
         repo_name,
         affected,
         repo_path,
         previous_head,
+        target_head,
+        request_id,
+        quiescence_callback,
         desired_running,
     )
-    state_store = ReportingDeploymentStateStore(
-        runner.config_dir / ".haniel" / "deployments", progress_callback
-    )
-    target_head = get_head(repo_path)
+    lifecycle = getattr(runner, "lifecycle_control", None)
+    owner_instance = getattr(runner, "lifecycle_instance_id", None)
+    if expected_operation is not None:
+        require_resident_owner(lifecycle, owner_instance, request_id)
+    if lifecycle is not None and request_id is not None:
+        validate_lifecycle_request(
+            lifecycle,
+            state_store,
+            request_id=request_id,
+            repo_name=repo_name,
+            target_head=target_head,
+            expected_operation=expected_operation or "upgrade",
+        )
 
     try:
         manifest = ReleaseManifest.load(manifest_path)
@@ -279,6 +307,16 @@ def run_manifest_deployment(
             journal_attempt_id=journal_attempt_id,
         )
         state_store.transition(repo_name, "recovering", message=str(error))
+        if expected_operation == "fresh_install":
+            state_store.transition(
+                repo_name,
+                "failed",
+                message=f"invalid fresh-install manifest; target preserved: {error}",
+                recovered=False,
+            )
+            raise DeploymentError(
+                f"invalid manifest: {error}", recovered=False
+            ) from error
         try:
             adapter.rollback()
         except Exception as recovery_error:
@@ -304,6 +342,11 @@ def run_manifest_deployment(
             recovered=True,
         ) from error
 
+    contract_mode = bool(manifest.migration and manifest.migration.operation)
+    resolved_operation = expected_operation or ("upgrade" if contract_mode else None)
+    if contract_mode and expected_operation is None:
+        require_resident_owner(lifecycle, owner_instance, request_id)
+
     base_runner = subprocess_command_runner(repo_path)
 
     def run_command(command, environment):
@@ -322,7 +365,7 @@ def run_manifest_deployment(
         )
         if service_cwd is not None:
             command_environment["HANIEL_SERVICE_CWD"] = str(service_cwd)
-        base_runner(
+        return base_runner(
             command,
             command_environment,
         )
@@ -331,18 +374,83 @@ def run_manifest_deployment(
         state_store=state_store,
         command_runner=run_command,
     )
-    coordinator.execute(
-        repo_name=repo_name,
-        previous_head=previous_head,
-        target_head=target_head,
-        manifest=manifest,
-        callbacks=adapter.callbacks(),
-        orchestrator_attempt_id=orchestrator_attempt_id,
-        node_id=node_id,
-        branch=branch,
-        manifest_identity=repo_config.release_manifest,
-        manifest_digest=sha256_file_at_commit(
-            repo_path, target_head, repo_config.release_manifest
-        ),
-        journal_attempt_id=journal_attempt_id,
-    )
+    owns_spool_request = False
+    lease = None
+    try:
+        if lifecycle is not None and request_id is not None:
+            if not lifecycle.request_path(request_id).exists():
+                lifecycle.submit_request(
+                    request_id,
+                    {
+                        "kind": "runtime-handover",
+                        "repo": repo_name,
+                        "target_ref": target_head,
+                        "expected_operation": expected_operation or "upgrade",
+                        "executor_instance": owner_instance,
+                    },
+                )
+                lifecycle.ack(
+                    request_id,
+                    "accepted",
+                    {
+                        "repo": repo_name,
+                        "owner_instance": getattr(
+                            runner, "lifecycle_instance_id", None
+                        ),
+                    },
+                )
+                owns_spool_request = True
+            if quiescence_callback is None:
+                adapter.quiescence_callback = lambda receipt: lifecycle.ack(
+                    request_id, "quiesced", receipt
+                )
+            lease = lifecycle.acquire_deployment(repo_name, request_id)
+        coordinator.execute(
+            repo_name=repo_name,
+            previous_head=previous_head,
+            target_head=target_head,
+            manifest=manifest,
+            callbacks=adapter.callbacks(),
+            orchestrator_attempt_id=orchestrator_attempt_id,
+            node_id=node_id,
+            branch=branch,
+            manifest_identity=repo_config.release_manifest,
+            manifest_digest=sha256_file_at_commit(
+                repo_path, target_head, repo_config.release_manifest
+            ),
+            journal_attempt_id=journal_attempt_id,
+            expected_operation=(resolved_operation),
+            request_id=request_id,
+        )
+    except Exception as error:
+        if owns_spool_request:
+            lifecycle.ack(
+                request_id,
+                "terminal",
+                {
+                    "schema_version": "haniel.runtime-handover.result.v1",
+                    "ok": False,
+                    "request_id": request_id,
+                    "error": {
+                        "code": deployment_error_code(error),
+                        "message": bounded_redact_text(str(error)),
+                    },
+                },
+            )
+        raise
+    else:
+        if owns_spool_request:
+            lifecycle.ack(
+                request_id,
+                "terminal",
+                {
+                    "schema_version": "haniel.runtime-handover.result.v1",
+                    "ok": True,
+                    "request_id": request_id,
+                    "repo": repo_name,
+                    "target_head": target_head,
+                },
+            )
+    finally:
+        if lease is not None:
+            lease.__exit__(None, None, None)

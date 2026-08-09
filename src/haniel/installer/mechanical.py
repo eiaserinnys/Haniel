@@ -1,6 +1,10 @@
 """
 Mechanical installer - Phase 1.
 
+Module-size exception: this legacy phase coordinator remains one transactional
+surface; this change only adds manifest deferral and does not split its existing
+installation steps without a dedicated characterization-test refactor.
+
 Handles automated installation steps that don't require user interaction:
 - System requirements verification
 - Directory creation
@@ -13,6 +17,7 @@ haniel doesn't care what it's installing - it just executes the steps.
 
 import json
 import logging
+import os
 import platform
 import re
 import shutil
@@ -21,9 +26,9 @@ from pathlib import Path
 from typing import Any
 
 from ..config import HanielConfig
+from ..core.release_staging import initial_clone_path
+from ..core.safety_redaction import bounded_redact_text
 from .state import InstallState
-import os
-
 from .utils import detect_tool_paths, find_winsw
 
 logger = logging.getLogger(__name__)
@@ -37,6 +42,8 @@ class MechanicalInstaller:
         config: HanielConfig,
         config_dir: Path,
         state: InstallState,
+        *,
+        defer_manifest_handover: bool = False,
     ):
         """Initialize the mechanical installer.
 
@@ -48,6 +55,7 @@ class MechanicalInstaller:
         self.config = config
         self.config_dir = config_dir
         self.state = state
+        self.defer_manifest_handover = defer_manifest_handover
 
     def _resolve_path(self, path: str) -> Path:
         """Resolve a path relative to config_dir.
@@ -254,6 +262,23 @@ class MechanicalInstaller:
                 # Check if it's a valid git repo
                 git_dir = repo_path / ".git"
                 if git_dir.exists():
+                    if self.defer_manifest_handover and repo.release_manifest:
+                        try:
+                            self._validate_deferred_repo_identity(repo_path, repo)
+                        except RuntimeError as error:
+                            logger.error(
+                                "Deferred repository identity rejected for %s: %s",
+                                name,
+                                bounded_redact_text(str(error)),
+                            )
+                            self.state.mark_failed(f"repos:{name}", str(error))
+                            all_success = False
+                            continue
+                        logger.info(
+                            "Repository %s identity verified; deferring pull and post_pull",
+                            name,
+                        )
+                        continue
                     logger.info(
                         f"Repository already exists: {name} at {repo_path}, pulling latest"
                     )
@@ -265,7 +290,9 @@ class MechanicalInstaller:
                             timeout=120,
                         )
                         if result.returncode != 0:
-                            error_msg = result.stderr.strip() or result.stdout.strip()
+                            error_msg = bounded_redact_text(
+                                result.stderr.strip() or result.stdout.strip()
+                            )
                             logger.warning(
                                 f"git pull --ff-only failed for {name}: {error_msg}"
                             )
@@ -283,7 +310,9 @@ class MechanicalInstaller:
                         )
                     except Exception as e:
                         logger.warning(
-                            f"git pull failed for {name}: {e}, continuing with existing code"
+                            "git pull failed for %s: %s, continuing with existing code",
+                            name,
+                            bounded_redact_text(str(e)),
                         )
                     continue
                 else:
@@ -297,9 +326,42 @@ class MechanicalInstaller:
                     all_success = False
                     continue
 
-            # Clone the repo
+            deferred_initial = bool(
+                self.defer_manifest_handover and repo.release_manifest
+            )
+            clone_path = (
+                initial_clone_path(repo_path) if deferred_initial else repo_path
+            )
+            if clone_path.exists():
+                if (clone_path / ".git").exists() and deferred_initial:
+                    try:
+                        self._validate_deferred_repo_identity(clone_path, repo)
+                    except RuntimeError as error:
+                        logger.error(
+                            "Deferred initial repository identity rejected for %s: %s",
+                            name,
+                            bounded_redact_text(str(error)),
+                        )
+                        self.state.mark_failed(f"repos:{name}", str(error))
+                        all_success = False
+                        continue
+                    logger.info(
+                        "Reusing verified deferred initial clone for %s at %s",
+                        name,
+                        clone_path,
+                    )
+                    continue
+                self.state.mark_failed(
+                    f"repos:{name}",
+                    f"Clone target exists but is not reusable: {clone_path}",
+                )
+                all_success = False
+                continue
+
+            # Clone the repo. Manifest-aware initial installs remain at a
+            # sibling path until the one-shot detached probe accepts them.
             try:
-                logger.info(f"Cloning {name} from {repo.url} to {repo_path}")
+                logger.info("Cloning %s into %s", name, clone_path)
                 result = subprocess.run(
                     [
                         "git",
@@ -307,32 +369,71 @@ class MechanicalInstaller:
                         "--branch",
                         repo.branch,
                         repo.url,
-                        str(repo_path),
+                        str(clone_path),
                     ],
                     capture_output=True,
                     text=True,
                     timeout=300,
                 )
                 if result.returncode != 0:
-                    error_msg = result.stderr.strip() or result.stdout.strip()
+                    error_msg = bounded_redact_text(
+                        result.stderr.strip() or result.stdout.strip()
+                    )
                     logger.error(f"Failed to clone {name}: {error_msg}")
                     self.state.mark_failed(f"repos:{name}", error_msg)
                     all_success = False
                 else:
                     logger.info(f"Successfully cloned {name}")
-                    if repo.hooks and repo.hooks.post_pull:
+                    if (
+                        repo.hooks
+                        and repo.hooks.post_pull
+                        and not (self.defer_manifest_handover and repo.release_manifest)
+                    ):
                         self._run_repo_hook(
-                            name, "post_pull", repo.hooks.post_pull, repo_path
+                            name, "post_pull", repo.hooks.post_pull, clone_path
                         )
             except subprocess.TimeoutExpired:
                 self.state.mark_failed(f"repos:{name}", "Clone timed out")
                 all_success = False
             except Exception as e:
-                self.state.mark_failed(f"repos:{name}", str(e))
+                self.state.mark_failed(f"repos:{name}", bounded_redact_text(str(e)))
                 all_success = False
 
         if all_success:
             self.state.mark_complete("repos")
+
+    @staticmethod
+    def _validate_deferred_repo_identity(repo_path: Path, repo: Any) -> None:
+        """Fail closed before a deferred handover fetches an existing checkout."""
+        origin = subprocess.run(
+            ["git", "-C", str(repo_path), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if origin.returncode != 0 or origin.stdout.strip() != repo.url:
+            raise RuntimeError(
+                "REPO_IDENTITY_MISMATCH: configured origin does not match "
+                "the existing checkout"
+            )
+        branch = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_path),
+                "ls-remote",
+                "--exit-code",
+                "origin",
+                f"refs/heads/{repo.branch}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if branch.returncode != 0:
+            raise RuntimeError(
+                "REPO_BRANCH_MISSING: configured branch is absent from origin"
+            )
 
     def create_environments(self) -> None:
         """Create virtual environments and install dependencies."""

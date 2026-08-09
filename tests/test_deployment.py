@@ -411,7 +411,8 @@ def test_failed_command_persists_bounded_stderr_and_stdout_in_journal(
     tmp_path: Path,
 ) -> None:
     events: list[str] = []
-    stderr = "s" * 9000 + "Error: DATABASE_URL is required"
+    secret = "journal-secret-value"
+    stderr = "s" * 9000 + f" TOKEN={secret} Error: DATABASE_URL is required"
     stdout = "o" * 5000 + "preflight context"
     deploy = DeploymentCoordinator(
         state_store=DeploymentStateStore(tmp_path / "state"),
@@ -451,6 +452,9 @@ def test_failed_command_persists_bounded_stderr_and_stdout_in_journal(
     assert "Error: DATABASE_URL is required" in message
     assert "stdout (last 4096 chars):" in message
     assert "preflight context" in message
+    assert secret not in message
+    assert "TOKEN=[REDACTED]" in message
+    assert len(message) <= 16384
     assert stderr not in message
     assert stdout not in message
 

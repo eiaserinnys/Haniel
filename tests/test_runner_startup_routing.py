@@ -1,7 +1,9 @@
 """Startup and approved pulls activate one release-manifest control path."""
 
 import threading
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,6 +13,16 @@ from haniel.config import HanielConfig, RepoConfig, ServiceConfig, load_config
 from haniel.config.release_activation import DEFAULT_RELEASE_MANIFEST
 from haniel.core.deployment import DeploymentError
 from haniel.core.deployment import DeploymentStateStore
+from haniel.core.lifecycle_control import LifecycleConflict
+from haniel.core.one_shot_handover import execute_owner_handover
+
+
+def staged_release(target_head: str = "new-head") -> SimpleNamespace:
+    return SimpleNamespace(
+        target_head=target_head,
+        manifest_digest="manifest-digest",
+        manifest=SimpleNamespace(release_id="release-1"),
+    )
 
 
 def config_text() -> str:
@@ -77,6 +89,8 @@ def test_start_services_routes_manifest_repo_once_in_global_order(
             "soulstream-orch-server",
             "soulstream-soul-server-ts",
         },
+        expected_operation="upgrade",
+        request_id="startup-resume-soulstream",
     )
 
 
@@ -106,6 +120,10 @@ def test_start_services_only_continues_after_recovered_handover(
     )
     runner = ServiceRunner(config, config_dir=tmp_path)
     runner._startup_manifest_updates = {"soulstream": "old-head"}
+    startup_lease = runner.lifecycle_control.acquire_deployment(
+        "soulstream", "startup-resume-soulstream"
+    )
+    runner._startup_deployment_leases["soulstream"] = startup_lease
     runner._start_service = MagicMock(return_value=True)
     mock_deploy.side_effect = DeploymentError("injected", recovered=recovered)
 
@@ -116,6 +134,11 @@ def test_start_services_only_continues_after_recovered_handover(
         with pytest.raises(DeploymentError, match="injected"):
             runner.start_services()
         runner._start_service.assert_not_called()
+
+    with runner.lifecycle_control.acquire_deployment(
+        "soulstream", f"after-startup-{recovered}"
+    ):
+        pass
 
 
 @patch("haniel.core.runner.get_head", side_effect=["old-head", "new-head"])
@@ -139,11 +162,23 @@ def test_manifest_repo_is_deferred_to_startup_handover(
     )
     runner = ServiceRunner(config, config_dir=tmp_path)
 
-    runner._apply_startup_updates()
+    with (
+        patch("haniel.core.runner.get_remote_head", return_value="new-head"),
+        patch(
+            "haniel.core.runner.probe_manifest_target",
+            return_value=staged_release(),
+        ),
+        patch("haniel.core.runner.activate_repo_target", return_value=[]) as activate,
+    ):
+        runner._apply_startup_updates()
 
     assert runner._startup_manifest_updates == {"soulstream": "old-head"}
     assert runner._startup_updated_repos == set()
     assert runner._repo_states["soulstream"].last_head == "new-head"
+    mock_pull.assert_not_called()
+    activate.assert_called_once_with(
+        tmp_path / "soulstream", "new-head", strategy="merge"
+    )
 
 
 @patch("haniel.core.runner.run_manifest_deployment")
@@ -173,9 +208,19 @@ def test_startup_manifest_holds_repo_lock_through_handover(
     runner = ServiceRunner(config, config_dir=tmp_path)
     runner._start_service = MagicMock(return_value=True)
 
-    runner._apply_startup_updates()
+    with (
+        patch("haniel.core.runner.get_remote_head", return_value="new-head"),
+        patch(
+            "haniel.core.runner.probe_manifest_target",
+            return_value=staged_release(),
+        ),
+        patch("haniel.core.runner.activate_repo_target", return_value=[]),
+    ):
+        runner._apply_startup_updates()
 
     assert runner._pull_locks["soulstream"].locked()
+    with pytest.raises(LifecycleConflict, match="DEPLOYMENT_LEASE_CONFLICT"):
+        runner.lifecycle_control.acquire_deployment("soulstream", "one-shot-race")
 
     def assert_locked_during_handover(*_args, **_kwargs) -> None:
         assert runner._pull_locks["soulstream"].locked()
@@ -184,6 +229,88 @@ def test_startup_manifest_holds_repo_lock_through_handover(
     runner.start_services()
 
     assert not runner._pull_locks["soulstream"].locked()
+    with runner.lifecycle_control.acquire_deployment("soulstream", "after-startup"):
+        pass
+
+
+def test_runtime_probe_and_activation_are_serialized_against_one_shot(
+    tmp_path: Path,
+) -> None:
+    make_repo(tmp_path)
+    config = HanielConfig(
+        repos={
+            "soulstream": RepoConfig(
+                url="git@test/soulstream",
+                path="./soulstream",
+                release_manifest=DEFAULT_RELEASE_MANIFEST,
+            )
+        },
+        services={
+            "soulstream-orch-server": ServiceConfig(run="orch", repo="soulstream")
+        },
+    )
+    runner = ServiceRunner(config, config_dir=tmp_path)
+    runner.lifecycle_instance_id = "owner-1"
+    runner._repo_states["soulstream"].pending_changes = {"commits": ["new"]}
+    probe_entered = threading.Event()
+    continue_probe = threading.Event()
+    errors: list[BaseException] = []
+    activated = False
+
+    def probe(*_args, **_kwargs):
+        probe_entered.set()
+        assert continue_probe.wait(2)
+        return staged_release()
+
+    def activate(*_args, **_kwargs):
+        nonlocal activated
+        activated = True
+        return []
+
+    def head(_path: Path) -> str:
+        return "new-head" if activated else "old-head"
+
+    def runtime_pull() -> None:
+        try:
+            runner.trigger_pull("soulstream")
+        except BaseException as error:
+            errors.append(error)
+
+    with (
+        runner.lifecycle_control.acquire_owner("owner-1"),
+        patch("haniel.core.runner.get_remote_head", return_value="new-head"),
+        patch("haniel.core.runner.get_head", side_effect=head),
+        patch("haniel.core.runner.probe_manifest_target", side_effect=probe),
+        patch("haniel.core.runner.activate_repo_target", side_effect=activate) as live,
+        patch("haniel.core.runner.run_manifest_deployment"),
+    ):
+        thread = threading.Thread(target=runtime_pull)
+        thread.start()
+        assert probe_entered.wait(1)
+        runner.lifecycle_control.submit_request(
+            "one-shot-race",
+            {
+                "kind": "handover",
+                "repo": "soulstream",
+                "target_ref": "origin/main",
+                "expected_operation": "upgrade",
+            },
+        )
+        with pytest.raises(LifecycleConflict, match="DEPLOYMENT_LEASE_CONFLICT"):
+            execute_owner_handover(
+                runner,
+                control=runner.lifecycle_control,
+                repo_name="soulstream",
+                target_ref="origin/main",
+                expected_operation="upgrade",
+                request_id="one-shot-race",
+            )
+        continue_probe.set()
+        thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert errors == []
+    live.assert_called_once()
 
 
 def test_orchestrated_pull_waits_for_startup_repo_lock(tmp_path: Path) -> None:
@@ -246,7 +373,15 @@ def test_remote_manifest_without_writable_config_blocks_before_pull(
     )
     runner = ServiceRunner(config, config_dir=tmp_path)
 
-    runner._apply_startup_updates()
+    with (
+        patch("haniel.core.runner.get_remote_head", return_value="new-head"),
+        patch(
+            "haniel.core.runner.probe_manifest_target",
+            return_value=staged_release(),
+        ),
+        patch("haniel.core.runner.activate_repo_target", return_value=[]),
+    ):
+        runner._apply_startup_updates()
 
     mock_pull.assert_not_called()
     error = runner._repo_states["soulstream"].fetch_error
@@ -271,13 +406,21 @@ def test_startup_atomically_activates_remote_manifest_before_pull(
         load_config(config_path), config_dir=tmp_path, config_path=config_path
     )
 
-    runner._apply_startup_updates()
+    with (
+        patch("haniel.core.runner.get_remote_head", return_value="new-head"),
+        patch(
+            "haniel.core.runner.probe_manifest_target",
+            return_value=staged_release(),
+        ),
+        patch("haniel.core.runner.activate_repo_target", return_value=[]),
+    ):
+        runner._apply_startup_updates()
 
     assert load_config(config_path).repos["soulstream"].release_manifest == (
         DEFAULT_RELEASE_MANIFEST
     )
     assert runner._startup_manifest_updates == {"soulstream": "old-head"}
-    mock_pull.assert_called_once()
+    mock_pull.assert_not_called()
 
 
 @patch("haniel.core.runner.sha256_file_at_commit", return_value="manifest-digest")
@@ -306,7 +449,14 @@ def test_approved_pull_activates_before_capturing_previous_head(
     )
     runner._repo_states["soulstream"].pending_changes = {"commits": ["new"]}
 
-    runner.trigger_pull("soulstream")
+    with (
+        patch(
+            "haniel.core.runner.probe_manifest_target",
+            return_value=staged_release(),
+        ),
+        patch("haniel.core.runner.activate_repo_target", return_value=[]),
+    ):
+        runner.trigger_pull("soulstream")
 
     args, kwargs = mock_deploy.call_args
     assert args == (
@@ -317,8 +467,10 @@ def test_approved_pull_activates_before_capturing_previous_head(
     )
     assert kwargs["branch"] == "main"
     assert kwargs["journal_attempt_id"]
+    assert kwargs["expected_operation"] == "upgrade"
+    assert kwargs["request_id"].startswith("runtime-")
     mock_remote_head.assert_called_once()
-    mock_manifest_digest.assert_called_once()
+    mock_manifest_digest.assert_not_called()
 
 
 @patch("haniel.core.runner.get_head", return_value="new-head")
@@ -343,9 +495,91 @@ def test_startup_resumes_manifest_pull_interrupted_before_state_machine(
     store.begin("soulstream", "old-head", "old-head", "startup-pull-pending")
     runner = ServiceRunner(config, config_dir=tmp_path)
 
-    runner._apply_startup_updates()
+    with patch(
+        "haniel.core.runner.probe_manifest_target",
+        return_value=staged_release("new-head"),
+    ) as probe:
+        runner._apply_startup_updates()
 
     assert runner._startup_manifest_updates == {"soulstream": "old-head"}
+    assert runner._startup_manifest_request_ids == {
+        "soulstream": "startup-resume-soulstream-new-head"
+    }
+    probe.assert_called_once()
+
+
+def test_interrupted_fresh_install_preserves_operation_and_absent_rollback(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "soulstream"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    manifest = repo / DEFAULT_RELEASE_MANIFEST
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "target"], cwd=repo, check=True)
+    current_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    config = HanielConfig(
+        repos={
+            "soulstream": RepoConfig(
+                url=str(repo),
+                path="./soulstream",
+                release_manifest=DEFAULT_RELEASE_MANIFEST,
+            )
+        },
+        services={
+            "soulstream-orch-server": ServiceConfig(run="orch", repo="soulstream")
+        },
+    )
+    store = DeploymentStateStore(tmp_path / ".haniel" / "deployments")
+    store.begin_handover(
+        "soulstream",
+        previous_head="absent",
+        target_ref=current_head,
+        manifest_identity=DEFAULT_RELEASE_MANIFEST,
+        request_id="fresh-before-crash",
+        expected_operation="fresh_install",
+    )
+    store.bind_handover_target(
+        "soulstream",
+        request_id="fresh-before-crash",
+        target_head=current_head,
+        release_id="release-1",
+        manifest_digest="digest-1",
+    )
+    runner = ServiceRunner(config, config_dir=tmp_path)
+
+    with (
+        patch("haniel.core.runner.fetch_repo", return_value=False),
+        patch(
+            "haniel.core.runner.probe_manifest_target",
+            return_value=staged_release(current_head),
+        ) as probe,
+        patch("haniel.core.runner.run_manifest_deployment") as deploy,
+        patch("haniel.core.runner.reset_repo_to") as reset,
+    ):
+        runner._apply_startup_updates()
+        runner.start_services()
+
+    probe.assert_called_once()
+    assert probe.call_args.kwargs["expected_operation"] == "fresh_install"
+    deploy.assert_called_once()
+    assert deploy.call_args.args[3] == "absent"
+    assert deploy.call_args.kwargs["expected_operation"] == "fresh_install"
+    reset.assert_not_called()
 
 
 @patch(
@@ -364,14 +598,23 @@ def test_startup_activation_without_new_commits_still_runs_manifest_once(
         load_config(config_path), config_dir=tmp_path, config_path=config_path
     )
 
-    runner._apply_startup_updates()
+    with patch(
+        "haniel.core.runner.probe_manifest_target",
+        return_value=staged_release("current-head"),
+    ) as probe:
+        runner._apply_startup_updates()
 
     assert runner._startup_manifest_updates == {"soulstream": "current-head"}
+    assert runner._startup_manifest_request_ids == {
+        "soulstream": "startup-resume-soulstream-current-head"
+    }
+    probe.assert_called_once()
     journal = DeploymentStateStore(tmp_path / ".haniel" / "deployments").read(
         "soulstream"
     )
     assert journal is not None
-    assert journal["release_id"] == "startup-activation-pending"
+    assert journal["release_id"] == "release-1"
+    assert journal["target_head"] == "current-head"
 
 
 def test_runner_start_closes_nonterminal_manifest_journal_before_startup_work(
