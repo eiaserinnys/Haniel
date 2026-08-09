@@ -772,3 +772,102 @@ class TestSendJson:
 
         with pytest.raises(asyncio.TimeoutError):
             await client._send_json({"type": "node_status"})
+
+
+class TestHeartbeatDoesNotBlockEventLoop:
+    """The event loop must stay responsive while a runner thread holds a lock.
+
+    Regression for the 260810 node flap: the heartbeat read service state
+    through a config-guarded runner method, so the loop parked on the runner's
+    threading lock. The poll thread held that lock while waiting on a coroutine
+    the parked loop could no longer run, so the two deadlocked until the send
+    timed out. Pongs stopped with it, the hub closed each connection after 60s,
+    and every node sat offline roughly 70% of the time.
+
+    The lock is released by a coroutine, so a parked loop can never reach the
+    release and the deadlock reproduces instead of merely running slowly.
+    """
+
+    def test_send_heartbeat_reads_service_state_off_the_loop(self, config):
+        holder_acquired = threading.Event()
+        release_holder = threading.Event()
+        runner_lock = threading.RLock()
+
+        def guarded_services_info():
+            with runner_lock:
+                return [{"name": "svc", "ready": True}]
+
+        client = OrchestratorClient(
+            config,
+            haniel_version="0.1.0",
+            get_services_info=guarded_services_info,
+        )
+        client._ws = MagicMock()
+        client._send_json = AsyncMock()
+
+        def hold_lock() -> None:
+            with runner_lock:
+                holder_acquired.set()
+                release_holder.wait(timeout=10)
+
+        async def release_from_the_loop() -> str:
+            await asyncio.sleep(0.05)
+            release_holder.set()
+            return "alive"
+
+        async def scenario() -> str:
+            holder = threading.Thread(target=hold_lock)
+            holder.start()
+            assert holder_acquired.wait(timeout=5)
+            heartbeat = asyncio.create_task(client._send_heartbeat())
+            progressed = await asyncio.wait_for(release_from_the_loop(), timeout=2)
+            await asyncio.wait_for(heartbeat, timeout=5)
+            holder.join(timeout=5)
+            return progressed
+
+        assert asyncio.run(scenario()) == "alive"
+        client._send_json.assert_awaited_once()
+        sent = client._send_json.await_args.args[0]
+        assert sent["type"] == "node_status"
+        assert sent["services"] == [{"name": "svc", "ready": True}]
+
+    def test_node_hello_reads_service_state_off_the_loop(self, config):
+        holder_acquired = threading.Event()
+        release_holder = threading.Event()
+        runner_lock = threading.RLock()
+
+        def guarded_services_info():
+            with runner_lock:
+                return [{"name": "svc", "ready": True}]
+
+        client = OrchestratorClient(
+            config,
+            haniel_version="0.1.0",
+            get_services_info=guarded_services_info,
+        )
+
+        def hold_lock() -> None:
+            with runner_lock:
+                holder_acquired.set()
+                release_holder.wait(timeout=10)
+
+        async def release_from_the_loop() -> str:
+            await asyncio.sleep(0.05)
+            release_holder.set()
+            return "alive"
+
+        async def scenario() -> tuple:
+            holder = threading.Thread(target=hold_lock)
+            holder.start()
+            assert holder_acquired.wait(timeout=5)
+            snapshot = asyncio.create_task(client._services_snapshot())
+            progressed = await asyncio.wait_for(release_from_the_loop(), timeout=2)
+            services = await asyncio.wait_for(snapshot, timeout=5)
+            holder.join(timeout=5)
+            return progressed, services
+
+        progressed, services = asyncio.run(scenario())
+        assert progressed == "alive"
+        assert client._build_node_hello(services)["services"] == [
+            {"name": "svc", "ready": True}
+        ]

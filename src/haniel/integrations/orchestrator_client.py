@@ -264,7 +264,18 @@ class OrchestratorClient:
         except Exception as exc:
             logger.warning("Failed to send orchestrator deploy report: %s", exc)
 
-    def _build_node_hello(self) -> dict:
+    async def _services_snapshot(self) -> "list[dict] | None":
+        """Read config-guarded service state without parking the event loop.
+
+        The reader blocks on a runner threading lock. Awaiting it in a worker
+        thread keeps pongs, socket reads, and cross-thread coroutine scheduling
+        alive while a runner thread holds that lock.
+        """
+        if self._get_services_info is None:
+            return None
+        return await asyncio.to_thread(self._get_services_info)
+
+    def _build_node_hello(self, services: "list[dict] | None" = None) -> dict:
         """Build the NodeHello payload sent after connecting."""
         return {
             "type": "node_hello",
@@ -274,7 +285,7 @@ class OrchestratorClient:
             "os": platform.system(),
             "arch": platform.machine(),
             "haniel_version": self._haniel_version,
-            "services": self._get_services_info() if self._get_services_info else None,
+            "services": services,
         }
 
     def enqueue_deploy_result(
@@ -410,7 +421,7 @@ class OrchestratorClient:
             self._deploy_attempt_gate.reset_connection()
 
             # Send NodeHello
-            await self._send_json(self._build_node_hello())
+            await self._send_json(self._build_node_hello(await self._services_snapshot()))
 
             self._connected = True
             self._reset_backoff()
@@ -615,11 +626,15 @@ class OrchestratorClient:
         )
 
     async def _send_heartbeat(self) -> None:
-        """Send a heartbeat message with current service state."""
+        """Send a heartbeat message with current service state.
+
+        Reads service state off the loop; see _services_snapshot.
+        """
+        services = await self._services_snapshot()
         msg = {
             "type": "node_status",
             "node_id": self._config.node_id,
-            "services": self._get_services_info() if self._get_services_info else None,
+            "services": services,
         }
         await self._send_json(msg)
 
