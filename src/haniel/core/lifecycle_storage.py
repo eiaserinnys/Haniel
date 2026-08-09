@@ -37,12 +37,64 @@ def atomic_json(path: Path, value: dict[str, Any]) -> None:
 
 
 def current_process_start_identity() -> str:
-    stat = Path("/proc/self/stat")
-    if stat.exists():
-        fields_after_name = stat.read_text(encoding="utf-8").rsplit(")", 1)[1].split()
-        if len(fields_after_name) > 19:
-            return f"proc-start-ticks:{fields_after_name[19]}"
+    identity = process_start_identity(os.getpid())
+    if identity is not None:
+        return identity
     return f"process-instance:{os.getpid()}:{_PROCESS_START_FALLBACK}"
+
+
+def process_start_identity(pid: int) -> str | None:
+    """Resolve an OS process creation identity so PID reuse cannot impersonate owner."""
+    if os.name == "nt":
+        return _windows_process_start_identity(pid)
+    stat = Path(f"/proc/{pid}/stat")
+    try:
+        fields_after_name = stat.read_text(encoding="utf-8").rsplit(")", 1)[1].split()
+    except (FileNotFoundError, IndexError, OSError):
+        return None
+    if len(fields_after_name) <= 19:
+        return None
+    return f"proc-start-ticks:{fields_after_name[19]}"
+
+
+def _windows_process_start_identity(pid: int) -> str | None:
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    ]
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        return None
+    creation = wintypes.FILETIME()
+    exit_time = wintypes.FILETIME()
+    kernel = wintypes.FILETIME()
+    user = wintypes.FILETIME()
+    try:
+        if not kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel),
+            ctypes.byref(user),
+        ):
+            return None
+        ticks = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+        return f"windows-filetime:{ticks}"
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _fsync_directory(directory: Path) -> None:

@@ -133,11 +133,11 @@ def test_active_owner_rejects_metadata_from_reused_pid_or_other_instance(
     with control.acquire_owner("current-instance"):
         metadata = control.read_owner()
         metadata["instance_id"] = "stale-instance"
-        metadata["lease_identity"] = "stale-instance"
         metadata["pid"] = os.getpid()
+        metadata["process_start_identity"] = "reused-pid"
         control.owner_path.write_text(json.dumps(metadata), encoding="utf-8")
 
-        with pytest.raises(LifecycleConflict, match="does not match OS lease"):
+        with pytest.raises(LifecycleConflict, match="process identity is stale"):
             control.read_active_owner()
 
 

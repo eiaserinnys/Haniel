@@ -11,12 +11,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from .lifecycle_storage import atomic_json, current_process_start_identity, read_json
+from .lifecycle_storage import (
+    atomic_json,
+    current_process_start_identity,
+    process_start_identity,
+    read_json,
+)
+from .lifecycle_locks import (
+    FileLease as _FileLease,
+    LifecycleConflict,
+    SerialFileLock as _SerialFileLock,
+)
 from .safety_redaction import redact_value
-
-
-class LifecycleConflict(RuntimeError):
-    """A stable lifecycle identity or lease conflict."""
 
 
 def config_identity(config_path: Path) -> str:
@@ -32,161 +38,40 @@ class RequestSubmission:
     path: Path
 
 
-class _FileLease:
-    _guard = threading.Lock()
-    _active: dict[str, str] = {}
-
-    def __init__(self, path: Path, holder: str, conflict_code: str) -> None:
-        self.path = path
-        self.holder = holder
-        self.conflict_code = conflict_code
-        self._handle = None
-        handle = None
-        key = str(path.resolve(strict=False))
-        with self._guard:
-            current = self._active.get(key)
-            if current is not None:
-                raise LifecycleConflict(f"{conflict_code}: lease is held by {current}")
-            self._active[key] = holder
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.touch(exist_ok=True)
-            handle = path.open("r+b")
-            if path.stat().st_size == 0:
-                handle.write(b"0")
-                handle.flush()
-            handle.seek(0)
-            self._lock(handle)
-            handle.seek(0)
-            handle.truncate()
-            handle.write(holder.encode("utf-8"))
-            handle.flush()
-            os.fsync(handle.fileno())
-            handle.seek(0)
-            self._handle = handle
-        except Exception:
-            if handle is not None:
-                handle.close()
-            with self._guard:
-                self._active.pop(key, None)
-            raise
-
-    def _lock(self, handle) -> None:
-        if os.name == "nt":
-            import msvcrt
-
-            try:
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            except OSError as error:
-                raise LifecycleConflict(
-                    f"{self.conflict_code}: OS lease is already held"
-                ) from error
-        else:
-            import fcntl
-
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as error:
-                raise LifecycleConflict(
-                    f"{self.conflict_code}: OS lease is already held"
-                ) from error
-
-    @staticmethod
-    def _unlock(handle) -> None:
-        if os.name == "nt":
-            import msvcrt
-
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-    def release(self) -> None:
-        if self._handle is None:
-            return
-        key = str(self.path.resolve(strict=False))
-        try:
-            self._unlock(self._handle)
-        finally:
-            self._handle.close()
-            self._handle = None
-            with self._guard:
-                self._active.pop(key, None)
-
-
-class _SerialFileLock(AbstractContextManager["_SerialFileLock"]):
-    _guard = threading.Lock()
-    _local_locks: dict[str, threading.Lock] = {}
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        key = str(path.resolve(strict=False))
-        with self._guard:
-            self._local_lock = self._local_locks.setdefault(key, threading.Lock())
-        self._local_lock.acquire()
-        self._handle = None
-        handle = None
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            handle = path.open("a+b")
-            if handle.tell() == 0:
-                handle.write(b"0")
-                handle.flush()
-            handle.seek(0)
-            self._lock(handle)
-            self._handle = handle
-        except Exception:
-            if handle is not None:
-                handle.close()
-            self._local_lock.release()
-            raise
-
-    @staticmethod
-    def _lock(handle) -> None:
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-
-    def __exit__(self, exc_type, exc, traceback) -> None:
-        try:
-            if self._handle is not None:
-                _FileLease._unlock(self._handle)
-                self._handle.close()
-                self._handle = None
-        finally:
-            self._local_lock.release()
-
-
 class ResidentOwner(AbstractContextManager["ResidentOwner"]):
     def __init__(self, control: "LifecycleControl", instance_id: str) -> None:
         self.control = control
         self.instance_id = instance_id
-        self._lease = _FileLease(
-            control.owner_lock_path,
-            instance_id,
-            "LIFECYCLE_OWNER_CONFLICT",
-        )
-        try:
-            control._prepare_owner_metadata(instance_id)
-        except Exception:
-            self._lease.release()
-            raise
+        with control._owner_metadata_transaction():
+            self._lease = _FileLease(
+                control.owner_lock_path,
+                instance_id,
+                "LIFECYCLE_OWNER_CONFLICT",
+            )
+            try:
+                self._identity = control._prepare_owner_metadata(instance_id)
+            except Exception:
+                self._lease.release()
+                raise
 
     def metadata(self) -> dict[str, Any]:
         return self.control.read_owner()
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         try:
-            metadata = self.control.read_owner(optional=True)
-            if metadata and metadata.get("instance_id") == self.instance_id:
-                self.control.owner_path.unlink(missing_ok=True)
+            with self.control._owner_metadata_transaction():
+                metadata = self.control.read_owner(optional=True)
+                identity_keys = (
+                    "config_identity",
+                    "instance_id",
+                    "pid",
+                    "process_start_identity",
+                )
+                if metadata and all(
+                    metadata.get(key) == self._identity.get(key)
+                    for key in identity_keys
+                ):
+                    self.control.owner_path.unlink(missing_ok=True)
         finally:
             self._lease.release()
 
@@ -239,6 +124,7 @@ class LifecycleControl:
         self.transactions_dir = self.root / "transactions"
         self.owner_path = self.root / "owner.json"
         self.owner_lock_path = self.root / "owner.lock"
+        self.owner_metadata_lock_path = self.root / "owner.metadata.lock"
 
     def acquire_owner(self, instance_id: str) -> ResidentOwner:
         return ResidentOwner(self, instance_id)
@@ -413,23 +299,44 @@ class LifecycleControl:
                 "LIFECYCLE_OWNER_ACTIVE",
             )
         except LifecycleConflict:
-            metadata = self.read_owner()
-            if metadata.get("config_identity") != self.identity:
-                raise LifecycleConflict(
-                    "LIFECYCLE_OWNER_CONFLICT: owner config identity mismatch"
-                )
-            if not metadata.get("instance_id") or not metadata.get(
-                "process_start_identity"
-            ):
-                raise LifecycleConflict(
-                    "LIFECYCLE_OWNER_CONFLICT: owner metadata is incomplete"
-                )
-            lease_identity = self.owner_lock_path.read_text(encoding="utf-8")
-            if metadata.get("lease_identity") != lease_identity:
-                raise LifecycleConflict(
-                    "LIFECYCLE_OWNER_CONFLICT: owner metadata does not match OS lease"
-                )
-            return metadata
+            with self._owner_metadata_transaction():
+                try:
+                    recheck = _FileLease(
+                        self.owner_lock_path,
+                        "owner-recheck",
+                        "LIFECYCLE_OWNER_ACTIVE",
+                    )
+                except LifecycleConflict:
+                    metadata = self.read_owner()
+                    if metadata.get("config_identity") != self.identity:
+                        raise LifecycleConflict(
+                            "LIFECYCLE_OWNER_CONFLICT: owner config identity mismatch"
+                        )
+                    if not metadata.get("instance_id") or not metadata.get(
+                        "process_start_identity"
+                    ):
+                        raise LifecycleConflict(
+                            "LIFECYCLE_OWNER_CONFLICT: owner metadata is incomplete"
+                        )
+                    pid = metadata.get("pid")
+                    if not isinstance(pid, int):
+                        raise LifecycleConflict(
+                            "LIFECYCLE_OWNER_CONFLICT: owner metadata is incomplete"
+                        )
+                    observed_start = process_start_identity(pid)
+                    if (
+                        observed_start is not None
+                        and observed_start != metadata["process_start_identity"]
+                    ):
+                        raise LifecycleConflict(
+                            "LIFECYCLE_OWNER_CONFLICT: owner process identity is stale"
+                        )
+                    return metadata
+                else:
+                    recheck.release()
+                    raise LifecycleConflict(
+                        "LIFECYCLE_OWNER_MISSING: no resident owner"
+                    )
         else:
             probe.release()
             raise LifecycleConflict("LIFECYCLE_OWNER_MISSING: no resident owner")
@@ -454,27 +361,31 @@ class LifecycleControl:
     def _request_transaction(self, request_id: str) -> _SerialFileLock:
         return _SerialFileLock(self.transactions_dir / f"{_safe(request_id)}.lock")
 
-    def _write_owner(self, instance_id: str) -> None:
+    def _owner_metadata_transaction(self) -> _SerialFileLock:
+        return _SerialFileLock(self.owner_metadata_lock_path)
+
+    def _write_owner(self, instance_id: str) -> dict[str, Any]:
+        metadata = {
+            "schema_version": "haniel.lifecycle.owner.v1",
+            "config_identity": self.identity,
+            "config_path": str(self.config_path),
+            "instance_id": instance_id,
+            "pid": os.getpid(),
+            "process_start_identity": current_process_start_identity(),
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }
         atomic_json(
             self.owner_path,
-            {
-                "schema_version": "haniel.lifecycle.owner.v1",
-                "config_identity": self.identity,
-                "config_path": str(self.config_path),
-                "instance_id": instance_id,
-                "lease_identity": instance_id,
-                "pid": os.getpid(),
-                "process_start_identity": current_process_start_identity(),
-                "started_at": datetime.now(timezone.utc).isoformat(),
-            },
+            metadata,
         )
+        return metadata
 
-    def _prepare_owner_metadata(self, instance_id: str) -> None:
+    def _prepare_owner_metadata(self, instance_id: str) -> dict[str, Any]:
         if self.owner_path.exists():
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
             stale = self.owner_path.with_name(f"owner.json.stale-{stamp}")
             os.replace(self.owner_path, stale)
-        self._write_owner(instance_id)
+        return self._write_owner(instance_id)
 
 
 def _safe(value: str) -> str:
