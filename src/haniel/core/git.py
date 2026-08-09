@@ -428,6 +428,50 @@ def pull_repo(
         return []
 
 
+def activate_repo_target(
+    path: Path,
+    revision: str,
+    *,
+    strategy: str,
+) -> list[str]:
+    """Activate one already-fetched immutable target without consulting a branch."""
+    if not path.exists() or not (path / ".git").is_dir():
+        raise GitPullError(f"Not a git repository: {path}", path=path)
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+        raise GitPullError(f"Invalid staged revision: {revision}", path=path)
+    discarded: list[str] = []
+    try:
+        if strategy == "force":
+            status = _run_git(["status", "--short"], cwd=path)
+            discarded = [
+                line.strip()
+                for line in status.stdout.strip().splitlines()
+                if line.strip()
+            ]
+            _run_git(["reset", "--hard", revision], cwd=path)
+        elif strategy == "merge":
+            _run_git(["merge", "--ff-only", revision], cwd=path)
+        else:
+            raise GitPullError(
+                f"Unsupported pull strategy for staged activation: {strategy}",
+                path=path,
+            )
+        actual = get_head(path)
+        if actual != revision:
+            raise GitPullError(
+                f"Activated HEAD {actual} does not match staged target {revision}",
+                path=path,
+            )
+    except subprocess.CalledProcessError as error:
+        raise GitPullError(
+            f"Failed to activate staged target {revision}",
+            path=path,
+            stderr=error.stderr.strip(),
+            returncode=error.returncode,
+        ) from error
+    return discarded
+
+
 def reset_repo_to(path: Path, revision: str) -> None:
     """Restore tracked repository content to one previously recorded revision."""
 

@@ -7,6 +7,10 @@ Implements the poll → pull → restart cycle:
 - Phase 3: Health check (process survival)
 
 haniel doesn't care what it runs. It polls, pulls, and restarts as configured.
+
+This legacy orchestration module remains above 500 lines while its runtime
+surfaces are extracted incrementally. New release lifecycle logic belongs in
+one_shot_handover.py; this file only wires existing callers to that boundary.
 """
 
 import hashlib
@@ -22,6 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
+from uuid import uuid4
 
 from ..config import (
     BackoffConfig,
@@ -40,6 +45,7 @@ from .child_env import sanitized_child_env
 from .change_evidence import get_applied_change_evidence
 from .git import (
     GitError,
+    activate_repo_target,
     fetch_repo,
     get_head,
     get_pending_changes,
@@ -56,6 +62,10 @@ from .repo_reconciliation import (
     capture_repo_snapshot,
 )
 from .runner_deployment import run_manifest_deployment
+from .one_shot_handover import probe_manifest_target
+from .release_staging import ReleaseStagingError
+from .safety_redaction import redact_text, sensitive_values
+from .lifecycle_control import DeploymentLease, LifecycleControl
 from .deploy_retry_planner import DeployRetryPlanner
 from .orchestrated_deploy_execution import (
     OrchestratedDeployRegistry,
@@ -290,6 +300,10 @@ class ServiceRunner:
         self.config_dir = config_dir
         self.log_dir = log_dir or config_dir / "logs"
         self.config_path = config_path
+        self.lifecycle_control = LifecycleControl(
+            config_path or (config_dir / "haniel.yaml")
+        )
+        self.lifecycle_instance_id: str | None = None
 
         self.poll_interval = config.poll_interval
 
@@ -359,6 +373,9 @@ class ServiceRunner:
         self._post_pull_executed = False
         self._startup_updated_repos: set[str] = set()
         self._startup_manifest_updates: dict[str, str] = {}
+        self._startup_manifest_request_ids: dict[str, str] = {}
+        self._startup_manifest_operations: dict[str, str] = {}
+        self._startup_deployment_leases: dict[str, DeploymentLease] = {}
         self._startup_repo_locks: set[str] = set()
 
         # Self-update (see ADR-0002)
@@ -499,7 +516,13 @@ class ServiceRunner:
             config_prefix = str(self.config_dir).replace("\\", "/") + "/"
             hook_cmd = re.sub(r"(?<![.\w])\./", config_prefix, hook_cmd)
 
-        logger.info(f"Executing {hook_name} hook for {service_name}: {hook_cmd}")
+        redaction_values = sensitive_values(os.environ)
+        logger.info(
+            "Executing %s hook for %s: %s",
+            hook_name,
+            service_name,
+            redact_text(hook_cmd, redaction_values),
+        )
 
         try:
             # Use shell=True when the command contains shell operators (&&, ||,
@@ -527,14 +550,23 @@ class ServiceRunner:
             return True
         except subprocess.CalledProcessError as e:
             logger.error(
-                f"Hook {hook_name} for {service_name} failed with exit code {e.returncode}: {e.stderr}"
+                "Hook %s for %s failed with exit code %s: %s",
+                hook_name,
+                service_name,
+                e.returncode,
+                redact_text(str(e.stderr or ""), redaction_values),
             )
             return False
         except subprocess.TimeoutExpired:
             logger.error(f"Hook {hook_name} for {service_name} timed out")
             return False
         except Exception as e:
-            logger.error(f"Hook {hook_name} for {service_name} failed: {e}")
+            logger.error(
+                "Hook %s for %s failed: %s",
+                hook_name,
+                service_name,
+                redact_text(str(e), redaction_values),
+            )
             return False
 
     def start_services(self) -> None:
@@ -575,6 +607,9 @@ class ServiceRunner:
         for name in startup_order:
             if name in handled_manifest_services:
                 continue
+            if self.process_manager.is_running(name):
+                logger.info("Service already running after handover: %s", name)
+                continue
             repo_name = self._enabled_services[name].repo
             if repo_name not in self._startup_manifest_updates:
                 self._start_service(name)
@@ -589,6 +624,12 @@ class ServiceRunner:
                     affected,
                     self._startup_manifest_updates[repo_name],
                     desired_running=set(affected),
+                    expected_operation=self._startup_manifest_operations.get(
+                        repo_name, "upgrade"
+                    ),
+                    request_id=self._startup_manifest_request_ids.get(
+                        repo_name, f"startup-resume-{repo_name}"
+                    ),
                 )
             except DeploymentError as error:
                 if not error.recovered:
@@ -601,6 +642,9 @@ class ServiceRunner:
 
     def _release_startup_repo_locks(self) -> None:
         """Release repo leases retained across startup manifest handover."""
+        for repo_name, lease in tuple(self._startup_deployment_leases.items()):
+            lease.__exit__(None, None, None)
+            self._startup_deployment_leases.pop(repo_name, None)
         for repo_name in tuple(self._startup_repo_locks):
             lock = self._pull_locks.get(repo_name)
             if lock is not None and lock.locked():
@@ -1323,6 +1367,7 @@ class ServiceRunner:
             return
 
         captured_changes: dict | None = None
+        deployment_lease: DeploymentLease | None = None
         try:
             state = self._repo_states[repo_name]
 
@@ -1360,35 +1405,66 @@ class ServiceRunner:
                         repo_path, state.config.branch
                     )
                     manifest_identity = state.config.release_manifest
-                    manifest_digest = sha256_file_at_commit(
-                        repo_path, intended_target, manifest_identity
+                    lifecycle_request_id = (
+                        orchestrator_attempt_id or f"runtime-{uuid4()}"
                     )
-                    journal_attempt_id = self._record_manifest_deployment_intent(
+                    deployment_lease = self.lifecycle_control.acquire_deployment(
+                        repo_name, lifecycle_request_id
+                    )
+                    journal_store = self._deployment_state_store()
+                    journal_attempt_id = journal_store.begin_handover(
                         repo_name,
-                        previous_head,
-                        "approved-pull-pending",
-                        target_head=intended_target,
-                        orchestrator_attempt_id=orchestrator_attempt_id,
-                        node_id=node_id,
-                        branch=resolved_branch,
+                        previous_head=previous_head,
+                        target_ref=intended_target,
                         manifest_identity=manifest_identity,
-                        manifest_digest=manifest_digest,
+                        request_id=lifecycle_request_id,
+                        expected_operation="upgrade",
                     )
+                    staged = probe_manifest_target(
+                        self,
+                        repo_name,
+                        target_ref=intended_target,
+                        expected_operation="upgrade",
+                        request_id=lifecycle_request_id,
+                    )
+                    journal_store.bind_handover_target(
+                        repo_name,
+                        request_id=lifecycle_request_id,
+                        target_head=staged.target_head,
+                        release_id=staged.manifest.release_id,
+                        manifest_digest=staged.manifest_digest,
+                    )
+                    if target_head is not None and staged.target_head != target_head:
+                        raise ApprovalRevalidationError(
+                            "approved target changed during staging: "
+                            f"approved={target_head} staged={staged.target_head}"
+                        )
                 else:
                     journal_attempt_id = None
-                success, discarded = self._pull_repo(repo_name)
-                if not success:
-                    raise RuntimeError(f"git pull failed for {repo_name}")
-                if target_head is not None:
-                    actual_head = get_head(repo_path)
-                    if actual_head != target_head:
-                        assert previous_head is not None
-                        reset_repo_to(repo_path, previous_head)
-                        state.last_head = get_head(repo_path)
-                        raise ApprovalRevalidationError(
-                            "approved target changed during pull: "
-                            f"approved={target_head} pulled={actual_head}"
+                if state.config.release_manifest:
+                    assert previous_head is not None
+                    try:
+                        discarded = activate_repo_target(
+                            repo_path,
+                            staged.target_head,
+                            strategy=state.config.pull_strategy or "merge",
                         )
+                        actual_head = get_head(repo_path)
+                        if actual_head != staged.target_head:
+                            raise RuntimeError(
+                                "activated checkout differs from staged target"
+                            )
+                    except Exception:
+                        if get_head(repo_path) != previous_head:
+                            reset_repo_to(repo_path, previous_head)
+                        state.last_head = get_head(repo_path)
+                        raise
+                    state.last_head = actual_head
+                    state.pending_changes = None
+                else:
+                    success, discarded = self._pull_repo(repo_name)
+                    if not success:
+                        raise RuntimeError(f"git pull failed for {repo_name}")
 
                 if state.config.release_manifest:
                     assert previous_head is not None
@@ -1406,6 +1482,8 @@ class ServiceRunner:
                         node_id=node_id,
                         branch=resolved_branch,
                         journal_attempt_id=journal_attempt_id,
+                        expected_operation="upgrade",
+                        request_id=lifecycle_request_id,
                         **progress_kwargs,
                     )
                 else:
@@ -1446,6 +1524,8 @@ class ServiceRunner:
                 self._ws_handler.broadcast_repo_pulling(repo_name, False)
             # Clear pending hash so new changes after this pull trigger fresh notifications
             self._last_pending_hash.pop(repo_name, None)
+            if deployment_lease is not None:
+                deployment_lease.__exit__(None, None, None)
             pull_lock.release()
 
     def _restart_after_pull_legacy(self, repo_name: str, affected: list[str]) -> None:
@@ -1572,6 +1652,11 @@ class ServiceRunner:
         failed: list[str] = []
         self._startup_updated_repos.clear()
         self._startup_manifest_updates.clear()
+        self._startup_manifest_request_ids.clear()
+        self._startup_manifest_operations.clear()
+        for lease in self._startup_deployment_leases.values():
+            lease.__exit__(None, None, None)
+        self._startup_deployment_leases.clear()
 
         for name, state in self._repo_states.items():
             # Skip self-update repo (haniel-runner.ps1 handles it)
@@ -1589,6 +1674,7 @@ class ServiceRunner:
             self._startup_repo_locks.add(name)
             pull_lock.acquire()
             retain_for_manifest_handover = False
+            deployment_lease: DeploymentLease | None = None
             try:
                 has_updates = fetch_repo(
                     path=repo_path,
@@ -1604,20 +1690,69 @@ class ServiceRunner:
                         get_head(repo_path) if state.config.release_manifest else None
                     )
                     if previous_head is not None:
-                        self._record_manifest_deployment_intent(
-                            name, previous_head, "startup-pull-pending"
+                        startup_target = get_remote_head(repo_path, state.config.branch)
+                        startup_request_id = f"startup-{name}-{startup_target[:12]}"
+                        deployment_lease = self.lifecycle_control.acquire_deployment(
+                            name, startup_request_id
                         )
-                    pull_repo(
-                        path=repo_path,
-                        branch=state.config.branch,
-                        strategy=state.config.pull_strategy or "merge",
-                    )
-                    state.last_head = get_head(repo_path)
+                        manifest_identity = state.config.release_manifest
+                        assert manifest_identity is not None
+                        journal_store = self._deployment_state_store()
+                        journal_store.begin_handover(
+                            name,
+                            previous_head=previous_head,
+                            target_ref=startup_target,
+                            manifest_identity=manifest_identity,
+                            request_id=startup_request_id,
+                            expected_operation="upgrade",
+                        )
+                        staged = probe_manifest_target(
+                            self,
+                            name,
+                            target_ref=startup_target,
+                            expected_operation="upgrade",
+                            request_id=startup_request_id,
+                        )
+                        journal_store.bind_handover_target(
+                            name,
+                            request_id=startup_request_id,
+                            target_head=staged.target_head,
+                            release_id=staged.manifest.release_id,
+                            manifest_digest=staged.manifest_digest,
+                        )
+                    if state.config.release_manifest:
+                        try:
+                            activate_repo_target(
+                                repo_path,
+                                staged.target_head,
+                                strategy=state.config.pull_strategy or "merge",
+                            )
+                            actual_head = get_head(repo_path)
+                            if actual_head != staged.target_head:
+                                raise RuntimeError(
+                                    "activated checkout differs from staged target"
+                                )
+                        except Exception:
+                            assert previous_head is not None
+                            if get_head(repo_path) != previous_head:
+                                reset_repo_to(repo_path, previous_head)
+                            state.last_head = get_head(repo_path)
+                            raise
+                        state.last_head = actual_head
+                    else:
+                        pull_repo(
+                            path=repo_path,
+                            branch=state.config.branch,
+                            strategy=state.config.pull_strategy or "merge",
+                        )
+                        state.last_head = get_head(repo_path)
                     state.pending_changes = None
                     updated.append(name)
                     if state.config.release_manifest:
                         assert previous_head is not None
                         self._startup_manifest_updates[name] = previous_head
+                        self._startup_manifest_request_ids[name] = startup_request_id
+                        self._startup_manifest_operations[name] = "upgrade"
                     else:
                         self._startup_updated_repos.add(name)
                 else:
@@ -1626,8 +1761,15 @@ class ServiceRunner:
 
                 if name in self._startup_manifest_updates:
                     retain_for_manifest_handover = True
+                    if deployment_lease is not None:
+                        self._startup_deployment_leases[name] = deployment_lease
+                        deployment_lease = None
 
-            except (GitError, ReleaseManifestActivationRequired) as e:
+            except (
+                GitError,
+                ReleaseManifestActivationRequired,
+                ReleaseStagingError,
+            ) as e:
                 logger.error("Startup update failed for %s: %s", name, e)
                 state.fetch_error = str(e)
                 failed.append(name)
@@ -1635,6 +1777,8 @@ class ServiceRunner:
                 if not retain_for_manifest_handover:
                     pull_lock.release()
                     self._startup_repo_locks.discard(name)
+                if deployment_lease is not None:
+                    deployment_lease.__exit__(None, None, None)
 
         if updated:
             logger.info(
@@ -1736,27 +1880,63 @@ class ServiceRunner:
             return
         repo_path = self.config_dir / state.config.path
         current_head = get_head(repo_path)
-        journal = self._deployment_state_store().read(repo_name)
+        store = self._deployment_state_store()
+        journal = store.read(repo_name)
         if activated:
-            self._record_manifest_deployment_intent(
-                repo_name, current_head, "startup-activation-pending"
-            )
-            self._startup_manifest_updates[repo_name] = current_head
-            return
-        if journal is None or journal.get("state") == "success":
-            return
-        previous_head = journal.get("previous_head")
-        release_id = journal.get("release_id")
-        activation_pending = release_id == "startup-activation-pending"
-        if isinstance(previous_head, str) and (
-            activation_pending or current_head != previous_head
-        ):
-            logger.warning(
-                "Resuming interrupted manifest deployment for %s from %s",
+            previous_head = current_head
+        else:
+            if journal is None or journal.get("state") == "success":
+                return
+            previous_head = journal.get("previous_head")
+            if not isinstance(previous_head, str) or current_head == previous_head:
+                return
+        manifest_identity = state.config.release_manifest
+        assert manifest_identity is not None
+        operation = journal.get("expected_operation") if journal is not None else None
+        if operation not in {"fresh_install", "upgrade"}:
+            operation = "upgrade"
+        request_id = f"startup-resume-{repo_name}-{current_head[:12]}"
+        lease = self.lifecycle_control.acquire_deployment(repo_name, request_id)
+        try:
+            store.begin_handover(
                 repo_name,
-                previous_head[:8],
+                previous_head=previous_head,
+                target_ref=current_head,
+                manifest_identity=manifest_identity,
+                request_id=request_id,
+                expected_operation=operation,
             )
-            self._startup_manifest_updates[repo_name] = previous_head
+            staged = probe_manifest_target(
+                self,
+                repo_name,
+                target_ref=current_head,
+                expected_operation=operation,
+                request_id=request_id,
+            )
+            if staged.target_head != current_head:
+                raise ReleaseStagingError(
+                    "startup resume target differs from detached staging evidence"
+                )
+            store.bind_handover_target(
+                repo_name,
+                request_id=request_id,
+                target_head=staged.target_head,
+                release_id=staged.manifest.release_id,
+                manifest_digest=staged.manifest_digest,
+            )
+        except Exception:
+            lease.__exit__(None, None, None)
+            raise
+        self._startup_deployment_leases[repo_name] = lease
+        logger.warning(
+            "Resuming staged manifest deployment for %s from %s at %s",
+            repo_name,
+            previous_head[:8],
+            current_head[:8],
+        )
+        self._startup_manifest_updates[repo_name] = previous_head
+        self._startup_manifest_request_ids[repo_name] = request_id
+        self._startup_manifest_operations[repo_name] = operation
 
     def _poll_loop(self) -> None:
         """Main poll loop."""

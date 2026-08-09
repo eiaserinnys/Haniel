@@ -37,6 +37,8 @@ class InstallOrchestrator:
         config_dir: Path,
         state: InstallState,
         config_filename: str = "haniel.yaml",
+        *,
+        defer_manifest_handover: bool = False,
     ):
         """Initialize the orchestrator.
 
@@ -50,6 +52,7 @@ class InstallOrchestrator:
         self.config_dir = config_dir
         self.state = state
         self.config_filename = config_filename
+        self.defer_manifest_handover = defer_manifest_handover
         self._state_file = config_dir / "install.state"
 
         # Lazy import to avoid circular dependencies
@@ -64,7 +67,10 @@ class InstallOrchestrator:
             from .mechanical import MechanicalInstaller
 
             self._mechanical = MechanicalInstaller(
-                self.config, self.config_dir, self.state
+                self.config,
+                self.config_dir,
+                self.state,
+                defer_manifest_handover=self.defer_manifest_handover,
             )
         return self._mechanical
 
@@ -272,14 +278,19 @@ class InstallOrchestrator:
             self.save_state()
             return False
 
-        # Register service (Windows only)
-        try:
-            self.finalizer.register_service()
-            self.state.mark_complete("service-registration")
-        except Exception as e:
-            logger.warning(f"Service registration failed: {e}")
-            self.state.mark_failed("service-registration", str(e))
-            # Don't fail the whole installation for this
+        # Manifest handover owns the running service identity. Registration is
+        # deliberately deferred so an existing resident owner is never stopped
+        # or uninstalled before it can quiesce the release.
+        if self.defer_manifest_handover:
+            self.state.mark_complete("service-registration-deferred")
+        else:
+            try:
+                self.finalizer.register_service()
+                self.state.mark_complete("service-registration")
+            except Exception as e:
+                logger.warning(f"Service registration failed: {e}")
+                self.state.mark_failed("service-registration", str(e))
+                # Don't fail the whole installation for this
 
         self.state.transition_to(InstallPhase.COMPLETE)
         self.save_state()

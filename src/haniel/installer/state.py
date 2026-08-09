@@ -14,7 +14,7 @@ import logging
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -65,6 +65,63 @@ class InstallState(BaseModel):
         default=None, description="When installation started"
     )
     updated_at: str | None = Field(default=None, description="Last update time")
+    config_identity: str | None = Field(
+        default=None, description="Immutable canonical config identity"
+    )
+    deferred_manifest_handover: bool = Field(
+        default=False,
+        description="Mechanical install must not pull/build/start manifest repos",
+    )
+    install_provenance: Literal["initial", "existing"] | None = Field(
+        default=None, description="Immutable caller-observed install provenance"
+    )
+    expected_operation: Literal["fresh_install", "upgrade"] | None = Field(
+        default=None, description="Immutable database release operation"
+    )
+
+    def bind_handover(
+        self,
+        *,
+        config_path: Path,
+        deferred: bool,
+        provenance: Literal["initial", "existing"] | None,
+        expected_operation: Literal["fresh_install", "upgrade"] | None,
+    ) -> None:
+        """Bind or verify install-state fields that may not drift on resume."""
+        from haniel.core.lifecycle_control import config_identity
+
+        identity = config_identity(config_path)
+        requested = {
+            "config_identity": identity,
+            "deferred_manifest_handover": deferred,
+            "install_provenance": provenance,
+            "expected_operation": expected_operation,
+        }
+        if deferred and (provenance is None or expected_operation is None):
+            raise ValueError(
+                "deferred manifest handover requires provenance and expected_operation"
+            )
+        if provenance == "initial" and expected_operation not in (
+            None,
+            "fresh_install",
+        ):
+            raise ValueError("initial provenance requires fresh_install")
+        if provenance == "existing" and expected_operation not in (None, "upgrade"):
+            raise ValueError("existing provenance requires upgrade")
+
+        existing_bound = self.config_identity is not None
+        if existing_bound:
+            changed = [
+                key for key, value in requested.items() if getattr(self, key) != value
+            ]
+            if changed:
+                raise ValueError(
+                    "install state immutable fields changed: " + ", ".join(changed)
+                )
+            return
+
+        for key, value in requested.items():
+            setattr(self, key, value)
 
     def save(self, path: Path) -> None:
         """Save state to a JSON file.
@@ -79,14 +136,16 @@ class InstallState(BaseModel):
         logger.debug(f"Saved install state to {path}")
 
     @classmethod
-    def load(cls, path: Path) -> "InstallState":
+    def load(cls, path: Path, *, strict: bool = False) -> "InstallState":
         """Load state from a JSON file.
 
         Args:
             path: Path to state file
 
         Returns:
-            Loaded state, or new state if file doesn't exist
+            Loaded state, or new state if file doesn't exist. When strict is
+            true, malformed or schema-invalid state is rejected instead of
+            silently creating a new installation identity.
         """
         if not path.exists():
             logger.debug(f"No state file at {path}, creating new state")
@@ -99,6 +158,8 @@ class InstallState(BaseModel):
             logger.debug(f"Loaded install state from {path}: phase={state.phase}")
             return state
         except Exception as e:
+            if strict:
+                raise
             logger.warning(f"Failed to load state from {path}: {e}, creating new state")
             return cls()
 

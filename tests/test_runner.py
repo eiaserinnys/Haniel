@@ -347,6 +347,36 @@ class TestHookExecution:
 
         assert result is False
 
+    @patch("subprocess.run")
+    def test_hook_failure_redacts_command_stderr_and_environment_secret(
+        self,
+        mock_run: MagicMock,
+        config_with_hooks: HanielConfig,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        secret = "database-password-from-child"
+        monkeypatch.setenv("DATABASE_URL", f"postgres://owner:{secret}@db/app")
+        config_with_hooks.services[
+            "test-service"
+        ].hooks.post_pull = f"echo TOKEN={secret}"
+        mock_run.side_effect = subprocess.CalledProcessError(
+            1,
+            "cmd",
+            stderr=(
+                f"PASSWORD={secret} url=postgres://owner:{secret}@db/app AUTH={secret}"
+            ),
+        )
+
+        runner = ServiceRunner(config_with_hooks, config_dir=tmp_path)
+        with caplog.at_level("INFO"):
+            result = runner.execute_hook("test-service", "post_pull")
+
+        assert result is False
+        assert secret not in caplog.text
+        assert "[REDACTED]" in caplog.text
+
     def test_no_hook_returns_true(self, tmp_path: Path):
         """Service without hook should return True."""
         config = HanielConfig(
@@ -1173,7 +1203,20 @@ class TestServiceRunnerPollCycle:
         state.pending_changes = {"commits": ["a"]}
         previous_head = get_head(runner.config_dir / state.config.path)
 
-        with patch.object(runner, "_pull_repo", return_value=(True, [])):
+        staged = MagicMock(
+            target_head="target-head",
+            manifest_digest="manifest-digest",
+        )
+        staged.manifest.release_id = "release-1"
+        with (
+            patch.object(runner, "_pull_repo", return_value=(True, [])),
+            patch("haniel.core.runner.probe_manifest_target", return_value=staged),
+            patch("haniel.core.runner.activate_repo_target", return_value=[]),
+            patch(
+                "haniel.core.runner.get_head",
+                side_effect=[previous_head, "target-head"],
+            ),
+        ):
             runner.trigger_pull("test-repo")
 
         args, kwargs = mock_deploy.call_args
@@ -1182,8 +1225,49 @@ class TestServiceRunnerPollCycle:
         assert kwargs["journal_attempt_id"]
         assert kwargs["orchestrator_attempt_id"] is None
         assert kwargs["node_id"] is None
+        assert kwargs["expected_operation"] == "upgrade"
+        assert kwargs["request_id"].startswith("runtime-")
         mock_remote_head.assert_called_once()
-        mock_manifest_digest.assert_called_once()
+        mock_manifest_digest.assert_not_called()
+
+    @patch("haniel.core.runner.run_manifest_deployment")
+    def test_manifest_pull_activates_the_exact_staged_target_without_repulling(
+        self,
+        mock_deploy,
+        runner_with_mock_repo,
+    ):
+        runner = runner_with_mock_repo
+        state = runner._repo_states["test-repo"]
+        state.config.release_manifest = "deploy/release.json"
+        state.pending_changes = {"commits": ["a"]}
+        repo_path = runner.config_dir / state.config.path
+        previous_head = get_head(repo_path)
+        staged = MagicMock(
+            target_head="staged-target",
+            manifest_digest="manifest-digest",
+        )
+        staged.manifest.release_id = "release-1"
+
+        with (
+            patch.object(runner, "_pull_repo", return_value=(True, [])) as pull,
+            patch("haniel.core.runner.probe_manifest_target", return_value=staged),
+            patch(
+                "haniel.core.runner.get_remote_head", return_value="remote-before-probe"
+            ),
+            patch(
+                "haniel.core.runner.get_head",
+                side_effect=[previous_head, "staged-target"],
+            ),
+            patch(
+                "haniel.core.runner.activate_repo_target", return_value=[]
+            ) as activate,
+        ):
+            runner.trigger_pull("test-repo")
+
+        pull.assert_not_called()
+        activate.assert_called_once_with(repo_path, "staged-target", strategy="merge")
+        assert state.last_head == "staged-target"
+        mock_deploy.assert_called_once()
 
     @patch("haniel.core.runner.sha256_file_at_commit", return_value="manifest-digest")
     @patch("haniel.core.runner.run_manifest_deployment")
@@ -1200,9 +1284,16 @@ class TestServiceRunnerPollCycle:
         repo_path = runner.config_dir / state.config.path
         previous_head = get_head(repo_path)
 
+        staged = MagicMock(
+            target_head="unapproved-target",
+            manifest_digest="manifest-digest",
+        )
+        staged.manifest.release_id = "release-1"
         with (
-            patch.object(runner, "_pull_repo", return_value=(True, [])),
-            pytest.raises(Exception, match="approved target changed during pull"),
+            patch.object(runner, "_pull_repo", return_value=(True, [])) as pull,
+            patch("haniel.core.runner.probe_manifest_target", return_value=staged),
+            patch("haniel.core.runner.activate_repo_target") as activate,
+            pytest.raises(Exception, match="approved target changed during staging"),
         ):
             runner.trigger_pull(
                 "test-repo",
@@ -1213,6 +1304,8 @@ class TestServiceRunnerPollCycle:
             )
 
         assert get_head(repo_path) == previous_head
+        pull.assert_not_called()
+        activate.assert_not_called()
         mock_deploy.assert_not_called()
 
     @patch("haniel.core.runner.ServiceRunner._start_service")

@@ -209,6 +209,8 @@ def _execute_retry(
             orchestrator_attempt_id=approval["orchestrator_attempt_id"],
             node_id=probe["node_id"],
             branch=branch,
+            expected_operation="upgrade",
+            request_id=approval["orchestrator_attempt_id"],
             **progress_kwargs,
         )
     finally:
