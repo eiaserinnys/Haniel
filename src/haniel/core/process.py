@@ -26,11 +26,11 @@ from pathlib import Path
 from typing import Callable
 
 from ..config import ServiceConfig, ShutdownConfig
-from .child_env import sanitized_child_env
+from ..platform import get_platform_handler
 from .health import HealthManager, ServiceState
 from .logs import LogCapture, LogManager, StreamReader
+from .service_environment import ServiceEnvironmentFile, service_process_environment
 from .stale_instance import PortInUseError, StaleInstanceCleaner, extract_ready_port
-from ..platform import get_platform_handler
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +142,9 @@ class ProcessManager:
         ready_timeout: float | None = None,
         on_ready: Callable[[], None] | None = None,
         on_crash: Callable[[int | None], None] | None = None,
+        expected_env_path: str | None = None,
+        expected_env_sha256: str | None = None,
+        approved_env_snapshot: ServiceEnvironmentFile | None = None,
     ) -> ManagedProcess:
         """Start a service process.
 
@@ -201,7 +204,14 @@ class ProcessManager:
             if resolved and resolved.lower().endswith((".cmd", ".bat")):
                 popen_kwargs["shell"] = True
 
-        process = self._spawn_process(name, cmd, cwd, popen_kwargs)
+        child_env = service_process_environment(
+            self.config_dir,
+            config,
+            expected_env_path=expected_env_path,
+            expected_env_sha256=expected_env_sha256,
+            approved_snapshot=approved_env_snapshot,
+        )
+        process = self._spawn_process(name, cmd, cwd, popen_kwargs, child_env)
 
         # Set up process group
         self.platform.setup_process_group(process)
@@ -212,6 +222,7 @@ class ProcessManager:
             cwd=cwd,
             cmd=cmd,
             popen_kwargs=popen_kwargs,
+            child_env=child_env,
             process=process,
             log_capture=log_capture,
         )
@@ -261,6 +272,7 @@ class ProcessManager:
         cmd: str | list[str],
         cwd: Path,
         popen_kwargs: dict,
+        child_env: dict[str, str],
     ) -> subprocess.Popen:
         """Spawn a process, preserving Windows breakaway fallback behavior."""
         try:
@@ -270,7 +282,7 @@ class ProcessManager:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                env=sanitized_child_env(),
+                env=child_env,
                 **popen_kwargs,
             )
         except PermissionError:
@@ -293,7 +305,7 @@ class ProcessManager:
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE,
                             text=True,
-                            env=sanitized_child_env(),
+                            env=child_env,
                             **retry_kwargs,
                         )
                     except (OSError, subprocess.SubprocessError) as e:
@@ -339,6 +351,7 @@ class ProcessManager:
         cwd: Path,
         cmd: str | list[str],
         popen_kwargs: dict,
+        child_env: dict[str, str],
         process: subprocess.Popen,
         log_capture: LogCapture,
     ) -> subprocess.Popen:
@@ -372,7 +385,7 @@ class ProcessManager:
             logger.error(str(e))
             raise RuntimeError(str(e)) from e
 
-        retry = self._spawn_process(name, cmd, cwd, popen_kwargs)
+        retry = self._spawn_process(name, cmd, cwd, popen_kwargs, child_env)
         self.platform.setup_process_group(retry)
         return retry
 
@@ -524,6 +537,32 @@ class ProcessManager:
         if managed.process is None:
             return False
         return managed.process.poll() is None
+
+    def running_services_affected_by_repo(self, repo_name: str) -> tuple[str, ...]:
+        """Derive affected live processes from their immutable start snapshots."""
+
+        with self._lock:
+            started = {
+                name: managed.config for name, managed in self._processes.items()
+            }
+            running = {
+                name
+                for name, managed in self._processes.items()
+                if managed.process is not None and managed.process.poll() is None
+            }
+        affected = {
+            name for name, config in started.items() if config.repo == repo_name
+        }
+        changed = True
+        while changed:
+            changed = False
+            for name, config in started.items():
+                if name not in affected and any(
+                    dependency in affected for dependency in config.after
+                ):
+                    affected.add(name)
+                    changed = True
+        return tuple(sorted(affected & running))
 
     def get_state(self, name: str) -> ServiceState:
         """Get the current state of a service.

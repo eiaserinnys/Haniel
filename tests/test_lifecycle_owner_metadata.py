@@ -40,6 +40,7 @@ def test_active_owner_consumers_use_metadata_when_lifetime_lock_is_not_readable(
     tmp_path: Path,
 ) -> None:
     config = tmp_path / "haniel.yaml"
+    config.write_text("repos: {}\nservices: {}\n", encoding="utf-8")
     control = LifecycleControl(config)
 
     with control.acquire_owner("instance-a"), _deny_lifetime_lock_read(control):
@@ -72,6 +73,7 @@ def test_active_owner_consumers_accept_unsupported_process_start_lookup(
     tmp_path: Path,
 ) -> None:
     config = tmp_path / "haniel.yaml"
+    config.write_text("repos: {}\nservices: {}\n", encoding="utf-8")
     control = LifecycleControl(config)
 
     with (

@@ -204,6 +204,33 @@ def test_bound_intent_reuses_one_journal_identity_and_rejects_drift(
         )
 
 
+def test_bound_config_digest_cannot_be_omitted_when_reusing_journal(
+    tmp_path: Path,
+) -> None:
+    store = DeploymentStateStore(tmp_path / "state")
+    journal_id = store.begin(
+        "repo",
+        "previous",
+        "target",
+        "approved-pull-pending",
+        journal_attempt_id=None,
+        request_id="request-1",
+        expected_operation="upgrade",
+        config_digest="a" * 64,
+    )
+
+    with pytest.raises(ValueError, match="config_digest"):
+        store.begin(
+            "repo",
+            "previous",
+            "target",
+            "release-1",
+            journal_attempt_id=journal_id,
+            request_id="request-1",
+            expected_operation="upgrade",
+        )
+
+
 def test_new_begin_aborts_unfinished_live_intent_before_archiving(
     tmp_path: Path,
 ) -> None:

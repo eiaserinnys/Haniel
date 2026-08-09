@@ -1,0 +1,33 @@
+{
+  "schema_version": "soulstream.haniel.config-environment-consumer.v1",
+  "source": {
+    "repository": "eiaserinnys/soulstream",
+    "commit": "1ada848e6b8d1efdcf2d7f50414361eb6cc510b5",
+    "extract_root": "soulstream-1ada848e",
+    "byte_canonicalization": "crlf-to-lf",
+    "manifests": [
+      {
+        "path": "deploy/release-manifest.json",
+        "sha256": "9b3282f9e59aac1d7b5a17c9cf6fd5c50621b4ba8916ad7296b1313ae5131dab",
+        "environment_service": "soulstream-orch-server"
+      },
+      {
+        "path": "deploy/release-manifest-standalone.json",
+        "sha256": "f7404c6aa355746d71e040193066236b13bdff4739b3a2cb788035c293cb02f5",
+        "environment_service": "soul-server-ts"
+      }
+    ]
+  },
+  "required_haniel_contract": {
+    "schema_version": "haniel.handover.config-environment.v1",
+    "service_config_field": "release_env_file",
+    "manifest_required_field": "requires_service_env_file",
+    "child_path_env": "HANIEL_SERVICE_ENV_FILE",
+    "child_digest_env": "HANIEL_SERVICE_ENV_FILE_SHA256",
+    "runtime_consumes_declared_file": true,
+    "request_snapshot_used_through_recovery": true
+  },
+  "planned_manifest_overlay": {
+    "requires_service_env_file": true
+  }
+}

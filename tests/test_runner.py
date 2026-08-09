@@ -1,6 +1,7 @@
 """Tests for the haniel runner module."""
 
 import subprocess
+import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
@@ -2026,6 +2027,68 @@ class TestRemoteServiceCommandHandler:
             name="flux",
             repo_config={"url": "git@github.com:test/flux.git", "path": "./flux"},
         )
+
+    def test_register_command_and_config_writer_have_one_lock_order(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from haniel.core.service_lifecycle import CONFIG_WRITE_LOCK
+        import haniel.core.service_lifecycle as lifecycle
+
+        config_path = tmp_path / "haniel.yaml"
+        config_path.write_text(
+            "services:\n  web:\n    run: python app.py\n", encoding="utf-8"
+        )
+        config = HanielConfig(
+            poll_interval=60,
+            repos={},
+            services={"web": ServiceConfig(run="python app.py")},
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path, config_path=config_path)
+        writer_holds_lock = threading.Event()
+        register_entered = threading.Event()
+        errors: list[BaseException] = []
+
+        def register(*_args, **_kwargs):
+            register_entered.set()
+            assert writer_holds_lock.wait(timeout=2)
+            with CONFIG_WRITE_LOCK:
+                return {"ok": True, "service": "flux"}
+
+        def config_writer() -> None:
+            try:
+                with CONFIG_WRITE_LOCK:
+                    writer_holds_lock.set()
+                    assert register_entered.wait(timeout=2)
+                    runner.reload_config()
+            except BaseException as error:
+                errors.append(error)
+
+        def orchestrator_register() -> None:
+            try:
+                runner._handle_service_command(
+                    "",
+                    "register-service",
+                    {
+                        "name": "flux",
+                        "service_config": {"run": "node index.js"},
+                        "start": False,
+                    },
+                )
+            except BaseException as error:
+                errors.append(error)
+
+        monkeypatch.setattr(lifecycle, "register_service", register)
+        writer_thread = threading.Thread(target=config_writer, daemon=True)
+        command_thread = threading.Thread(target=orchestrator_register, daemon=True)
+        writer_thread.start()
+        assert writer_holds_lock.wait(timeout=1)
+        command_thread.start()
+        writer_thread.join(timeout=2)
+        command_thread.join(timeout=2)
+
+        assert not writer_thread.is_alive()
+        assert not command_thread.is_alive()
+        assert errors == []
 
     def test_service_scoped_action_rejects_unknown_service(self, tmp_path: Path):
         runner = self._runner(tmp_path)

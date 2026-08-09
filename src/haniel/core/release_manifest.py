@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from .service_environment import read_service_environment_file
+from .path_identity import canonical_path_text
 
 from .deployment_command_runner import CommandSpec
 
@@ -68,6 +72,7 @@ class ReleaseManifest(BaseModel):
     schema_version: Literal["haniel.release.v1"]
     release_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9._-]+$")
     environment_service: str | None = Field(default=None, min_length=1)
+    requires_service_env_file: bool = False
     migration: MigrationSpec | None = None
     post_start_verify: list[CommandSpec] = Field(min_length=1)
     recovery: RecoverySpec
@@ -119,3 +124,72 @@ def resolve_manifest_service_cwd(
     if len(service_cwds) != 1:
         return None
     return next(iter(service_cwds))
+
+
+@dataclass(frozen=True)
+class ManifestServiceEnvironment:
+    """Validated service-owned paths supplied to release children."""
+
+    cwd: Path | None
+    env_file: Path | None
+    env_file_sha256: str | None = None
+
+    def child_environment(self) -> dict[str, str]:
+        environment: dict[str, str] = {}
+        if self.cwd is not None:
+            environment["HANIEL_SERVICE_CWD"] = str(self.cwd)
+        if self.env_file is not None:
+            environment["HANIEL_SERVICE_ENV_FILE"] = str(self.env_file)
+            assert self.env_file_sha256 is not None
+            environment["HANIEL_SERVICE_ENV_FILE_SHA256"] = self.env_file_sha256
+        return environment
+
+
+def resolve_manifest_service_environment(
+    runner: Any,
+    repo_name: str,
+    affected: list[str],
+    environment_service: str | None,
+    *,
+    requires_env_file: bool,
+    expected_env_path: str | None = None,
+    expected_env_sha256: str | None = None,
+) -> ManifestServiceEnvironment:
+    """Resolve cwd and the config-declared env file from one service identity."""
+
+    cwd = resolve_manifest_service_cwd(runner, repo_name, affected, environment_service)
+    if environment_service is None:
+        if requires_env_file:
+            raise ValueError(
+                "SERVICE_ENV_FILE_REQUIRED: manifest environment_service is required"
+            )
+        return ManifestServiceEnvironment(cwd=cwd, env_file=None)
+
+    service = runner._enabled_services[environment_service]
+    declared = service.release_env_file
+    if declared is None:
+        if requires_env_file:
+            raise ValueError(
+                "SERVICE_ENV_FILE_REQUIRED: environment service has no release env file"
+            )
+        return ManifestServiceEnvironment(cwd=cwd, env_file=None)
+
+    try:
+        snapshot = read_service_environment_file(runner.config_dir / declared)
+    except RuntimeError as error:
+        raise ValueError(str(error)) from error
+    if expected_env_path is not None and canonical_path_text(
+        snapshot.path
+    ) != canonical_path_text(Path(expected_env_path)):
+        raise ValueError(
+            "SERVICE_ENV_FILE_CHANGED: service env file path changed after binding"
+        )
+    if expected_env_sha256 is not None and snapshot.sha256 != expected_env_sha256:
+        raise ValueError(
+            "SERVICE_ENV_FILE_CHANGED: service env file content changed after binding"
+        )
+    return ManifestServiceEnvironment(
+        cwd=cwd,
+        env_file=snapshot.path,
+        env_file_sha256=snapshot.sha256,
+    )

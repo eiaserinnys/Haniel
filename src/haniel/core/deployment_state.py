@@ -56,6 +56,7 @@ class DeploymentStateStore:
         journal_attempt_id: str | None = None,
         request_id: str | None = None,
         expected_operation: str | None = None,
+        config_digest: str | None = None,
     ) -> str:
         previous_attempts: list[dict[str, Any]] = []
         existing = self.read(repo_name)
@@ -84,6 +85,8 @@ class DeploymentStateStore:
                 "request_id": request_id,
                 "expected_operation": expected_operation,
             }
+            if existing.get("config_digest") is not None or config_digest is not None:
+                immutable["config_digest"] = config_digest
             changed = [
                 key for key, value in immutable.items() if existing.get(key) != value
             ]
@@ -135,6 +138,8 @@ class DeploymentStateStore:
             "request_id": request_id,
             "expected_operation": expected_operation,
         }
+        if config_digest is not None:
+            current["config_digest"] = config_digest
         if previous_attempts:
             current["previous_attempts"] = previous_attempts
         self._write(repo_name, current)
@@ -149,6 +154,7 @@ class DeploymentStateStore:
         manifest_identity: str,
         request_id: str,
         expected_operation: str,
+        config_digest: str | None = None,
     ) -> str:
         """Commit rollback identity before target fetch or staging starts."""
         existing = self.read(repo_name)
@@ -162,6 +168,7 @@ class DeploymentStateStore:
                 "manifest_identity": manifest_identity,
                 "expected_operation": expected_operation,
                 "target_ref": target_ref,
+                "config_digest": config_digest,
             }
             changed = [
                 key for key, value in immutable.items() if existing.get(key) != value
@@ -180,6 +187,7 @@ class DeploymentStateStore:
             manifest_identity=manifest_identity,
             request_id=request_id,
             expected_operation=expected_operation,
+            config_digest=config_digest,
         )
         current = self.read(repo_name)
         assert current is not None

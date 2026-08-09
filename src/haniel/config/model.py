@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ShutdownConfig(BaseModel):
@@ -150,6 +150,13 @@ class ServiceConfig(BaseModel):
 
     run: str = Field(..., description="Command to execute")
     cwd: str | None = Field(default=None, description="Working directory")
+    release_env_file: str | None = Field(
+        default=None,
+        description=(
+            "Config-directory-relative authoritative environment file consumed "
+            "by both the service process and release-manifest child commands"
+        ),
+    )
     repo: str | None = Field(
         default=None, description="Repository this service depends on"
     )
@@ -180,6 +187,15 @@ class ServiceConfig(BaseModel):
         if isinstance(v, str):
             return [v]
         return v
+
+    @model_validator(mode="after")
+    def require_single_environment_file_source(self) -> "ServiceConfig":
+        if self.release_env_file is not None and "--env-file" in self.run.lower():
+            raise ValueError(
+                "SERVICE_ENV_SOURCE_CONFLICT: run command must not declare a "
+                "second environment file"
+            )
+        return self
 
 
 class EnvironmentConfig(BaseModel):

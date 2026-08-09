@@ -16,6 +16,7 @@ from haniel.core.lifecycle_control import (
     LifecycleControl,
     config_identity,
 )
+from haniel.core.handover_config import handover_config_digest
 from haniel.core.lifecycle_request_server import LifecycleRequestServer
 from haniel.core.one_shot_handover import (
     _start_resident_owner,
@@ -68,6 +69,10 @@ def _run_processes(context, processes, start, outcomes) -> list[tuple]:
             process.join(timeout=1)
         assert process.exitcode == 0
     return results
+
+
+def _write_minimal_config(config: Path) -> None:
+    config.write_text("repos: {}\nservices: {}\n", encoding="utf-8")
 
 
 def test_config_identity_is_canonical_path_sha256(tmp_path: Path) -> None:
@@ -319,6 +324,7 @@ def test_upgrade_without_resident_owner_refuses_synthetic_quiescence(
     tmp_path: Path,
 ) -> None:
     config = tmp_path / "haniel.yaml"
+    _write_minimal_config(config)
 
     with (
         patch("haniel.core.one_shot_handover._start_resident_owner") as start_owner,
@@ -342,6 +348,7 @@ def test_fresh_without_owner_and_without_start_owner_fails_before_spool(
     tmp_path: Path,
 ) -> None:
     config = tmp_path / "haniel.yaml"
+    _write_minimal_config(config)
 
     with pytest.raises(LifecycleConflict, match="LIFECYCLE_OWNER_MISSING"):
         execute_manifest_handover_once(
@@ -359,6 +366,7 @@ def test_fresh_without_owner_and_without_start_owner_fails_before_spool(
 
 def test_fresh_owner_start_failure_cancels_spooled_request(tmp_path: Path) -> None:
     config = tmp_path / "haniel.yaml"
+    _write_minimal_config(config)
     control = LifecycleControl(config)
 
     with (
@@ -387,6 +395,7 @@ def test_terminal_timeout_cancels_request_before_late_owner_can_execute(
     tmp_path: Path,
 ) -> None:
     config = tmp_path / "haniel.yaml"
+    _write_minimal_config(config)
     control = LifecycleControl(config)
 
     with (
@@ -421,6 +430,7 @@ def test_retry_of_cancelled_request_returns_stable_error_instead_of_type_error(
     tmp_path: Path,
 ) -> None:
     config = tmp_path / "haniel.yaml"
+    _write_minimal_config(config)
     control = LifecycleControl(config)
     control.submit_request(
         "request-1",
@@ -429,6 +439,7 @@ def test_retry_of_cancelled_request_returns_stable_error_instead_of_type_error(
             "repo": "app",
             "target_ref": "origin/main",
             "expected_operation": "upgrade",
+            "config_digest": handover_config_digest(config),
         },
     )
     control.cancel_request(
@@ -456,6 +467,7 @@ def test_timeout_cannot_cancel_request_already_accepted_by_resident_owner(
     tmp_path: Path,
 ) -> None:
     config = tmp_path / "haniel.yaml"
+    _write_minimal_config(config)
     control = LifecycleControl(config)
     control.submit_request(
         "request-1",
@@ -464,6 +476,7 @@ def test_timeout_cannot_cancel_request_already_accepted_by_resident_owner(
             "repo": "app",
             "target_ref": "origin/main",
             "expected_operation": "upgrade",
+            "config_digest": handover_config_digest(config),
         },
     )
     control.ack("request-1", "accepted", {"owner_instance": "owner-1"})

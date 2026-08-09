@@ -98,7 +98,7 @@ class LifecycleRequestServer:
             self._validate_stop(payload)
             self._handle_stop(request_id, payload)
         elif kind == "handover":
-            self._validate_handover(payload)
+            self._validate_handover(payload, require_config_digest=True)
             self._handle_handover(request_id, payload)
         elif kind == "runtime-handover":
             self._validate_handover(payload, require_executor=True)
@@ -115,7 +115,10 @@ class LifecycleRequestServer:
 
     @staticmethod
     def _validate_handover(
-        payload: dict[str, Any], *, require_executor: bool = False
+        payload: dict[str, Any],
+        *,
+        require_executor: bool = False,
+        require_config_digest: bool = False,
     ) -> None:
         if (
             not isinstance(payload.get("repo"), str)
@@ -129,6 +132,17 @@ class LifecycleRequestServer:
                     not isinstance(payload.get("executor_instance"), str)
                     or not payload.get("executor_instance")
                 )
+            )
+        ):
+            raise RuntimeError("MALFORMED_REQUEST")
+        if require_config_digest and not payload.get("config_digest"):
+            raise RuntimeError("CONFIG_DIGEST_REQUIRED")
+        if require_config_digest and (
+            not isinstance(payload.get("config_digest"), str)
+            or len(payload["config_digest"]) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in payload["config_digest"]
             )
         ):
             raise RuntimeError("MALFORMED_REQUEST")
@@ -192,6 +206,7 @@ class LifecycleRequestServer:
                 target_ref=payload["target_ref"],
                 expected_operation=payload["expected_operation"],
                 request_id=request_id,
+                config_digest=payload.get("config_digest"),
             )
         except Exception as error:
             operation = payload.get("expected_operation", "upgrade")
@@ -210,5 +225,6 @@ class LifecycleRequestServer:
                     "code": handover_error_code(error),
                     "message": bounded_redact_text(str(error)),
                 },
+                config_digest=payload.get("config_digest"),
             )
             self.control.ack(request_id, "terminal", terminal.to_dict())

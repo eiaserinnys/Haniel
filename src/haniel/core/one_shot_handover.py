@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
+from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -17,18 +18,35 @@ from .handover_result import (
     build_handover_result,
     handover_error_code,
 )
+from .handover_config import (
+    BoundServiceEnvironment,
+    handover_config_digest,
+    require_handover_config_digest,
+)
 from .lifecycle_control import LifecycleConflict, LifecycleControl
 from .release_staging import (
+    ReleaseIdentityError,
     StagedRelease,
     initial_clone_path,
     stage_release,
 )
-from .release_manifest import resolve_manifest_service_cwd
+from .release_manifest import resolve_manifest_service_environment
 from .runner_deployment import run_manifest_deployment
 from .safety_redaction import bounded_redact_text
 
 if TYPE_CHECKING:
     from .runner import ServiceRunner
+
+
+def _runner_config_guard(function):
+    """Keep one resident handover on a single applied config snapshot."""
+
+    @wraps(function)
+    def guarded(runner, *args, **kwargs):
+        with runner._config_reload_lock:
+            return function(runner, *args, **kwargs)
+
+    return guarded
 
 
 def execute_manifest_handover_once(
@@ -42,11 +60,13 @@ def execute_manifest_handover_once(
 ) -> HandoverResult:
     """Submit one immutable request to the resident owner and await terminal ack."""
     control = LifecycleControl(config_path)
+    config_digest = handover_config_digest(config_path)
     payload = {
         "kind": "handover",
         "repo": repo_name,
         "target_ref": target_ref,
         "expected_operation": expected_operation,
+        "config_digest": config_digest,
     }
     try:
         control.read_active_owner()
@@ -115,6 +135,48 @@ def stop(
     return _wait_for_terminal(control, resolved_request, wait_timeout)["terminal"]
 
 
+def _resolve_bound_manifest_environment(
+    runner: "ServiceRunner",
+    repo_name: str,
+    affected: list[str],
+    manifest: Any,
+    config_digest: str | None,
+    service_environment_bindings: dict[str, BoundServiceEnvironment] | None = None,
+) -> dict[str, str]:
+    if manifest.requires_service_env_file and config_digest is None:
+        raise ReleaseIdentityError(
+            "CONFIG_DIGEST_REQUIRED: manifest service environment requires "
+            "a config-bound detached probe"
+        )
+    if config_digest is not None:
+        assert runner.config_path is not None
+        require_handover_config_digest(runner.config_path, config_digest)
+    binding = (
+        service_environment_bindings.get(manifest.environment_service)
+        if service_environment_bindings is not None
+        and manifest.environment_service is not None
+        else None
+    )
+    if (
+        config_digest is not None
+        and manifest.requires_service_env_file
+        and binding is None
+    ):
+        raise ValueError(
+            "SERVICE_ENV_FILE_CHANGED: request config has no bound service env file"
+        )
+    return resolve_manifest_service_environment(
+        runner,
+        repo_name,
+        affected,
+        manifest.environment_service,
+        requires_env_file=manifest.requires_service_env_file,
+        expected_env_path=binding.path if binding is not None else None,
+        expected_env_sha256=binding.sha256 if binding is not None else None,
+    ).child_environment()
+
+
+@_runner_config_guard
 def probe_manifest_target(
     runner: "ServiceRunner",
     repo_name: str,
@@ -123,6 +185,8 @@ def probe_manifest_target(
     expected_operation: Operation,
     request_id: str,
     source_repo_path: Path | None = None,
+    config_digest: str | None = None,
+    service_environment_bindings: dict[str, BoundServiceEnvironment] | None = None,
 ) -> StagedRelease:
     """Run and clean a detached probe, returning immutable target evidence."""
     state = runner._repo_states[repo_name]
@@ -140,10 +204,22 @@ def probe_manifest_target(
         request_id=request_id,
         expected_operation=expected_operation,
         target_ref=target_ref,
-        service_cwd_resolver=lambda manifest: resolve_manifest_service_cwd(
-            runner, repo_name, affected, manifest.environment_service
+        service_environment_resolver=lambda manifest: (
+            _resolve_bound_manifest_environment(
+                runner,
+                repo_name,
+                affected,
+                manifest,
+                config_digest,
+                service_environment_bindings,
+            )
         ),
     ) as staged:
+        if staged.manifest.requires_service_env_file and config_digest is None:
+            raise ReleaseIdentityError(
+                "CONFIG_DIGEST_REQUIRED: manifest service environment requires "
+                "a config-bound detached probe"
+            )
         return staged
 
 
@@ -155,12 +231,22 @@ def execute_owner_handover(
     target_ref: str,
     expected_operation: Operation,
     request_id: str,
+    config_digest: str | None = None,
 ) -> HandoverResult:
     """Execute target staging, live checkout, deployment, and terminal result."""
-    with control.acquire_deployment(repo_name, request_id) as lease:
+    with (
+        control.acquire_deployment(repo_name, request_id) as lease,
+        runner._config_reload_lock,
+    ):
         existing = control.read_result(request_id)
         if lease.attached and existing.get("terminal"):
             return HandoverResult(**existing["terminal"])
+
+        reload_plan = (
+            runner.prepare_handover_config(repo_name, config_digest)
+            if config_digest is not None
+            else None
+        )
 
         control.ack(
             request_id,
@@ -168,6 +254,7 @@ def execute_owner_handover(
             {
                 "repo": repo_name,
                 "owner_instance": getattr(runner, "lifecycle_instance_id", None),
+                "config_digest": config_digest,
             },
         )
         previous_head: str | None = None
@@ -204,6 +291,7 @@ def execute_owner_handover(
                 manifest_identity=manifest_identity,
                 request_id=request_id,
                 expected_operation=expected_operation,
+                config_digest=config_digest,
             )
             staged = probe_manifest_target(
                 runner,
@@ -212,6 +300,12 @@ def execute_owner_handover(
                 expected_operation=expected_operation,
                 request_id=request_id,
                 source_repo_path=source_repo_path,
+                config_digest=config_digest,
+                service_environment_bindings=(
+                    reload_plan.service_environment_map()
+                    if reload_plan is not None
+                    else None
+                ),
             )
             journal_store.bind_handover_target(
                 repo_name,
@@ -220,6 +314,8 @@ def execute_owner_handover(
                 release_id=staged.manifest.release_id,
                 manifest_digest=staged.manifest_digest,
             )
+            if config_digest is not None:
+                require_handover_config_digest(runner.config_path, config_digest)
             if initial_install:
                 deferred_clone.replace(repo_path)
                 live_changed = True
@@ -245,7 +341,11 @@ def execute_owner_handover(
                     "PULL_FAILED: live checkout does not match the staged target"
                 )
             state.last_head = actual_head
-            affected = runner.get_affected_services(repo_name)
+            affected = (
+                list(reload_plan.new_affected)
+                if reload_plan is not None
+                else runner.get_affected_services(repo_name)
+            )
             run_manifest_deployment(
                 runner,
                 repo_name,
@@ -256,6 +356,17 @@ def execute_owner_handover(
                 request_id=request_id,
                 quiescence_callback=lambda receipt: control.ack(
                     request_id, "quiesced", receipt
+                ),
+                quiesce_services=(
+                    list(reload_plan.quiesce_services)
+                    if reload_plan is not None
+                    else affected
+                ),
+                config_digest=config_digest,
+                service_environment_bindings=(
+                    reload_plan.service_environment_map()
+                    if reload_plan is not None
+                    else None
                 ),
             )
             result = build_handover_result(
@@ -269,6 +380,7 @@ def execute_owner_handover(
                 ok=True,
                 recovered=False,
                 retryable=False,
+                config_digest=config_digest,
             )
         except Exception as error:
             recovered = isinstance(error, DeploymentError) and error.recovered
@@ -305,6 +417,7 @@ def execute_owner_handover(
                     "code": handover_error_code(error),
                     "message": bounded_redact_text(str(error)),
                 },
+                config_digest=config_digest,
             )
         control.ack(request_id, "terminal", result.to_dict())
         return result

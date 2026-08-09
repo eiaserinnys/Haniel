@@ -149,6 +149,7 @@ class TestRunnerSelfUpdate:
         runner._state.self_update_pending = False
         runner._ws_handler = None
         runner._state_lock = threading.Lock()
+        runner._config_reload_lock = threading.RLock()
         runner._restart_lock = threading.Lock()
         runner._stop_event = threading.Event()
         runner._self_update_requested = threading.Event()

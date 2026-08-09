@@ -157,9 +157,11 @@ def _execute_retry(
     *,
     progress_callback: ProgressCallback | None,
 ) -> None:
-    state = runner._repo_states[repo]
-    repo_path = runner.config_dir / state.config.path
-    current_head = get_head(repo_path)
+    with runner._config_reload_lock:
+        state = runner._repo_states[repo]
+        repo_path = runner.config_dir / state.config.path
+        current_head = get_head(repo_path)
+        lock = runner._pull_locks[repo]
     target = probe["target_head"]
     if current_head != target:
         if not state.pending_changes:
@@ -182,15 +184,45 @@ def _execute_retry(
         )
         return
 
-    affected = runner.get_affected_services(repo)
-    lock = runner._pull_locks[repo]
     if not lock.acquire(blocking=False):
         raise RuntimeError(f"already deploying {repo}")
-    runner._suppress_pending_restarts(affected)
+    deployment_lease = None
+    config_lock_acquired = False
+    suppressed: list[str] = []
     try:
+        deployment_lease = runner.lifecycle_control.acquire_deployment(
+            repo, approval["orchestrator_attempt_id"]
+        )
+        runner._config_reload_lock.acquire()
+        config_lock_acquired = True
+        state = runner._repo_states[repo]
+        repo_path = runner.config_dir / state.config.path
+        if get_head(repo_path) != target:
+            raise ApprovalRevalidationError(
+                "approved target changed before manifest retry execution"
+            )
         if state.config.release_manifest is None:
+            affected = runner.get_affected_services(repo)
+            suppressed = affected
+            runner._suppress_pending_restarts(suppressed)
             runner._restart_after_pull_legacy(repo, affected)
             return
+        reload_plan = runner._prepare_current_manifest_config(repo)
+        state = runner._repo_states[repo]
+        repo_path = runner.config_dir / state.config.path
+        if get_head(repo_path) != target:
+            raise ApprovalRevalidationError(
+                "approved target changed while binding manifest config"
+            )
+        affected = (
+            list(reload_plan.new_affected)
+            if reload_plan is not None
+            else runner.get_affected_services(repo)
+        )
+        suppressed = (
+            list(reload_plan.quiesce_services) if reload_plan is not None else affected
+        )
+        runner._suppress_pending_restarts(suppressed)
         previous_head = plan.evidence.get("original_previous_head")
         if not previous_head:
             raise ApprovalRevalidationError(
@@ -199,6 +231,15 @@ def _execute_retry(
         progress_kwargs = (
             {"progress_callback": progress_callback}
             if progress_callback is not None
+            else {}
+        )
+        config_kwargs = (
+            {
+                "quiesce_services": suppressed,
+                "config_digest": reload_plan.config_digest,
+                "service_environment_bindings": (reload_plan.service_environment_map()),
+            }
+            if reload_plan is not None
             else {}
         )
         run_manifest_deployment(
@@ -211,10 +252,15 @@ def _execute_retry(
             branch=branch,
             expected_operation="upgrade",
             request_id=approval["orchestrator_attempt_id"],
+            **config_kwargs,
             **progress_kwargs,
         )
     finally:
-        runner._release_restart_suppression(affected)
+        if config_lock_acquired:
+            runner._release_restart_suppression(suppressed)
+            runner._config_reload_lock.release()
+        if deployment_lease is not None:
+            deployment_lease.__exit__(None, None, None)
         lock.release()
 
 
