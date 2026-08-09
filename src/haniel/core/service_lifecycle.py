@@ -25,14 +25,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-CONFIG_WRITE_LOCK = threading.Lock()
+CONFIG_WRITE_LOCK = threading.RLock()
 
 
 @contextmanager
 def config_write_transaction(runner: "ServiceRunner"):
     """Serialize disk config bytes and the resident snapshot in one order."""
 
-    with CONFIG_WRITE_LOCK, runner._config_reload_lock:
+    with CONFIG_WRITE_LOCK:
         yield
 
 
@@ -157,7 +157,7 @@ def _stop_if_running(runner: "ServiceRunner", service: str) -> bool:
 
 
 def _start_enabled_service(runner: "ServiceRunner", service: str) -> bool:
-    if service not in runner._enabled_services:
+    if service not in runner._snapshot_config_state().enabled_services:
         return False
     if not runner._start_service(service):
         raise RuntimeError(f"Failed to start service: {service}")
@@ -317,25 +317,25 @@ def reload_service_definition(runner: "ServiceRunner", service: str) -> dict[str
         raise ValueError("Service name is required")
 
     config_path = _require_config_path(runner)
-    # Configuration mutations use one global order: CONFIG_WRITE_LOCK first,
-    # then the resident snapshot lock. Read, validate, atomically replace the
-    # snapshot, and restart while both identities remain stable.
+    # The writer lock serializes file identity. The resident lock is acquired
+    # only by snapshot/CAS helpers and is never retained across restart I/O.
     with config_write_transaction(runner):
+        resident = runner._snapshot_config_state()
         disk_config = read_config(config_path)
         if service not in disk_config.services:
             raise KeyError(f"Service not found: {service}")
         _validate_or_raise(disk_config)
 
         new_service = disk_config.services[service]
-        if new_service.repo and new_service.repo not in runner._repo_states:
+        if new_service.repo and new_service.repo not in resident.repo_identity:
             raise ValueError(
                 f"Service '{service}' references repo '{new_service.repo}', "
                 "but that repo is not loaded; run full reload or register_service"
             )
 
-        candidate = runner.config.model_copy(deep=True)
+        candidate = resident.config.model_copy(deep=True)
         candidate.services[service] = new_service
-        runner._apply_config_snapshot(candidate)
+        runner._replace_config_snapshot(candidate, resident.generation)
 
         stopped = _stop_if_running(runner, service)
         restarted = False

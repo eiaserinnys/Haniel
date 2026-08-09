@@ -137,7 +137,10 @@ def prepare_runner_handover_config(
             "CONFIG_RELOAD_FAILED: resident owner has no config path"
         )
 
-    with runner._config_reload_lock:
+    from .service_lifecycle import CONFIG_WRITE_LOCK
+
+    with CONFIG_WRITE_LOCK:
+        resident = runner._snapshot_config_state()
         try:
             candidate, actual_digest, service_environments = _load_config_identity(
                 runner.config_path.expanduser().resolve(strict=False)
@@ -152,7 +155,7 @@ def prepare_runner_handover_config(
             raise HandoverConfigError(
                 "CONFIG_DIGEST_MISMATCH: resident config changed before handover"
             )
-        old_repo = runner.config.repos.get(repo_name)
+        old_repo = resident.config.repos.get(repo_name)
         new_repo = candidate.repos.get(repo_name)
         if old_repo is None or new_repo is None:
             raise HandoverConfigError(
@@ -193,7 +196,7 @@ def prepare_runner_handover_config(
         changed_non_reloadable = [
             field
             for field in _NON_RELOADABLE_CONFIG_FIELDS
-            if getattr(runner.config, field) != getattr(candidate, field)
+            if getattr(resident.config, field) != getattr(candidate, field)
         ]
         if changed_non_reloadable:
             raise HandoverConfigError(
@@ -203,14 +206,14 @@ def prepare_runner_handover_config(
 
         old_affected = tuple(
             sorted(
-                set(affected_services_for_config(runner.config, repo_name))
+                set(affected_services_for_config(resident.config, repo_name))
                 | set(
                     runner.process_manager.running_services_affected_by_repo(repo_name)
                 )
             )
         )
         new_affected = affected_services_for_config(candidate, repo_name)
-        runner._apply_config_snapshot(candidate)
+        runner._replace_config_snapshot(candidate, resident.generation)
         return HandoverReloadPlan(
             config_digest=actual_digest,
             old_affected=old_affected,

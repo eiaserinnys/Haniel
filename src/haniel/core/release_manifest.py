@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..config import ServiceConfig
 from .service_environment import read_service_environment_file
 from .path_identity import canonical_path_text
 
@@ -93,8 +94,17 @@ def resolve_manifest_service_cwd(
     repo_name: str,
     affected: list[str],
     environment_service: str | None,
+    *,
+    enabled_services: dict[str, ServiceConfig] | None = None,
 ) -> Path | None:
     """Resolve the same service environment for detached and live commands."""
+
+    if enabled_services is None:
+        enabled_services = (
+            runner._snapshot_config_state().enabled_services
+            if hasattr(runner, "_snapshot_config_state")
+            else runner._enabled_services
+        )
 
     def resolve(service: Any) -> Path:
         return (
@@ -109,7 +119,7 @@ def resolve_manifest_service_cwd(
             raise ValueError(
                 f"manifest environment_service is not affected: {service_name}"
             )
-        service = runner._enabled_services.get(service_name)
+        service = enabled_services.get(service_name)
         if service is None:
             raise ValueError(
                 f"manifest environment_service is not enabled: {service_name}"
@@ -118,7 +128,7 @@ def resolve_manifest_service_cwd(
 
     service_cwds = {
         resolve(service)
-        for service in runner._enabled_services.values()
+        for service in enabled_services.values()
         if service.repo == repo_name
     }
     if len(service_cwds) != 1:
@@ -154,10 +164,24 @@ def resolve_manifest_service_environment(
     requires_env_file: bool,
     expected_env_path: str | None = None,
     expected_env_sha256: str | None = None,
+    enabled_services: dict[str, ServiceConfig] | None = None,
 ) -> ManifestServiceEnvironment:
     """Resolve cwd and the config-declared env file from one service identity."""
 
-    cwd = resolve_manifest_service_cwd(runner, repo_name, affected, environment_service)
+    if enabled_services is None:
+        enabled_services = (
+            runner._snapshot_config_state().enabled_services
+            if hasattr(runner, "_snapshot_config_state")
+            else runner._enabled_services
+        )
+
+    cwd = resolve_manifest_service_cwd(
+        runner,
+        repo_name,
+        affected,
+        environment_service,
+        enabled_services=enabled_services,
+    )
     if environment_service is None:
         if requires_env_file:
             raise ValueError(
@@ -165,7 +189,7 @@ def resolve_manifest_service_environment(
             )
         return ManifestServiceEnvironment(cwd=cwd, env_file=None)
 
-    service = runner._enabled_services[environment_service]
+    service = enabled_services[environment_service]
     declared = service.release_env_file
     if declared is None:
         if requires_env_file:

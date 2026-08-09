@@ -13,15 +13,24 @@ from typing import Callable, Iterator, Literal
 from .deployment import ReleaseManifest
 from .deployment_command_runner import CommandRunner
 from .deployment_command_runner import subprocess_command_runner
+from .deployment_errors import StableDeploymentError
 from .safety_redaction import redact_text
 
 
-class ReleaseStagingError(RuntimeError):
+class ReleaseStagingError(StableDeploymentError):
     """A target could not be prepared in a detached staging checkout."""
+
+    def __init__(self, message: str, *, code: str = "PULL_FAILED") -> None:
+        super().__init__(code, message)
 
 
 class ReleaseIdentityError(ReleaseStagingError):
     """The target probe disagrees with immutable handover intent."""
+
+    def __init__(self, message: str) -> None:
+        marker = message.split(":", 1)[0]
+        code = marker if marker.isupper() else "PROVENANCE_PROBE_FAILED"
+        super().__init__(message, code=code)
 
 
 @dataclass(frozen=True)
@@ -165,7 +174,13 @@ def _git(path: Path, *args: str) -> str:
     except subprocess.CalledProcessError as error:
         detail = redact_text((error.stderr or error.stdout or "").strip())
         raise ReleaseStagingError(
-            f"git {' '.join(args)} failed for {path}: {detail}"
+            f"git {' '.join(args)} failed for {path}: {detail}",
+            code="PULL_FAILED",
+        ) from error
+    except subprocess.TimeoutExpired as error:
+        raise ReleaseStagingError(
+            f"git {' '.join(args)} timed out for {path}",
+            code="PULL_TIMEOUT",
         ) from error
     return result.stdout.strip()
 

@@ -6,39 +6,11 @@ from typing import Any
 
 from .lifecycle_control import LifecycleConflict
 from .lifecycle_storage import read_json
+from .deployment_errors import stable_deployment_error_code
 
 
 def deployment_error_code(error: Exception) -> str:
-    if getattr(error, "recovery_error", None) is not None:
-        return "RECOVERY_FAILED"
-    message = str(error)
-    for code in (
-        "OPERATION_MISMATCH",
-        "PULL_FAILED",
-        "PREFLIGHT_FAILED",
-        "QUIESCENCE_REQUIRED",
-        "BACKUP_CREATE_FAILED",
-        "BACKUP_VERIFY_FAILED",
-        "JOURNAL_GATE_FAILED",
-        "APPLY_FAILED",
-        "AMBIGUOUS_COMMIT_STATE",
-        "POST_VERIFY_FAILED",
-        "RECOVERY_FAILED",
-        "LIFECYCLE_OWNER_REQUIRED",
-        "LIFECYCLE_OWNER_CONFLICT",
-        "DEPLOYMENT_LEASE_CONFLICT",
-        "RUNTIME_OWNER_LOST",
-        "CONFIG_DIGEST_REQUIRED",
-        "CONFIG_DIGEST_MISMATCH",
-        "CONFIG_RELOAD_FAILED",
-        "CONFIG_RELOAD_UNSAFE",
-        "SERVICE_ENV_FILE_REQUIRED",
-        "SERVICE_ENV_FILE_INVALID",
-        "SERVICE_ENV_FILE_CHANGED",
-    ):
-        if code in message:
-            return code
-    return "HANDOVER_FAILED"
+    return stable_deployment_error_code(error)
 
 
 def validate_lifecycle_request(

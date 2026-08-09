@@ -18,7 +18,11 @@ import pytest
 
 from haniel.config import HanielConfig, RepoConfig, ServiceConfig, load_config
 from haniel.core.deployment_state import DeploymentStateStore
-from haniel.core.deployment_command_runner import CommandSpec, subprocess_command_runner
+from haniel.core.deployment_command_runner import (
+    CommandSpec,
+    DeploymentCommandError,
+    subprocess_command_runner,
+)
 from haniel.core.lifecycle_control import LifecycleControl
 from haniel.core.lifecycle_request_server import LifecycleRequestServer
 from haniel.core.one_shot_handover import (
@@ -66,7 +70,7 @@ def _write_config(
     )
 
 
-def test_handover_config_lock_freezes_config_file_bytes_during_writer(
+def test_config_write_lock_freezes_config_file_bytes_during_writer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -104,7 +108,7 @@ def test_handover_config_lock_freezes_config_file_bytes_during_writer(
             errors.append(error)
 
     monkeypatch.setattr(lifecycle, "write_config", observed_write_config)
-    with runner._config_reload_lock:
+    with lifecycle.CONFIG_WRITE_LOCK:
         writer = threading.Thread(target=mutate_config, daemon=True)
         writer.start()
         assert writer_started.wait(timeout=1)
@@ -117,6 +121,62 @@ def test_handover_config_lock_freezes_config_file_bytes_during_writer(
     assert write_attempted.is_set()
     assert config_path.read_bytes() != original_bytes
     assert "extra" in load_config(config_path).repos
+
+
+def test_handover_config_keeps_writer_lock_through_resident_snapshot_cas(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disk identity and resident generation publish under one writer lock."""
+
+    import haniel.core.handover_config as handover_config
+    import haniel.core.service_lifecycle as lifecycle
+
+    env_file = tmp_path / "service.env"
+    env_file.write_text("DATABASE_URL=sqlite:///approved\n", encoding="utf-8")
+    config_path = tmp_path / "haniel.yaml"
+    _write_config(config_path, env_file=env_file, service_name="app")
+    runner = ServiceRunner(load_config(config_path), tmp_path, config_path=config_path)
+    (tmp_path / "repo").mkdir()
+    digest = handover_config.handover_config_digest(config_path)
+    replace_entered = threading.Event()
+    release_replace = threading.Event()
+    competing_writer_entered = threading.Event()
+    errors: list[BaseException] = []
+    original_replace = runner._replace_config_snapshot
+
+    def blocking_replace(candidate: HanielConfig, expected_generation: int) -> int:
+        replace_entered.set()
+        assert release_replace.wait(timeout=5)
+        return original_replace(candidate, expected_generation)
+
+    def prepare() -> None:
+        try:
+            runner.prepare_handover_config("app", digest)
+        except BaseException as error:
+            errors.append(error)
+
+    def competing_writer() -> None:
+        with lifecycle.CONFIG_WRITE_LOCK:
+            competing_writer_entered.set()
+
+    monkeypatch.setattr(runner, "_replace_config_snapshot", blocking_replace)
+    handover = threading.Thread(target=prepare)
+    handover.start()
+    assert replace_entered.wait(timeout=2)
+    writer = threading.Thread(target=competing_writer)
+    writer.start()
+    try:
+        assert not competing_writer_entered.wait(timeout=0.2)
+    finally:
+        release_replace.set()
+    handover.join(timeout=5)
+    writer.join(timeout=5)
+
+    assert not handover.is_alive()
+    assert not writer.is_alive()
+    assert errors == []
+    assert competing_writer_entered.is_set()
 
 
 def test_reload_union_stops_removed_writer_with_real_process_manager(
@@ -494,6 +554,125 @@ def test_config_drift_after_probe_fails_before_live_checkout(tmp_path: Path) -> 
     assert journal["config_digest"] == digest
 
 
+def test_one_shot_recovery_failure_uses_same_code_in_result_and_journal(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "haniel.yaml"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = HanielConfig(
+        repos={
+            "app": RepoConfig(
+                url="unused",
+                path="./repo",
+                release_manifest="deploy/release.json",
+            )
+        }
+    )
+    runner = ServiceRunner(config, tmp_path, config_path=config_path)
+    control = LifecycleControl(config_path)
+    control.submit_request(
+        "request-recovery-failed",
+        {
+            "kind": "handover",
+            "repo": "app",
+            "target_ref": "target",
+            "expected_operation": "upgrade",
+        },
+    )
+    staged = MagicMock(
+        target_head="b" * 40,
+        manifest_digest="c" * 64,
+        manifest=MagicMock(release_id="release-1"),
+    )
+
+    with (
+        patch(
+            "haniel.core.one_shot_handover.get_head",
+            side_effect=["a" * 40, "b" * 40],
+        ),
+        patch(
+            "haniel.core.one_shot_handover.probe_manifest_target",
+            return_value=staged,
+        ),
+        patch("haniel.core.one_shot_handover.activate_repo_target", return_value=[]),
+        patch(
+            "haniel.core.one_shot_handover.run_manifest_deployment",
+            side_effect=RuntimeError("programming defect"),
+        ),
+        patch(
+            "haniel.core.one_shot_handover.reset_repo_to",
+            side_effect=DeploymentCommandError(
+                "COMMAND_TIMEOUT", "reset", "reset timed out"
+            ),
+        ),
+    ):
+        result = execute_owner_handover(
+            runner,
+            control=control,
+            repo_name="app",
+            target_ref="target",
+            expected_operation="upgrade",
+            request_id="request-recovery-failed",
+        )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error["code"] == "RECOVERY_FAILED"
+    journal = DeploymentStateStore(tmp_path / ".haniel" / "deployments").read("app")
+    assert journal is not None
+    assert journal["state"] == "failed"
+    assert journal["error_code"] == "RECOVERY_FAILED"
+
+
+def test_one_shot_programming_runtime_error_escapes_owner_boundary(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "haniel.yaml"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    runner = ServiceRunner(
+        HanielConfig(
+            repos={
+                "app": RepoConfig(
+                    url="unused",
+                    path="./repo",
+                    release_manifest="deploy/release.json",
+                )
+            }
+        ),
+        tmp_path,
+        config_path=config_path,
+    )
+    control = LifecycleControl(config_path)
+    control.submit_request(
+        "request-programming-error",
+        {
+            "kind": "handover",
+            "repo": "app",
+            "target_ref": "target",
+            "expected_operation": "upgrade",
+        },
+    )
+
+    with (
+        patch("haniel.core.one_shot_handover.get_head", return_value="a" * 40),
+        patch(
+            "haniel.core.one_shot_handover.probe_manifest_target",
+            side_effect=RuntimeError("programming defect"),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="programming defect"):
+            execute_owner_handover(
+                runner,
+                control=control,
+                repo_name="app",
+                target_ref="target",
+                expected_operation="upgrade",
+                request_id="request-programming-error",
+            )
+
+
 def test_config_bound_runtime_without_snapshot_fails_before_service_start(
     tmp_path: Path,
 ) -> None:
@@ -726,7 +905,7 @@ def test_handover_reload_rejects_config_owned_by_initialized_subsystems(
 
 
 @pytest.mark.parametrize("reader_kind", ["affected-services", "orchestrator-plan"])
-def test_config_reload_blocks_cross_thread_reader_until_snapshot_is_complete(
+def test_config_reload_reader_sees_old_snapshot_until_atomic_replace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     reader_kind: str,
@@ -767,16 +946,17 @@ def test_config_reload_blocks_cross_thread_reader_until_snapshot_is_complete(
 
     reader_thread = threading.Thread(target=read_affected)
     reader_thread.start()
-    reader_was_blocked = not reader_finished.wait(timeout=0.1)
+    reader_finished_before_commit = reader_finished.wait(timeout=1)
     allow_graph.set()
     reload_thread.join(timeout=5)
     reader_thread.join(timeout=5)
 
     assert not reload_thread.is_alive()
     assert not reader_thread.is_alive()
-    assert reader_was_blocked
+    assert reader_finished_before_commit
     if reader_kind == "affected-services":
-        assert observed["affected"] == ["new-writer"]
+        assert observed["affected"] == ["old-writer"]
+        assert runner.get_affected_services("app") == ["new-writer"]
     else:
         assert observed["planner"] is not None
 

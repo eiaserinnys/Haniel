@@ -1879,12 +1879,14 @@ class TestReloadConfig:
         runner._repo_states["main"].last_head = "abc12345"
         runner._repo_states["main"].last_fetch = datetime(2026, 1, 1)
 
-        # Reload with same repo (branch changed)
+        # Reload with the same checkout identity and an operational flag change.
         updated = HanielConfig(
             poll_interval=5,
             repos={
                 "main": RepoConfig(
-                    url="git@github.com:test/repo.git", path="./repo", branch="develop"
+                    url="git@github.com:test/repo.git",
+                    path="./repo",
+                    auto_apply=False,
                 )
             },
             services={},
@@ -1894,7 +1896,8 @@ class TestReloadConfig:
         runner.reload_config()
 
         assert runner._repo_states["main"].last_head == "abc12345"
-        assert runner._repo_states["main"].config.branch == "develop"
+        assert runner._repo_states["main"].last_fetch == datetime(2026, 1, 1)
+        assert runner._repo_states["main"].config.auto_apply is False
 
     def test_initializes_new_repo_from_current_head(self, tmp_path: Path):
         """A newly registered checkout must not look like an external pull."""

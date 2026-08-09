@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -17,8 +18,13 @@ from haniel.core.orch_pending_deploy import (
     write as write_pending,
 )
 from haniel.core.runner import ServiceRunner
+from haniel.core.deployment_errors import StableDeploymentError
 from haniel.core.self_update_marker import SelfUpdateResult
-from haniel.core.orchestrated_deploy_execution import execute_approved_plan
+from haniel.core.orchestrated_deploy_execution import (
+    _execute_retry,
+    execute_approved_plan,
+)
+from haniel.integrations.deploy_reporting import ApprovalRevalidationError
 
 
 @pytest.fixture(autouse=True)
@@ -134,6 +140,52 @@ class TestHandleDeployApprovalNonSelf:
             result = runner._handle_deploy_approval(_approval())
         runner.trigger_pull.assert_not_called()
         assert result is None
+
+    def test_missing_approved_target_is_typed_revalidation_failure(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _build_runner(tmp_path)
+        runner._repo_states["appA"].pending_changes = None
+        with (
+            patch(
+                "haniel.core.orchestrated_deploy_execution.get_head",
+                return_value="different",
+            ),
+            patch(
+                "haniel.core.orchestrated_deploy_execution.get_pending_changes",
+                return_value={"commits": []},
+            ),
+            pytest.raises(ApprovalRevalidationError),
+        ):
+            runner._handle_deploy_approval(_approval())
+
+    def test_retry_duplicate_lock_is_typed_operational_failure(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _build_runner(tmp_path)
+        lock = runner._pull_locks["appA"]
+        lock.acquire()
+        try:
+            with (
+                patch(
+                    "haniel.core.orchestrated_deploy_execution.get_head",
+                    return_value="abc1234",
+                ),
+                pytest.raises(StableDeploymentError) as caught,
+            ):
+                _execute_retry(
+                    runner,
+                    _approval(),
+                    {"target_head": "abc1234", "node_id": "node-a"},
+                    SimpleNamespace(),
+                    "appA",
+                    "main",
+                    progress_callback=None,
+                )
+        finally:
+            lock.release()
+
+        assert caught.value.code == "DEPLOYMENT_LEASE_CONFLICT"
 
     def test_already_pulling_raises(self, tmp_path: Path) -> None:
         runner = _build_runner(tmp_path)
@@ -360,6 +412,7 @@ class TestImmutableRetryExecution:
             branch="main",
             expected_operation="upgrade",
             request_id="orch-1",
+            config_snapshot=ANY,
         )
 
     def test_recovery_mode_returns_evidence_without_deploy_side_effects(

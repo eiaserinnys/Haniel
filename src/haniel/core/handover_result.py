@@ -6,9 +6,8 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
-from .deployment import DeploymentError
+from .deployment_errors import stable_deployment_error_code
 from .lifecycle_control import LifecycleControl
-from .release_staging import ReleaseStagingError
 
 Operation = Literal["fresh_install", "upgrade"]
 
@@ -78,43 +77,7 @@ def build_handover_result(
 
 
 def handover_error_code(error: Exception) -> str:
-    if isinstance(error, DeploymentError) and error.recovery_error:
-        return "RECOVERY_FAILED"
-    message = str(error)
-    for code in (
-        "OPERATION_MISMATCH",
-        "CONFIG_DIGEST_MISMATCH",
-        "SERVICE_ENV_FILE_CHANGED",
-        "PULL_FAILED",
-        "PREFLIGHT_FAILED",
-        "QUIESCENCE_REQUIRED",
-        "BACKUP_CREATE_FAILED",
-        "BACKUP_VERIFY_FAILED",
-        "JOURNAL_GATE_FAILED",
-        "APPLY_FAILED",
-        "AMBIGUOUS_COMMIT_STATE",
-        "POST_VERIFY_FAILED",
-        "RECOVERY_FAILED",
-        "LIFECYCLE_OWNER_REQUIRED",
-        "LIFECYCLE_OWNER_MISSING",
-        "LIFECYCLE_OWNER_CONFLICT",
-        "REQUEST_IDENTITY_CONFLICT",
-        "REQUEST_IN_PROGRESS",
-        "DEPLOYMENT_LEASE_CONFLICT",
-        "RUNTIME_OWNER_LOST",
-        "REQUEST_TIMEOUT",
-        "OWNER_START_FAILED",
-        "CONFIG_DIGEST_REQUIRED",
-        "CONFIG_RELOAD_FAILED",
-        "CONFIG_RELOAD_UNSAFE",
-        "SERVICE_ENV_FILE_REQUIRED",
-        "SERVICE_ENV_FILE_INVALID",
-    ):
-        if code in message:
-            return code
-    if isinstance(error, ReleaseStagingError):
-        return "PULL_FAILED"
-    return "HANDOVER_FAILED"
+    return stable_deployment_error_code(error)
 
 
 def request_error_code(error: Exception) -> str:

@@ -10,7 +10,12 @@ from .deployment_command_runner import (
     CommandResult,
     CommandRunner,
     CommandSpec,
+    DeploymentCommandError as DeploymentCommandError,
     subprocess_command_runner as subprocess_command_runner,
+)
+from .deployment_errors import (
+    StableDeploymentError as StableDeploymentError,
+    stable_deployment_error_code as stable_deployment_error_code,
 )
 from .deployment_state import DeploymentStateStore
 from .release_manifest import MigrationSpec, ReleaseManifest

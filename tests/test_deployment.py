@@ -12,12 +12,14 @@ from pydantic import ValidationError
 
 from haniel.core.deployment import (
     CommandSpec,
+    DeploymentCommandError,
     DeploymentCallbacks,
     DeploymentCoordinator,
     DeploymentError,
     DeploymentStateStore,
     ReleaseManifest,
     subprocess_command_runner,
+    stable_deployment_error_code,
 )
 
 
@@ -59,6 +61,20 @@ def callbacks(events: list[str]) -> DeploymentCallbacks:
         rollback=lambda: events.append("rollback"),
         prepare_roll_forward=lambda: events.append("prepare-roll-forward"),
     )
+
+
+def test_recovery_failure_code_wins_over_typed_recovery_child() -> None:
+    error = DeploymentError(
+        "apply failed and rollback timed out",
+        recovered=False,
+        recovery_error=DeploymentCommandError(
+            "COMMAND_TIMEOUT",
+            "restore",
+            "restore timed out",
+        ),
+    )
+
+    assert stable_deployment_error_code(error) == "RECOVERY_FAILED"
 
 
 def coordinator(
@@ -451,7 +467,7 @@ def test_failed_command_persists_bounded_stderr_and_stdout_in_journal(
             "haniel.core.deployment_command_runner.shutil.which",
             return_value="/tools/run-preflight",
         ),
-        patch("haniel.core.deployment_command_runner.subprocess.run") as run,
+        patch("haniel.core.deployment_command_runner._run_process_tree") as run,
     ):
         run.side_effect = subprocess.CalledProcessError(
             1,
@@ -604,3 +620,34 @@ def test_same_successful_target_is_idempotent(tmp_path: Path) -> None:
     assert second.status == "success"
     assert second.skipped is True
     assert events.count("migrate") == 1
+
+
+def test_staging_failure_only_terminates_matching_live_request(tmp_path: Path) -> None:
+    store = DeploymentStateStore(tmp_path / "state")
+    store.begin_handover(
+        "app",
+        previous_head="old",
+        target_ref="origin/main",
+        manifest_identity="deploy/release.json",
+        request_id="request-new",
+        expected_operation="upgrade",
+    )
+
+    assert (
+        store.fail_handover_if_current("app", "request-old", "COMMAND_TIMEOUT", "stale")
+        is False
+    )
+    current = store.read("app")
+    assert current is not None
+    assert current["state"] == "target_resolving"
+
+    assert (
+        store.fail_handover_if_current(
+            "app", "request-new", "COMMAND_TIMEOUT", "child timed out"
+        )
+        is True
+    )
+    terminal = store.read("app")
+    assert terminal is not None
+    assert terminal["state"] == "failed"
+    assert terminal["error_code"] == "COMMAND_TIMEOUT"
