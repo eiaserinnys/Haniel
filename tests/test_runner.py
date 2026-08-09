@@ -1895,6 +1895,34 @@ class TestReloadConfig:
         assert runner._repo_states["main"].last_head == "abc12345"
         assert runner._repo_states["main"].config.branch == "develop"
 
+    def test_initializes_new_repo_from_current_head(self, tmp_path: Path):
+        """A newly registered checkout must not look like an external pull."""
+        from haniel.config import RepoConfig
+
+        config_file = tmp_path / "haniel.yaml"
+        original = HanielConfig(poll_interval=5, repos={}, services={})
+        self._write_yaml(config_file, original)
+
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+        runner = ServiceRunner(original, config_dir=tmp_path, config_path=config_file)
+
+        updated = HanielConfig(
+            poll_interval=5,
+            repos={
+                "main": RepoConfig(
+                    url="git@github.com:test/repo.git", path="./repo", branch="main"
+                )
+            },
+            services={},
+        )
+        self._write_yaml(config_file, updated)
+
+        with patch("haniel.core.runner.get_head", return_value="current-head"):
+            runner.reload_config()
+
+        assert runner._repo_states["main"].last_head == "current-head"
+
 
 class TestRemoteServiceCommandHandler:
     """Tests for runner handling of orchestrator service-command actions."""
