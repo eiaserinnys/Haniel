@@ -812,16 +812,21 @@ print(json.dumps({"content_sha256": hashlib.sha256(content.encode()).hexdigest()
     outcome: dict[str, object] = {}
 
     def execute() -> None:
-        outcome["result"] = subprocess_command_runner(tmp_path)(
-            CommandSpec(
-                name="immutable-env",
-                command=(f"{sys.executable} {script.name} {ready.name} {proceed.name}"),
-            ),
-            {
-                "HANIEL_SERVICE_ENV_FILE": str(env_file),
-                "HANIEL_SERVICE_ENV_FILE_SHA256": expected_digest,
-            },
-        )
+        try:
+            outcome["result"] = subprocess_command_runner(tmp_path)(
+                CommandSpec(
+                    name="immutable-env",
+                    command=(
+                        f"{sys.executable} {script.name} {ready.name} {proceed.name}"
+                    ),
+                ),
+                {
+                    "HANIEL_SERVICE_ENV_FILE": str(env_file),
+                    "HANIEL_SERVICE_ENV_FILE_SHA256": expected_digest,
+                },
+            )
+        except BaseException as error:
+            outcome["error"] = error
 
     worker = threading.Thread(target=execute)
     worker.start()
@@ -835,6 +840,7 @@ print(json.dumps({"content_sha256": hashlib.sha256(content.encode()).hexdigest()
     proceed.write_text("go", encoding="utf-8")
     worker.join(timeout=5)
     assert not worker.is_alive()
+    assert "error" not in outcome
     result = outcome["result"]
     assert result.json_data == {  # type: ignore[union-attr]
         "content_sha256": hashlib.sha256(

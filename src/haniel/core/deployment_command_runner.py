@@ -170,7 +170,7 @@ def _execute_subprocess(
     env: dict[str, str],
     secret_values: tuple[str, ...],
 ) -> CommandResult:
-    argv = shlex.split(command.command)
+    argv = _split_command(command.command)
     executable = argv[0] if argv else ""
     resolved_executable = shutil.which(executable, path=env.get("PATH"))
     if resolved_executable is None:
@@ -208,6 +208,21 @@ def _execute_subprocess(
         stderr=_output_tail(safe_stderr, _STDERR_TAIL_CHARS) or "",
         json_data=redact_value(json_data, secret_values),
     )
+
+
+def _split_command(command: str, *, windows: bool | None = None) -> list[str]:
+    """Split an explicit command without destroying Windows path separators."""
+
+    use_windows_rules = os.name == "nt" if windows is None else windows
+    if not use_windows_rules:
+        return shlex.split(command)
+    argv = shlex.split(command, posix=False)
+    return [
+        token[1:-1]
+        if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}
+        else token
+        for token in argv
+    ]
 
 
 def _parse_json_result(command: CommandSpec, stdout: str) -> dict[str, Any] | None:

@@ -13,7 +13,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from haniel.config import HanielConfig, RepoConfig, ServiceConfig, load_config
-from haniel.core.deployment_command_runner import CommandSpec, subprocess_command_runner
+from haniel.core.deployment_command_runner import (
+    CommandSpec,
+    _split_command,
+    subprocess_command_runner,
+)
 from haniel.core.handover_result import HandoverResult
 from haniel.core.lifecycle_control import LifecycleConflict, LifecycleControl
 from haniel.core.lifecycle_request_server import LifecycleRequestServer
@@ -253,6 +257,17 @@ print(json.dumps({"ok": True, "path_matches": path.name == "service.env"}))
         assert connection.execute("select id from release_ledger").fetchall() == [
             ("expected",)
         ]
+
+
+def test_release_command_split_preserves_windows_drive_and_quoted_space_paths() -> None:
+    assert _split_command(
+        r'C:\hostedtoolcache\windows\Python\python.exe "script with spaces.py" apply',
+        windows=True,
+    ) == [
+        r"C:\hostedtoolcache\windows\Python\python.exe",
+        "script with spaces.py",
+        "apply",
+    ]
 
 
 def test_release_child_rejects_env_file_changed_after_identity_binding(
