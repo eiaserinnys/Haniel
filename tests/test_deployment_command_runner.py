@@ -23,6 +23,38 @@ def _python_command(script: Path) -> str:
     return subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
 
 
+def _process_is_running(pid: int) -> bool:
+    """Use the platform process primitive instead of POSIX-only kill(pid, 0)."""
+
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+
+    import ctypes
+    from ctypes import wintypes
+
+    synchronize = 0x00100000
+    wait_timeout = 0x00000102
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    handle = kernel32.OpenProcess(synchronize, False, pid)
+    if not handle:
+        return False
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == wait_timeout
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def test_public_classifier_preserves_typed_cause_code() -> None:
     command_error = DeploymentCommandError(
         "COMMAND_EXIT_NONZERO",
@@ -319,9 +351,7 @@ def test_real_timeout_child_has_stable_code_and_is_reaped(tmp_path: Path) -> Non
     assert pid_file.exists()
     pid = int(pid_file.read_text(encoding="utf-8"))
     for _ in range(50):
-        try:
-            os.kill(pid, 0)
-        except OSError:
+        if not _process_is_running(pid):
             break
         time.sleep(0.02)
     else:
