@@ -1231,6 +1231,38 @@ class TestServiceRunnerPollCycle:
         mock_remote_head.assert_called_once()
         mock_manifest_digest.assert_not_called()
 
+    def test_trigger_pull_persists_and_logs_untyped_git_failure(
+        self,
+        runner_with_mock_repo,
+        caplog,
+    ):
+        runner = runner_with_mock_repo
+        state = runner._repo_states["test-repo"]
+        state.config.release_manifest = "deploy/release.json"
+        state.pending_changes = {"commits": ["a"]}
+        previous_head = get_head(runner.config_dir / state.config.path)
+
+        with (
+            patch("haniel.core.runner.get_head", return_value=previous_head),
+            patch("haniel.core.runner.get_remote_head", return_value="target-head"),
+            patch(
+                "haniel.core.runner.probe_manifest_target",
+                side_effect=GitError("bare git failure"),
+            ),
+            pytest.raises(GitError, match="bare git failure"),
+            caplog.at_level("ERROR", logger="haniel.core.runner"),
+        ):
+            runner.trigger_pull(
+                "test-repo",
+                orchestrator_attempt_id="request-git-failure",
+            )
+
+        journal = runner._deployment_state_store().read("test-repo")
+        assert journal is not None
+        assert journal["state"] == "failed"
+        assert journal["error_code"] == "UNCLASSIFIED_DEPLOYMENT_ERROR"
+        assert "UNCLASSIFIED_DEPLOYMENT_ERROR" in caplog.text
+
     @patch("haniel.core.runner.run_manifest_deployment")
     def test_manifest_pull_activates_the_exact_staged_target_without_repulling(
         self,
