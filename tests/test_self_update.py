@@ -172,6 +172,8 @@ class TestRunnerSelfUpdate:
         runner._dependency_graph.topological_sort.return_value = list(
             config.services.keys()
         )
+        runner._startup_order = tuple(config.services.keys())
+        runner._shutdown_order = tuple(reversed(runner._startup_order))
 
         return runner
 

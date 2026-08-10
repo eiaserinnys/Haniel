@@ -15,13 +15,14 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 
 from haniel.config import HanielConfig, RepoConfig, ServiceConfig, load_config
 from haniel.config.model import OrchestratorClientConfig
 from haniel.core.deployment_state import DeploymentStateStore
 from haniel.core.deployment_errors import StableDeploymentError
 from haniel.core.git import fetch_repo, get_head, get_remote_head
-from haniel.core.runner import ServiceRunner
+from haniel.core.runner import DependencyGraph, ServiceRunner
 from haniel.core.runner_config_snapshot import RepoObservation
 from haniel.integrations.deploy_attempt_gate import DeployPermissionError
 from haniel.integrations.orchestrator_client import OrchestratorClient
@@ -37,6 +38,17 @@ def _git(path: Path, *args: str) -> str:
 def _python_command(script: Path) -> str:
     argv = [sys.executable, str(script)]
     return subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
+
+
+def _write_config(path: Path, config: HanielConfig) -> None:
+    path.write_text(
+        yaml.safe_dump(
+            config.model_dump(by_alias=True, exclude_none=True, mode="python"),
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
 
 
 def _process_is_running(pid: int) -> bool:
@@ -411,6 +423,119 @@ def test_repo_and_config_snapshot_are_one_generation_under_reload(
     assert failures == []
 
 
+def test_cyclic_reload_is_fail_closed_and_valid_reload_recovers_without_restart(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "haniel.yaml"
+    original = HanielConfig(
+        poll_interval=0,
+        repos={"app": RepoConfig(url="unused", path="app")},
+        services={
+            "api": ServiceConfig(run="api"),
+            "worker": ServiceConfig(run="worker", after=["api"]),
+        },
+    )
+    _write_config(config_path, original)
+    backup_path = config_path.with_suffix(config_path.suffix + ".bak")
+    backup_path.write_text("existing backup", encoding="utf-8")
+    runner = ServiceRunner(
+        original,
+        config_dir=tmp_path,
+        config_path=config_path,
+    )
+    runner._repo_states["app"].last_head = "resident-head"
+    runner._repo_states["app"].pending_changes = {"commits": ["resident"]}
+    before = runner._snapshot_config_state()
+    before_repo = runner._snapshot_repo_runtime("app")
+
+    cyclic = original.model_copy(deep=True)
+    cyclic.services["api"] = cyclic.services["api"].model_copy(
+        update={"after": ["worker"]}
+    )
+    _write_config(config_path, cyclic)
+
+    with pytest.raises(StableDeploymentError) as exc_info:
+        runner.reload_config()
+
+    assert exc_info.value.code == "CONFIG_SEMANTIC_INVALID"
+    after_rejection = runner._snapshot_config_state()
+    after_repo = runner._snapshot_repo_runtime("app")
+    assert after_rejection == before
+    assert after_repo == before_repo
+    assert runner.get_status()["dependency_graph"] == {
+        "api": {"dependencies": [], "dependents": ["worker"]},
+        "worker": {"dependencies": ["api"], "dependents": []},
+    }
+    assert [service["name"] for service in runner._collect_services_info()] == [
+        "api",
+        "worker",
+    ]
+    assert backup_path.read_text(encoding="utf-8") == "existing backup"
+
+    poll_cycles = 0
+    next_cycle = threading.Event()
+
+    def poll_unchanged_snapshot() -> None:
+        nonlocal poll_cycles
+        assert runner.get_status()["poll_interval"] == 0
+        assert len(runner._collect_services_info()) == 2
+        poll_cycles += 1
+        if poll_cycles == 2:
+            next_cycle.set()
+            runner._stop_event.set()
+
+    runner._poll_cycle = poll_unchanged_snapshot  # type: ignore[method-assign]
+    runner._poll_thread = threading.Thread(target=runner._poll_loop, daemon=True)
+    runner._poll_thread.start()
+    assert next_cycle.wait(timeout=2), "rejected reload killed the poll thread"
+    runner._poll_thread.join(timeout=2)
+    assert not runner._poll_thread.is_alive()
+    runner._stop_event.clear()
+
+    corrected = original.model_copy(deep=True)
+    corrected.services["api"] = corrected.services["api"].model_copy(
+        update={"run": "api-corrected"}
+    )
+    _write_config(config_path, corrected)
+    runner.reload_config()
+
+    recovered = runner._snapshot_config_state()
+    assert recovered.generation == before.generation + 1
+    assert recovered.config.services["api"].run == "api-corrected"
+    assert recovered.startup_order == ("api", "worker")
+    assert recovered.shutdown_order == ("worker", "api")
+
+
+def test_config_replace_computes_order_once_and_snapshots_reuse_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = ServiceRunner(
+        HanielConfig(services={"api": ServiceConfig(run="api")}),
+        config_dir=tmp_path,
+    )
+    candidate = HanielConfig(
+        services={
+            "api": ServiceConfig(run="api"),
+            "worker": ServiceConfig(run="worker", after=["api"]),
+        }
+    )
+    original_sort = DependencyGraph.topological_sort
+    calls: list[bool] = []
+
+    def tracked_sort(graph: DependencyGraph, reverse: bool = False) -> list[str]:
+        calls.append(reverse)
+        return original_sort(graph, reverse=reverse)
+
+    monkeypatch.setattr(DependencyGraph, "topological_sort", tracked_sort)
+    resident = runner._snapshot_config_state()
+    runner._replace_config_snapshot(candidate, resident.generation)
+    assert runner._snapshot_config_state().startup_order == ("api", "worker")
+    assert runner.get_startup_order() == ["api", "worker"]
+    assert runner.get_shutdown_order() == ["worker", "api"]
+
+    assert calls == [False]
+
+
 def test_manual_manifest_activation_rolls_back_when_generation_commit_is_stale(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -529,17 +654,31 @@ def test_auto_poll_isolates_only_typed_operational_repo_errors(tmp_path: Path) -
     runner._run_auto_deploy.assert_called_once_with("failed")
 
 
-def test_poll_loop_does_not_hide_programming_runtime_error(tmp_path: Path) -> None:
-    runner = ServiceRunner(HanielConfig(), config_dir=tmp_path)
+def test_poll_loop_reports_untyped_failure_and_runs_the_next_cycle(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    runner = ServiceRunner(HanielConfig(poll_interval=0), config_dir=tmp_path)
+    next_cycle = threading.Event()
+    attempts = 0
 
-    def programming_failure() -> None:
+    def fail_once_then_stop() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("programming defect")
+        next_cycle.set()
         runner._stop_event.set()
-        raise RuntimeError("programming defect")
 
-    runner._poll_cycle = programming_failure  # type: ignore[method-assign]
+    runner._poll_cycle = fail_once_then_stop  # type: ignore[method-assign]
+    runner._poll_thread = threading.Thread(target=runner._poll_loop, daemon=True)
+    runner._poll_thread.start()
 
-    with pytest.raises(RuntimeError, match="programming defect"):
-        runner._poll_loop()
+    assert next_cycle.wait(timeout=2), "poll thread died before the next cycle"
+    runner._poll_thread.join(timeout=2)
+    assert not runner._poll_thread.is_alive()
+    assert attempts == 2
+    assert "POLL_CYCLE_FAILED" in caplog.text
+    assert "programming defect" in caplog.text
 
 
 def test_poll_report_timeout_keeps_heartbeat_node_hello_reader_and_pong_alive(

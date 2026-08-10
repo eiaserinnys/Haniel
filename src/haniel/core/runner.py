@@ -35,6 +35,7 @@ from ..config import (
     RepoConfig,
     ServiceConfig,
     ShutdownConfig,
+    validate_config,
 )
 from ..config.release_activation import (
     ReleaseManifestActivationRequired,
@@ -358,6 +359,8 @@ class ServiceRunner:
             name: svc for name, svc in config.services.items() if svc.enabled
         }
         self._dependency_graph = DependencyGraph(self._enabled_services)
+        self._startup_order = tuple(self._dependency_graph.topological_sort())
+        self._shutdown_order = tuple(reversed(self._startup_order))
 
         # Initialize repo states
         self._repo_states: dict[str, RepoState] = {}
@@ -481,10 +484,8 @@ class ServiceRunner:
                     for name, state in self._repo_states.items()
                 },
                 self_repo=self._self_repo,
-                startup_order=tuple(self._dependency_graph.topological_sort()),
-                shutdown_order=tuple(
-                    self._dependency_graph.topological_sort(reverse=True)
-                ),
+                startup_order=self._startup_order,
+                shutdown_order=self._shutdown_order,
             )
 
     def _snapshot_repo_runtime(self, name: str) -> RepoRuntimeSnapshot:
@@ -546,14 +547,29 @@ class ServiceRunner:
     ) -> int:
         """Prepare outside the lock, then atomically replace one generation."""
 
+        prepared_config = candidate.model_copy(deep=True)
+        semantic_errors = validate_config(prepared_config)
+        if semantic_errors:
+            raise StableDeploymentError(
+                "CONFIG_SEMANTIC_INVALID",
+                "; ".join(str(error) for error in semantic_errors),
+            )
         enabled_services = {
-            name: svc for name, svc in candidate.services.items() if svc.enabled
+            name: svc for name, svc in prepared_config.services.items() if svc.enabled
         }
         dependency_graph = DependencyGraph(enabled_services)
+        try:
+            startup_order = tuple(dependency_graph.topological_sort())
+        except CyclicDependencyError as error:
+            raise StableDeploymentError(
+                "CONFIG_SEMANTIC_INVALID",
+                str(error),
+            ) from error
+        shutdown_order = tuple(reversed(startup_order))
         resident_identity = self._snapshot_config_state().repo_identity
         prepared_identity_states: dict[str, RepoState] = {}
         prepared_new_locks: dict[str, threading.Lock] = {}
-        for name, repo_cfg in candidate.repos.items():
+        for name, repo_cfg in prepared_config.repos.items():
             old_config = resident_identity.get(name)
             checkout_identity_unchanged = old_config is not None and (
                 old_config.url,
@@ -572,7 +588,9 @@ class ServiceRunner:
             prepared_identity_states[name] = state
             if old_config is None:
                 prepared_new_locks[name] = threading.Lock()
-        self_update_repo = candidate.self_update.repo if candidate.self_update else None
+        self_update_repo = (
+            prepared_config.self_update.repo if prepared_config.self_update else None
+        )
         with self._config_reload_lock:
             if self._config_generation != expected_generation:
                 raise StableDeploymentError(
@@ -581,7 +599,7 @@ class ServiceRunner:
                 )
             repo_states: dict[str, RepoState] = {}
             pull_locks: dict[str, threading.Lock] = {}
-            for name, repo_cfg in candidate.repos.items():
+            for name, repo_cfg in prepared_config.repos.items():
                 current = self._repo_states.get(name)
                 prepared = prepared_identity_states.get(name)
                 if prepared is not None:
@@ -602,10 +620,12 @@ class ServiceRunner:
                     pending_changes=deepcopy(current.pending_changes),
                 )
                 pull_locks[name] = self._pull_locks[name]
-            self.config = candidate
-            self.poll_interval = candidate.poll_interval
+            self.config = prepared_config
+            self.poll_interval = prepared_config.poll_interval
             self._enabled_services = enabled_services
             self._dependency_graph = dependency_graph
+            self._startup_order = startup_order
+            self._shutdown_order = shutdown_order
             self._repo_states = repo_states
             self._pull_locks = pull_locks
             self._self_repo = self_update_repo
@@ -2497,8 +2517,10 @@ class ServiceRunner:
     def _poll_loop(self) -> None:
         """Main poll loop."""
         while not self._stop_event.is_set():
+            interval = self.poll_interval
             try:
                 self._poll_cycle()
+                interval = self._snapshot_config_state().config.poll_interval
             except _OPERATIONAL_DEPLOYMENT_ERRORS as error:
                 code = stable_deployment_error_code(error, default="POLL_CYCLE_FAILED")
                 logger.error(
@@ -2506,9 +2528,18 @@ class ServiceRunner:
                     code,
                     bounded_redact_text(str(error)),
                 )
+            except Exception as error:
+                code = stable_deployment_error_code(
+                    error,
+                    default="POLL_CYCLE_FAILED",
+                )
+                logger.exception(
+                    "Poll cycle crashed [%s] and will retry: %s",
+                    code,
+                    bounded_redact_text(str(error)),
+                )
 
             # Wait for next poll interval (interruptible)
-            interval = self._snapshot_config_state().config.poll_interval
             self._stop_event.wait(timeout=interval)
 
     def _poll_cycle(self) -> None:
