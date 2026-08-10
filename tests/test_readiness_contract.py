@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import importlib
 import json
 import os
@@ -628,14 +629,18 @@ def test_stop_reaps_grandchild_and_closes_reader_threads_and_pipes(
     assert process is not None
     assert _wait(status.exists)
     grandchild_pid = int(_status(status)["grandchild_pid"])
+    stdout_reader = managed.stdout_reader
+    stderr_reader = managed.stderr_reader
+    assert stdout_reader is not None
+    assert stderr_reader is not None
 
     assert manager.stop_service("process-tree", force=True)
 
     assert not _process_is_running(grandchild_pid)
-    assert managed.stdout_reader is not None
-    assert managed.stderr_reader is not None
-    assert not managed.stdout_reader.is_alive()
-    assert not managed.stderr_reader.is_alive()
+    assert managed.stdout_reader is None
+    assert managed.stderr_reader is None
+    assert not stdout_reader.is_alive()
+    assert not stderr_reader.is_alive()
     assert process.stdout is not None and process.stdout.closed
     assert process.stderr is not None and process.stderr.closed
 
@@ -656,6 +661,10 @@ def test_stop_self_wakes_readers_when_escaped_descendant_holds_pipe(
     grandchild_pid = int(_status(status)["grandchild_pid"])
     process = managed.process
     assert process is not None
+    stdout_reader = managed.stdout_reader
+    stderr_reader = managed.stderr_reader
+    assert stdout_reader is not None
+    assert stderr_reader is not None
     stopped = threading.Event()
     result: list[bool] = []
 
@@ -669,10 +678,10 @@ def test_stop_self_wakes_readers_when_escaped_descendant_holds_pipe(
         assert stopped.wait(2), "stop must not wait for an escaped pipe writer"
         assert result == [True]
         assert process.poll() is not None
-        assert managed.stdout_reader is not None
-        assert managed.stderr_reader is not None
-        assert not managed.stdout_reader.is_alive()
-        assert not managed.stderr_reader.is_alive()
+        assert managed.stdout_reader is None
+        assert managed.stderr_reader is None
+        assert not stdout_reader.is_alive()
+        assert not stderr_reader.is_alive()
         assert process.stdout is not None and process.stdout.closed
         assert process.stderr is not None and process.stderr.closed
         assert _process_resource_count() <= resources_before + 1
@@ -715,6 +724,8 @@ def test_stream_reader_self_wakes_while_an_independent_writer_remains_open(
     finally:
         os.close(write_fd)
         capture.stop()
+    del reader
+    gc.collect()
     assert _process_resource_count() <= resources_before + 1
 
 

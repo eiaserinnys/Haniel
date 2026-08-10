@@ -6,6 +6,7 @@ It also supports real-time pattern matching for ready: log:{pattern} conditions.
 """
 
 import codecs
+import logging
 import os
 import re
 import selectors
@@ -16,6 +17,8 @@ from datetime import datetime
 from io import TextIOWrapper
 from pathlib import Path
 from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -324,13 +327,16 @@ class StreamReader(threading.Thread):
                 self._close_owned_resources()
             return
 
+        if os.name == "nt":
+            self._run_windows_text()
+            return
+
         decoder = codecs.getincrementaldecoder(self.stream.encoding or "utf-8")(
             errors=self.stream.errors or "replace"
         )
         pending = ""
         try:
-            chunks = self._windows_chunks() if os.name == "nt" else self._posix_chunks()
-            for chunk in chunks:
+            for chunk in self._posix_chunks():
                 pending += decoder.decode(chunk)
                 pending = self._emit_complete_lines(pending)
             pending += decoder.decode(b"", final=True)
@@ -362,40 +368,59 @@ class StreamReader(threading.Thread):
         finally:
             selector.close()
 
-    def _windows_chunks(self):
+    def _run_windows_text(self) -> None:
+        """Read complete lines until EOF or a synchronous-I/O cancellation."""
+        try:
+            while not self._stop_event.is_set():
+                line = self.stream.readline()
+                if not line:
+                    return
+                self.log_capture.write_line(line, self.source)
+        except (ValueError, OSError):
+            if not self._stop_event.is_set():
+                logger.exception("Windows stream reader failed for %s", self.source)
+        finally:
+            self._close_owned_resources()
+
+    def _cancel_windows_read(self) -> None:
+        """Cancel only this reader thread's synchronous pipe read."""
         import ctypes
-        import msvcrt
         from ctypes import wintypes
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.PeekNamedPipe.argtypes = (
-            wintypes.HANDLE,
-            wintypes.LPVOID,
+        kernel32.OpenThread.argtypes = (
             wintypes.DWORD,
-            wintypes.LPVOID,
-            ctypes.POINTER(wintypes.DWORD),
-            wintypes.LPVOID,
+            wintypes.BOOL,
+            wintypes.DWORD,
         )
-        kernel32.PeekNamedPipe.restype = wintypes.BOOL
-        fd = self.stream.fileno()
-        handle = msvcrt.get_osfhandle(fd)
-        available = wintypes.DWORD()
-        while not self._stop_event.is_set():
-            ok = kernel32.PeekNamedPipe(
-                handle, None, 0, None, ctypes.byref(available), None
+        kernel32.OpenThread.restype = wintypes.HANDLE
+        kernel32.CancelSynchronousIo.argtypes = (wintypes.HANDLE,)
+        kernel32.CancelSynchronousIo.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        native_id = self.native_id
+        if native_id is None:
+            return
+        thread_handle = kernel32.OpenThread(0x0001, False, native_id)
+        if not thread_handle:
+            logger.warning(
+                "Could not open Windows stream reader thread %s: error=%s",
+                native_id,
+                ctypes.get_last_error(),
             )
-            if not ok:
+            return
+        try:
+            if not kernel32.CancelSynchronousIo(thread_handle):
                 error = ctypes.get_last_error()
-                if error in {6, 109, 232}:  # invalid/broken/no-data pipe
-                    return
-                raise ctypes.WinError(error)
-            if available.value:
-                chunk = os.read(fd, min(available.value, 65536))
-                if not chunk:
-                    return
-                yield chunk
-                continue
-            self._stop_event.wait(0.02)
+                if error != 1168:  # ERROR_NOT_FOUND: no read is currently pending
+                    logger.warning(
+                        "Could not cancel Windows stream read for thread %s: error=%s",
+                        native_id,
+                        error,
+                    )
+        finally:
+            kernel32.CloseHandle(thread_handle)
 
     def _emit_complete_lines(self, content: str) -> str:
         lines = content.splitlines(keepends=True)
@@ -426,6 +451,8 @@ class StreamReader(threading.Thread):
     def stop(self) -> None:
         """Signal the reader through its private wakeup without closing its stream."""
         self._stop_event.set()
+        if os.name == "nt" and self.is_alive():
+            self._cancel_windows_read()
         if self._wake_write is not None:
             try:
                 os.write(self._wake_write, b"x")

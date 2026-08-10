@@ -1055,13 +1055,16 @@ class ProcessManager:
         if monitor is not None and monitor is not threading.current_thread():
             monitor.join(timeout=5)
 
-        # Stop stream readers
-        if managed.stdout_reader:
-            managed.stdout_reader.stop()
-        if managed.stderr_reader:
-            managed.stderr_reader.stop()
+        # Stop stream readers. Keep local references only until each reader has
+        # released its wrapper and native thread resources.
+        stdout_reader = managed.stdout_reader
+        stderr_reader = managed.stderr_reader
+        if stdout_reader:
+            stdout_reader.stop()
+        if stderr_reader:
+            stderr_reader.stop()
 
-        for reader in (managed.stdout_reader, managed.stderr_reader):
+        for reader in (stdout_reader, stderr_reader):
             if reader is None or reader is threading.current_thread():
                 continue
             if reader.ident is None:
@@ -1072,14 +1075,20 @@ class ProcessManager:
                 logger.warning("Stream reader did not stop for %s", managed.name)
 
         for reader, stream in (
-            (managed.stdout_reader, None if process is None else process.stdout),
-            (managed.stderr_reader, None if process is None else process.stderr),
+            (stdout_reader, None if process is None else process.stdout),
+            (stderr_reader, None if process is None else process.stderr),
         ):
             if reader is None and stream is not None and not stream.closed:
                 try:
                     stream.close()
                 except (OSError, ValueError):
                     pass
+
+        with self._lock:
+            if managed.stdout_reader is stdout_reader:
+                managed.stdout_reader = None
+            if managed.stderr_reader is stderr_reader:
+                managed.stderr_reader = None
 
         # Stop log capture
         self.log_manager.stop_capture(managed.name)
