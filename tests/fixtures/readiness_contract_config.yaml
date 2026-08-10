@@ -1,0 +1,13 @@
+services:
+  remiel:
+    run: node remiel.js
+    ready: 'log:\[Remiel\] Bot is running!'
+  ariella:
+    run: node ariella.js
+    ready: 'log:\[Ariella\] Bot is running!'
+  rescue-bot:
+    run: python -m rescue
+    ready: 'log:\[Rescue\] Bot is running!'
+  translate-bot:
+    run: python -m translate_bot
+    ready: 'log:\[Translate\] Bot is running!'

@@ -1,0 +1,6 @@
+{
+  "schema_version": "haniel.readiness-contract.v1",
+  "service": "translate-bot",
+  "marker": "[Translate] Bot is running!",
+  "ready": "log:\\[Translate\\] Bot is running!"
+}

@@ -1,0 +1,6 @@
+{
+  "schema_version": "haniel.readiness-contract.v1",
+  "service": "ariella",
+  "marker": "[Ariella] Bot is running!",
+  "ready": "log:\\[Ariella\\] Bot is running!"
+}

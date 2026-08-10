@@ -636,7 +636,7 @@ def test_stop_reaps_grandchild_and_closes_reader_threads_and_pipes(
 
     assert manager.stop_service("process-tree", force=True)
 
-    assert not _process_is_running(grandchild_pid)
+    assert _wait(lambda: not _process_is_running(grandchild_pid))
     assert managed.stdout_reader is None
     assert managed.stderr_reader is None
     assert not stdout_reader.is_alive()
@@ -738,6 +738,241 @@ def test_stream_reader_self_wakes_while_an_independent_writer_remains_open(
         assert _process_resource_count() <= resources_before + 1
     finally:
         capture.stop()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX wakeup descriptor race contract")
+def test_stream_reader_cleanup_and_stop_share_one_wakeup_fd_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """EOF cleanup racing stop cannot write a closed or reused descriptor."""
+    import haniel.core.logs as logs
+
+    capture = _manager(tmp_path).log_manager.start_capture("wakeup-race")
+    real_close = os.close
+    real_write = os.write
+    current: dict[str, object] = {}
+    closed_fd_writes = 0
+    contaminated_files = 0
+    failures: list[BaseException] = []
+
+    def intercepted_close(descriptor: int) -> None:
+        nonlocal contaminated_files
+        target = current.get("target")
+        if descriptor != target:
+            real_close(descriptor)
+            return
+        real_close(descriptor)
+        reuse_path = current.get("reuse_path")
+        if isinstance(reuse_path, Path):
+            reused = os.open(reuse_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            if reused != descriptor:
+                os.dup2(reused, descriptor)
+            current["reused"] = (reused, descriptor)
+        close_started = current["close_started"]
+        release_close = current["release_close"]
+        assert isinstance(close_started, threading.Event)
+        assert isinstance(release_close, threading.Event)
+        close_started.set()
+        assert release_close.wait(1)
+
+    def intercepted_write(descriptor: int, payload: bytes) -> int:
+        nonlocal closed_fd_writes
+        if descriptor == current.get("target"):
+            write_attempted = current["write_attempted"]
+            assert isinstance(write_attempted, threading.Event)
+            write_attempted.set()
+            reused = current.get("reused")
+            if not isinstance(reused, tuple) or descriptor not in reused:
+                closed_fd_writes += 1
+        return real_write(descriptor, payload)
+
+    monkeypatch.setattr(logs.os, "close", intercepted_close)
+    monkeypatch.setattr(logs.os, "write", intercepted_write)
+
+    try:
+        for iteration in range(1600):
+            stream_read, stream_write = os.pipe()
+            stream = os.fdopen(stream_read, "r", encoding="utf-8")
+            reader = StreamReader(stream, capture)
+            target = reader._wake_write
+            assert target is not None
+            reuse_path = tmp_path / f"reused-{iteration}.bin" if iteration % 2 else None
+            current.clear()
+            current.update(
+                target=target,
+                reuse_path=reuse_path,
+                close_started=threading.Event(),
+                release_close=threading.Event(),
+                write_attempted=threading.Event(),
+            )
+
+            cleanup = threading.Thread(target=reader._close_owned_resources)
+            cleanup.start()
+            close_started = current["close_started"]
+            write_attempted = current["write_attempted"]
+            release_close = current["release_close"]
+            assert isinstance(close_started, threading.Event)
+            assert isinstance(write_attempted, threading.Event)
+            assert isinstance(release_close, threading.Event)
+            assert close_started.wait(1)
+
+            def stop_reader() -> None:
+                try:
+                    reader.stop()
+                except BaseException as error:
+                    failures.append(error)
+
+            stopper = threading.Thread(target=stop_reader)
+            stopper.start()
+            write_attempted.wait(0.002)
+            release_close.set()
+            cleanup.join(timeout=1)
+            stopper.join(timeout=1)
+            assert not cleanup.is_alive()
+            assert not stopper.is_alive()
+
+            reused = current.get("reused")
+            if isinstance(reused, tuple):
+                for descriptor in set(reused):
+                    real_close(descriptor)
+                if reuse_path is not None and reuse_path.read_bytes():
+                    contaminated_files += 1
+            real_close(stream_write)
+
+        assert failures == []
+        assert not any(isinstance(error, TypeError) for error in failures)
+        assert closed_fd_writes == 0
+        assert contaminated_files == 0
+    finally:
+        capture.stop()
+
+
+def test_stream_reader_concurrent_stop_is_idempotent(tmp_path: Path) -> None:
+    capture = _manager(tmp_path).log_manager.start_capture("concurrent-stop")
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(300)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    assert process.stdout is not None
+    reader = StreamReader(process.stdout, capture)
+    reader.start()
+    stoppers = [threading.Thread(target=reader.stop) for _ in range(8)]
+    try:
+        for stopper in stoppers:
+            stopper.start()
+        for stopper in stoppers:
+            stopper.join(timeout=2)
+            assert not stopper.is_alive()
+        reader.join(timeout=2)
+        assert not reader.is_alive()
+        assert reader._closed.is_set()
+        assert process.stdout.closed
+    finally:
+        if reader.is_alive():
+            reader.stop()
+            reader.join(timeout=2)
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        capture.stop()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows synchronous pipe contract")
+def test_windows_reader_retries_cancel_when_read_starts_after_error_not_found(
+    tmp_path: Path,
+) -> None:
+    """A read entering after ERROR_NOT_FOUND still receives bounded cancellation."""
+    capture = _manager(tmp_path).log_manager.start_capture("windows-cancel-race")
+    gc.collect()
+    resources_before = _process_resource_count()
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(300)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+    )
+    assert process.stdout is not None
+    entered_wrapper = threading.Event()
+    allow_native_read = threading.Event()
+
+    class DelayedRead:
+        encoding = process.stdout.encoding
+        errors = process.stdout.errors
+
+        @property
+        def closed(self) -> bool:
+            return process.stdout.closed
+
+        def fileno(self) -> int:
+            return process.stdout.fileno()
+
+        def readline(self) -> str:
+            entered_wrapper.set()
+            assert allow_native_read.wait(2)
+            return process.stdout.readline()
+
+        def close(self) -> None:
+            process.stdout.close()
+
+    reader = StreamReader(DelayedRead(), capture)  # type: ignore[arg-type]
+    cancel_results: list[bool] = []
+    first_cancel = threading.Event()
+    actual_cancel = reader._cancel_windows_read
+
+    def observed_cancel() -> bool:
+        result = actual_cancel()
+        cancel_results.append(result)
+        first_cancel.set()
+        return result
+
+    reader._cancel_windows_read = observed_cancel  # type: ignore[method-assign]
+    stop_done = threading.Event()
+
+    def stop_reader() -> None:
+        reader.stop()
+        stop_done.set()
+
+    reader.start()
+    assert entered_wrapper.wait(2)
+    stopper = threading.Thread(target=stop_reader)
+    stopper.start()
+    try:
+        assert first_cancel.wait(2)
+        assert cancel_results[0] is False
+        allow_native_read.set()
+        assert stop_done.wait(2), "stop must retry after the read becomes pending"
+        stopper.join(timeout=2)
+        reader.join(timeout=2)
+        assert not stopper.is_alive()
+        assert not reader.is_alive()
+        assert reader._closed.is_set()
+        assert process.stdout.closed
+        assert any(cancel_results[1:])
+    finally:
+        allow_native_read.set()
+        if reader.is_alive():
+            reader.stop()
+            reader.join(timeout=2)
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        capture.stop()
+        gc.collect()
+    assert _process_resource_count() <= resources_before + 1
 
 
 def test_missing_ready_is_running_but_explicitly_unconfigured(tmp_path: Path) -> None:

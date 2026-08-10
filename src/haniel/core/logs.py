@@ -11,6 +11,7 @@ import os
 import re
 import selectors
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -19,6 +20,9 @@ from pathlib import Path
 from typing import Callable
 
 logger = logging.getLogger(__name__)
+
+WINDOWS_READ_CANCEL_TIMEOUT_SECONDS = 1.0
+WINDOWS_READ_CANCEL_RETRY_SECONDS = 0.01
 
 
 @dataclass(frozen=True)
@@ -300,6 +304,7 @@ class StreamReader(threading.Thread):
         self.log_capture = log_capture
         self.source = source
         self._stop_event = threading.Event()
+        self._wake_lock = threading.Lock()
         self._wake_read: int | None = None
         self._wake_write: int | None = None
         self._closed = threading.Event()
@@ -382,7 +387,7 @@ class StreamReader(threading.Thread):
         finally:
             self._close_owned_resources()
 
-    def _cancel_windows_read(self) -> None:
+    def _cancel_windows_read(self) -> bool:
         """Cancel only this reader thread's synchronous pipe read."""
         import ctypes
         from ctypes import wintypes
@@ -401,7 +406,7 @@ class StreamReader(threading.Thread):
 
         native_id = self.native_id
         if native_id is None:
-            return
+            return False
         thread_handle = kernel32.OpenThread(0x0001, False, native_id)
         if not thread_handle:
             logger.warning(
@@ -409,7 +414,7 @@ class StreamReader(threading.Thread):
                 native_id,
                 ctypes.get_last_error(),
             )
-            return
+            return False
         try:
             if not kernel32.CancelSynchronousIo(thread_handle):
                 error = ctypes.get_last_error()
@@ -419,6 +424,8 @@ class StreamReader(threading.Thread):
                         native_id,
                         error,
                     )
+                return False
+            return True
         finally:
             kernel32.CloseHandle(thread_handle)
 
@@ -439,25 +446,35 @@ class StreamReader(threading.Thread):
         except (OSError, ValueError):
             pass
         for attribute in ("_wake_read", "_wake_write"):
-            descriptor = getattr(self, attribute)
-            if descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
-                setattr(self, attribute, None)
+            with self._wake_lock:
+                descriptor = getattr(self, attribute)
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+                    finally:
+                        setattr(self, attribute, None)
         self._closed.set()
 
     def stop(self) -> None:
         """Signal the reader through its private wakeup without closing its stream."""
         self._stop_event.set()
         if os.name == "nt" and self.is_alive():
-            self._cancel_windows_read()
-        if self._wake_write is not None:
-            try:
-                os.write(self._wake_write, b"x")
-            except OSError:
-                pass
+            deadline = time.monotonic() + WINDOWS_READ_CANCEL_TIMEOUT_SECONDS
+            while self.is_alive() and not self._closed.is_set():
+                self._cancel_windows_read()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._closed.wait(min(WINDOWS_READ_CANCEL_RETRY_SECONDS, remaining))
+        with self._wake_lock:
+            wake_write = self._wake_write
+            if wake_write is not None:
+                try:
+                    os.write(wake_write, b"x")
+                except OSError:
+                    pass
 
     def close_before_start(self) -> None:
         """Close resources when thread startup failed before ownership transfer."""

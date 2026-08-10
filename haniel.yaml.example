@@ -55,6 +55,7 @@ services:
   mcp-slack:
     run: npx -y supergateway --stdio "npx -y @anthropic/mcp-slack" --port 3101
     cwd: ./.services/my-app
+    ready: port:3101
     restart_delay: 3
 
   mcp-my-app:
@@ -72,6 +73,7 @@ services:
     cwd: ./.services/my-app
     repo: my-app
     after: mcp-my-app
+    ready: delay:0.01
     shutdown:
       signal: SIGTERM
       timeout: 15

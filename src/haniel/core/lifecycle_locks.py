@@ -150,7 +150,7 @@ class SerialFileLock(AbstractContextManager["SerialFileLock"]):
         if self.timeout_seconds <= 0:
             raise ValueError("file lock timeout must be positive")
         self.operation = operation
-        key = str(path.resolve(strict=False))
+        key = os.path.normcase(str(self.path))
         with self._guard:
             self._local_lock = self._local_locks.setdefault(key, threading.Lock())
         deadline = time.monotonic() + self.timeout_seconds

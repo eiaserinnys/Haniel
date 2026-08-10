@@ -32,7 +32,16 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Audit repository readiness config
-        run: python scripts/audit_readiness_config.py tests/fixtures/readiness_ci_config.yaml
+        run: python scripts/audit_readiness_config.py tests/fixtures/readiness_ci_config.yaml haniel.yaml.example
+
+      - name: Audit service readiness contracts
+        run: >-
+          python scripts/audit_readiness_config.py
+          tests/fixtures/readiness_contract_config.yaml
+          --readiness-contract tests/fixtures/readiness_contracts/remiel.json
+          --readiness-contract tests/fixtures/readiness_contracts/ariella.json
+          --readiness-contract tests/fixtures/readiness_contracts/rescue-bot.json
+          --readiness-contract tests/fixtures/readiness_contracts/translate-bot.json
 
       - name: Run tests with coverage
         run: |

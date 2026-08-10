@@ -255,6 +255,151 @@ def test_serial_file_lock_uses_bounded_canonical_wait(tmp_path: Path) -> None:
                 pass
 
 
+def test_serial_file_lock_local_identity_expands_user_before_resolving(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    alias = Path("~/locks/serial.lock")
+    canonical = (tmp_path / "locks" / "serial.lock").resolve()
+
+    with SerialFileLock(alias, timeout_seconds=1, operation="alias") as lock:
+        key = os.path.normcase(str(canonical))
+        assert SerialFileLock._local_locks[key] is lock._local_lock
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process contention stress")
+def test_serial_file_lock_multiprocess_stress_has_no_starvation(
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "multiprocess.lock"
+    script = "\n".join(
+        (
+            "import sys, time",
+            "from pathlib import Path",
+            "from haniel.core.lifecycle_locks import SerialFileLock",
+            "path = Path(sys.argv[1])",
+            "for iteration in range(12):",
+            "    with SerialFileLock(path, timeout_seconds=10, operation=f'child-{sys.argv[2]}'):",
+            "        time.sleep(0.002)",
+            "print('12', flush=True)",
+        )
+    )
+    workers = [
+        subprocess.Popen(
+            [sys.executable, "-c", script, str(lock_path), str(index)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for index in range(8)
+    ]
+    started_at = time.monotonic()
+    try:
+        results = [worker.communicate(timeout=12) for worker in workers]
+    finally:
+        for worker in workers:
+            if worker.poll() is None:
+                worker.kill()
+                worker.wait(timeout=5)
+
+    assert time.monotonic() - started_at < 12
+    assert [worker.returncode for worker in workers] == [0] * len(workers)
+    assert [stdout.strip() for stdout, _stderr in results] == ["12"] * len(workers)
+    assert all("Traceback" not in stderr for _stdout, stderr in results)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process lock contract")
+def test_windows_config_lock_contends_across_independent_processes(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "haniel.yaml"
+    config_path.write_text("services: {}\n", encoding="utf-8")
+    holder_script = "\n".join(
+        (
+            "import sys",
+            "from pathlib import Path",
+            "from haniel.core.lifecycle_locks import ConfigTransactionLock",
+            "with ConfigTransactionLock(Path(sys.argv[1]), timeout_seconds=2, operation='windows-holder'):",
+            "    print('locked', flush=True)",
+            "    sys.stdin.readline()",
+        )
+    )
+    contender_script = "\n".join(
+        (
+            "import sys",
+            "from pathlib import Path",
+            "from haniel.core.lifecycle_locks import ConfigTransactionLock, ConfigTransactionLockTimeout",
+            "try:",
+            "    with ConfigTransactionLock(Path(sys.argv[1]), timeout_seconds=float(sys.argv[2]), operation='windows-contender'):",
+            "        print('acquired', flush=True)",
+            "except ConfigTransactionLockTimeout as error:",
+            "    print('timeout:' + str(error), flush=True)",
+        )
+    )
+    holder = subprocess.Popen(
+        [sys.executable, "-c", holder_script, str(config_path)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert holder.stdout is not None
+    assert holder.stdout.readline().strip() == "locked"
+    try:
+        blocked = subprocess.run(
+            [sys.executable, "-c", contender_script, str(config_path), "0.2"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        assert blocked.returncode == 0
+        assert blocked.stdout.startswith("timeout:CONFIG_LOCK_TIMEOUT:")
+        assert "windows-holder" in blocked.stdout
+    finally:
+        assert holder.stdin is not None
+        holder.stdin.write("release\n")
+        holder.stdin.flush()
+        assert holder.wait(timeout=5) == 0
+
+    acquired = subprocess.run(
+        [sys.executable, "-c", contender_script, str(config_path), "2"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert acquired.returncode == 0
+    assert acquired.stdout.strip() == "acquired"
+
+
+def test_named_config_lock_wait_allows_eight_second_clone_contention(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "haniel.yaml"
+    config_path.write_text("services: {}\n", encoding="utf-8")
+    entered = threading.Event()
+
+    def hold_clone() -> None:
+        with ConfigTransactionLock(config_path, operation="clone"):
+            entered.set()
+            time.sleep(8)
+
+    holder = threading.Thread(target=hold_clone)
+    holder.start()
+    assert entered.wait(1)
+    started_at = time.monotonic()
+    try:
+        with ConfigTransactionLock(config_path, operation="reload"):
+            pass
+    finally:
+        holder.join(timeout=10)
+
+    elapsed = time.monotonic() - started_at
+    assert 7.5 <= elapsed < ConfigTransactionLock.DEFAULT_TIMEOUT_SECONDS
+
+
 def test_config_file_lock_stress_has_no_starved_waiter(tmp_path: Path) -> None:
     from haniel.core.service_lifecycle import config_file_transaction
 

@@ -1,0 +1,6 @@
+{
+  "schema_version": "haniel.readiness-contract.v1",
+  "service": "remiel",
+  "marker": "[Remiel] Bot is running!",
+  "ready": "log:\\[Remiel\\] Bot is running!"
+}

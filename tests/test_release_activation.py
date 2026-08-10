@@ -279,6 +279,68 @@ def test_cli_apply_requires_and_reuses_check_identity_evidence(tmp_path: Path) -
     )
 
 
+@pytest.mark.parametrize(
+    "mutated_key",
+    ["config_sha256", "repo_head", "manifest_sha256", "candidate_sha256"],
+)
+def test_cli_apply_rejects_each_mutated_check_evidence(
+    tmp_path: Path,
+    mutated_key: str,
+) -> None:
+    config_path = tmp_path / "haniel.yaml"
+    write_config(config_path)
+    _init_remote_manifest_repo(tmp_path)
+    before = config_path.read_bytes()
+    module = "haniel.config.release_activation"
+    checked = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            module,
+            "check",
+            "--config",
+            str(config_path),
+            "--repo",
+            "soulstream",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert checked.returncode == 2
+    evidence = json.loads(checked.stdout)
+    evidence[mutated_key] = "0" * 64
+
+    applied = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            module,
+            "apply",
+            "--config",
+            str(config_path),
+            "--repo",
+            "soulstream",
+            "--expected-sha256",
+            evidence["config_sha256"],
+            "--expected-repo-head",
+            evidence["repo_head"],
+            "--expected-manifest-sha256",
+            evidence["manifest_sha256"],
+            "--expected-candidate-sha256",
+            evidence["candidate_sha256"],
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert applied.returncode != 0
+    assert "activation check evidence changed" in applied.stderr
+    assert config_path.read_bytes() == before
+    assert list(tmp_path.glob("*.bak")) == []
+
+
 def test_plan_parses_the_exact_bytes_used_for_its_digest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
