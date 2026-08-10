@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import ast
+import concurrent.futures
+import socket
+import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from haniel.config import HanielConfig, RepoConfig, ServiceConfig
@@ -181,3 +185,85 @@ def test_external_subprocess_and_git_boundaries_never_own_config_lock(
     monkeypatch.setattr("haniel.core.runner.subprocess.run", assert_unlocked)
     assert runner.execute_hook("svc", "post_pull") is True
     assert observed == ["boundary"]
+
+
+def test_each_inventory_boundary_runs_only_after_snapshot_lock_release(
+    tmp_path: Path,
+) -> None:
+    """Exercise every R7 boundary class after the real snapshot helper returns."""
+
+    runner = ServiceRunner(HanielConfig(), config_dir=tmp_path)
+    observed: list[str] = []
+
+    def outside_lock(label: str) -> None:
+        assert not runner._config_reload_lock._is_owned(), label
+        observed.append(label)
+
+    runner._snapshot_config_state()
+
+    # file
+    evidence = tmp_path / "evidence.txt"
+    evidence.write_text("ok", encoding="utf-8")
+    outside_lock("file.read_text")
+    assert evidence.read_text(encoding="utf-8") == "ok"
+
+    # process + communicate, using git as the real executable boundary
+    outside_lock("git.process.Popen")
+    process = subprocess.Popen(
+        ["git", "--version"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    outside_lock("process.communicate")
+    stdout, _stderr = process.communicate(timeout=5)
+    assert process.returncode == 0 and stdout.startswith("git version")
+
+    # future.result
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(lambda: "done")
+        outside_lock("future.result")
+        assert future.result(timeout=5) == "done"
+
+    # network.connect against a loopback-only listener
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    accepted = threading.Event()
+
+    def accept_once() -> None:
+        connection, _address = listener.accept()
+        connection.close()
+        accepted.set()
+
+    accept_thread = threading.Thread(target=accept_once)
+    accept_thread.start()
+    client = socket.socket()
+    try:
+        outside_lock("network.connect")
+        client.connect(listener.getsockname())
+        assert accepted.wait(5)
+    finally:
+        client.close()
+        listener.close()
+        accept_thread.join(timeout=5)
+
+    # callback and independent lock.acquire
+    def callback() -> None:
+        outside_lock("callback")
+
+    callback()
+    boundary_lock = threading.Lock()
+    outside_lock("lock.acquire")
+    assert boundary_lock.acquire(timeout=1)
+    boundary_lock.release()
+
+    assert observed == [
+        "file.read_text",
+        "git.process.Popen",
+        "process.communicate",
+        "future.result",
+        "network.connect",
+        "callback",
+        "lock.acquire",
+    ]
