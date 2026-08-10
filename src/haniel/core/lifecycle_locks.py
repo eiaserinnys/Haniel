@@ -163,10 +163,6 @@ class SerialFileLock(AbstractContextManager["SerialFileLock"]):
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             handle = self.path.open("a+b")
-            handle.seek(0, os.SEEK_END)
-            if handle.tell() == 0:
-                handle.write(b"0\n")
-                handle.flush()
             handle.seek(0)
             self._acquire_os_lock(handle, deadline)
             self._handle = handle
@@ -228,9 +224,12 @@ class SerialFileLock(AbstractContextManager["SerialFileLock"]):
             "acquired_monotonic": time.monotonic(),
         }
         payload = json.dumps(evidence, sort_keys=True).encode("utf-8")
-        self._handle.seek(1)
+        # Initialize byte zero only after owning its OS lock. Two Windows
+        # contenders may both open a newly-created empty file; writing the
+        # sentinel before locking lets the loser hit EACCES instead of wait.
+        self._handle.seek(0)
         self._handle.truncate()
-        self._handle.write(b"\n" + payload)
+        self._handle.write(b"0\n" + payload)
         self._handle.flush()
 
     def _read_holder_evidence(self) -> str | None:
