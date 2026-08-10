@@ -6,6 +6,7 @@ import importlib
 import json
 import shlex
 import socket
+import subprocess
 import sys
 import threading
 import urllib.request
@@ -64,6 +65,8 @@ def _child_command(
         command.append("--exit-after-marker")
     if grandchild:
         command.append("--grandchild")
+    if sys.platform == "win32":
+        return subprocess.list2cmdline(command), status
     return shlex.join(command), status
 
 
