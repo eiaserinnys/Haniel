@@ -291,9 +291,7 @@ class DeploymentStateStore:
                 else "HANDOVER_FAILED"
             )
             if error_code not in KNOWN_DEPLOYMENT_ERROR_CODES:
-                raise ValueError(
-                    f"unregistered deployment error code: {error_code}"
-                )
+                raise ValueError(f"unregistered deployment error code: {error_code}")
             current["error_code"] = error_code
         if recovered is not None:
             current["recovered"] = recovered
