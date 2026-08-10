@@ -703,30 +703,41 @@ def test_stop_self_wakes_readers_when_escaped_descendant_holds_pipe(
 def test_stream_reader_self_wakes_while_an_independent_writer_remains_open(
     tmp_path: Path,
 ) -> None:
-    # Count after the long-lived capture objects exist so the assertion isolates
-    # the pipe and reader lifecycle instead of CPython's platform lock handles.
     capture = _manager(tmp_path).log_manager.start_capture("independent-writer")
-    resources_before = _process_resource_count()
-    read_fd, write_fd = os.pipe()
-    stream = os.fdopen(read_fd, "r", encoding="utf-8")
-    reader = StreamReader(stream, capture)
-    reader.start()
-    try:
-        reader.stop()
-        reader.join(timeout=1)
-        assert not reader.is_alive()
-        assert stream.closed
 
-        journal = DeploymentStateStore(tmp_path / ".haniel" / "direct-reader")
-        journal.begin("reader", "old", "new", "release-1")
-        journal.transition("reader", "failed")
-        assert journal.read("reader")["state"] == "failed"
+    def exercise_reader() -> None:
+        read_fd, write_fd = os.pipe()
+        stream = os.fdopen(read_fd, "r", encoding="utf-8")
+        reader = StreamReader(stream, capture)
+        reader.start()
+        try:
+            reader.stop()
+            reader.join(timeout=1)
+            assert not reader.is_alive()
+            assert stream.closed
+
+            journal = DeploymentStateStore(tmp_path / ".haniel" / "direct-reader")
+            journal.begin("reader", "old", "new", "release-1")
+            journal.transition("reader", "failed")
+            assert journal.read("reader")["state"] == "failed"
+        finally:
+            os.close(write_fd)
+        with pytest.raises(OSError):
+            os.fstat(read_fd)
+        with pytest.raises(OSError):
+            os.fstat(write_fd)
+
+    try:
+        # Warm up CPython's per-process thread primitives, then prove additional
+        # reader lifecycles have no descriptor or native-handle growth.
+        exercise_reader()
+        gc.collect()
+        resources_before = _process_resource_count()
+        exercise_reader()
+        gc.collect()
+        assert _process_resource_count() <= resources_before + 1
     finally:
-        os.close(write_fd)
         capture.stop()
-    del reader
-    gc.collect()
-    assert _process_resource_count() <= resources_before + 1
 
 
 def test_missing_ready_is_running_but_explicitly_unconfigured(tmp_path: Path) -> None:
