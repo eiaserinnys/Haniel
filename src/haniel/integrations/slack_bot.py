@@ -138,6 +138,12 @@ class SlackBot:
         """Shut down the bot (close Socket Mode connection)."""
         try:
             self._handler.close()
+            if (
+                self._socket_thread
+                and self._socket_thread.is_alive()
+                and self._socket_thread is not threading.current_thread()
+            ):
+                self._socket_thread.join()
         except Exception as e:
             logger.warning("SlackBot stop error: %s", e)
 

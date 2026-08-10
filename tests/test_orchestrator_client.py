@@ -213,6 +213,29 @@ class TestStartStop:
         client.stop()
         assert client._stop_event.is_set()
 
+    def test_stop_requires_background_thread_to_finish(self, config):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+
+        class ThreadProbe:
+            alive = True
+            join_timeout = object()
+
+            def is_alive(self) -> bool:
+                return self.alive
+
+            def join(self, timeout=None) -> None:
+                self.join_timeout = timeout
+                if timeout is None:
+                    self.alive = False
+
+        thread = ThreadProbe()
+        client._thread = thread  # type: ignore[assignment]
+
+        client.stop()
+
+        assert thread.join_timeout is None
+        assert thread.is_alive() is False
+
     def test_double_start_noop(self, config):
         """Starting twice while thread is alive should not create a second thread."""
         client = OrchestratorClient(config, haniel_version="0.1.0")

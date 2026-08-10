@@ -269,6 +269,36 @@ def test_start_opens_dm_channel(mock_web_client):
     assert bot._socket_thread.daemon is True
 
 
+def test_stop_waits_for_socket_thread(mock_web_client):
+    config = _make_slack_config()
+    with (
+        patch("haniel.integrations.slack_bot.App"),
+        patch("haniel.integrations.slack_bot.SocketModeHandler") as MockHandler,
+    ):
+        bot = SlackBot(config)
+
+    class ThreadProbe:
+        alive = True
+        join_timeout = object()
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def join(self, timeout=None) -> None:
+            self.join_timeout = timeout
+            if timeout is None:
+                self.alive = False
+
+    thread = ThreadProbe()
+    bot._socket_thread = thread  # type: ignore[assignment]
+
+    bot.stop()
+
+    MockHandler.return_value.close.assert_called_once_with()
+    assert thread.join_timeout is None
+    assert thread.is_alive() is False
+
+
 # ── Phase 2: approve button interaction ──────────────────────────────────────
 
 

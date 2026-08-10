@@ -31,9 +31,28 @@ HANIEL_REPO="${CONFIG[HANIEL_REPO]:-}"
 CONFIG_FILE="${CONFIG[CONFIG]:-}"
 MAX_GIT_FAILURES="${CONFIG[MAX_GIT_FAILURES]:-3}"
 PYTHON_BIN_CONFIG="${CONFIG[PYTHON_BIN]:-}"
+SELF_UPDATE_EXIT_TIMEOUT="${CONFIG[SELF_UPDATE_EXIT_TIMEOUT]:-60}"
+CRASH_RESTART_BASE_SECONDS="${CONFIG[CRASH_RESTART_BASE_SECONDS]:-5}"
+CRASH_RESTART_MAX_SECONDS="${CONFIG[CRASH_RESTART_MAX_SECONDS]:-60}"
+CRASH_RESET_SECONDS="${CONFIG[CRASH_RESET_SECONDS]:-300}"
 
 if [[ -z "$HANIEL_REPO" || -z "$CONFIG_FILE" ]]; then
   echo "HANIEL_REPO and CONFIG must be set in haniel-runner.conf" >&2
+  exit 1
+fi
+
+for numeric_value in \
+  "$SELF_UPDATE_EXIT_TIMEOUT" \
+  "$CRASH_RESTART_BASE_SECONDS" \
+  "$CRASH_RESTART_MAX_SECONDS" \
+  "$CRASH_RESET_SECONDS"; do
+  if [[ ! "$numeric_value" =~ ^[0-9]+$ ]]; then
+    echo "Runner timeout and backoff values must be non-negative integers" >&2
+    exit 1
+  fi
+done
+if (( CRASH_RESTART_BASE_SECONDS > CRASH_RESTART_MAX_SECONDS )); then
+  echo "CRASH_RESTART_BASE_SECONDS must not exceed CRASH_RESTART_MAX_SECONDS" >&2
   exit 1
 fi
 
@@ -260,6 +279,57 @@ EXIT_SELF_UPDATE=10
 EXIT_RESTART=11
 skip_update=false
 write_self_update_marker=false
+crash_restart_count=0
+SELF_UPDATE_EXIT_MARKER="$ROOT_DIR/.local/self_update_exit_requested"
+FORCED_SELF_UPDATE_MARKER="$ROOT_DIR/.local/self_update_exit_forced"
+CHILD_PID=""
+WATCHDOG_PID=""
+
+stop_wrapper() {
+  if [[ -n "$WATCHDOG_PID" ]] && kill -0 "$WATCHDOG_PID" 2>/dev/null; then
+    kill "$WATCHDOG_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$CHILD_PID" ]] && kill -0 "$CHILD_PID" 2>/dev/null; then
+    kill -TERM "$CHILD_PID" 2>/dev/null || true
+    wait "$CHILD_PID" 2>/dev/null || true
+  fi
+  exit 0
+}
+
+trap stop_wrapper SIGINT SIGTERM
+
+start_self_update_watchdog() {
+  local child_pid="$1"
+  (
+    while kill -0 "$child_pid" 2>/dev/null; do
+      if [[ -f "$SELF_UPDATE_EXIT_MARKER" ]]; then
+        sleep "$SELF_UPDATE_EXIT_TIMEOUT"
+        if kill -0 "$child_pid" 2>/dev/null; then
+          echo "[haniel-runner] Self-update process did not exit within ${SELF_UPDATE_EXIT_TIMEOUT}s; sending SIGKILL."
+          mkdir -p "$ROOT_DIR/.local"
+          : > "$FORCED_SELF_UPDATE_MARKER"
+          kill -KILL "$child_pid" 2>/dev/null || true
+        fi
+        return
+      fi
+      sleep 1
+    done
+  ) &
+  WATCHDOG_PID=$!
+}
+
+next_crash_delay() {
+  local delay="$CRASH_RESTART_BASE_SECONDS"
+  local attempt=1
+  while (( attempt < crash_restart_count && delay < CRASH_RESTART_MAX_SECONDS )); do
+    delay=$((delay * 2))
+    if (( delay > CRASH_RESTART_MAX_SECONDS )); then
+      delay="$CRASH_RESTART_MAX_SECONDS"
+    fi
+    attempt=$((attempt + 1))
+  done
+  printf '%s\n' "$delay"
+}
 
 while true; do
   if [[ "$skip_update" != "true" ]]; then
@@ -284,26 +354,52 @@ while true; do
   skip_update=false
 
   echo "[haniel-runner] Launching haniel..."
-  "$PYTHON_BIN" -m haniel.cli run "$CONFIG_PATH"
+  rm -f "$SELF_UPDATE_EXIT_MARKER" "$FORCED_SELF_UPDATE_MARKER"
+  launch_started_at="$(date +%s)"
+  "$PYTHON_BIN" -m haniel.cli run "$CONFIG_PATH" &
+  CHILD_PID=$!
+  start_self_update_watchdog "$CHILD_PID"
+  wait "$CHILD_PID"
   exit_code=$?
+  CHILD_PID=""
+  if [[ -n "$WATCHDOG_PID" ]] && kill -0 "$WATCHDOG_PID" 2>/dev/null; then
+    kill "$WATCHDOG_PID" 2>/dev/null || true
+  fi
+  wait "$WATCHDOG_PID" 2>/dev/null || true
+  WATCHDOG_PID=""
   echo "[haniel-runner] haniel exited with code: $exit_code"
+
+  launch_runtime=$(( $(date +%s) - launch_started_at ))
+  if (( launch_runtime >= CRASH_RESET_SECONDS )); then
+    crash_restart_count=0
+  fi
 
   if [[ "$exit_code" -eq 0 ]]; then
     echo "[haniel-runner] Clean shutdown. Exiting wrapper."
     exit 0
   elif [[ "$exit_code" -eq "$EXIT_SELF_UPDATE" ]]; then
+    crash_restart_count=0
     echo "[haniel-runner] Self-update requested. Looping..."
     send_webhook "Self-update initiated. Updating and restarting..." "info"
     write_self_update_marker=true
     sleep 5
   elif [[ "$exit_code" -eq "$EXIT_RESTART" ]]; then
+    crash_restart_count=0
     echo "[haniel-runner] Restart requested. Skipping update..."
     send_webhook "Restart initiated (no update)." "info"
     skip_update=true
     sleep 3
   else
-    echo "[haniel-runner] Unexpected exit code $exit_code. Exiting wrapper."
-    send_webhook "haniel exited with unexpected code $exit_code." "error"
-    exit "$exit_code"
+    crash_restart_count=$((crash_restart_count + 1))
+    restart_delay="$(next_crash_delay)"
+    if [[ -f "$FORCED_SELF_UPDATE_MARKER" ]]; then
+      echo "[haniel-runner] Forced self-update recovery after shutdown timeout."
+      send_webhook "Self-update shutdown timed out; process was killed and will be updated." "error"
+      write_self_update_marker=true
+    else
+      send_webhook "haniel exited with unexpected code $exit_code; recovering after ${restart_delay}s." "error"
+    fi
+    echo "[haniel-runner] Unexpected exit code $exit_code. Recovering after ${restart_delay}s..."
+    sleep "$restart_delay"
   fi
 done

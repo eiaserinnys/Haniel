@@ -1,13 +1,41 @@
 """Tests for haniel CLI commands."""
 
 import json
+import os
+import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from haniel.cli import main
 from haniel.core.lifecycle_control import LifecycleConflict
+
+
+def test_self_update_exit_intent_is_atomic_and_immediate_exit_flushes(tmp_path):
+    from haniel.cli import _exit_immediately
+    from haniel.core.self_update_exit_intent import MARKER_RELPATH, write
+
+    marker = write(tmp_path)
+
+    assert marker == tmp_path / MARKER_RELPATH
+    assert marker.is_file()
+    assert not marker.with_suffix(marker.suffix + ".tmp").exists()
+
+    stdout = MagicMock()
+    stderr = MagicMock()
+    with (
+        patch.object(sys, "stdout", stdout),
+        patch.object(sys, "stderr", stderr),
+        patch.object(os, "_exit", side_effect=RuntimeError("exit")) as hard_exit,
+    ):
+        with pytest.raises(RuntimeError, match="exit"):
+            _exit_immediately(10)
+
+    stdout.flush.assert_called_once_with()
+    stderr.flush.assert_called_once_with()
+    hard_exit.assert_called_once_with(10)
 
 
 class TestCLIBasics:

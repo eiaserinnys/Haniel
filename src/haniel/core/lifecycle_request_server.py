@@ -48,8 +48,8 @@ class LifecycleRequestServer:
 
     def close(self) -> None:
         self._stopping.set()
-        if self._thread is not None:
-            self._thread.join(timeout=5)
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join()
 
     def _serve(self) -> None:
         while not self._stopping.is_set():
