@@ -6,7 +6,10 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
-from .deployment_errors import stable_deployment_error_code
+from .deployment_errors import (
+    UNCLASSIFIED_DEPLOYMENT_ERROR_CODE,
+    stable_deployment_error_code,
+)
 from .lifecycle_control import LifecycleControl
 
 Operation = Literal["fresh_install", "upgrade"]
@@ -82,6 +85,6 @@ def handover_error_code(error: Exception) -> str:
 
 def request_error_code(error: Exception) -> str:
     phase_code = handover_error_code(error)
-    if phase_code != "HANDOVER_FAILED":
+    if phase_code != UNCLASSIFIED_DEPLOYMENT_ERROR_CODE:
         return phase_code
     return "REQUEST_HANDLER_FAILED"

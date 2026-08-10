@@ -22,6 +22,7 @@ from haniel.core.deployment import (
     stable_deployment_error_code,
 )
 from haniel.core.deployment_errors import KNOWN_DEPLOYMENT_ERROR_CODES
+from haniel.core.deployment_errors import StableDeploymentError
 
 
 def command(name: str) -> CommandSpec:
@@ -120,6 +121,31 @@ def test_untyped_message_does_not_create_journal_error_code(tmp_path: Path) -> N
 
     assert store.read("app")["error_code"] == "HANDOVER_FAILED"
     assert "HANDOVER_FAILED" in KNOWN_DEPLOYMENT_ERROR_CODES
+
+
+def test_untyped_exception_uses_a_distinct_stable_fallback_code() -> None:
+    assert stable_deployment_error_code(RuntimeError("plain failure")) == (
+        "UNCLASSIFIED_DEPLOYMENT_ERROR"
+    )
+
+
+def test_transition_rejects_unregistered_typed_error_code(tmp_path: Path) -> None:
+    store = DeploymentStateStore(tmp_path / "state")
+    store.begin("app", "old", "new", "release")
+    error = RuntimeError("foreign typed failure")
+    error.code = "FOREIGN_UNREGISTERED_CODE"  # type: ignore[attr-defined]
+
+    with pytest.raises(ValueError, match="unregistered deployment error code"):
+        store.transition("app", "failed", message=str(error), error=error)
+
+    current = store.read("app")
+    assert current is not None
+    assert "error_code" not in current
+
+
+def test_stable_deployment_error_rejects_the_fallback_as_free_form_input() -> None:
+    with pytest.raises(ValueError, match="unregistered deployment error code"):
+        StableDeploymentError("FOREIGN_UNREGISTERED_CODE", "failure")
 
 
 def coordinator(

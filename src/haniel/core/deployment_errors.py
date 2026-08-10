@@ -7,10 +7,12 @@ from collections.abc import Iterator
 from .safety_redaction import bounded_redact_text
 
 _ERROR_MESSAGE_MAX_CHARS = 16384
+UNCLASSIFIED_DEPLOYMENT_ERROR_CODE = "UNCLASSIFIED_DEPLOYMENT_ERROR"
 
 KNOWN_DEPLOYMENT_ERROR_CODES = frozenset(
     {
         "HANDOVER_FAILED",
+        UNCLASSIFIED_DEPLOYMENT_ERROR_CODE,
         "COMMAND_NOT_FOUND",
         "COMMAND_START_FAILED",
         "COMMAND_TIMEOUT",
@@ -99,7 +101,7 @@ def _error_chain(error: BaseException) -> Iterator[BaseException]:
 def stable_deployment_error_code(
     error: BaseException,
     *,
-    default: str = "HANDOVER_FAILED",
+    default: str = UNCLASSIFIED_DEPLOYMENT_ERROR_CODE,
 ) -> str:
     """Return one stable code from typed metadata without parsing prose."""
 

@@ -15,6 +15,7 @@ from .deployment_command_runner import (
 )
 from .deployment_errors import (
     StableDeploymentError as StableDeploymentError,
+    UNCLASSIFIED_DEPLOYMENT_ERROR_CODE,
     stable_deployment_error_code as stable_deployment_error_code,
 )
 from .deployment_state import DeploymentStateStore
@@ -449,7 +450,9 @@ class DeploymentCoordinator:
         try:
             result = self._run(command, environment)
         except Exception as error:
-            if stable_deployment_error_code(error) != "HANDOVER_FAILED":
+            if stable_deployment_error_code(error) != (
+                UNCLASSIFIED_DEPLOYMENT_ERROR_CODE
+            ):
                 raise
             raise StableDeploymentError(error_code, str(error)) from error
         if result is not None and result.json_data is not None:

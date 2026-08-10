@@ -285,11 +285,16 @@ class DeploymentStateStore:
         if error is not None and state != "failed":
             raise ValueError("typed transition errors are only valid for failed state")
         if state == "failed" and message:
-            current["error_code"] = (
+            error_code = (
                 stable_deployment_error_code(error)
                 if error is not None
                 else "HANDOVER_FAILED"
             )
+            if error_code not in KNOWN_DEPLOYMENT_ERROR_CODES:
+                raise ValueError(
+                    f"unregistered deployment error code: {error_code}"
+                )
+            current["error_code"] = error_code
         if recovered is not None:
             current["recovered"] = recovered
         current.setdefault("history", []).append(self._entry(state, message))

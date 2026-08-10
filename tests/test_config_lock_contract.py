@@ -50,6 +50,14 @@ FORBIDDEN_LOCK_CALLS = {
     "wait",
     "join",
     "sleep",
+    "system",
+    "copy",
+    "socket",
+    "info",
+    "debug",
+    "warning",
+    "error",
+    "exception",
 }
 
 BOUNDARY_CALLS = {
@@ -57,7 +65,10 @@ BOUNDARY_CALLS = {
     "file": {"read_text", "read_bytes", "write_text", "write_bytes", "open"},
     "future": {"result", "wait"},
     "process": {"run", "Popen", "communicate", "check_output"},
-    "network": {"connect", "send"},
+    "network": {"connect", "send", "socket"},
+    "shell": {"system"},
+    "filesystem_helper": {"copy"},
+    "logging": {"info", "debug", "warning", "error", "exception"},
     "callback": {"notify", "start_service", "stop_service", "restart_service"},
     "lock": {"acquire", "join", "sleep"},
 }
@@ -191,6 +202,9 @@ def test_boundary_inventory_is_complete_and_matches_static_contract() -> None:
         "network",
         "callback",
         "lock",
+        "shell",
+        "filesystem_helper",
+        "logging",
     } == set(BOUNDARY_CALLS)
 
 
@@ -216,6 +230,9 @@ class Guarded:
     calls = _calls_inside_config_lock(source)
 
     assert {"system", "copy", "connect", "info", "result"} <= calls
+    assert {"system", "copy", "connect", "info", "result"} <= (
+        calls & FORBIDDEN_LOCK_CALLS
+    )
 
 
 def test_external_subprocess_and_git_boundaries_never_own_config_lock(
