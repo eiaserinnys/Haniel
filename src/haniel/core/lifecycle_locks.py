@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
+import json
 import logging
 import os
 import threading
@@ -14,6 +14,9 @@ from .deployment_errors import StableDeploymentError
 
 logger = logging.getLogger(__name__)
 
+CONFIG_TRANSACTION_WAIT_SECONDS = 30.0
+SERIAL_FILE_LOCK_WAIT_SECONDS = 30.0
+
 
 class LifecycleConflict(StableDeploymentError):
     """A stable lifecycle identity or lease conflict."""
@@ -22,10 +25,13 @@ class LifecycleConflict(StableDeploymentError):
 class ConfigTransactionLockTimeout(StableDeploymentError):
     """A cross-process config transaction lock exceeded its bounded wait."""
 
-    def __init__(self, timeout_seconds: float) -> None:
+    def __init__(self, timeout_seconds: float, holder: str | None = None) -> None:
+        detail = f"config transaction lock was not acquired within {timeout_seconds:g}s"
+        if holder:
+            detail += f"; holder={holder}"
         super().__init__(
             "CONFIG_LOCK_TIMEOUT",
-            f"config transaction lock was not acquired within {timeout_seconds:g}s",
+            detail,
         )
 
 
@@ -122,48 +128,135 @@ class FileLease:
 
 
 class SerialFileLock(AbstractContextManager["SerialFileLock"]):
-    """A blocking cross-process transaction lock with same-process serialization."""
+    """One bounded file-lock implementation for every serialized transaction."""
 
     _guard = threading.Lock()
     _local_locks: dict[str, threading.Lock] = {}
+    DEFAULT_TIMEOUT_SECONDS = SERIAL_FILE_LOCK_WAIT_SECONDS
+    MIN_BACKOFF_SECONDS = 0.01
+    MAX_BACKOFF_SECONDS = 0.2
 
-    def __init__(self, path: Path) -> None:
-        self.path = path
+    def __init__(
+        self,
+        path: Path,
+        *,
+        timeout_seconds: float | None = None,
+        operation: str = "serial",
+    ) -> None:
+        self.path = path.expanduser().resolve(strict=False)
+        self.timeout_seconds = (
+            self.DEFAULT_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+        )
+        if self.timeout_seconds <= 0:
+            raise ValueError("file lock timeout must be positive")
+        self.operation = operation
         key = str(path.resolve(strict=False))
         with self._guard:
             self._local_lock = self._local_locks.setdefault(key, threading.Lock())
-        self._local_lock.acquire()
+        deadline = time.monotonic() + self.timeout_seconds
+        if not self._local_lock.acquire(timeout=self.timeout_seconds):
+            raise ConfigTransactionLockTimeout(
+                self.timeout_seconds, self._read_holder_evidence()
+            )
         self._handle = None
         handle = None
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            handle = path.open("a+b")
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            handle = self.path.open("a+b")
+            handle.seek(0, os.SEEK_END)
             if handle.tell() == 0:
-                handle.write(b"0")
+                handle.write(b"0\n")
                 handle.flush()
             handle.seek(0)
-            self._lock(handle)
+            self._acquire_os_lock(handle, deadline)
             self._handle = handle
+            self._write_holder_evidence()
         except Exception:
             if handle is not None:
                 handle.close()
             self._local_lock.release()
             raise
 
-    @staticmethod
-    def _lock(handle) -> None:
+    def _try_lock(self, handle) -> bool:
         if os.name == "nt":
             import msvcrt
 
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
+            try:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                return True
+            except OSError as error:
+                if isinstance(error, PermissionError) or getattr(
+                    error, "winerror", None
+                ) in {32, 33, 36}:
+                    return False
+                raise
 
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        import fcntl
+
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            return False
+
+    def _acquire_os_lock(self, handle, deadline: float) -> None:
+        backoff = self.MIN_BACKOFF_SECONDS
+        waiting_logged = False
+        while not self._try_lock(handle):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ConfigTransactionLockTimeout(
+                    self.timeout_seconds, self._read_holder_evidence()
+                )
+            if not waiting_logged:
+                logger.warning(
+                    "File transaction %s is contended; waiting up to %gs",
+                    self.operation,
+                    self.timeout_seconds,
+                )
+                waiting_logged = True
+            time.sleep(min(backoff, remaining))
+            backoff = min(backoff * 1.5, self.MAX_BACKOFF_SECONDS)
+
+    def _write_holder_evidence(self) -> None:
+        assert self._handle is not None
+        evidence = {
+            "pid": os.getpid(),
+            "thread": threading.current_thread().name,
+            "operation": self.operation,
+            "acquired_monotonic": time.monotonic(),
+        }
+        payload = json.dumps(evidence, sort_keys=True).encode("utf-8")
+        self._handle.seek(1)
+        self._handle.truncate()
+        self._handle.write(b"\n" + payload)
+        self._handle.flush()
+
+    def _read_holder_evidence(self) -> str | None:
+        try:
+            with self.path.open("rb") as handle:
+                handle.seek(2)
+                payload = json.loads(handle.read().decode("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+        operation = payload.get("operation", "unknown")
+        pid = payload.get("pid", "unknown")
+        thread = payload.get("thread", "unknown")
+        return f"operation={operation},pid={pid},thread={thread}"
+
+    def _clear_holder_evidence(self) -> None:
+        if self._handle is None:
+            return
+        self._handle.seek(1)
+        self._handle.truncate()
+        self._handle.write(b"\n")
+        self._handle.flush()
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         try:
             if self._handle is not None:
+                self._clear_holder_evidence()
                 FileLease._unlock(self._handle)
                 self._handle.close()
                 self._handle = None
@@ -172,130 +265,41 @@ class SerialFileLock(AbstractContextManager["SerialFileLock"]):
 
 
 class ConfigTransactionLock(AbstractContextManager["ConfigTransactionLock"]):
-    """Artifact-free cross-process lock for one configuration identity.
+    """Cross-session file lock for one exact configuration identity."""
 
-    POSIX locks the stable parent directory inode, so atomic replacement of the
-    config file cannot bypass the lease. Windows uses a named kernel mutex for
-    the canonical config path. Same-process reentrancy is owned by the caller.
-    """
+    DEFAULT_TIMEOUT_SECONDS = CONFIG_TRANSACTION_WAIT_SECONDS
 
-    DEFAULT_TIMEOUT_SECONDS = 5.0
-    POLL_INTERVAL_SECONDS = 0.05
-
-    def __init__(self, config_path: Path, timeout_seconds: float | None = None) -> None:
+    def __init__(
+        self,
+        config_path: Path,
+        timeout_seconds: float | None = None,
+        *,
+        operation: str = "config_write",
+    ) -> None:
         self.config_path = config_path.expanduser().resolve(strict=False)
         self.timeout_seconds = (
             self.DEFAULT_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
         )
         if self.timeout_seconds <= 0:
             raise ValueError("config transaction lock timeout must be positive")
-        self._directory_handle: int | None = None
-        self._windows_handle = None
-        self._kernel32 = None
-        if os.name == "nt":
-            self._acquire_windows()
-        else:
-            self._acquire_posix()
+        self._serial = SerialFileLock(
+            self.lock_path(self.config_path),
+            timeout_seconds=self.timeout_seconds,
+            operation=operation,
+        )
 
     @staticmethod
     def identity_path(config_path: Path) -> Path:
-        resolved = config_path.expanduser().resolve(strict=False)
-        return resolved if os.name == "nt" else resolved.parent
+        return config_path.expanduser().resolve(strict=False)
 
     @classmethod
     def identity_key(cls, config_path: Path) -> str:
         return os.path.normcase(str(cls.identity_path(config_path)))
 
     @staticmethod
-    def windows_mutex_name(config_path: Path) -> str:
-        canonical = os.path.normcase(
-            str(config_path.expanduser().resolve(strict=False))
-        )
-        identity = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        return f"Local\\HanielConfigWrite_{identity}"
-
-    def _acquire_posix(self) -> None:
-        import fcntl
-
-        handle = os.open(self.config_path.parent, os.O_RDONLY)
-        deadline = time.monotonic() + self.timeout_seconds
-        waiting_logged = False
-        try:
-            while True:
-                try:
-                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError as error:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise ConfigTransactionLockTimeout(
-                            self.timeout_seconds
-                        ) from error
-                    if not waiting_logged:
-                        logger.warning(
-                            "Config transaction lock is contended; waiting up to %gs",
-                            self.timeout_seconds,
-                        )
-                        waiting_logged = True
-                    time.sleep(min(self.POLL_INTERVAL_SECONDS, remaining))
-        except Exception:
-            os.close(handle)
-            raise
-        self._directory_handle = handle
-
-    def _acquire_windows(self) -> None:
-        import ctypes
-        from ctypes import wintypes
-
-        name = self.windows_mutex_name(self.config_path)
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CreateMutexW.argtypes = (
-            wintypes.LPVOID,
-            wintypes.BOOL,
-            wintypes.LPCWSTR,
-        )
-        kernel32.CreateMutexW.restype = wintypes.HANDLE
-        kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
-        kernel32.WaitForSingleObject.restype = wintypes.DWORD
-        kernel32.ReleaseMutex.argtypes = (wintypes.HANDLE,)
-        kernel32.ReleaseMutex.restype = wintypes.BOOL
-        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-        kernel32.CloseHandle.restype = wintypes.BOOL
-        handle = kernel32.CreateMutexW(None, False, name)
-        if not handle:
-            raise ctypes.WinError(ctypes.get_last_error())
-        timeout_ms = max(1, int(self.timeout_seconds * 1000))
-        result = kernel32.WaitForSingleObject(handle, timeout_ms)
-        if result == 0x00000102:
-            kernel32.CloseHandle(handle)
-            raise ConfigTransactionLockTimeout(self.timeout_seconds)
-        if result not in (0x00000000, 0x00000080):
-            kernel32.CloseHandle(handle)
-            raise OSError(f"WaitForSingleObject failed: {result}")
-        self._kernel32 = kernel32
-        self._windows_handle = handle
+    def lock_path(config_path: Path) -> Path:
+        resolved = config_path.expanduser().resolve(strict=False)
+        return resolved.parent / ".haniel" / f"{resolved.name}.config.lock"
 
     def __exit__(self, exc_type, exc, traceback) -> None:
-        if os.name == "nt":
-            if self._windows_handle is not None and self._kernel32 is not None:
-                import ctypes
-
-                released = self._kernel32.ReleaseMutex(self._windows_handle)
-                release_error = ctypes.get_last_error() if not released else None
-                closed = self._kernel32.CloseHandle(self._windows_handle)
-                close_error = ctypes.get_last_error() if not closed else None
-                self._windows_handle = None
-                if release_error is not None:
-                    raise ctypes.WinError(release_error)
-                if close_error is not None:
-                    raise ctypes.WinError(close_error)
-            return
-
-        if self._directory_handle is not None:
-            import fcntl
-
-            try:
-                fcntl.flock(self._directory_handle, fcntl.LOCK_UN)
-            finally:
-                os.close(self._directory_handle)
-                self._directory_handle = None
+        self._serial.__exit__(exc_type, exc, traceback)

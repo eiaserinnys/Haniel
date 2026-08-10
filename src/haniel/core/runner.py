@@ -38,6 +38,7 @@ from ..config import (
 )
 from ..config.readiness import ready_port
 from ..config.release_activation import (
+    ReleaseManifestActivationPlan,
     ReleaseManifestActivationRequired,
     activate_release_manifest,
     discover_remote_release_manifest,
@@ -1672,7 +1673,7 @@ class ServiceRunner:
             if self._slack_bot:
                 self._slack_bot.notify_pulling(repo_name, auto=auto)
 
-            self._ensure_release_manifest_activation(repo_name)
+            activation_plan = self._ensure_release_manifest_activation(repo_name)
             runtime = self._snapshot_repo_runtime(repo_name)
             reload_plan = (
                 self._prepare_current_manifest_config(repo_name)
@@ -1704,8 +1705,10 @@ class ServiceRunner:
                 if runtime.config.release_manifest:
                     assert previous_head is not None
                     resolved_branch = branch or runtime.config.branch
-                    intended_target = target_head or get_remote_head(
-                        repo_path, runtime.config.branch
+                    intended_target = target_head or (
+                        activation_plan.repo_head
+                        if activation_plan is not None
+                        else get_remote_head(repo_path, runtime.config.branch)
                     )
                     manifest_identity = runtime.config.release_manifest
                     journal_store = self._deployment_state_store()
@@ -2111,8 +2114,10 @@ class ServiceRunner:
                     logger.info("Startup update: pulling %s", name)
                     previous_head = get_head(repo_path)
                     if runtime.config.release_manifest:
-                        startup_target = get_remote_head(
-                            repo_path, runtime.config.branch
+                        startup_target = (
+                            activated.repo_head
+                            if activated is not None
+                            else get_remote_head(repo_path, runtime.config.branch)
                         )
                         manifest_identity = runtime.config.release_manifest
                         assert manifest_identity is not None
@@ -2284,7 +2289,7 @@ class ServiceRunner:
                     )
                 except ValueError:
                     pass
-                if isinstance(e, StableDeploymentError):
+                if code != "STARTUP_UPDATE_FAILED":
                     try:
                         self._deployment_state_store().fail_handover_if_current(
                             name,
@@ -2324,39 +2329,36 @@ class ServiceRunner:
                 ", ".join(failed),
             )
 
-    def _ensure_release_manifest_activation(self, repo_name: str) -> bool:
+    def _ensure_release_manifest_activation(
+        self, repo_name: str
+    ) -> "ReleaseManifestActivationPlan | None":
         """Activate a conventional remote manifest before any new code is pulled."""
         config_snapshot, runtime = self._snapshot_repo_and_config(repo_name)
         if runtime.config.release_manifest:
-            return False
+            return None
         repo_path = self.config_dir / runtime.config.path
         discovered = discover_remote_release_manifest(repo_path, runtime.config.branch)
         if discovered is None:
-            return False
+            return None
         if self.config_path is None:
             raise ReleaseManifestActivationRequired(
                 f"release manifest discovered for {repo_name}, but config_path is unavailable"
             )
-        from .service_lifecycle import config_file_transaction
-
-        with config_file_transaction(self.config_path):
-            self._require_config_generation(config_snapshot)
-            plan = plan_release_manifest_activation(
-                self.config_path, repo_name, discovered
-            )
-            self._require_config_generation(config_snapshot)
-            result = activate_release_manifest(
-                self.config_path,
-                plan=plan,
-            )
-            self.reload_config()
+        self._require_config_generation(config_snapshot)
+        plan = plan_release_manifest_activation(self.config_path, repo_name, discovered)
+        self._require_config_generation(config_snapshot)
+        result = activate_release_manifest(
+            self.config_path,
+            plan=plan,
+        )
+        self.reload_config()
         logger.warning(
             "Activated release manifest for %s before pull (changed=%s, backup=%s)",
             repo_name,
             result.changed,
             result.backup_path,
         )
-        return result.changed
+        return plan
 
     def _deployment_state_store(self) -> DeploymentStateStore:
         return DeploymentStateStore(self.config_dir / ".haniel" / "deployments")
@@ -2412,7 +2414,7 @@ class ServiceRunner:
     def _queue_interrupted_manifest_deployment(
         self,
         repo_name: str,
-        activated: bool,
+        activated: "ReleaseManifestActivationPlan | None",
         *,
         request_id: str,
         reload_plan: "HandoverReloadPlan | None",
@@ -2427,7 +2429,7 @@ class ServiceRunner:
         current_head = get_head(repo_path)
         store = self._deployment_state_store()
         journal = store.read(repo_name)
-        if activated:
+        if activated is not None:
             previous_head = current_head
         else:
             if journal is None or journal.get("state") == "success":
@@ -3071,7 +3073,7 @@ class ServiceRunner:
             state = self._snapshot_repo_runtime(repo_name)
         except ValueError:
             return False, []
-        self._ensure_release_manifest_activation(repo_name)
+        activation_plan = self._ensure_release_manifest_activation(repo_name)
         config_snapshot, state = self._snapshot_repo_and_config(repo_name)
         repo_path = self.config_dir / state.config.path
         strategy = state.config.pull_strategy or "merge"
@@ -3079,11 +3081,14 @@ class ServiceRunner:
         try:
             previous_head = get_head(repo_path)
             self._require_config_generation(config_snapshot)
-            discarded = pull_repo(
-                path=repo_path,
-                branch=state.config.branch,
-                strategy=strategy,
-            )
+            pull_options = {
+                "path": repo_path,
+                "branch": state.config.branch,
+                "strategy": strategy,
+            }
+            if activation_plan is not None:
+                pull_options["expected_head"] = activation_plan.repo_head
+            discarded = pull_repo(**pull_options)
             head = get_head(repo_path)
             if not self._commit_repo_observation(
                 RepoObservation(

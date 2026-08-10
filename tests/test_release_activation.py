@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from haniel.config.release_activation import (
     activate_release_manifest,
     plan_release_manifest_activation,
 )
+from haniel.core.git import GitError
 
 
 def write_config(path: Path) -> None:
@@ -193,6 +195,90 @@ def test_apply_restores_exact_original_when_target_verification_fails(
     assert failed_once is True
 
 
+def test_rollback_uses_current_config_permissions_not_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import haniel.config.release_activation as activation
+
+    config_path = tmp_path / "haniel.yaml"
+    write_config(config_path)
+    _init_remote_manifest_repo(tmp_path)
+    plan = plan_release_manifest_activation(
+        config_path, "soulstream", DEFAULT_RELEASE_MANIFEST
+    )
+    actual_atomic_write = activation._atomic_write
+    writes: list[tuple[Path, Path]] = []
+
+    def fail_target(path: Path, content: bytes, permission_source: Path) -> None:
+        writes.append((path, permission_source))
+        actual_atomic_write(path, content, permission_source)
+        if (
+            path == config_path
+            and len([item for item in writes if item[0] == path]) == 1
+        ):
+            raise OSError("force rollback")
+
+    monkeypatch.setattr(activation, "_atomic_write", fail_target)
+    with pytest.raises(ReleaseActivationWriteError):
+        activate_release_manifest(config_path, plan=plan)
+
+    target_writes = [source for path, source in writes if path == config_path]
+    assert target_writes == [config_path, config_path]
+
+
+def test_cli_apply_requires_and_reuses_check_identity_evidence(tmp_path: Path) -> None:
+    config_path = tmp_path / "haniel.yaml"
+    write_config(config_path)
+    _init_remote_manifest_repo(tmp_path)
+    module = "haniel.config.release_activation"
+    checked = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            module,
+            "check",
+            "--config",
+            str(config_path),
+            "--repo",
+            "soulstream",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert checked.returncode == 2
+    evidence = json.loads(checked.stdout)
+
+    applied = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            module,
+            "apply",
+            "--config",
+            str(config_path),
+            "--repo",
+            "soulstream",
+            "--expected-sha256",
+            evidence["config_sha256"],
+            "--expected-repo-head",
+            evidence["repo_head"],
+            "--expected-manifest-sha256",
+            evidence["manifest_sha256"],
+            "--expected-candidate-sha256",
+            evidence["candidate_sha256"],
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert applied.returncode == 0, applied.stderr
+    assert load_config(config_path).repos["soulstream"].release_manifest == (
+        DEFAULT_RELEASE_MANIFEST
+    )
+
+
 def test_plan_parses_the_exact_bytes_used_for_its_digest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -212,6 +298,45 @@ def test_plan_parses_the_exact_bytes_used_for_its_digest(
     )
 
     assert plan.changed is True
+
+
+def test_plan_wraps_git_failure_in_stable_activation_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import haniel.config.release_activation as activation
+
+    config_path = tmp_path / "haniel.yaml"
+    write_config(config_path)
+    _init_remote_manifest_repo(tmp_path)
+    monkeypatch.setattr(
+        activation,
+        "_remote_release_identity",
+        lambda *_args: (_ for _ in ()).throw(GitError("fetch unavailable")),
+    )
+
+    with pytest.raises(ReleaseManifestActivationRequired) as failed:
+        plan_release_manifest_activation(
+            config_path, "soulstream", DEFAULT_RELEASE_MANIFEST
+        )
+
+    assert getattr(failed.value, "code", None) == "RELEASE_IDENTITY_UNAVAILABLE"
+
+
+def test_plan_validates_the_exact_manifest_bytes_bound_to_repo_head(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "haniel.yaml"
+    write_config(config_path)
+    repo = _init_remote_manifest_repo(tmp_path)
+    (repo / DEFAULT_RELEASE_MANIFEST).write_text("not-json", encoding="utf-8")
+    _git(repo, "add", DEFAULT_RELEASE_MANIFEST)
+    _git(repo, "commit", "-m", "invalid release manifest")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+    with pytest.raises(ReleaseManifestActivationRequired, match="invalid"):
+        plan_release_manifest_activation(
+            config_path, "soulstream", DEFAULT_RELEASE_MANIFEST
+        )
 
 
 def test_apply_rederives_changed_from_locked_source_instead_of_plan_flag(

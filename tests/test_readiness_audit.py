@@ -50,6 +50,21 @@ def test_audit_accepts_explicit_valid_readiness(tmp_path: Path) -> None:
     assert result.stderr == ""
 
 
+def test_audit_rejects_empty_service_inventory(tmp_path: Path) -> None:
+    config = tmp_path / "empty.yaml"
+    config.write_text("repos: {}\nservices: {}\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), str(config)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout.strip() == "services: READINESS_AUDIT_EMPTY"
+
+
 def test_audit_accepts_multiple_config_paths(tmp_path: Path) -> None:
     first = tmp_path / "first.yaml"
     second = tmp_path / "second.yaml"
@@ -79,4 +94,10 @@ def test_audit_accepts_multiple_config_paths(tmp_path: Path) -> None:
 def test_ci_runs_repository_readiness_audit() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
-    assert "python scripts/audit_readiness_config.py haniel.yaml" in workflow
+    assert "permissions:\n  contents: read" in workflow
+    assert (
+        "python scripts/audit_readiness_config.py "
+        "tests/fixtures/readiness_ci_config.yaml"
+    ) in workflow
+    fixture = WORKFLOW.parents[2] / "tests" / "fixtures" / "readiness_ci_config.yaml"
+    assert "services:" in fixture.read_text(encoding="utf-8")

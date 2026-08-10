@@ -58,6 +58,7 @@ def main() -> int:
     parser.add_argument("--marker", default="READY-MARKER")
     parser.add_argument("--exit-after-marker", action="store_true")
     parser.add_argument("--grandchild", action="store_true")
+    parser.add_argument("--escaped-grandchild", action="store_true")
     args = parser.parse_args()
 
     def stop(_signum: int, _frame: object) -> None:
@@ -87,9 +88,16 @@ def main() -> int:
         else:
             port = None
 
-        if args.grandchild:
+        if args.grandchild or args.escaped_grandchild:
+            spawn_options: dict[str, object] = {}
+            if args.escaped_grandchild:
+                if os.name == "nt":
+                    spawn_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+                else:
+                    spawn_options["start_new_session"] = True
             grandchild = subprocess.Popen(
-                [sys.executable, "-c", "import time; time.sleep(300)"]
+                [sys.executable, "-c", "import time; time.sleep(300)"],
+                **spawn_options,
             )
 
         if args.mode == "immediate-log":
@@ -121,7 +129,11 @@ def main() -> int:
             server_thread.join(timeout=5)
         if listener is not None:
             listener.close()
-        if grandchild is not None and grandchild.poll() is None:
+        if (
+            grandchild is not None
+            and not args.escaped_grandchild
+            and grandchild.poll() is None
+        ):
             grandchild.terminate()
             try:
                 grandchild.wait(timeout=5)

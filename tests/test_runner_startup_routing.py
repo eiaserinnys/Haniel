@@ -10,7 +10,10 @@ import pytest
 
 from haniel.core.runner import ServiceRunner
 from haniel.config import HanielConfig, RepoConfig, ServiceConfig, load_config
-from haniel.config.release_activation import DEFAULT_RELEASE_MANIFEST
+from haniel.config.release_activation import (
+    DEFAULT_RELEASE_MANIFEST,
+    ReleaseActivationGitError,
+)
 from haniel.core.deployment import DeploymentError
 from haniel.core.deployment_errors import StableDeploymentError
 from haniel.core.git import GitError
@@ -853,9 +856,51 @@ def test_approved_pull_activates_before_capturing_previous_head(
     assert kwargs["request_id"].startswith("runtime-")
     assert kwargs["config_digest"] == handover_config_digest(config_path)
     assert probe.call_args.kwargs["config_digest"] == kwargs["config_digest"]
-    mock_remote_head.assert_called_once()
+    mock_remote_head.assert_not_called()
     mock_manifest_digest.assert_not_called()
     assert mock_activation_identity.call_count == 2
+    mock_pull.assert_not_called()
+    assert probe.call_args.kwargs["target_ref"] == "new-head"
+
+
+def test_activation_git_failure_keeps_typed_log_and_journal(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    make_repo(tmp_path)
+    config_path = tmp_path / "haniel.yaml"
+    config_path.write_text(config_text(), encoding="utf-8")
+    runner = ServiceRunner(
+        load_config(config_path), config_dir=tmp_path, config_path=config_path
+    )
+    runner._repo_states["soulstream"].pending_changes = {"commits": ["new"]}
+    store = runner._deployment_state_store()
+    store.begin_handover(
+        "soulstream",
+        previous_head="old-head",
+        target_ref="new-head",
+        manifest_identity=DEFAULT_RELEASE_MANIFEST,
+        request_id="orch-activation-failure",
+        expected_operation="upgrade",
+    )
+
+    with (
+        patch.object(
+            runner,
+            "_ensure_release_manifest_activation",
+            side_effect=ReleaseActivationGitError("remote inspection failed"),
+        ),
+        pytest.raises(ReleaseActivationGitError),
+    ):
+        runner.trigger_pull(
+            "soulstream",
+            orchestrator_attempt_id="orch-activation-failure",
+        )
+
+    journal = store.read("soulstream")
+    assert journal is not None
+    assert journal["state"] == "failed"
+    assert journal["error_code"] == "RELEASE_IDENTITY_UNAVAILABLE"
+    assert "RELEASE_IDENTITY_UNAVAILABLE" in caplog.text
 
 
 @patch("haniel.core.runner.get_head", return_value="new-head")
@@ -1069,6 +1114,20 @@ def test_manifest_activation_rejects_runner_generation_drift_before_write(
     assert drift.value.code == "CONFIG_GENERATION_CHANGED"
     assert config_path.read_bytes() == before
     assert list(tmp_path.glob("*.bak")) == []
+
+
+def test_absent_remote_manifest_has_no_activation_evidence(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    config_path = tmp_path / "haniel.yaml"
+    config_path.write_text(config_text(), encoding="utf-8")
+    runner = ServiceRunner(
+        load_config(config_path), config_dir=tmp_path, config_path=config_path
+    )
+
+    with patch(
+        "haniel.core.runner.discover_remote_release_manifest", return_value=None
+    ):
+        assert runner._ensure_release_manifest_activation("soulstream") is None
 
 
 def test_runner_start_closes_nonterminal_manifest_journal_before_startup_work(

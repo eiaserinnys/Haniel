@@ -1,0 +1,4 @@
+services:
+  readiness-audit-fixture:
+    run: python -c "print('fixture')"
+    ready: delay:0.01

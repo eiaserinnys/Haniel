@@ -27,6 +27,9 @@ def audit(path: Path) -> tuple[str, ...]:
             for detail in error.errors()
         )
 
+    if not config.services:
+        return ("services: READINESS_AUDIT_EMPTY",)
+
     return tuple(
         f"{error.location or 'config'}: {error.code or 'CONFIG_SEMANTIC_INVALID'}"
         for error in check_readiness(config)

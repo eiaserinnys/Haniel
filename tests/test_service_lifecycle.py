@@ -1,6 +1,8 @@
 """Tests for service lifecycle management helpers."""
 
 from pathlib import Path
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -193,6 +195,57 @@ def test_register_service_rolls_back_config_and_partial_clone_on_clone_failure(
     assert raw["services"] == {}
     assert raw["repos"] == {}
     assert not partial_path.exists()
+
+
+def test_eight_second_clone_does_not_own_config_write_transaction(tmp_path: Path):
+    from haniel.core.service_lifecycle import register_service
+
+    config = HanielConfig(
+        poll_interval=60,
+        services={"existing": ServiceConfig(run="python old.py", enabled=False)},
+        repos={},
+    )
+    runner = _runner(config, tmp_path)
+    clone_entered = threading.Event()
+    errors: list[BaseException] = []
+
+    def slow_clone(**_kwargs):
+        clone_entered.set()
+        time.sleep(8)
+
+    def register() -> None:
+        try:
+            register_service(
+                runner,
+                name="new",
+                service_config={
+                    "run": "python new.py",
+                    "ready": "delay:0.01",
+                    "repo": "main",
+                    "enabled": False,
+                },
+                repo="main",
+                repo_config={
+                    "url": "git@example.invalid/repo.git",
+                    "path": "./repo",
+                },
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    with patch("haniel.core.service_lifecycle.clone_repo", side_effect=slow_clone):
+        worker = threading.Thread(target=register)
+        worker.start()
+        assert clone_entered.wait(1)
+        started = time.monotonic()
+        runner.reload_config()
+        reload_elapsed = time.monotonic() - started
+        worker.join(timeout=10)
+
+    assert reload_elapsed < 2
+    assert "existing" in runner.config.services
+    assert "new" in runner.config.services
+    assert errors == []
 
 
 def test_reload_service_definition_restarts_only_the_target_service(tmp_path: Path):

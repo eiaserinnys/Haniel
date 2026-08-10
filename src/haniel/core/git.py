@@ -362,6 +362,8 @@ def pull_repo(
     branch: str,
     remote: str = "origin",
     strategy: str = "merge",
+    *,
+    expected_head: str | None = None,
 ) -> list[str]:
     """Pull updates from remote.
 
@@ -405,8 +407,11 @@ def pull_repo(
                     path.name,
                     discarded,
                 )
-            _run_git(["fetch", remote], cwd=path)
-            _run_git(["reset", "--hard", f"{remote}/{branch}"], cwd=path)
+            _run_git(["fetch", remote, branch], cwd=path)
+            target = expected_head or f"{remote}/{branch}"
+            if expected_head is not None:
+                _run_git(["cat-file", "-e", f"{expected_head}^{{commit}}"], cwd=path)
+            _run_git(["reset", "--hard", target], cwd=path)
         except subprocess.CalledProcessError as e:
             raise GitPullError(
                 f"Failed to force-pull from {remote}/{branch}",
@@ -417,7 +422,12 @@ def pull_repo(
         return discarded
     else:
         try:
-            _run_git(["pull", remote, branch], cwd=path)
+            if expected_head is None:
+                _run_git(["pull", remote, branch], cwd=path)
+            else:
+                _run_git(["fetch", remote, branch], cwd=path)
+                _run_git(["cat-file", "-e", f"{expected_head}^{{commit}}"], cwd=path)
+                _run_git(["merge", "--ff-only", expected_head], cwd=path)
         except subprocess.CalledProcessError as e:
             raise GitPullError(
                 f"Failed to pull from {remote}/{branch}",

@@ -46,6 +46,7 @@ class ReadinessState(Enum):
     """Terminal-monotonic readiness state for one process generation."""
 
     PENDING = "pending"
+    UNCONFIGURED = "unconfigured"
     READY = "ready"
     TIMED_OUT = "timed_out"
     EXITED = "exited"
@@ -250,6 +251,11 @@ class ProcessManager:
             self._next_generation += 1
             self._processes[name] = managed
             self._arm_log_evidence_locked(managed)
+
+            if condition is None:
+                managed.readiness_state = ReadinessState.UNCONFIGURED
+                managed.readiness_done_event.set()
+                self.health_manager.record_running(name)
 
         try:
             # Start stream readers
@@ -627,8 +633,8 @@ class ProcessManager:
                 return False
             managed = self._processes[name]
 
-        if managed.ready_event is None:
-            return True
+        if managed.readiness_state is ReadinessState.UNCONFIGURED:
+            return False
 
         timeout = self.DEFAULT_READY_TIMEOUT if timeout is None else timeout
         managed.readiness_done_event.wait(timeout=timeout)
@@ -674,9 +680,6 @@ class ProcessManager:
                 if managed.marker_observed_at is None:
                     managed.marker_observed_at = observed_at
                 managed.marker_event.set()
-            with self._lock:
-                if not self._is_current_pending_locked(managed):
-                    return
 
         managed.ready_callback_handle = managed.log_capture.add_pattern_callback(
             condition.value, record_marker
@@ -1058,25 +1061,25 @@ class ProcessManager:
         if managed.stderr_reader:
             managed.stderr_reader.stop()
 
-        for stream in (
-            None if process is None else process.stdout,
-            None if process is None else process.stderr,
+        for reader in (managed.stdout_reader, managed.stderr_reader):
+            if reader is None or reader is threading.current_thread():
+                continue
+            if reader.ident is None:
+                reader.close_before_start()
+                continue
+            reader.join(timeout=5)
+            if reader.is_alive():
+                logger.warning("Stream reader did not stop for %s", managed.name)
+
+        for reader, stream in (
+            (managed.stdout_reader, None if process is None else process.stdout),
+            (managed.stderr_reader, None if process is None else process.stderr),
         ):
-            if stream is not None and not stream.closed:
+            if reader is None and stream is not None and not stream.closed:
                 try:
                     stream.close()
                 except (OSError, ValueError):
                     pass
-
-        for reader in (managed.stdout_reader, managed.stderr_reader):
-            if (
-                reader is not None
-                and reader is not threading.current_thread()
-                and reader.is_alive()
-            ):
-                reader.join(timeout=5)
-                if reader.is_alive():
-                    logger.warning("Stream reader did not stop for %s", managed.name)
 
         # Stop log capture
         self.log_manager.stop_capture(managed.name)

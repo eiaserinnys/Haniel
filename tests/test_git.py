@@ -322,6 +322,21 @@ class TestPullRepo:
 
         assert discarded == []
 
+    def test_expected_head_is_the_exact_fetched_commit(
+        self, git_repo: Path, bare_remote: Path, tmp_path: Path
+    ):
+        clone_path = tmp_path / "approved-clone"
+        clone_repo(str(bare_remote), "master", clone_path)
+        approved = get_head(git_repo)
+        (git_repo / "later.txt").write_text("later", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=git_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "later"], cwd=git_repo, check=True)
+        subprocess.run(["git", "push", "origin", "master"], cwd=git_repo, check=True)
+
+        pull_repo(clone_path, "master", expected_head=approved)
+
+        assert get_head(clone_path) == approved
+
     def test_force_pull_raises_on_invalid_path(self):
         """Force strategy should raise GitPullError for non-existent path."""
         with pytest.raises(GitPullError):

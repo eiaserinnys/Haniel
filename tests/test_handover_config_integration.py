@@ -24,7 +24,11 @@ from haniel.core.deployment_command_runner import (
     subprocess_command_runner,
 )
 from haniel.core.lifecycle_control import LifecycleControl
-from haniel.core.lifecycle_locks import ConfigTransactionLock
+from haniel.core.lifecycle_locks import (
+    ConfigTransactionLock,
+    ConfigTransactionLockTimeout,
+    SerialFileLock,
+)
 from haniel.core.lifecycle_request_server import LifecycleRequestServer
 from haniel.core.one_shot_handover import (
     _resolve_bound_manifest_environment,
@@ -91,7 +95,7 @@ def test_config_write_transaction_serializes_across_processes(tmp_path: Path) ->
             child.wait(timeout=5)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX directory flock contract")
+@pytest.mark.skipif(os.name == "nt", reason="POSIX subprocess fixture")
 def test_config_lock_timeout_does_not_wedge_unrelated_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -111,14 +115,15 @@ def test_config_lock_timeout_does_not_wedge_unrelated_config(
             "-c",
             "\n".join(
                 (
-                    "import fcntl, os, sys",
-                    "handle = os.open(sys.argv[1], os.O_RDONLY)",
-                    "fcntl.flock(handle, fcntl.LOCK_EX)",
-                    "print('locked', flush=True)",
-                    "sys.stdin.readline()",
+                    "import sys",
+                    "from pathlib import Path",
+                    "from haniel.core.lifecycle_locks import ConfigTransactionLock",
+                    "with ConfigTransactionLock(Path(sys.argv[1]), operation='holder'):",
+                    "    print('locked', flush=True)",
+                    "    sys.stdin.readline()",
                 )
             ),
-            str(blocked_dir),
+            str(blocked),
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -166,8 +171,7 @@ def test_config_lock_timeout_does_not_wedge_unrelated_config(
         unrelated_thread.join(timeout=2)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX directory flock identity")
-def test_nested_configs_in_same_directory_share_reentrant_identity(
+def test_configs_in_same_directory_have_distinct_file_lock_identity(
     tmp_path: Path,
 ) -> None:
     first = tmp_path / "first.yaml"
@@ -179,31 +183,110 @@ def test_nested_configs_in_same_directory_share_reentrant_identity(
             "import sys",
             "from pathlib import Path",
             "from haniel.core.service_lifecycle import config_file_transaction",
-            "with config_file_transaction(Path(sys.argv[1])):",
-            "    with config_file_transaction(Path(sys.argv[2])):",
-            "        print('nested', flush=True)",
+            "with config_file_transaction(Path(sys.argv[1]), timeout_seconds=0.5):",
+            "    print('acquired', flush=True)",
         )
     )
 
-    result = subprocess.run(
-        [sys.executable, "-c", script, str(first), str(second)],
-        capture_output=True,
-        text=True,
-        timeout=1,
-        check=False,
-    )
+    from haniel.core.service_lifecycle import config_file_transaction
+
+    with config_file_transaction(first):
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(second)],
+            capture_output=True,
+            text=True,
+            timeout=1,
+            check=False,
+        )
 
     assert result.returncode == 0
-    assert result.stdout.strip() == "nested"
+    assert result.stdout.strip() == "acquired"
 
 
-def test_windows_config_mutex_uses_non_privileged_local_namespace(
+def test_config_transaction_uses_cross_session_file_identity(
     tmp_path: Path,
 ) -> None:
-    name = ConfigTransactionLock.windows_mutex_name(tmp_path / "haniel.yaml")
+    config_path = tmp_path / "haniel.yaml"
+    lock_path = ConfigTransactionLock.lock_path(config_path)
 
-    assert name.startswith("Local\\HanielConfigWrite_")
-    assert not name.startswith("Global\\")
+    assert lock_path.parent == tmp_path / ".haniel"
+    assert lock_path.name.endswith(".config.lock")
+    assert "Local\\" not in str(lock_path)
+
+
+def test_config_lock_timeout_reports_named_holder_evidence(tmp_path: Path) -> None:
+    from haniel.core.service_lifecycle import config_file_transaction
+
+    config_path = tmp_path / "haniel.yaml"
+    config_path.write_text("services: {}\n", encoding="utf-8")
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with config_file_transaction(config_path, operation="clone"):
+            entered.set()
+            release.wait(2)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert entered.wait(1)
+    try:
+        with pytest.raises(ConfigTransactionLockTimeout) as blocked:
+            with config_file_transaction(
+                config_path,
+                operation="reload",
+                timeout_seconds=0.1,
+            ):
+                pass
+        assert "clone" in str(blocked.value)
+        assert "pid=" in str(blocked.value)
+    finally:
+        release.set()
+        holder.join(timeout=2)
+
+
+def test_serial_file_lock_uses_bounded_canonical_wait(tmp_path: Path) -> None:
+    path = tmp_path / "serial.lock"
+    with SerialFileLock(path, timeout_seconds=1, operation="holder"):
+        with pytest.raises(ConfigTransactionLockTimeout):
+            with SerialFileLock(path, timeout_seconds=0.05, operation="waiter"):
+                pass
+
+
+def test_config_file_lock_stress_has_no_starved_waiter(tmp_path: Path) -> None:
+    from haniel.core.service_lifecycle import config_file_transaction
+
+    config_path = tmp_path / "haniel.yaml"
+    config_path.write_text("services: {}\n", encoding="utf-8")
+    entered: list[int] = []
+    failures: list[BaseException] = []
+    start = threading.Event()
+
+    def contend(index: int) -> None:
+        start.wait()
+        try:
+            with config_file_transaction(
+                config_path,
+                operation=f"stress-{index}",
+                timeout_seconds=3,
+            ):
+                entered.append(index)
+                time.sleep(0.005)
+        except BaseException as error:
+            failures.append(error)
+
+    workers = [threading.Thread(target=contend, args=(index,)) for index in range(12)]
+    with config_file_transaction(config_path, operation="stress-holder"):
+        for worker in workers:
+            worker.start()
+        start.set()
+        time.sleep(0.05)
+    for worker in workers:
+        worker.join(timeout=4)
+
+    assert failures == []
+    assert sorted(entered) == list(range(12))
+    assert all(not worker.is_alive() for worker in workers)
 
 
 def _write_config(

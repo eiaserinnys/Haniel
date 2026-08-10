@@ -18,10 +18,13 @@ from .model import HanielConfig, load_config
 from .validators import ConfigSemanticError, require_valid_config
 
 DEFAULT_RELEASE_MANIFEST = "deploy/release-manifest.json"
+RELEASE_GIT_INSPECTION_TIMEOUT_SECONDS = 60
 
 
 class ReleaseManifestActivationRequired(RuntimeError):
     """A remote release contract exists but Haniel cannot activate it safely."""
+
+    code = "RELEASE_ACTIVATION_REQUIRED"
 
 
 class ReleaseActivationSemanticError(ReleaseManifestActivationRequired):
@@ -40,6 +43,12 @@ class ReleaseActivationWriteError(ReleaseManifestActivationRequired):
     """Activation write failed after validation and was rolled back."""
 
     code = "CONFIG_WRITE_FAILED"
+
+
+class ReleaseActivationGitError(ReleaseManifestActivationRequired):
+    """The fetched release identity could not be inspected deterministically."""
+
+    code = "RELEASE_IDENTITY_UNAVAILABLE"
 
 
 @dataclass(frozen=True)
@@ -69,7 +78,6 @@ def discover_remote_release_manifest(
     manifest_path: str = DEFAULT_RELEASE_MANIFEST,
 ) -> str | None:
     """Return a validated conventional manifest path from the fetched remote ref."""
-    from ..core.git import GitError
     from ..core.release_manifest import ReleaseManifest
 
     # Unit fixtures may use a sentinel .git directory while mocking fetch/pull.
@@ -79,46 +87,24 @@ def discover_remote_release_manifest(
         return None
 
     ref = f"origin/{branch}"
-    verified = subprocess.run(
-        ["git", "rev-parse", "--verify", ref],
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=False,
-        timeout=60,
-    )
+    verified = _run_git_inspection(repo_path, "rev-parse", "--verify", ref)
     if verified.returncode != 0:
         # No remote target means there is nothing safe to pull. The following
         # real pull will fail as before; unit fixtures may mock that boundary.
         return None
-    listed = subprocess.run(
-        ["git", "ls-tree", "-r", "--name-only", ref, "--", manifest_path],
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=False,
-        timeout=60,
+    listed = _run_git_inspection(
+        repo_path, "ls-tree", "-r", "--name-only", ref, "--", manifest_path
     )
     if listed.returncode != 0:
-        raise GitError(
+        raise ReleaseActivationGitError(
             f"failed to inspect release manifest at {ref}: {listed.stderr.strip()}"
         )
     if manifest_path not in listed.stdout.splitlines():
         return None
 
-    shown = subprocess.run(
-        ["git", "show", f"{ref}:{manifest_path}"],
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=False,
-        timeout=60,
-    )
+    shown = _run_git_inspection(repo_path, "show", f"{ref}:{manifest_path}")
     if shown.returncode != 0:
-        raise GitError(
+        raise ReleaseActivationGitError(
             f"failed to read release manifest at {ref}: {shown.stderr.strip()}"
         )
     try:
@@ -128,6 +114,25 @@ def discover_remote_release_manifest(
             f"remote release manifest is invalid: {ref}:{manifest_path}: {error}"
         ) from error
     return manifest_path
+
+
+def _run_git_inspection(
+    repo_path: Path, *arguments: str
+) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+            timeout=RELEASE_GIT_INSPECTION_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ReleaseActivationGitError(
+            "release identity inspection did not complete"
+        ) from error
 
 
 def plan_release_manifest_activation(
@@ -149,9 +154,18 @@ def plan_release_manifest_activation(
         raise ReleaseManifestActivationRequired(
             f"repository {repo_name} already uses a different release manifest: {current}"
         )
-    repo_head, manifest_sha256 = _remote_release_identity(
-        config_path, config, repo_name, manifest_path
-    )
+    try:
+        repo_head, manifest_sha256 = _remote_release_identity(
+            config_path, config, repo_name, manifest_path
+        )
+    except Exception as error:
+        from ..core.git import GitError
+
+        if isinstance(error, GitError):
+            raise ReleaseActivationGitError(
+                f"failed to inspect release identity for repository: {repo_name}"
+            ) from error
+        raise
 
     payload = _load_mapping(raw)
     repo_payload = payload.get("repos", {}).get(repo_name)
@@ -200,9 +214,31 @@ def activate_release_manifest(
             "activation plan targets a different config path"
         )
 
+    preflight = config_path.read_bytes()
+    if hashlib.sha256(preflight).hexdigest() != plan.config_sha256:
+        raise ReleaseActivationIdentityDrift(
+            "Haniel config changed before activation identity revalidation"
+        )
+    preflight_source = HanielConfig.model_validate(_load_mapping(preflight))
+    try:
+        repo_head, manifest_sha256 = _remote_release_identity(
+            config_path,
+            preflight_source,
+            plan.repo_name,
+            plan.release_manifest,
+        )
+    except Exception as error:
+        raise ReleaseActivationIdentityDrift(
+            "remote release identity could not be revalidated"
+        ) from error
+    if repo_head != plan.repo_head or manifest_sha256 != plan.manifest_sha256:
+        raise ReleaseActivationIdentityDrift(
+            "remote release identity drifted after activation planning"
+        )
+
     from ..core.service_lifecycle import config_file_transaction
 
-    with config_file_transaction(config_path):
+    with config_file_transaction(config_path, operation="release_activation_commit"):
         original = config_path.read_bytes()
         if hashlib.sha256(original).hexdigest() != plan.config_sha256:
             raise ReleaseActivationIdentityDrift(
@@ -220,18 +256,6 @@ def activate_release_manifest(
         if current_manifest not in (None, plan.release_manifest):
             raise ReleaseActivationIdentityDrift(
                 "planned repository now uses a different release manifest"
-            )
-        try:
-            repo_head, manifest_sha256 = _remote_release_identity(
-                config_path, source, plan.repo_name, plan.release_manifest
-            )
-        except Exception as error:
-            raise ReleaseActivationIdentityDrift(
-                "remote release identity could not be revalidated"
-            ) from error
-        if repo_head != plan.repo_head or manifest_sha256 != plan.manifest_sha256:
-            raise ReleaseActivationIdentityDrift(
-                "remote release identity drifted after activation planning"
             )
         payload = _load_mapping(original)
         repo_payload = payload.get("repos", {}).get(plan.repo_name)
@@ -275,10 +299,7 @@ def activate_release_manifest(
             rollback_error: Exception | None = None
             try:
                 if config_path.read_bytes() != original:
-                    permission_source = (
-                        backup_path if backup_path.exists() else config_path
-                    )
-                    _atomic_write(config_path, original, permission_source)
+                    _atomic_write(config_path, original, config_path)
                 if config_path.read_bytes() != original:
                     raise OSError("activation rollback verification failed")
             except Exception as failed_rollback:
@@ -307,15 +328,21 @@ def _remote_release_identity(
 ) -> tuple[str, str]:
     """Capture the exact fetched ref and manifest bytes bound to an activation."""
 
-    from ..core.git import get_remote_head, sha256_file_at_commit
+    from ..core.git import get_remote_head, read_file_at_commit
+    from ..core.release_manifest import ReleaseManifest
 
     repo = config.repos[repo_name]
     repo_path = (config_path.parent / repo.path).resolve(strict=False)
     repo_head = get_remote_head(repo_path, repo.branch)
-    return (
-        repo_head,
-        sha256_file_at_commit(repo_path, repo_head, manifest_path),
-    )
+    manifest = read_file_at_commit(repo_path, repo_head, manifest_path)
+    try:
+        ReleaseManifest.model_validate_json(manifest)
+    except ValueError as error:
+        raise ReleaseManifestActivationRequired(
+            "remote release manifest is invalid at the exact planned repository head: "
+            f"{repo_head}:{manifest_path}"
+        ) from error
+    return repo_head, hashlib.sha256(manifest).hexdigest()
 
 
 def _require_activation_semantics(config: HanielConfig):
@@ -356,6 +383,9 @@ def main() -> None:
     parser.add_argument("--repo", required=True)
     parser.add_argument("--manifest", default=DEFAULT_RELEASE_MANIFEST)
     parser.add_argument("--expected-sha256")
+    parser.add_argument("--expected-repo-head")
+    parser.add_argument("--expected-manifest-sha256")
+    parser.add_argument("--expected-candidate-sha256")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -370,14 +400,32 @@ def main() -> None:
     if args.action == "check":
         print(json.dumps(_plan_json(plan), ensure_ascii=False, indent=2))
         raise SystemExit(2 if plan.changed else 0)
-    if not args.expected_sha256:
-        parser.error("apply requires --expected-sha256 from a fresh check")
-    result = activate_release_manifest(
-        args.config,
-        args.repo,
-        discovered,
-        expected_sha256=args.expected_sha256,
+    required_evidence = {
+        "--expected-sha256": args.expected_sha256,
+        "--expected-repo-head": args.expected_repo_head,
+        "--expected-manifest-sha256": args.expected_manifest_sha256,
+        "--expected-candidate-sha256": args.expected_candidate_sha256,
+    }
+    missing = [name for name, value in required_evidence.items() if not value]
+    if missing:
+        parser.error("apply requires fresh check evidence: " + ", ".join(missing))
+    expected = (
+        args.expected_sha256,
+        args.expected_repo_head,
+        args.expected_manifest_sha256,
+        args.expected_candidate_sha256,
     )
+    actual = (
+        plan.config_sha256,
+        plan.repo_head,
+        plan.manifest_sha256,
+        plan.candidate_sha256,
+    )
+    if actual != expected:
+        raise ReleaseActivationIdentityDrift(
+            "activation check evidence changed; rerun the activation check"
+        )
+    result = activate_release_manifest(args.config, plan=plan)
     print(
         json.dumps(
             {

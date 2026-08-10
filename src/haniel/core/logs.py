@@ -5,10 +5,13 @@ haniel captures stdout/stderr from each service and writes to log files.
 It also supports real-time pattern matching for ready: log:{pattern} conditions.
 """
 
+import codecs
+import os
 import re
+import selectors
 import threading
-from dataclasses import dataclass
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from io import TextIOWrapper
 from pathlib import Path
@@ -289,32 +292,152 @@ class StreamReader(threading.Thread):
             log_capture: LogCapture to write to
             source: Source identifier ("stdout" or "stderr")
         """
-        super().__init__(daemon=True)
+        super().__init__(daemon=True, name=f"haniel-stream-{source}")
         self.stream = stream
         self.log_capture = log_capture
         self.source = source
         self._stop_event = threading.Event()
+        self._wake_read: int | None = None
+        self._wake_write: int | None = None
+        self._closed = threading.Event()
+        if os.name != "nt":
+            self._wake_read, self._wake_write = os.pipe()
+            os.set_blocking(self._wake_read, False)
+            os.set_blocking(self._wake_write, False)
 
     def run(self) -> None:
-        """Read lines from the stream until it's closed."""
+        """Read bytes until EOF or the private wakeup becomes readable.
+
+        The reader is the sole owner allowed to close the buffered wrapper after
+        it starts. Closing a ``TextIOWrapper`` from another thread can block in
+        buffered I/O while an escaped descendant still owns the pipe writer.
+        """
         try:
-            for line in iter(self.stream.readline, ""):
-                if self._stop_event.is_set():
-                    break
-                if line:
+            self.stream.fileno()
+        except (AttributeError, OSError, ValueError):
+            try:
+                for line in self.stream:
+                    if self._stop_event.is_set():
+                        break
                     self.log_capture.write_line(line, self.source)
+            finally:
+                self._close_owned_resources()
+            return
+
+        decoder = codecs.getincrementaldecoder(self.stream.encoding or "utf-8")(
+            errors=self.stream.errors or "replace"
+        )
+        pending = ""
+        try:
+            chunks = self._windows_chunks() if os.name == "nt" else self._posix_chunks()
+            for chunk in chunks:
+                pending += decoder.decode(chunk)
+                pending = self._emit_complete_lines(pending)
+            pending += decoder.decode(b"", final=True)
+            if pending:
+                self.log_capture.write_line(pending, self.source)
         except (ValueError, OSError):
-            # Stream closed
             pass
+        finally:
+            self._close_owned_resources()
+
+    def _posix_chunks(self):
+        assert self._wake_read is not None
+        selector = selectors.DefaultSelector()
+        stream_fd = self.stream.fileno()
+        selector.register(stream_fd, selectors.EVENT_READ, "stream")
+        selector.register(self._wake_read, selectors.EVENT_READ, "wake")
+        try:
+            while True:
+                events = selector.select()
+                if any(key.data == "wake" for key, _mask in events):
+                    return
+                for key, _mask in events:
+                    if key.data != "stream":
+                        continue
+                    chunk = os.read(stream_fd, 65536)
+                    if not chunk:
+                        return
+                    yield chunk
+        finally:
+            selector.close()
+
+    def _windows_chunks(self):
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.PeekNamedPipe.argtypes = (
+            wintypes.HANDLE,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            ctypes.POINTER(wintypes.DWORD),
+            wintypes.LPVOID,
+        )
+        kernel32.PeekNamedPipe.restype = wintypes.BOOL
+        fd = self.stream.fileno()
+        handle = msvcrt.get_osfhandle(fd)
+        available = wintypes.DWORD()
+        while not self._stop_event.is_set():
+            ok = kernel32.PeekNamedPipe(
+                handle, None, 0, None, ctypes.byref(available), None
+            )
+            if not ok:
+                error = ctypes.get_last_error()
+                if error in {6, 109, 232}:  # invalid/broken/no-data pipe
+                    return
+                raise ctypes.WinError(error)
+            if available.value:
+                chunk = os.read(fd, min(available.value, 65536))
+                if not chunk:
+                    return
+                yield chunk
+                continue
+            self._stop_event.wait(0.02)
+
+    def _emit_complete_lines(self, content: str) -> str:
+        lines = content.splitlines(keepends=True)
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            pending = lines.pop()
+        else:
+            pending = ""
+        for line in lines:
+            self.log_capture.write_line(line, self.source)
+        return pending
+
+    def _close_owned_resources(self) -> None:
+        try:
+            if not self.stream.closed:
+                self.stream.close()
+        except (OSError, ValueError):
+            pass
+        for attribute in ("_wake_read", "_wake_write"):
+            descriptor = getattr(self, attribute)
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                setattr(self, attribute, None)
+        self._closed.set()
 
     def stop(self) -> None:
-        """Signal the reader to stop and wake a blocking ``readline``."""
+        """Signal the reader through its private wakeup without closing its stream."""
         self._stop_event.set()
-        if not self.stream.closed:
+        if self._wake_write is not None:
             try:
-                self.stream.close()
-            except (OSError, ValueError):
+                os.write(self._wake_write, b"x")
+            except OSError:
                 pass
+
+    def close_before_start(self) -> None:
+        """Close resources when thread startup failed before ownership transfer."""
+        if self.ident is not None or self.is_alive():
+            raise RuntimeError("reader thread already owns its stream")
+        self.stop()
+        self._close_owned_resources()
 
 
 def get_log_tail(

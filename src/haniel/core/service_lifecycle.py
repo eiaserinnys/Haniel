@@ -18,6 +18,7 @@ from .child_env import sanitized_child_env
 from ..config.io import backup_config, read_config, restore_config, write_config
 from ..config.model import HanielConfig, RepoConfig, ServiceConfig
 from ..config.validators import require_valid_config
+from .deployment_errors import StableDeploymentError
 from .git import clone_repo
 from .lifecycle_locks import ConfigTransactionLock
 
@@ -31,7 +32,12 @@ _CONFIG_TRANSACTION_LOCAL = threading.local()
 
 
 @contextmanager
-def config_file_transaction(config_path: Path):
+def config_file_transaction(
+    config_path: Path,
+    *,
+    operation: str = "config_write",
+    timeout_seconds: float | None = None,
+):
     """Serialize one config identity across threads and operating processes."""
 
     resolved = Path(config_path).expanduser().resolve(strict=False)
@@ -51,7 +57,11 @@ def config_file_transaction(config_path: Path):
         return
 
     # The cross-process wait must never own the process-wide writer lock.
-    with ConfigTransactionLock(resolved):
+    with ConfigTransactionLock(
+        resolved,
+        timeout_seconds=timeout_seconds,
+        operation=operation,
+    ):
         with CONFIG_WRITE_LOCK:
             depths[key] = 1
             try:
@@ -61,10 +71,19 @@ def config_file_transaction(config_path: Path):
 
 
 @contextmanager
-def config_write_transaction(runner: "ServiceRunner"):
+def config_write_transaction(
+    runner: "ServiceRunner",
+    *,
+    operation: str = "config_write",
+    timeout_seconds: float | None = None,
+):
     """Serialize disk config bytes and the resident snapshot in one order."""
 
-    with config_file_transaction(_require_config_path(runner)):
+    with config_file_transaction(
+        _require_config_path(runner),
+        operation=operation,
+        timeout_seconds=timeout_seconds,
+    ):
         yield
 
 
@@ -250,7 +269,7 @@ def register_service(
     created_clone_path: Path | None = None
     repo_post_pull = False
 
-    with config_write_transaction(runner):
+    with config_write_transaction(runner, operation="register_service_prepare"):
         config = read_config(config_path)
         if name in config.services:
             raise ValueError(f"Service already exists: {name}")
@@ -265,36 +284,61 @@ def register_service(
         config.services[name] = service
         _validate_or_raise(config)
 
-        clone_status = "skipped"
-        repo_path_value = None
-        if resolved_repo is not None:
-            repo_path = _repo_path(runner.config_dir, resolved_repo)
-            repo_path_value = resolved_repo.path
-            repo_path_preexisted = repo_path.exists()
-            try:
-                clone_status = _ensure_repo_clone(
-                    repo_name or "",
-                    resolved_repo,
-                    repo_path,
-                )
-                if clone_status == "created":
-                    created_clone_path = repo_path
-                repo_post_pull = _maybe_run_repo_post_pull(
-                    repo_name or "",
-                    resolved_repo,
-                    repo_path,
-                    runner.config_dir,
-                )
-            except Exception:
-                if not repo_path_preexisted and repo_path.exists():
-                    _remove_created_clone(repo_path)
-                raise
-
+    clone_status = "skipped"
+    repo_path_value = None
+    if resolved_repo is not None:
+        repo_path = _repo_path(runner.config_dir, resolved_repo)
+        repo_path_value = resolved_repo.path
+        repo_path_preexisted = repo_path.exists()
         try:
-            _commit_config(config_path, config, runner)
+            clone_status = _ensure_repo_clone(
+                repo_name or "",
+                resolved_repo,
+                repo_path,
+            )
+            if clone_status == "created":
+                created_clone_path = repo_path
+            repo_post_pull = _maybe_run_repo_post_pull(
+                repo_name or "",
+                resolved_repo,
+                repo_path,
+                runner.config_dir,
+            )
         except Exception:
-            if created_clone_path is not None:
+            if not repo_path_preexisted and repo_path.exists():
+                _remove_created_clone(repo_path)
+            raise
+
+    try:
+        with config_write_transaction(runner, operation="register_service_commit"):
+            current = read_config(config_path)
+            if name in current.services:
+                raise ValueError(f"Service already exists: {name}")
+            committed_service, committed_repo_name, committed_repo = (
+                _resolve_repo_for_registration(
+                    current,
+                    ServiceConfig.model_validate(service_config),
+                    repo,
+                    repo_config,
+                )
+            )
+            if (
+                committed_service != service
+                or committed_repo_name != repo_name
+                or committed_repo != resolved_repo
+            ):
+                raise StableDeploymentError(
+                    "CONFIG_IDENTITY_DRIFT",
+                    "service or repository identity changed during registration",
+                )
+            current.services[name] = committed_service
+            _validate_or_raise(current)
+            _commit_config(config_path, current, runner)
+    except Exception:
+        try:
+            if created_clone_path is not None and created_clone_path.exists():
                 _remove_created_clone(created_clone_path)
+        finally:
             raise
 
     service_post_pull = False
@@ -330,7 +374,7 @@ def register_repo(
         raise ValueError("Repo name is required")
 
     config_path = _require_config_path(runner)
-    with config_write_transaction(runner):
+    with config_write_transaction(runner, operation="register_repo"):
         config = read_config(config_path)
         if name in config.repos:
             raise ValueError(f"Repo already exists: {name}")
@@ -350,7 +394,7 @@ def reload_service_definition(runner: "ServiceRunner", service: str) -> dict[str
     config_path = _require_config_path(runner)
     # The writer lock serializes file identity. The resident lock is acquired
     # only by snapshot/CAS helpers and is never retained across restart I/O.
-    with config_write_transaction(runner):
+    with config_write_transaction(runner, operation="reload_service_definition"):
         resident = runner._snapshot_config_state()
         disk_config = read_config(config_path)
         if service not in disk_config.services:
@@ -368,10 +412,10 @@ def reload_service_definition(runner: "ServiceRunner", service: str) -> dict[str
         candidate.services[service] = new_service
         runner._replace_config_snapshot(candidate, resident.generation)
 
-        stopped = _stop_if_running(runner, service)
-        restarted = False
-        if new_service.enabled:
-            restarted = _start_enabled_service(runner, service)
+    stopped = _stop_if_running(runner, service)
+    restarted = False
+    if new_service.enabled:
+        restarted = _start_enabled_service(runner, service)
 
     return {
         "ok": True,
@@ -389,7 +433,7 @@ def disable_service(runner: "ServiceRunner", service: str) -> dict[str, Any]:
         raise ValueError("Service name is required")
 
     config_path = _require_config_path(runner)
-    with config_write_transaction(runner):
+    with config_write_transaction(runner, operation="disable_service"):
         config = read_config(config_path)
         if service not in config.services:
             raise KeyError(f"Service not found: {service}")
@@ -398,8 +442,9 @@ def disable_service(runner: "ServiceRunner", service: str) -> dict[str, Any]:
             update={"enabled": False}
         )
         _validate_or_raise(config)
-        stopped = _stop_if_running(runner, service)
         _commit_config(config_path, config, runner)
+
+    stopped = _stop_if_running(runner, service)
 
     return {
         "ok": True,
@@ -429,7 +474,9 @@ def delete_service_config(
     config_path = _require_config_path(runner)
     purge_path: Path | None = None
 
-    with config_write_transaction(runner):
+    stopped = _stop_if_running(runner, service)
+
+    with config_write_transaction(runner, operation="delete_service"):
         config = read_config(config_path)
         if service not in config.services:
             raise KeyError(f"Service not found: {service}")
@@ -461,7 +508,6 @@ def delete_service_config(
                 purge_path = _repo_path(runner.config_dir, repo_config)
                 _purge_allowed(runner.config_dir, purge_path)
 
-        stopped = _stop_if_running(runner, service)
         del config.services[service]
         _validate_or_raise(config)
         _commit_config(config_path, config, runner)

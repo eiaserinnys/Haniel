@@ -6,6 +6,7 @@ import importlib
 import json
 import os
 import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -20,6 +21,7 @@ import yaml
 from haniel.config import HanielConfig, RepoConfig, ServiceConfig
 from haniel.config.validators import require_valid_config, validate_config
 from haniel.core.health import ServiceState
+from haniel.core.deployment_state import DeploymentStateStore
 from haniel.core.logs import StreamReader
 from haniel.core.process import ManagedProcess, ProcessManager
 from haniel.core.runner import ServiceRunner
@@ -64,6 +66,28 @@ def _process_is_running(pid: int) -> bool:
         kernel32.CloseHandle(handle)
 
 
+def _process_resource_count() -> int:
+    if os.name != "nt":
+        return len(list(Path("/proc/self/fd").iterdir()))
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessHandleCount.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.GetProcessHandleCount.restype = wintypes.BOOL
+    count = wintypes.DWORD()
+    if not kernel32.GetProcessHandleCount(
+        kernel32.GetCurrentProcess(), ctypes.byref(count)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(count.value)
+
+
 def _status(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -75,6 +99,7 @@ def _child_command(
     release: Path | None = None,
     exit_after_marker: bool = False,
     grandchild: bool = False,
+    escaped_grandchild: bool = False,
 ) -> tuple[str, Path]:
     status = tmp_path / f"{mode}-{len(list(tmp_path.glob('*.json')))}.json"
     command = [
@@ -93,6 +118,8 @@ def _child_command(
         command.append("--exit-after-marker")
     if grandchild:
         command.append("--grandchild")
+    if escaped_grandchild:
+        command.append("--escaped-grandchild")
     if sys.platform == "win32":
         return subprocess.list2cmdline(command), status
     return shlex.join(command), status
@@ -265,9 +292,9 @@ def test_missing_ready_runs_but_remains_never_ready(tmp_path: Path) -> None:
         assert _wait(status.exists)
         assert manager.is_running("migrating")
         assert manager.wait_for_ready("migrating", timeout=0.05) is False
-        assert managed.readiness_state.value == "pending"
-        assert manager.health_manager.get_health("migrating").state is not (
-            ServiceState.READY
+        assert managed.readiness_state.value == "unconfigured"
+        assert manager.health_manager.get_health("migrating").state is (
+            ServiceState.RUNNING
         )
         assert runner._collect_services_info()[0]["ready"] is False
     finally:
@@ -556,6 +583,37 @@ def test_timeout_commit_rechecks_timely_marker_evidence_under_lock(
     assert manager.health_manager.get_health(managed.name).state is ServiceState.READY
 
 
+def test_marker_evidence_callback_never_waits_for_manager_lock(tmp_path: Path) -> None:
+    readiness = importlib.import_module("haniel.config.readiness")
+    manager = _manager(tmp_path)
+    capture = manager.log_manager.start_capture("marker-lock")
+    process = MagicMock(pid=104)
+    process.poll.return_value = None
+    managed = ManagedProcess(
+        name="marker-lock",
+        config=_config("python app.py", f"log:{MARKER}"),
+        process=process,
+        log_capture=capture,
+        ready_event=threading.Event(),
+        generation=22,
+        ready_condition=readiness.parse_ready_condition(f"log:{MARKER}"),
+    )
+    manager._processes[managed.name] = managed
+    manager._arm_log_evidence_locked(managed)
+    completed = threading.Event()
+
+    def emit() -> None:
+        capture.write_line(MARKER)
+        completed.set()
+
+    with manager._lock:
+        emitter = threading.Thread(target=emit)
+        emitter.start()
+        assert completed.wait(0.2), "evidence callback must not reacquire manager lock"
+    emitter.join(timeout=1)
+    capture.stop()
+
+
 def test_stop_reaps_grandchild_and_closes_reader_threads_and_pipes(
     tmp_path: Path,
 ) -> None:
@@ -580,6 +638,97 @@ def test_stop_reaps_grandchild_and_closes_reader_threads_and_pipes(
     assert not managed.stderr_reader.is_alive()
     assert process.stdout is not None and process.stdout.closed
     assert process.stderr is not None and process.stderr.closed
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX escaped-session pipe contract")
+def test_stop_self_wakes_readers_when_escaped_descendant_holds_pipe(
+    tmp_path: Path,
+) -> None:
+    resources_before = _process_resource_count()
+    command, status = _child_command(tmp_path, "hold", escaped_grandchild=True)
+    manager = _manager(tmp_path)
+    managed = manager.start_service(
+        "escaped-tree",
+        _config(command, "delay:0.01"),
+        ready_timeout=1,
+    )
+    assert _wait(status.exists)
+    grandchild_pid = int(_status(status)["grandchild_pid"])
+    process = managed.process
+    assert process is not None
+    stopped = threading.Event()
+    result: list[bool] = []
+
+    def stop() -> None:
+        result.append(manager.stop_service("escaped-tree", force=True))
+        stopped.set()
+
+    stop_thread = threading.Thread(target=stop, daemon=True)
+    stop_thread.start()
+    try:
+        assert stopped.wait(2), "stop must not wait for an escaped pipe writer"
+        assert result == [True]
+        assert process.poll() is not None
+        assert managed.stdout_reader is not None
+        assert managed.stderr_reader is not None
+        assert not managed.stdout_reader.is_alive()
+        assert not managed.stderr_reader.is_alive()
+        assert process.stdout is not None and process.stdout.closed
+        assert process.stderr is not None and process.stderr.closed
+        assert _process_resource_count() <= resources_before + 1
+        assert not any(
+            thread.name.startswith("haniel-stream-") and thread.is_alive()
+            for thread in threading.enumerate()
+        )
+
+        journal = DeploymentStateStore(tmp_path / ".haniel" / "deployments")
+        journal.begin("escaped-tree", "old", "new", "release-1")
+        journal.transition("escaped-tree", "failed")
+        assert journal.read("escaped-tree")["state"] == "failed"
+    finally:
+        if _process_is_running(grandchild_pid):
+            os.kill(grandchild_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        stop_thread.join(timeout=5)
+
+
+def test_stream_reader_self_wakes_while_an_independent_writer_remains_open(
+    tmp_path: Path,
+) -> None:
+    resources_before = _process_resource_count()
+    read_fd, write_fd = os.pipe()
+    stream = os.fdopen(read_fd, "r", encoding="utf-8")
+    capture = _manager(tmp_path).log_manager.start_capture("independent-writer")
+    reader = StreamReader(stream, capture)
+    reader.start()
+    try:
+        reader.stop()
+        reader.join(timeout=1)
+        assert not reader.is_alive()
+        assert stream.closed
+
+        journal = DeploymentStateStore(tmp_path / ".haniel" / "direct-reader")
+        journal.begin("reader", "old", "new", "release-1")
+        journal.transition("reader", "failed")
+        assert journal.read("reader")["state"] == "failed"
+    finally:
+        os.close(write_fd)
+        capture.stop()
+    assert _process_resource_count() <= resources_before + 1
+
+
+def test_missing_ready_is_running_but_explicitly_unconfigured(tmp_path: Path) -> None:
+    command, status = _child_command(tmp_path, "hold")
+    manager = _manager(tmp_path)
+    managed = manager.start_service("legacy", _config(command, None), ready_timeout=1)
+    try:
+        assert _wait(status.exists)
+        assert manager.health_manager.get_health("legacy").state is ServiceState.RUNNING
+        assert managed.readiness_state.value == "unconfigured"
+        assert manager.wait_for_ready("legacy", timeout=0.01) is False
+        runner = _runner_with_manager(tmp_path, manager, "legacy", managed.config)
+        assert runner._collect_services_info()[0]["ready"] is False
+    finally:
+        manager.stop_service("legacy", force=True)
 
 
 def test_ready_monitor_exception_commits_terminal_cleanup(
