@@ -99,11 +99,13 @@ def execute_manifest_handover_once(
     except LifecycleConflict as owner_error:
         if expected_operation == "upgrade":
             raise LifecycleConflict(
-                "LIFECYCLE_OWNER_REQUIRED: upgrade requires an existing resident owner"
+                "LIFECYCLE_OWNER_REQUIRED",
+                "upgrade requires an existing resident owner",
             ) from owner_error
         if not start_owner:
             raise LifecycleConflict(
-                "LIFECYCLE_OWNER_MISSING: fresh_install requires --start-owner"
+                "LIFECYCLE_OWNER_MISSING",
+                "fresh_install requires --start-owner",
             ) from owner_error
         control.submit_request(request_id, payload)
         try:
@@ -171,8 +173,8 @@ def _resolve_bound_manifest_environment(
 ) -> dict[str, str]:
     if manifest.requires_service_env_file and config_digest is None:
         raise ReleaseIdentityError(
-            "CONFIG_DIGEST_REQUIRED: manifest service environment requires "
-            "a config-bound detached probe"
+            "CONFIG_DIGEST_REQUIRED",
+            "manifest service environment requires a config-bound detached probe",
         )
     if config_digest is not None:
         assert runner.config_path is not None
@@ -246,8 +248,8 @@ def probe_manifest_target(
     ) as staged:
         if staged.manifest.requires_service_env_file and config_digest is None:
             raise ReleaseIdentityError(
-                "CONFIG_DIGEST_REQUIRED: manifest service environment requires "
-                "a config-bound detached probe"
+                "CONFIG_DIGEST_REQUIRED",
+                "manifest service environment requires a config-bound detached probe",
             )
         return staged
 

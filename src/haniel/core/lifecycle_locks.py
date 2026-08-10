@@ -7,8 +7,10 @@ import threading
 from contextlib import AbstractContextManager
 from pathlib import Path
 
+from .deployment_errors import StableDeploymentError
 
-class LifecycleConflict(RuntimeError):
+
+class LifecycleConflict(StableDeploymentError):
     """A stable lifecycle identity or lease conflict."""
 
 
@@ -36,7 +38,7 @@ class FileLease:
         with self._guard:
             current = self._active.get(key)
             if current is not None:
-                raise LifecycleConflict(f"{conflict_code}: lease is held by {current}")
+                raise LifecycleConflict(conflict_code, f"lease is held by {current}")
             self._active[key] = holder
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -55,7 +57,7 @@ class FileLease:
                 self._active.pop(key, None)
             if _is_windows_lease_contention(error):
                 raise LifecycleConflict(
-                    f"{conflict_code}: OS lease is already held"
+                    conflict_code, "OS lease is already held"
                 ) from error
             raise
 
@@ -67,7 +69,7 @@ class FileLease:
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
             except OSError as error:
                 raise LifecycleConflict(
-                    f"{self.conflict_code}: OS lease is already held"
+                    self.conflict_code, "OS lease is already held"
                 ) from error
         else:
             import fcntl
@@ -76,7 +78,7 @@ class FileLease:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as error:
                 raise LifecycleConflict(
-                    f"{self.conflict_code}: OS lease is already held"
+                    self.conflict_code, "OS lease is already held"
                 ) from error
 
     @staticmethod

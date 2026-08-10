@@ -21,6 +21,7 @@ from haniel.core.deployment import (
     subprocess_command_runner,
     stable_deployment_error_code,
 )
+from haniel.core.deployment_errors import KNOWN_DEPLOYMENT_ERROR_CODES
 
 
 def command(name: str) -> CommandSpec:
@@ -75,6 +76,20 @@ def test_recovery_failure_code_wins_over_typed_recovery_child() -> None:
     )
 
     assert stable_deployment_error_code(error) == "RECOVERY_FAILED"
+
+
+def test_untyped_message_does_not_create_journal_error_code(tmp_path: Path) -> None:
+    store = DeploymentStateStore(tmp_path / "state")
+    store.begin("app", "old", "new", "release")
+
+    store.transition(
+        "app",
+        "failed",
+        message="PULL_FAILED happened after CONFIG_DIGEST_MISMATCH",
+    )
+
+    assert store.read("app")["error_code"] == "HANDOVER_FAILED"
+    assert "HANDOVER_FAILED" in KNOWN_DEPLOYMENT_ERROR_CODES
 
 
 def coordinator(

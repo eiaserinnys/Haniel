@@ -81,11 +81,6 @@ def handover_error_code(error: Exception) -> str:
 
 
 def request_error_code(error: Exception) -> str:
-    message = str(error)
-    if "MALFORMED_REQUEST" in message:
-        return "MALFORMED_REQUEST"
-    if "REQUEST_IDENTITY_CONFLICT" in message:
-        return "REQUEST_IDENTITY_CONFLICT"
     phase_code = handover_error_code(error)
     if phase_code != "HANDOVER_FAILED":
         return phase_code
