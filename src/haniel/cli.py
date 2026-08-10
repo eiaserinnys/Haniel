@@ -10,6 +10,7 @@ Commands:
 
 import json
 import logging
+import os
 import signal
 import sys
 from pathlib import Path
@@ -24,6 +25,13 @@ from haniel.commands.install import install_command
 from haniel.commands.install import print_dry_run_install as print_dry_run_install
 from haniel.commands.lifecycle import lifecycle_group
 from haniel.config import HanielConfig
+
+
+def _exit_immediately(exit_code: int) -> None:
+    """Flush user-visible streams, then bypass interpreter finalization."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(exit_code)
 
 
 def print_dry_run_run(config: HanielConfig) -> None:
@@ -238,14 +246,19 @@ def run(
         click.echo(click.style(f"Error: {e}", fg="red"), err=True)
         sys.exit(1)
     finally:
-        lifecycle_server.close()
-        runner.stop()
-        owner.__exit__(None, None, None)
-        if runner.self_update_requested:
+        self_update_requested = runner.self_update_requested
+        if self_update_requested:
+            from haniel.core.self_update_exit_intent import write
+
             click.echo(
                 click.style("Exiting for self-update (exit code 10).", fg="yellow")
             )
-            sys.exit(EXIT_SELF_UPDATE)
+            write(config_dir)
+        lifecycle_server.close()
+        runner.stop()
+        owner.__exit__(None, None, None)
+        if self_update_requested:
+            _exit_immediately(EXIT_SELF_UPDATE)
         if runner.restart_requested:
             click.echo(click.style("Exiting for restart (exit code 11).", fg="yellow"))
             sys.exit(EXIT_RESTART)

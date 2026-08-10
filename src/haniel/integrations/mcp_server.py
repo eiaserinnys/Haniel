@@ -55,6 +55,7 @@ class HanielMcpServer:
         self._server: Optional[Any] = None  # uvicorn.Server
         self._server_thread: Optional[threading.Thread] = None
         self._session_manager: Optional[Any] = None
+        self._stop_requested = threading.Event()
 
     @property
     def port(self) -> int:
@@ -1215,6 +1216,8 @@ class HanielMcpServer:
                 log_level="warning",
             )
             self._server = uvicorn.Server(config)
+            if self._stop_requested.is_set():
+                self._server.should_exit = True
             await self._server.serve()
 
         except ImportError as e:
@@ -1225,6 +1228,7 @@ class HanielMcpServer:
 
     async def stop(self) -> None:
         """Stop the MCP server."""
+        self._stop_requested.set()
         # Disconnect all cached Claude SDK clients first
         if self._session_manager is not None:
             try:
@@ -1242,16 +1246,26 @@ class HanielMcpServer:
 
         Used when the ServiceRunner stops.
         """
+        self._stop_requested.set()
         if self._server:
             self._server.should_exit = True
 
-        logger.info("MCP server stop requested")
+        if (
+            self._server_thread
+            and self._server_thread.is_alive()
+            and self._server_thread is not threading.current_thread()
+        ):
+            self._server_thread.join()
+
+        logger.info("MCP server stopped")
 
     def start_background(self) -> None:
         """Start the MCP server in a background thread.
 
         This is useful when integrating with synchronous code.
         """
+
+        self._stop_requested.clear()
 
         def run_server():
             loop = asyncio.new_event_loop()

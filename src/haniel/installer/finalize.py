@@ -415,6 +415,10 @@ class Finalizer:
             f"HANIEL_REPO={repo_path}",
             f"CONFIG={self.config_filename}",
             "MAX_GIT_FAILURES=3",
+            "SELF_UPDATE_EXIT_TIMEOUT=60",
+            "CRASH_RESTART_BASE_SECONDS=5",
+            "CRASH_RESTART_MAX_SECONDS=60",
+            "CRASH_RESET_SECONDS=300",
         ]
 
         conf_path = self.config_dir / "haniel-runner.conf"

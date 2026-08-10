@@ -786,6 +786,159 @@ class TestServiceRunnerExtended:
         # Should not raise
         runner.stop()
 
+    @patch("haniel.core.runner.ServiceRunner._start_mcp_server")
+    @patch("haniel.core.runner.ServiceRunner.start_services")
+    def test_concurrent_start_cannot_clear_a_stop_request(
+        self, _start_services: MagicMock, _start_mcp: MagicMock, tmp_path: Path
+    ) -> None:
+        """The start transition holds the state lock while clearing stop state."""
+        runner = ServiceRunner(
+            HanielConfig(poll_interval=5, repos={}, services={}),
+            config_dir=tmp_path,
+        )
+        clear_entered = threading.Event()
+        release_clear = threading.Event()
+        real_stop_event = runner._stop_event
+
+        class BlockingClearEvent:
+            def clear(self) -> None:
+                clear_entered.set()
+                assert release_clear.wait(timeout=2)
+                real_stop_event.clear()
+
+            def set(self) -> None:
+                real_stop_event.set()
+
+            def is_set(self) -> bool:
+                return real_stop_event.is_set()
+
+            def wait(self, timeout: float | None = None) -> bool:
+                return real_stop_event.wait(timeout)
+
+        runner._stop_event = BlockingClearEvent()  # type: ignore[assignment]
+        starter = threading.Thread(target=runner.start)
+        stopper = threading.Thread(target=runner.stop)
+
+        starter.start()
+        assert clear_entered.wait(timeout=2)
+        stopper.start()
+        release_clear.set()
+        starter.join(timeout=2)
+        stopper.join(timeout=2)
+
+        assert not starter.is_alive()
+        assert not stopper.is_alive()
+        assert runner._stop_event.is_set()
+        assert not runner.is_running
+
+    def test_concurrent_stop_waits_for_cleanup_completion(self, tmp_path: Path):
+        """A second stop caller must not return while the owner is still cleaning up."""
+        runner = ServiceRunner(
+            HanielConfig(poll_interval=5, repos={}, services={}),
+            config_dir=tmp_path,
+        )
+        runner._state.running = True
+        cleanup_entered = threading.Event()
+        release_cleanup = threading.Event()
+        waiter_entered = threading.Event()
+        waiter_returned = threading.Event()
+
+        def blocking_stop_services() -> bool:
+            cleanup_entered.set()
+            assert release_cleanup.wait(timeout=2)
+            return True
+
+        runner.stop_services = blocking_stop_services  # type: ignore[method-assign]
+        owner = threading.Thread(target=runner.stop)
+        owner.start()
+        assert cleanup_entered.wait(timeout=2)
+
+        def wait_for_same_stop() -> None:
+            waiter_entered.set()
+            runner.stop()
+            waiter_returned.set()
+
+        waiter = threading.Thread(target=wait_for_same_stop)
+        waiter.start()
+        assert waiter_entered.wait(timeout=2)
+        assert not waiter_returned.wait(timeout=0.1)
+
+        release_cleanup.set()
+        owner.join(timeout=2)
+        waiter.join(timeout=2)
+        assert not owner.is_alive()
+        assert not waiter.is_alive()
+        assert waiter_returned.is_set()
+
+    def test_stop_does_not_join_current_poll_thread(self, tmp_path: Path):
+        """The poll thread may initiate shutdown without trying to join itself."""
+        runner = ServiceRunner(
+            HanielConfig(poll_interval=5, repos={}, services={}),
+            config_dir=tmp_path,
+        )
+        runner._state.running = True
+        runner.stop_services = MagicMock(return_value=True)
+        completed = threading.Event()
+
+        def stop_from_poll_thread() -> None:
+            runner._poll_thread = threading.current_thread()
+            runner.stop()
+            completed.set()
+
+        poll = threading.Thread(target=stop_from_poll_thread)
+        poll.start()
+        poll.join(timeout=2)
+
+        assert completed.is_set()
+        assert not poll.is_alive()
+
+    def test_poll_cycle_stops_between_phases(self, tmp_path: Path):
+        """A stop observed after detection must suppress apply and restart work."""
+        runner = ServiceRunner(
+            HanielConfig(poll_interval=5, repos={}, services={}),
+            config_dir=tmp_path,
+        )
+        runner._apply_changes = MagicMock()
+        runner._process_pending_restarts = MagicMock()
+
+        def detect_then_stop() -> list[str]:
+            runner._stop_event.set()
+            return ["haniel"]
+
+        runner._detect_changes = detect_then_stop  # type: ignore[method-assign]
+        runner._poll_cycle()
+
+        runner._apply_changes.assert_not_called()
+        runner._process_pending_restarts.assert_not_called()
+
+    def test_poll_detection_discards_fetch_result_after_stop(self, tmp_path: Path):
+        """A fetch finishing after stop must not repopulate pending update state."""
+        repo_path = tmp_path / "app"
+        repo_path.mkdir()
+        runner = ServiceRunner(
+            HanielConfig(
+                poll_interval=5,
+                repos={"app": RepoConfig(url="unused", path="app")},
+                services={},
+            ),
+            config_dir=tmp_path,
+        )
+        runner._repo_states["app"].last_head = "old-head"
+        runner._repo_states["app"].pending_changes = {"commits": ["existing"]}
+
+        def fetch_then_stop(**_kwargs) -> None:
+            runner._stop_event.set()
+
+        with (
+            patch("haniel.core.runner.fetch_repo", side_effect=fetch_then_stop),
+            patch("haniel.core.runner.get_head") as get_head_mock,
+        ):
+            changed = runner._detect_changes()
+
+        assert changed == []
+        get_head_mock.assert_not_called()
+        assert runner._repo_states["app"].pending_changes == {"commits": ["existing"]}
+
 
 class TestCyclicDependencyError:
     """Tests for CyclicDependencyError."""

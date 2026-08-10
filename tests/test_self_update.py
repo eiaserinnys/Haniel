@@ -154,6 +154,10 @@ class TestRunnerSelfUpdate:
         runner._config_generation = 0
         runner._restart_lock = threading.Lock()
         runner._stop_event = threading.Event()
+        runner._stop_complete = threading.Event()
+        runner._stop_complete.set()
+        runner._stop_owner_thread_id = None
+        runner._stop_error = None
         runner._self_update_requested = threading.Event()
         runner._last_self_update_result = None
         runner._last_pending_hash = {}
@@ -184,16 +188,22 @@ class TestRunnerSelfUpdate:
         assert runner._self_repo == "haniel"
 
     def test_auto_update_signals_event(self):
-        """auto_update=true should signal self_update_requested and call stop."""
+        """auto_update=true should stop on a non-daemon thread outside polling."""
         config = self._make_config(auto_update=True)
         runner = self._make_runner(config)
         runner.stop = MagicMock()
 
-        runner._initiate_self_update()
+        with patch("haniel.core.runner.threading.Thread") as thread_class:
+            runner._initiate_self_update()
 
         assert runner.self_update_requested is True
         runner.process_manager.is_running.assert_called_with("web")
-        runner.stop.assert_called_once()
+        assert thread_class.call_args.kwargs == {
+            "target": runner.stop,
+            "name": "haniel-auto-update-stop",
+            "daemon": False,
+        }
+        thread_class.return_value.start.assert_called_once_with()
 
     def test_manual_update_sets_pending(self):
         """auto_update=false should set pending state without exiting."""
@@ -570,6 +580,10 @@ class TestWrapperModeInstaller:
             assert "CONFIG=haniel.yaml" in content
             assert "WEBHOOK_URL=https://hooks.example.com/test" in content
             assert "MAX_GIT_FAILURES=3" in content
+            assert "SELF_UPDATE_EXIT_TIMEOUT=60" in content
+            assert "CRASH_RESTART_BASE_SECONDS=5" in content
+            assert "CRASH_RESTART_MAX_SECONDS=60" in content
+            assert "CRASH_RESET_SECONDS=300" in content
 
     def test_runner_script_writes_marker_only_after_self_update_exit(self):
         """Wrapper result marker should not be rewritten on ordinary restarts."""

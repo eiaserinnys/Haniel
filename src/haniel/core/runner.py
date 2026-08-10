@@ -373,6 +373,10 @@ class ServiceRunner:
         self._config_reload_lock = threading.RLock()
         self._config_generation = 0
         self._stop_event = threading.Event()
+        self._stop_complete = threading.Event()
+        self._stop_complete.set()
+        self._stop_owner_thread_id: int | None = None
+        self._stop_error: BaseException | None = None
         self._poll_thread: threading.Thread | None = None
 
         # Restart scheduling
@@ -525,6 +529,9 @@ class ServiceRunner:
 
     def _commit_repo_observation(self, observation: RepoObservation) -> bool:
         """CAS one completed external observation into resident memory."""
+
+        if self._stop_event.is_set():
+            return False
 
         with self._config_reload_lock:
             state = self._repo_states.get(observation.repo_name)
@@ -1155,13 +1162,20 @@ class ServiceRunner:
 
     def start(self) -> None:
         """Start the runner (services + poll loop + MCP server)."""
-        if self._state.running:
-            return
+        with self._state_lock:
+            if self._state.running:
+                return
+            if not self._stop_complete.is_set():
+                raise RuntimeError(
+                    "Cannot start ServiceRunner while stop is in progress"
+                )
+            self._stop_complete.clear()
+            self._stop_error = None
+            self._stop_event.clear()
+            self._state.running = True
+            self._state.start_time = datetime.now()
 
         logger.info("Starting ServiceRunner")
-        self._state.running = True
-        self._state.start_time = datetime.now()
-        self._stop_event.clear()
 
         # Initialize repo states (get current HEAD)
         self._init_repo_states()
@@ -1200,40 +1214,69 @@ class ServiceRunner:
         self._poll_thread.start()
 
     def stop(self) -> None:
-        """Stop the runner (poll loop + services + MCP server)."""
-        if not self._state.running:
+        """Stop the runner and wait for an already-running stop to finish."""
+        current_thread_id = threading.get_ident()
+        with self._state_lock:
+            if self._state.running:
+                self._state.running = False
+                self._stop_complete.clear()
+                self._stop_owner_thread_id = current_thread_id
+                self._stop_error = None
+                owns_stop = True
+            elif self._stop_owner_thread_id == current_thread_id:
+                # A cleanup callback may re-enter stop() on the owner thread.
+                # The outer invocation remains responsible for completion.
+                return
+            else:
+                owns_stop = False
+
+        if not owns_stop:
+            self._stop_complete.wait()
+            with self._state_lock:
+                stop_error = self._stop_error
+            if stop_error is not None:
+                raise RuntimeError("ServiceRunner stop failed") from stop_error
             return
 
         logger.info("Stopping ServiceRunner")
-        with self._state_lock:
-            self._state.running = False
         self._stop_event.set()
+        try:
+            # Stop Slack bot
+            if self._slack_bot:
+                self._slack_bot.notify_shutdown()  # best-effort, internally handled
+                try:
+                    self._slack_bot.stop()
+                except Exception as e:
+                    logger.warning("Error stopping Slack bot: %s", e)
 
-        # Stop Slack bot
-        if self._slack_bot:
-            self._slack_bot.notify_shutdown()  # best-effort, exceptions handled internally
-            try:
-                self._slack_bot.stop()
-            except Exception as e:
-                logger.warning("Error stopping Slack bot: %s", e)
+            # Stop MCP server and wait for its event loop to close.
+            if self._mcp_server:
+                try:
+                    self._mcp_server.stop_sync()
+                except Exception as e:
+                    logger.warning("Error stopping MCP server: %s", e)
 
-        # Stop MCP server
-        if self._mcp_server:
-            try:
-                self._mcp_server.stop_sync()
-            except Exception as e:
-                logger.warning(f"Error stopping MCP server: {e}")
+            # Wait for the poll thread unless it owns this stop invocation.
+            if (
+                self._poll_thread
+                and self._poll_thread.is_alive()
+                and self._poll_thread is not threading.current_thread()
+            ):
+                self._poll_thread.join()
 
-        # Wait for poll thread
-        if self._poll_thread and self._poll_thread.is_alive():
-            self._poll_thread.join(timeout=5)
+            # Stop orchestrator client after polling can no longer notify it.
+            if self._orch_client:
+                self._orch_client.stop()
 
-        # Stop orchestrator client (after poll thread to avoid race with notify_change)
-        if self._orch_client:
-            self._orch_client.stop()
-
-        # Stop services
-        self.stop_services()
+            self.stop_services()
+        except BaseException as error:
+            with self._state_lock:
+                self._stop_error = error
+            raise
+        finally:
+            with self._state_lock:
+                self._stop_owner_thread_id = None
+            self._stop_complete.set()
 
     def _start_mcp_server(self) -> None:
         """Start the MCP server if enabled."""
@@ -1417,7 +1460,7 @@ class ServiceRunner:
             threading.Thread(
                 target=self._deferred_stop_for_self_update,
                 name="haniel-deferred-stop",
-                daemon=True,
+                daemon=False,
             ).start()
             return "deferred"
         return execute_approved_plan(
@@ -2522,6 +2565,8 @@ class ServiceRunner:
                 self._poll_cycle()
                 interval = self._snapshot_config_state().config.poll_interval
             except _OPERATIONAL_DEPLOYMENT_ERRORS as error:
+                if self._stop_event.is_set():
+                    break
                 code = stable_deployment_error_code(error, default="POLL_CYCLE_FAILED")
                 logger.error(
                     "Poll cycle failed [%s]: %s",
@@ -2529,6 +2574,8 @@ class ServiceRunner:
                     bounded_redact_text(str(error)),
                 )
             except Exception as error:
+                if self._stop_event.is_set():
+                    break
                 code = stable_deployment_error_code(
                     error,
                     default="POLL_CYCLE_FAILED",
@@ -2549,16 +2596,23 @@ class ServiceRunner:
         Phase 2: Apply changes (shutdown → pull → hooks → restart)
         Phase 3: Health check (process pending restarts)
         """
+        if self._stop_event.is_set():
+            return
+
         with self._state_lock:
             self._state.last_poll = datetime.now()
             self._state.poll_count += 1
 
         # Phase 1: external observation and generation-checked memory commit
         changed_repos = self._detect_changes()
+        if self._stop_event.is_set():
+            return
 
         # Phase 2: Apply changes
         if changed_repos:
             self._apply_changes(changed_repos)
+        if self._stop_event.is_set():
+            return
 
         # Phase 3: Process pending restarts
         self._process_pending_restarts()
@@ -2580,6 +2634,8 @@ class ServiceRunner:
         cycle_snapshot = self._snapshot_config_state()
 
         for name in cycle_snapshot.repo_identity:
+            if self._stop_event.is_set():
+                break
             try:
                 config_snapshot, runtime = self._snapshot_repo_and_config(name)
             except ValueError:
@@ -2603,6 +2659,8 @@ class ServiceRunner:
                     path=repo_path,
                     branch=runtime.config.branch,
                 )
+                if self._stop_event.is_set():
+                    break
                 observed_at = datetime.now()
 
                 # Read current HEAD (may differ from last_head if externally pulled)
@@ -2675,6 +2733,8 @@ class ServiceRunner:
                     pending_changes=pending_changes,
                     changed=repo_changed,
                 )
+                if self._stop_event.is_set():
+                    break
                 if not self._commit_repo_observation(observation):
                     logger.info(
                         "Discarded stale repo observation for %s at generation %s",
@@ -2686,6 +2746,8 @@ class ServiceRunner:
                     continue
 
                 _committed_config, committed = self._snapshot_repo_and_config(name)
+                if self._stop_event.is_set():
+                    break
                 if committed.generation != runtime.generation:
                     if name in changed:
                         changed.remove(name)
@@ -2708,6 +2770,8 @@ class ServiceRunner:
                 self._notify_orchestrator_change(name)
 
             except GitError as e:
+                if self._stop_event.is_set():
+                    break
                 safe_error = bounded_redact_text(str(e))
                 logger.error("Failed to fetch %s: %s", name, safe_error)
                 self._commit_repo_observation(
@@ -2925,7 +2989,11 @@ class ServiceRunner:
             self._prepare_self_update_shutdown()
             self._require_config_generation(snapshot)
             self._self_update_requested.set()
-            self.stop()
+            threading.Thread(
+                target=self.stop,
+                name="haniel-auto-update-stop",
+                daemon=False,
+            ).start()
             return
 
         # Manual approval mode

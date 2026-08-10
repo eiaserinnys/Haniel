@@ -757,3 +757,35 @@ class TestMcpServerLifecycle:
         """Test stop_sync without starting."""
         # Should not raise
         mcp_server.stop_sync()
+
+    def test_stop_sync_waits_for_server_loop_to_close(self, mcp_server):
+        class ThreadProbe:
+            alive = True
+            join_timeout = object()
+
+            def is_alive(self) -> bool:
+                return self.alive
+
+            def join(self, timeout=None) -> None:
+                self.join_timeout = timeout
+                if timeout is None:
+                    self.alive = False
+
+        thread = ThreadProbe()
+        mcp_server._server = MagicMock()
+        mcp_server._server_thread = thread
+
+        mcp_server.stop_sync()
+
+        assert mcp_server._server.should_exit is True
+        assert thread.join_timeout is None
+        assert thread.is_alive() is False
+
+    def test_stop_sync_records_request_before_server_is_initialized(self, mcp_server):
+        """An immediate stop must survive the startup window before uvicorn exists."""
+        mcp_server._server = None
+        mcp_server._server_thread = None
+
+        mcp_server.stop_sync()
+
+        assert mcp_server._stop_requested.is_set()

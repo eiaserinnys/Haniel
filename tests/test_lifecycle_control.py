@@ -772,3 +772,33 @@ def test_terminal_write_failure_is_isolated_from_next_spool_request(
             server.close()
 
     assert control.read_result("b-valid")["terminal"]["ok"] is True
+
+
+def test_lifecycle_server_close_waits_for_worker_completion(tmp_path: Path) -> None:
+    control = LifecycleControl(tmp_path / "haniel.yaml")
+    server = LifecycleRequestServer(
+        control=control,
+        runner=MagicMock(),
+        instance_id="instance-a",
+    )
+
+    class ThreadProbe:
+        alive = True
+        join_timeout = object()
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def join(self, timeout=None) -> None:
+            self.join_timeout = timeout
+            if timeout is None:
+                self.alive = False
+
+    thread = ThreadProbe()
+    server._thread = thread  # type: ignore[assignment]
+
+    server.close()
+
+    assert server._stopping.is_set()
+    assert thread.join_timeout is None
+    assert thread.is_alive() is False

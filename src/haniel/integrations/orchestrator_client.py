@@ -125,8 +125,12 @@ class OrchestratorClient:
     def stop(self) -> None:
         """Stop the background thread and close the connection."""
         self._stop_event.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5)
+        if (
+            self._thread
+            and self._thread.is_alive()
+            and self._thread is not threading.current_thread()
+        ):
+            self._thread.join()
 
     def notify_change(
         self,
