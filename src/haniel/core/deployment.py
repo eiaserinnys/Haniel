@@ -259,6 +259,11 @@ class DeploymentCoordinator:
                         )
                     callbacks.stop_partial()
                 except Exception as cleanup_error:
+                    terminal_error = DeploymentError(
+                        "RECOVERY_FAILED: fresh target processes could not be stopped",
+                        recovered=False,
+                        recovery_error=cleanup_error,
+                    )
                     self.state_store.transition(
                         repo_name,
                         "failed",
@@ -267,17 +272,15 @@ class DeploymentCoordinator:
                             f"{cleanup_error}"
                         ),
                         recovered=False,
+                        error=terminal_error,
                     )
-                    raise DeploymentError(
-                        "RECOVERY_FAILED: fresh target processes could not be stopped",
-                        recovered=False,
-                        recovery_error=cleanup_error,
-                    ) from deployment_error
+                    raise terminal_error from deployment_error
             self.state_store.transition(
                 repo_name,
                 "failed",
                 message=f"fresh_install failed without destructive recovery: {deployment_error}",
                 recovered=False,
+                error=deployment_error,
             )
             raise DeploymentError(
                 f"deployment failed: {deployment_error}", recovered=False
@@ -306,6 +309,7 @@ class DeploymentCoordinator:
                         f"{deployment_error}"
                     ),
                     recovered=True,
+                    error=deployment_error,
                 )
                 raise DeploymentError(
                     f"deployment failed but availability recovered: {deployment_error}",
@@ -332,23 +336,26 @@ class DeploymentCoordinator:
         except DeploymentError:
             raise
         except Exception as recovery_error:
+            terminal_error = DeploymentError(
+                f"deployment failed: {deployment_error}; recovery failed: {recovery_error}",
+                recovered=False,
+                recovery_error=recovery_error,
+            )
             self.state_store.transition(
                 repo_name,
                 "failed",
                 message=f"recovery failed: {recovery_error}",
                 recovered=False,
+                error=terminal_error,
             )
-            raise DeploymentError(
-                f"deployment failed: {deployment_error}; recovery failed: {recovery_error}",
-                recovered=False,
-                recovery_error=recovery_error,
-            ) from deployment_error
+            raise terminal_error from deployment_error
 
         self.state_store.transition(
             repo_name,
             "failed",
             message=f"deployment failed but availability recovered: {deployment_error}",
             recovered=True,
+            error=deployment_error,
         )
         raise DeploymentError(
             f"deployment failed but availability recovered: {deployment_error}",

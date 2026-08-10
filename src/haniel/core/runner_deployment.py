@@ -554,6 +554,7 @@ def run_manifest_deployment(
                 "failed",
                 message=f"invalid fresh-install manifest; target preserved: {error}",
                 recovered=False,
+                error=error,
             )
             raise DeploymentError(
                 f"invalid manifest: {error}", recovered=False
@@ -561,22 +562,25 @@ def run_manifest_deployment(
         try:
             adapter.rollback()
         except Exception as recovery_error:
+            terminal_error = DeploymentError(
+                f"invalid manifest and recovery failed: {recovery_error}",
+                recovered=False,
+                recovery_error=recovery_error,
+            )
             state_store.transition(
                 repo_name,
                 "failed",
                 message=f"manifest recovery failed: {recovery_error}",
                 recovered=False,
+                error=terminal_error,
             )
-            raise DeploymentError(
-                f"invalid manifest and recovery failed: {recovery_error}",
-                recovered=False,
-                recovery_error=recovery_error,
-            ) from error
+            raise terminal_error from error
         state_store.transition(
             repo_name,
             "failed",
             message=f"invalid manifest; previous release restored: {error}",
             recovered=True,
+            error=error,
         )
         raise DeploymentError(
             f"invalid manifest; previous release restored: {error}",

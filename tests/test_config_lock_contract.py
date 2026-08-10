@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from concurrent.futures import Future
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -61,6 +62,25 @@ BOUNDARY_CALLS = {
     "lock": {"acquire", "join", "sleep"},
 }
 
+ALLOWED_LOCK_CALLS = {
+    "RepoRuntimeSnapshot",
+    "RepoState",
+    "RunnerConfigSnapshot",
+    "StableDeploymentError",
+    "ValueError",
+    "_snapshot_config_state",
+    "_snapshot_repo_runtime",
+    "deepcopy",
+    "get",
+    "get_all_dependents",
+    "items",
+    "model_copy",
+    "set",
+    "topological_sort",
+    "tuple",
+    "update",
+}
+
 
 def _functions_touching_config_lock(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -88,6 +108,12 @@ def _functions_touching_config_lock(path: Path) -> set[str]:
 def _calls_inside_config_lock(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
     calls: set[str] = set()
+    methods = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    visited_helpers: set[str] = set()
 
     def touches_lock(node: ast.AST) -> bool:
         return any(
@@ -96,16 +122,33 @@ def _calls_inside_config_lock(path: Path) -> set[str]:
             for candidate in ast.walk(node)
         )
 
+    def collect(nodes: list[ast.stmt]) -> None:
+        module = ast.Module(body=nodes, type_ignores=[])
+        for candidate in ast.walk(module):
+            if not isinstance(candidate, ast.Call):
+                continue
+            helper_name: str | None = None
+            if isinstance(candidate.func, ast.Attribute):
+                calls.add(candidate.func.attr)
+                if (
+                    isinstance(candidate.func.value, ast.Name)
+                    and candidate.func.value.id == "self"
+                ):
+                    helper_name = candidate.func.attr
+            elif isinstance(candidate.func, ast.Name):
+                calls.add(candidate.func.id)
+            if (
+                helper_name is not None
+                and helper_name in methods
+                and helper_name not in visited_helpers
+            ):
+                visited_helpers.add(helper_name)
+                collect(methods[helper_name].body)
+
     class Visitor(ast.NodeVisitor):
         def visit_With(self, node: ast.With) -> None:
             if any(touches_lock(item.context_expr) for item in node.items):
-                for candidate in ast.walk(node):
-                    if not isinstance(candidate, ast.Call):
-                        continue
-                    if isinstance(candidate.func, ast.Attribute):
-                        calls.add(candidate.func.attr)
-                    elif isinstance(candidate.func, ast.Name):
-                        calls.add(candidate.func.id)
+                collect(node.body)
             self.generic_visit(node)
 
     Visitor().visit(tree)
@@ -134,6 +177,7 @@ def test_config_lock_contains_no_external_or_blocking_boundary_calls() -> None:
     assert calls.isdisjoint(FORBIDDEN_LOCK_CALLS), sorted(calls & FORBIDDEN_LOCK_CALLS)
     for boundary, names in BOUNDARY_CALLS.items():
         assert calls.isdisjoint(names), (boundary, sorted(calls & names))
+    assert calls <= ALLOWED_LOCK_CALLS, sorted(calls - ALLOWED_LOCK_CALLS)
 
 
 def test_boundary_inventory_is_complete_and_matches_static_contract() -> None:
@@ -148,6 +192,30 @@ def test_boundary_inventory_is_complete_and_matches_static_contract() -> None:
         "callback",
         "lock",
     } == set(BOUNDARY_CALLS)
+
+
+def test_static_contract_traces_indirect_blocking_helpers(tmp_path: Path) -> None:
+    source = tmp_path / "guarded.py"
+    source.write_text(
+        """
+class Guarded:
+    def locked(self):
+        with self._config_reload_lock:
+            self.indirect()
+
+    def indirect(self):
+        os.system("blocked")
+        shutil.copy("a", "b")
+        socket.socket().connect(("localhost", 1))
+        logger.info("blocked")
+        self.future.result()
+""",
+        encoding="utf-8",
+    )
+
+    calls = _calls_inside_config_lock(source)
+
+    assert {"system", "copy", "connect", "info", "result"} <= calls
 
 
 def test_external_subprocess_and_git_boundaries_never_own_config_lock(
@@ -264,9 +332,18 @@ def test_poll_git_future_network_and_callback_boundaries_run_unlocked(
     runner._slack_bot = SimpleNamespace(
         notify_pending=lambda *_args: outside_lock("callback.slack")
     )
+    future: Future[None] = Future()
+    future.set_result(None)
+
+    def await_outside_lock(label: str) -> None:
+        outside_lock(label)
+        future.result()
+
     runner._orch_client = SimpleNamespace(
-        notify_change=lambda **_kwargs: outside_lock("future.network.notify_change"),
-        notify_repo_reconciliation=lambda *_args, **_kwargs: outside_lock(
+        notify_change=lambda **_kwargs: await_outside_lock(
+            "future.network.notify_change"
+        ),
+        notify_repo_reconciliation=lambda *_args, **_kwargs: await_outside_lock(
             "future.network.notify_repo_reconciliation"
         ),
     )

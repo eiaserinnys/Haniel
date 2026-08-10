@@ -78,6 +78,36 @@ def test_recovery_failure_code_wins_over_typed_recovery_child() -> None:
     assert stable_deployment_error_code(error) == "RECOVERY_FAILED"
 
 
+def test_coordinator_recovery_journal_preserves_typed_failure_code(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    def run(spec: CommandSpec, _env: dict[str, str]) -> None:
+        events.append(spec.name)
+        if spec.name in {"migrate", "recover", "restore-backup"}:
+            raise RuntimeError(f"{spec.name} failed")
+
+    deploy = DeploymentCoordinator(
+        state_store=DeploymentStateStore(tmp_path / "state"),
+        command_runner=run,
+    )
+
+    with pytest.raises(DeploymentError) as raised:
+        deploy.execute(
+            repo_name="soulstream",
+            previous_head="old",
+            target_head="new",
+            manifest=manifest(),
+            callbacks=callbacks(events),
+        )
+
+    assert raised.value.recovery_error is not None
+    journal = DeploymentStateStore(tmp_path / "state").read("soulstream")
+    assert journal is not None
+    assert journal["error_code"] == "RECOVERY_FAILED"
+
+
 def test_untyped_message_does_not_create_journal_error_code(tmp_path: Path) -> None:
     store = DeploymentStateStore(tmp_path / "state")
     store.begin("app", "old", "new", "release")
