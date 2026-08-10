@@ -890,89 +890,98 @@ def test_windows_reader_retries_cancel_when_read_starts_after_error_not_found(
     tmp_path: Path,
 ) -> None:
     """A read entering after ERROR_NOT_FOUND still receives bounded cancellation."""
-    capture = _manager(tmp_path).log_manager.start_capture("windows-cancel-race")
+
+    def exercise(suffix: str) -> None:
+        capture = _manager(tmp_path).log_manager.start_capture(
+            f"windows-cancel-race-{suffix}"
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(300)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+        assert process.stdout is not None
+        entered_wrapper = threading.Event()
+        allow_native_read = threading.Event()
+
+        class DelayedRead:
+            encoding = process.stdout.encoding
+            errors = process.stdout.errors
+
+            @property
+            def closed(self) -> bool:
+                return process.stdout.closed
+
+            def fileno(self) -> int:
+                return process.stdout.fileno()
+
+            def readline(self) -> str:
+                entered_wrapper.set()
+                assert allow_native_read.wait(2)
+                return process.stdout.readline()
+
+            def close(self) -> None:
+                process.stdout.close()
+
+        reader = StreamReader(DelayedRead(), capture)  # type: ignore[arg-type]
+        cancel_results: list[bool] = []
+        first_cancel = threading.Event()
+        actual_cancel = reader._cancel_windows_read
+
+        def observed_cancel() -> bool:
+            result = actual_cancel()
+            cancel_results.append(result)
+            first_cancel.set()
+            return result
+
+        reader._cancel_windows_read = observed_cancel  # type: ignore[method-assign]
+        stop_done = threading.Event()
+
+        def stop_reader() -> None:
+            reader.stop()
+            stop_done.set()
+
+        reader.start()
+        assert entered_wrapper.wait(2)
+        stopper = threading.Thread(target=stop_reader)
+        stopper.start()
+        try:
+            assert first_cancel.wait(2)
+            assert cancel_results[0] is False
+            allow_native_read.set()
+            assert stop_done.wait(2), "stop must retry after the read becomes pending"
+            stopper.join(timeout=2)
+            reader.join(timeout=2)
+            assert not stopper.is_alive()
+            assert not reader.is_alive()
+            assert reader._closed.is_set()
+            assert process.stdout.closed
+            assert any(cancel_results[1:])
+        finally:
+            allow_native_read.set()
+            if reader.is_alive():
+                reader.stop()
+                reader.join(timeout=2)
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+            capture.stop()
+
+    # Warm the Windows subprocess and handle-counting machinery before taking
+    # the baseline; all per-run objects then leave scope before collection.
+    exercise("warmup")
     gc.collect()
     resources_before = _process_resource_count()
-    process = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(300)"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-    )
-    assert process.stdout is not None
-    entered_wrapper = threading.Event()
-    allow_native_read = threading.Event()
-
-    class DelayedRead:
-        encoding = process.stdout.encoding
-        errors = process.stdout.errors
-
-        @property
-        def closed(self) -> bool:
-            return process.stdout.closed
-
-        def fileno(self) -> int:
-            return process.stdout.fileno()
-
-        def readline(self) -> str:
-            entered_wrapper.set()
-            assert allow_native_read.wait(2)
-            return process.stdout.readline()
-
-        def close(self) -> None:
-            process.stdout.close()
-
-    reader = StreamReader(DelayedRead(), capture)  # type: ignore[arg-type]
-    cancel_results: list[bool] = []
-    first_cancel = threading.Event()
-    actual_cancel = reader._cancel_windows_read
-
-    def observed_cancel() -> bool:
-        result = actual_cancel()
-        cancel_results.append(result)
-        first_cancel.set()
-        return result
-
-    reader._cancel_windows_read = observed_cancel  # type: ignore[method-assign]
-    stop_done = threading.Event()
-
-    def stop_reader() -> None:
-        reader.stop()
-        stop_done.set()
-
-    reader.start()
-    assert entered_wrapper.wait(2)
-    stopper = threading.Thread(target=stop_reader)
-    stopper.start()
-    try:
-        assert first_cancel.wait(2)
-        assert cancel_results[0] is False
-        allow_native_read.set()
-        assert stop_done.wait(2), "stop must retry after the read becomes pending"
-        stopper.join(timeout=2)
-        reader.join(timeout=2)
-        assert not stopper.is_alive()
-        assert not reader.is_alive()
-        assert reader._closed.is_set()
-        assert process.stdout.closed
-        assert any(cancel_results[1:])
-    finally:
-        allow_native_read.set()
-        if reader.is_alive():
-            reader.stop()
-            reader.join(timeout=2)
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-        capture.stop()
-        gc.collect()
-    assert _process_resource_count() <= resources_before + 1
+    exercise("measured")
+    gc.collect()
+    assert _process_resource_count() <= resources_before
 
 
 def test_missing_ready_is_running_but_explicitly_unconfigured(tmp_path: Path) -> None:

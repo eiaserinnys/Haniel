@@ -260,6 +260,7 @@ def test_serial_file_lock_local_identity_expands_user_before_resolving(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     alias = Path("~/locks/serial.lock")
     canonical = (tmp_path / "locks" / "serial.lock").resolve()
 
