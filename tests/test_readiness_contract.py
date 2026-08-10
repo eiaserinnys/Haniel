@@ -694,10 +694,12 @@ def test_stop_self_wakes_readers_when_escaped_descendant_holds_pipe(
 def test_stream_reader_self_wakes_while_an_independent_writer_remains_open(
     tmp_path: Path,
 ) -> None:
+    # Count after the long-lived capture objects exist so the assertion isolates
+    # the pipe and reader lifecycle instead of CPython's platform lock handles.
+    capture = _manager(tmp_path).log_manager.start_capture("independent-writer")
     resources_before = _process_resource_count()
     read_fd, write_fd = os.pipe()
     stream = os.fdopen(read_fd, "r", encoding="utf-8")
-    capture = _manager(tmp_path).log_manager.start_capture("independent-writer")
     reader = StreamReader(stream, capture)
     reader.start()
     try:

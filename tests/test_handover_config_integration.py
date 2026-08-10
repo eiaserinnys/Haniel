@@ -208,10 +208,12 @@ def test_config_transaction_uses_cross_session_file_identity(
 ) -> None:
     config_path = tmp_path / "haniel.yaml"
     lock_path = ConfigTransactionLock.lock_path(config_path)
+    transaction = ConfigTransactionLock(config_path)
 
     assert lock_path.parent == tmp_path / ".haniel"
     assert lock_path.name.endswith(".config.lock")
-    assert "Local\\" not in str(lock_path)
+    assert isinstance(transaction._serial, SerialFileLock)
+    assert transaction._serial.path == lock_path
 
 
 def test_config_lock_timeout_reports_named_holder_evidence(tmp_path: Path) -> None:
