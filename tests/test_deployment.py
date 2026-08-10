@@ -21,6 +21,7 @@ from haniel.core.deployment import (
     subprocess_command_runner,
     stable_deployment_error_code,
 )
+from haniel.core.deployment_errors import KNOWN_DEPLOYMENT_ERROR_CODES
 
 
 def command(name: str) -> CommandSpec:
@@ -88,6 +89,7 @@ def test_untyped_message_does_not_create_journal_error_code(tmp_path: Path) -> N
     )
 
     assert store.read("app")["error_code"] == "HANDOVER_FAILED"
+    assert "HANDOVER_FAILED" in KNOWN_DEPLOYMENT_ERROR_CODES
 
 
 def coordinator(

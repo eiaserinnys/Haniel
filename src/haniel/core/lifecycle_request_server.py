@@ -12,7 +12,8 @@ from .handover_result import (
     handover_error_code,
     request_error_code,
 )
-from .lifecycle_control import LifecycleConflict, LifecycleControl
+from .lifecycle_control import LifecycleControl
+from .deployment_errors import StableDeploymentError
 from .safety_redaction import bounded_redact_text
 
 if TYPE_CHECKING:
@@ -79,20 +80,26 @@ class LifecycleRequestServer:
         try:
             request = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as error:
-            raise RuntimeError("MALFORMED_REQUEST") from error
+            raise StableDeploymentError(
+                "MALFORMED_REQUEST", "lifecycle request is not valid JSON"
+            ) from error
         if not isinstance(request, dict):
-            raise RuntimeError("MALFORMED_REQUEST")
+            raise StableDeploymentError(
+                "MALFORMED_REQUEST", "lifecycle request envelope must be an object"
+            )
         if request.get("request_id") != request_id:
-            raise LifecycleConflict(
-                "REQUEST_IDENTITY_CONFLICT: path and envelope request_id differ"
+            raise StableDeploymentError(
+                "REQUEST_IDENTITY_CONFLICT", "path and envelope request_id differ"
             )
         if request.get("config_identity") != self.control.identity:
-            raise LifecycleConflict(
-                "REQUEST_IDENTITY_CONFLICT: config identity does not match owner"
+            raise StableDeploymentError(
+                "REQUEST_IDENTITY_CONFLICT", "config identity does not match owner"
             )
         payload = request.get("payload")
         if not isinstance(payload, dict):
-            raise RuntimeError("MALFORMED_REQUEST")
+            raise StableDeploymentError(
+                "MALFORMED_REQUEST", "lifecycle request payload must be an object"
+            )
         kind = payload.get("kind")
         if kind == "stop":
             self._validate_stop(payload)
@@ -111,7 +118,9 @@ class LifecycleRequestServer:
         if not isinstance(payload.get("expected_instance"), str) or not payload.get(
             "expected_instance"
         ):
-            raise RuntimeError("MALFORMED_REQUEST")
+            raise StableDeploymentError(
+                "MALFORMED_REQUEST", "stop request is missing expected_instance"
+            )
 
     @staticmethod
     def _validate_handover(
@@ -134,9 +143,13 @@ class LifecycleRequestServer:
                 )
             )
         ):
-            raise RuntimeError("MALFORMED_REQUEST")
+            raise StableDeploymentError(
+                "MALFORMED_REQUEST", "handover request fields are invalid"
+            )
         if require_config_digest and not payload.get("config_digest"):
-            raise RuntimeError("CONFIG_DIGEST_REQUIRED")
+            raise StableDeploymentError(
+                "CONFIG_DIGEST_REQUIRED", "handover request requires config_digest"
+            )
         if require_config_digest and (
             not isinstance(payload.get("config_digest"), str)
             or len(payload["config_digest"]) != 64
@@ -145,7 +158,9 @@ class LifecycleRequestServer:
                 for character in payload["config_digest"]
             )
         ):
-            raise RuntimeError("MALFORMED_REQUEST")
+            raise StableDeploymentError(
+                "MALFORMED_REQUEST", "config_digest must be 64 lowercase hex characters"
+            )
 
     def _terminal_failure(self, request_id: str, code: str) -> None:
         self.control.ack(

@@ -171,8 +171,8 @@ def _resolve_bound_manifest_environment(
 ) -> dict[str, str]:
     if manifest.requires_service_env_file and config_digest is None:
         raise ReleaseIdentityError(
-            "CONFIG_DIGEST_REQUIRED: manifest service environment requires "
-            "a config-bound detached probe"
+            "CONFIG_DIGEST_REQUIRED",
+            "manifest service environment requires a config-bound detached probe",
         )
     if config_digest is not None:
         assert runner.config_path is not None
@@ -246,8 +246,8 @@ def probe_manifest_target(
     ) as staged:
         if staged.manifest.requires_service_env_file and config_digest is None:
             raise ReleaseIdentityError(
-                "CONFIG_DIGEST_REQUIRED: manifest service environment requires "
-                "a config-bound detached probe"
+                "CONFIG_DIGEST_REQUIRED",
+                "manifest service environment requires a config-bound detached probe",
             )
         return staged
 

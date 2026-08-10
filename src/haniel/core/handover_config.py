@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from ..config import HanielConfig
+from .deployment_errors import StableDeploymentError
 from .path_identity import canonical_path_text
 from .service_environment import (
     ServiceEnvironmentFile,
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
     from .runner import ServiceRunner
 
 
-class HandoverConfigError(RuntimeError):
+class HandoverConfigError(StableDeploymentError):
     """The current config cannot safely satisfy a handover request."""
 
 
@@ -76,7 +77,7 @@ def handover_config_digest(config_path: Path) -> str:
         raise
     except Exception as error:
         raise HandoverConfigError(
-            "CONFIG_RELOAD_FAILED: configuration could not be loaded"
+            "CONFIG_RELOAD_FAILED", "configuration could not be loaded"
         ) from error
     return digest
 
@@ -91,7 +92,7 @@ def load_handover_config(config_path: Path) -> tuple[HanielConfig, str]:
         raise
     except Exception as error:
         raise HandoverConfigError(
-            "CONFIG_RELOAD_FAILED: configuration could not be loaded"
+            "CONFIG_RELOAD_FAILED", "configuration could not be loaded"
         ) from error
     return config, digest
 
@@ -102,7 +103,7 @@ def require_handover_config_digest(config_path: Path, expected_digest: str) -> N
     _config, actual_digest = load_handover_config(config_path)
     if actual_digest != expected_digest:
         raise HandoverConfigError(
-            "CONFIG_DIGEST_MISMATCH: resident config changed during handover"
+            "CONFIG_DIGEST_MISMATCH", "resident config changed during handover"
         )
 
 
@@ -131,10 +132,10 @@ def prepare_runner_handover_config(
     """Atomically validate and replace a resident runner's config snapshot."""
 
     if not isinstance(expected_digest, str) or len(expected_digest) != 64:
-        raise HandoverConfigError("CONFIG_DIGEST_REQUIRED: config digest is required")
+        raise HandoverConfigError("CONFIG_DIGEST_REQUIRED", "config digest is required")
     if runner.config_path is None:
         raise HandoverConfigError(
-            "CONFIG_RELOAD_FAILED: resident owner has no config path"
+            "CONFIG_RELOAD_FAILED", "resident owner has no config path"
         )
 
     from .service_lifecycle import CONFIG_WRITE_LOCK
@@ -149,17 +150,17 @@ def prepare_runner_handover_config(
             raise
         except Exception as error:
             raise HandoverConfigError(
-                "CONFIG_RELOAD_FAILED: configuration could not be loaded"
+                "CONFIG_RELOAD_FAILED", "configuration could not be loaded"
             ) from error
         if actual_digest != expected_digest:
             raise HandoverConfigError(
-                "CONFIG_DIGEST_MISMATCH: resident config changed before handover"
+                "CONFIG_DIGEST_MISMATCH", "resident config changed before handover"
             )
         old_repo = resident.config.repos.get(repo_name)
         new_repo = candidate.repos.get(repo_name)
         if old_repo is None or new_repo is None:
             raise HandoverConfigError(
-                "CONFIG_RELOAD_UNSAFE: handover repository is not present"
+                "CONFIG_RELOAD_UNSAFE", "handover repository is not present"
             )
         old_repo_path = (runner.config_dir / old_repo.path).resolve(strict=False)
         new_repo_path = (runner.config_dir / new_repo.path).resolve(strict=False)
@@ -189,8 +190,8 @@ def prepare_runner_handover_config(
             or old_repo.branch != new_repo.branch
         ):
             raise HandoverConfigError(
-                "CONFIG_RELOAD_UNSAFE: repository fetch identity, path, or "
-                "manifest changed"
+                "CONFIG_RELOAD_UNSAFE",
+                "repository fetch identity, path, or manifest changed",
             )
 
         changed_non_reloadable = [
@@ -200,8 +201,9 @@ def prepare_runner_handover_config(
         ]
         if changed_non_reloadable:
             raise HandoverConfigError(
-                "CONFIG_RELOAD_UNSAFE: resident subsystems require restart for: "
-                + ", ".join(changed_non_reloadable)
+                "CONFIG_RELOAD_UNSAFE",
+                "resident subsystems require restart for: "
+                + ", ".join(changed_non_reloadable),
             )
 
         old_affected = tuple(
@@ -268,7 +270,8 @@ def _canonical_projection(
         )
         if not path.is_file():
             raise HandoverConfigError(
-                "SERVICE_ENV_FILE_INVALID: declared release env file is not a file"
+                "SERVICE_ENV_FILE_INVALID",
+                "declared release env file is not a file",
             )
         snapshot = read_service_environment_file(path)
         rendered["release_env_file"] = canonical_path_text(snapshot.path)
@@ -305,6 +308,6 @@ def _load_config_projection(
     projection, environment_snapshots = _canonical_projection(config, resolved.parent)
     if resolved.read_bytes() != raw:
         raise HandoverConfigError(
-            "CONFIG_RELOAD_FAILED: configuration changed while it was read"
+            "CONFIG_RELOAD_FAILED", "configuration changed while it was read"
         )
     return config, projection, environment_snapshots

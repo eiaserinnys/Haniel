@@ -418,7 +418,7 @@ class DeploymentCoordinator:
             try:
                 self._run(command, environment)
             except Exception as error:
-                raise RuntimeError(f"POST_VERIFY_FAILED: {error}") from error
+                raise StableDeploymentError("POST_VERIFY_FAILED", str(error)) from error
 
     def _run(
         self, command: CommandSpec, environment: dict[str, str]
@@ -442,17 +442,9 @@ class DeploymentCoordinator:
         try:
             result = self._run(command, environment)
         except Exception as error:
-            message = str(error)
-            preserved_codes = (
-                "JOURNAL_GATE_FAILED",
-                "AMBIGUOUS_COMMIT_STATE",
-                "OPERATION_MISMATCH",
-                "CONFIG_DIGEST_MISMATCH",
-                "SERVICE_ENV_FILE_CHANGED",
-            )
-            if any(code in message for code in preserved_codes):
+            if stable_deployment_error_code(error) != "HANDOVER_FAILED":
                 raise
-            raise RuntimeError(f"{error_code}: {message}") from error
+            raise StableDeploymentError(error_code, str(error)) from error
         if result is not None and result.json_data is not None:
             self.state_store.record_database_result(
                 repo_name,

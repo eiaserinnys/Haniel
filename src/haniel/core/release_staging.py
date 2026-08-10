@@ -27,9 +27,7 @@ class ReleaseStagingError(StableDeploymentError):
 class ReleaseIdentityError(ReleaseStagingError):
     """The target probe disagrees with immutable handover intent."""
 
-    def __init__(self, message: str) -> None:
-        marker = message.split(":", 1)[0]
-        code = marker if marker.isupper() else "PROVENANCE_PROBE_FAILED"
+    def __init__(self, code: str, message: str) -> None:
         super().__init__(message, code=code)
 
 
@@ -142,18 +140,23 @@ def _validate_probe(
     manifest_digest: str,
 ) -> Literal["fresh_install", "upgrade"]:
     if not isinstance(payload, dict):
-        raise ReleaseIdentityError("PROVENANCE_PROBE_FAILED: JSON object required")
+        raise ReleaseIdentityError("PROVENANCE_PROBE_FAILED", "JSON object required")
     operation = payload.get("operation")
     if operation not in ("fresh_install", "upgrade"):
-        raise ReleaseIdentityError("PROVENANCE_PROBE_FAILED: invalid operation")
+        raise ReleaseIdentityError("PROVENANCE_PROBE_FAILED", "invalid operation")
     if operation != expected_operation:
         raise ReleaseIdentityError(
-            f"OPERATION_MISMATCH: expected {expected_operation}, got {operation}"
+            "OPERATION_MISMATCH", f"expected {expected_operation}, got {operation}"
         )
     if payload.get("target_head") != target_head:
-        raise ReleaseIdentityError("TARGET_IDENTITY_MISMATCH")
+        raise ReleaseIdentityError(
+            "TARGET_IDENTITY_MISMATCH", "probe target_head does not match target"
+        )
     if payload.get("manifest_digest") != manifest_digest:
-        raise ReleaseIdentityError("MANIFEST_IDENTITY_MISMATCH")
+        raise ReleaseIdentityError(
+            "MANIFEST_IDENTITY_MISMATCH",
+            "probe manifest_digest does not match manifest",
+        )
     return operation
 
 

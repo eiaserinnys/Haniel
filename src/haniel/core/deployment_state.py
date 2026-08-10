@@ -12,6 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from .safety_redaction import bounded_redact_text, redact_value
+from .deployment_errors import KNOWN_DEPLOYMENT_ERROR_CODES
 
 _JOURNAL_MESSAGE_MAX_CHARS = 16384
 
@@ -240,6 +241,8 @@ class DeploymentStateStore:
     ) -> bool:
         """Fail only the matching live handover without replacing newer evidence."""
 
+        if code not in KNOWN_DEPLOYMENT_ERROR_CODES:
+            raise ValueError(f"unregistered deployment error code: {code}")
         current = self.read(repo_name)
         if (
             current is None
