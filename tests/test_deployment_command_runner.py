@@ -391,6 +391,42 @@ def test_real_timeout_reaps_descendant_process_tree(tmp_path: Path) -> None:
     assert not escaped.exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX escaped process-group contract")
+def test_timeout_with_escaped_pipe_holder_is_bounded_and_records_cleanup(
+    tmp_path: Path,
+) -> None:
+    descendant = tmp_path / "escaped_descendant.py"
+    descendant.write_text(
+        "import time\ntime.sleep(6)\n",
+        encoding="utf-8",
+    )
+    parent = tmp_path / "escaped_parent.py"
+    parent.write_text(
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, {str(descendant)!r}], "
+        "start_new_session=True)\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+
+    started = time.monotonic()
+    with pytest.raises(DeploymentCommandError) as raised:
+        subprocess_command_runner(tmp_path)(
+            CommandSpec(
+                name="escaped-pipe-holder",
+                command=_python_command(parent),
+                timeout_seconds=1,
+            ),
+            {},
+        )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5
+    assert raised.value.code == "COMMAND_TIMEOUT"
+    assert "COMMAND_TIMEOUT_DRAIN_EXPIRED" in raised.value.detail
+    assert "PIPE_CLOSE_ATTEMPTED" in raised.value.detail
+
+
 def test_real_valid_non_object_json_has_stable_result_code(tmp_path: Path) -> None:
     script = tmp_path / "list.py"
     script.write_text("print('[1, 2, 3]')\n", encoding="utf-8")

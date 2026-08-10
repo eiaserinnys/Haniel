@@ -276,9 +276,7 @@ class DeploymentStateStore:
         if state in self.TERMINAL_STATES:
             current["completed_at"] = datetime.now(timezone.utc).isoformat()
         if state == "failed" and message:
-            from .deployment_errors import stable_deployment_error_code
-
-            current["error_code"] = stable_deployment_error_code(RuntimeError(message))
+            current["error_code"] = "HANDOVER_FAILED"
         if recovered is not None:
             current["recovered"] = recovered
         current.setdefault("history", []).append(self._entry(state, message))

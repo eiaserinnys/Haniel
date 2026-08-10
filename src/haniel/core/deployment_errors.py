@@ -9,6 +9,7 @@ from .safety_redaction import bounded_redact_text
 _ERROR_MESSAGE_MAX_CHARS = 16384
 
 _KNOWN_CODES = (
+    "HANDOVER_FAILED",
     "COMMAND_NOT_FOUND",
     "COMMAND_START_FAILED",
     "COMMAND_TIMEOUT",
@@ -81,7 +82,7 @@ def stable_deployment_error_code(
     *,
     default: str = "HANDOVER_FAILED",
 ) -> str:
-    """Return one stable code from typed metadata, recovery/cause, or markers."""
+    """Return one stable code from typed metadata without parsing prose."""
 
     direct_code = getattr(error, "code", None)
     if isinstance(direct_code, str) and direct_code:
@@ -93,9 +94,4 @@ def stable_deployment_error_code(
         code = getattr(current, "code", None)
         if isinstance(code, str) and code:
             return code
-    for current in chain:
-        message = str(current)
-        for code in _KNOWN_CODES:
-            if code in message:
-                return code
     return default

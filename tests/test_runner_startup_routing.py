@@ -12,6 +12,7 @@ from haniel.core.runner import ServiceRunner
 from haniel.config import HanielConfig, RepoConfig, ServiceConfig, load_config
 from haniel.config.release_activation import DEFAULT_RELEASE_MANIFEST
 from haniel.core.deployment import DeploymentError
+from haniel.core.git import GitError
 from haniel.core.deployment import DeploymentStateStore
 from haniel.core.lifecycle_control import LifecycleConflict
 from haniel.core.one_shot_handover import execute_owner_handover
@@ -157,6 +158,88 @@ def test_start_services_does_not_hide_programming_runtime_error(
 
     with pytest.raises(RuntimeError, match="programming defect"):
         runner.start_services()
+
+
+@patch("haniel.core.runner.run_manifest_deployment")
+def test_start_services_isolates_git_error_to_manifest_repo(
+    mock_deploy, tmp_path: Path
+) -> None:
+    config = HanielConfig(
+        repos={
+            "app": RepoConfig(
+                url="git@test/app",
+                path="./app",
+                release_manifest=DEFAULT_RELEASE_MANIFEST,
+            ),
+            "after": RepoConfig(url="git@test/after", path="./after"),
+        },
+        services={
+            "app": ServiceConfig(run="app", repo="app"),
+            "after": ServiceConfig(run="after", repo="after"),
+        },
+    )
+    runner = ServiceRunner(config, config_dir=tmp_path)
+    runner._startup_manifest_updates = {"app": "old-head"}
+    started: list[str] = []
+    runner._start_service = MagicMock(
+        side_effect=lambda name: started.append(name) or True
+    )
+    mock_deploy.side_effect = GitError("manifest checkout failed")
+
+    runner.start_services()
+
+    assert started == ["after"]
+
+
+@patch("haniel.core.runner.fetch_repo", return_value=False)
+def test_startup_repo_lease_conflict_is_isolated_and_next_repo_runs(
+    mock_fetch, tmp_path: Path
+) -> None:
+    for name in ("blocked", "after"):
+        repo = tmp_path / name
+        repo.mkdir()
+        (repo / ".git").mkdir()
+    config = HanielConfig(
+        repos={
+            name: RepoConfig(url=f"git@test/{name}", path=f"./{name}")
+            for name in ("blocked", "after")
+        },
+        services={},
+    )
+    runner = ServiceRunner(config, config_dir=tmp_path)
+    real_acquire = runner.lifecycle_control.acquire_deployment
+
+    def acquire(repo_name: str, request_id: str):
+        if repo_name == "blocked":
+            raise LifecycleConflict("DEPLOYMENT_LEASE_CONFLICT: held elsewhere")
+        return real_acquire(repo_name, request_id)
+
+    with patch.object(
+        runner.lifecycle_control, "acquire_deployment", side_effect=acquire
+    ):
+        runner._apply_startup_updates()
+
+    assert mock_fetch.call_count == 1
+    assert mock_fetch.call_args.kwargs["path"] == tmp_path / "after"
+
+
+@patch("haniel.core.runner.fetch_repo", side_effect=RuntimeError("programming defect"))
+def test_startup_repo_does_not_hide_programming_runtime_error(
+    _mock_fetch, tmp_path: Path
+) -> None:
+    repo = tmp_path / "app"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    runner = ServiceRunner(
+        HanielConfig(
+            repos={"app": RepoConfig(url="git@test/app", path="./app")},
+            services={},
+        ),
+        config_dir=tmp_path,
+    )
+
+    with pytest.raises(RuntimeError, match="programming defect"):
+        runner._apply_startup_updates()
 
 
 @patch("haniel.core.runner.get_head", side_effect=["old-head", "new-head"])

@@ -34,6 +34,10 @@ FORBIDDEN_LOCK_CALLS = {
     "open",
     "run",
     "Popen",
+    "communicate",
+    "check_output",
+    "connect",
+    "acquire",
     "start_service",
     "stop_service",
     "restart_service",
@@ -43,6 +47,16 @@ FORBIDDEN_LOCK_CALLS = {
     "wait",
     "join",
     "sleep",
+}
+
+BOUNDARY_CALLS = {
+    "git": {"fetch_repo", "get_head", "get_remote_head", "pull_repo"},
+    "file": {"read_text", "read_bytes", "write_text", "write_bytes", "open"},
+    "future": {"result", "wait"},
+    "process": {"run", "Popen", "communicate", "check_output"},
+    "network": {"connect", "send"},
+    "callback": {"notify", "start_service", "stop_service", "restart_service"},
+    "lock": {"acquire", "join", "sleep"},
 }
 
 
@@ -116,6 +130,22 @@ def test_config_lock_contains_no_external_or_blocking_boundary_calls() -> None:
     root = Path(__file__).parents[1]
     calls = _calls_inside_config_lock(root / "src/haniel/core/runner.py")
     assert calls.isdisjoint(FORBIDDEN_LOCK_CALLS), sorted(calls & FORBIDDEN_LOCK_CALLS)
+    for boundary, names in BOUNDARY_CALLS.items():
+        assert calls.isdisjoint(names), (boundary, sorted(calls & names))
+
+
+def test_boundary_inventory_is_complete_and_matches_static_contract() -> None:
+    inventoried = set().union(*BOUNDARY_CALLS.values())
+    assert inventoried <= FORBIDDEN_LOCK_CALLS
+    assert {
+        "git",
+        "file",
+        "future",
+        "process",
+        "network",
+        "callback",
+        "lock",
+    } == set(BOUNDARY_CALLS)
 
 
 def test_external_subprocess_and_git_boundaries_never_own_config_lock(

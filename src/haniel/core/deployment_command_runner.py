@@ -54,6 +54,7 @@ CommandRunner = Callable[[CommandSpec, dict[str, str]], CommandResult | None]
 
 _STDERR_TAIL_CHARS = 8192
 _STDOUT_TAIL_CHARS = 4096
+_POST_TIMEOUT_DRAIN_SECONDS = 2.0
 _JSON_RESULT_MAX_CHARS = 65536
 
 
@@ -241,6 +242,11 @@ def _execute_subprocess(
             part
             for part in (
                 f"command {command.name!r} timed out after {command.timeout_seconds}s",
+                (
+                    f"cleanup: {error.cleanup_detail}"
+                    if getattr(error, "cleanup_detail", None)
+                    else ""
+                ),
                 f"stderr:\n{stderr}" if stderr else "",
                 f"stdout:\n{stdout}" if stdout else "",
             )
@@ -304,14 +310,35 @@ def _run_process_tree(
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as error:
-        _terminate_process_tree(process)
-        stdout, stderr = process.communicate()
-        raise subprocess.TimeoutExpired(
+        cleanup_details = _terminate_process_tree(process)
+        try:
+            stdout, stderr = process.communicate(timeout=_POST_TIMEOUT_DRAIN_SECONDS)
+        except subprocess.TimeoutExpired as drain_error:
+            cleanup_details.append("COMMAND_TIMEOUT_DRAIN_EXPIRED")
+            for stream_name in ("stdout", "stderr"):
+                stream = getattr(process, stream_name)
+                if stream is None or stream.closed:
+                    continue
+                try:
+                    stream.close()
+                    cleanup_details.append(f"{stream_name.upper()}_PIPE_CLOSED")
+                except OSError as close_error:
+                    cleanup_details.append(
+                        f"{stream_name.upper()}_PIPE_CLOSE_FAILED:{close_error.errno}"
+                    )
+            cleanup_details.append("PIPE_CLOSE_ATTEMPTED")
+            stdout = drain_error.output or error.output or ""
+            stderr = drain_error.stderr or error.stderr or ""
+        timeout_error = subprocess.TimeoutExpired(
             argv,
             timeout,
             output=stdout,
             stderr=stderr,
-        ) from error
+        )
+        timeout_error.cleanup_detail = (
+            ",".join(cleanup_details) or "PROCESS_TREE_REAPED"
+        )
+        raise timeout_error from error
     completed = subprocess.CompletedProcess(
         argv,
         process.returncode,
@@ -328,9 +355,10 @@ def _run_process_tree(
     return completed
 
 
-def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+def _terminate_process_tree(process: subprocess.Popen[str]) -> list[str]:
+    evidence: list[str] = []
     if process.poll() is not None:
-        return
+        return ["PROCESS_ALREADY_EXITED"]
     if os.name == "nt":
         try:
             subprocess.run(
@@ -341,16 +369,21 @@ def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
                 timeout=10,
             )
         except (OSError, subprocess.SubprocessError):
-            pass
+            evidence.append("TASKKILL_FAILED")
     else:
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
-            return
+            return ["PROCESS_GROUP_ALREADY_EXITED"]
         except OSError:
-            pass
+            evidence.append("PROCESS_GROUP_KILL_FAILED")
     if process.poll() is None:
-        process.kill()
+        try:
+            process.kill()
+        except OSError:
+            evidence.append("DIRECT_PROCESS_KILL_FAILED")
+    evidence.append("PROCESS_TREE_TERMINATE_ATTEMPTED")
+    return evidence
 
 
 def _split_command(command: str, *, windows: bool | None = None) -> list[str]:

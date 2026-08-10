@@ -847,7 +847,7 @@ class ServiceRunner:
                     **snapshot_kwargs,
                     **config_kwargs,
                 )
-            except (DeploymentError, StableDeploymentError) as error:
+            except _OPERATIONAL_DEPLOYMENT_ERRORS as error:
                 code = stable_deployment_error_code(error)
                 request_id = self._startup_manifest_request_ids.get(
                     repo_name, f"startup-resume-{repo_name}"
@@ -2262,12 +2262,7 @@ class ServiceRunner:
                         self._startup_deployment_leases[name] = deployment_lease
                         deployment_lease = None
 
-            except (
-                GitError,
-                ReleaseManifestActivationRequired,
-                HandoverConfigError,
-                StableDeploymentError,
-            ) as e:
+            except _OPERATIONAL_DEPLOYMENT_ERRORS as e:
                 code = stable_deployment_error_code(e, default="STARTUP_UPDATE_FAILED")
                 logger.error(
                     "Startup update failed for %s [%s]: %s",
