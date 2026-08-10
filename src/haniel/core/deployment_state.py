@@ -11,8 +11,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .deployment_errors import (
+    KNOWN_DEPLOYMENT_ERROR_CODES,
+    stable_deployment_error_code,
+)
 from .safety_redaction import bounded_redact_text, redact_value
-from .deployment_errors import KNOWN_DEPLOYMENT_ERROR_CODES
 
 _JOURNAL_MESSAGE_MAX_CHARS = 16384
 
@@ -271,6 +274,7 @@ class DeploymentStateStore:
         *,
         message: str | None = None,
         recovered: bool | None = None,
+        error: BaseException | None = None,
     ) -> None:
         current = self.read(repo_name)
         if current is None:
@@ -278,8 +282,14 @@ class DeploymentStateStore:
         current["state"] = state
         if state in self.TERMINAL_STATES:
             current["completed_at"] = datetime.now(timezone.utc).isoformat()
+        if error is not None and state != "failed":
+            raise ValueError("typed transition errors are only valid for failed state")
         if state == "failed" and message:
-            current["error_code"] = "HANDOVER_FAILED"
+            current["error_code"] = (
+                stable_deployment_error_code(error)
+                if error is not None
+                else "HANDOVER_FAILED"
+            )
         if recovered is not None:
             current["recovered"] = recovered
         current.setdefault("history", []).append(self._entry(state, message))
