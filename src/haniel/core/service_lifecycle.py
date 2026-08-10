@@ -35,24 +35,28 @@ def config_file_transaction(config_path: Path):
     """Serialize one config identity across threads and operating processes."""
 
     resolved = Path(config_path).expanduser().resolve(strict=False)
-    key = os.path.normcase(str(resolved))
-    with CONFIG_WRITE_LOCK:
-        depths = getattr(_CONFIG_TRANSACTION_LOCAL, "depths", None)
-        if depths is None:
-            depths = {}
-            _CONFIG_TRANSACTION_LOCAL.depths = depths
-        depth = depths.get(key, 0)
-        depths[key] = depth + 1
-        try:
-            if depth:
+    key = ConfigTransactionLock.identity_key(resolved)
+    depths = getattr(_CONFIG_TRANSACTION_LOCAL, "depths", None)
+    if depths is None:
+        depths = {}
+        _CONFIG_TRANSACTION_LOCAL.depths = depths
+    depth = depths.get(key, 0)
+    if depth:
+        with CONFIG_WRITE_LOCK:
+            depths[key] = depth + 1
+            try:
                 yield
-            else:
-                with ConfigTransactionLock(resolved):
-                    yield
-        finally:
-            if depth:
+            finally:
                 depths[key] = depth
-            else:
+        return
+
+    # The cross-process wait must never own the process-wide writer lock.
+    with ConfigTransactionLock(resolved):
+        with CONFIG_WRITE_LOCK:
+            depths[key] = 1
+            try:
+                yield
+            finally:
                 depths.pop(key, None)
 
 

@@ -72,13 +72,15 @@ class ConfigValidationEvidence:
     error_count: int
 
 
-VALIDATOR_REVISION = "readiness-v1"
+VALIDATOR_REVISION = "readiness-v2-migration-warning"
 
 
 def require_valid_config(config: HanielConfig) -> ConfigValidationEvidence:
     """Require the complete canonical semantic validator to pass."""
 
-    errors = validate_config(config)
+    errors = [
+        finding for finding in validate_config(config) if finding.severity == "error"
+    ]
     if errors:
         raise ConfigSemanticError(errors)
     return ConfigValidationEvidence(VALIDATOR_REVISION, 0)
@@ -87,7 +89,11 @@ def require_valid_config(config: HanielConfig) -> ConfigValidationEvidence:
 def require_valid_service_readiness(name: str, service: ServiceConfig) -> None:
     """Validate a direct ProcessManager call before any lifecycle side effect."""
 
-    errors = _readiness_errors(name, service)
+    errors = [
+        finding
+        for finding in _readiness_errors(name, service)
+        if finding.severity == "error"
+    ]
     if errors:
         raise ConfigSemanticError(errors)
 
@@ -99,7 +105,7 @@ def _readiness_errors(name: str, service: ServiceConfig) -> list[ValidationError
         return [
             ValidationError(
                 message="Enabled service requires an explicit readiness condition",
-                severity="error",
+                severity="warning",
                 location=f"services.{name}.ready",
                 code="READINESS_REQUIRED",
             )

@@ -71,6 +71,7 @@ class ManagedProcess:
     readiness_deadline: float | None = None
     ready_condition: ReadyCondition | None = None
     marker_observed_at: float | None = None
+    marker_evidence_lock: threading.Lock = field(default_factory=threading.Lock)
     marker_event: threading.Event = field(default_factory=threading.Event)
     readiness_done_event: threading.Event = field(default_factory=threading.Event)
     ready_callback_handle: PatternCallbackHandle | None = None
@@ -154,7 +155,9 @@ class ProcessManager:
         # This is the direct-call boundary. It must fail before stale-process
         # cleanup, log files, health mutation, environment reads, or spawn.
         require_valid_service_readiness(name, config)
-        condition = ReadyCondition.parse(config.ready or "")
+        condition = (
+            ReadyCondition.parse(config.ready) if config.ready is not None else None
+        )
 
         with self._lock:
             if name in self._processes and self._processes[name].process:
@@ -248,28 +251,50 @@ class ProcessManager:
             self._processes[name] = managed
             self._arm_log_evidence_locked(managed)
 
-        # Start stream readers
-        if process.stdout:
-            managed.stdout_reader = StreamReader(
-                process.stdout,
-                log_capture,
-                source="stdout",
-            )
-            managed.stdout_reader.start()
+        try:
+            # Start stream readers
+            if process.stdout:
+                managed.stdout_reader = StreamReader(
+                    process.stdout,
+                    log_capture,
+                    source="stdout",
+                )
+                managed.stdout_reader.start()
 
-        if process.stderr:
-            managed.stderr_reader = StreamReader(
-                process.stderr,
-                log_capture,
-                source="stderr",
-            )
-            managed.stderr_reader.start()
+            if process.stderr:
+                managed.stderr_reader = StreamReader(
+                    process.stderr,
+                    log_capture,
+                    source="stderr",
+                )
+                managed.stderr_reader.start()
 
-        # Start ready condition monitoring
-        self._start_ready_monitor(managed, timeout, on_ready)
+            # Start ready condition monitoring
+            if condition is not None:
+                self._start_ready_monitor(managed, timeout, on_ready)
 
-        # Start crash monitor
-        self._start_crash_monitor(managed, on_crash)
+            # Start crash monitor
+            self._start_crash_monitor(managed, on_crash)
+        except Exception as error:
+            logger.exception("Failed to initialize service monitors for %s", name)
+            with self._lock:
+                self._set_terminal_locked(managed, ReadinessState.STOPPED)
+            try:
+                if process.poll() is None:
+                    self.platform.kill_process(process)
+                    process.wait(timeout=5)
+            except Exception as cleanup_error:
+                logger.error(
+                    "Failed to reap %s after monitor initialization error: %s",
+                    name,
+                    cleanup_error,
+                )
+            finally:
+                self._cleanup_managed(managed)
+                self.health_manager.record_crash(
+                    name, exit_code=process.poll(), reason=str(error)
+                )
+            raise
 
         return managed
 
@@ -642,12 +667,16 @@ class ProcessManager:
 
         def record_marker(_line: str) -> None:
             observed_at = time.monotonic()
-            with self._lock:
-                if not self._is_current_pending_locked(managed):
-                    return
+            # Persist the evidence before contending for the manager lock. A timeout
+            # commit can then distinguish a timely marker from a late callback even
+            # when the callback has not yet entered the state transition section.
+            with managed.marker_evidence_lock:
                 if managed.marker_observed_at is None:
                     managed.marker_observed_at = observed_at
                 managed.marker_event.set()
+            with self._lock:
+                if not self._is_current_pending_locked(managed):
+                    return
 
         managed.ready_callback_handle = managed.log_capture.add_pattern_callback(
             condition.value, record_marker
@@ -669,6 +698,7 @@ class ProcessManager:
                     process = managed.process
                     deadline = managed.readiness_deadline
                     started_at = managed.readiness_started_at
+                with managed.marker_evidence_lock:
                     marker_observed_at = managed.marker_observed_at
 
                 if process is None or process.poll() is not None:
@@ -712,6 +742,11 @@ class ProcessManager:
                     return
                 managed.marker_event.wait(min(self.POLL_INTERVAL, deadline - now))
                 managed.marker_event.clear()
+        except Exception:
+            logger.exception("Readiness monitor failed for %s", managed.name)
+            self._commit_terminal(
+                managed, ReadinessState.TIMED_OUT, record_running=True
+            )
         finally:
             with self._lock:
                 if managed.ready_monitor is threading.current_thread():
@@ -764,13 +799,46 @@ class ProcessManager:
         *,
         record_running: bool = False,
     ) -> bool:
+        callback: Callable[[], None] | None = None
+        committed_ready = False
+        changed = False
         with self._lock:
             if self._processes.get(managed.name) is not managed:
                 return False
-            changed = self._set_terminal_locked(managed, state)
-            if changed and record_running:
-                self.health_manager.record_running(managed.name)
+            process = managed.process
+            with managed.marker_evidence_lock:
+                marker_observed_at = managed.marker_observed_at
+            if (
+                state is ReadinessState.TIMED_OUT
+                and managed.ready_condition is not None
+                and managed.ready_condition.type is ReadyConditionType.LOG
+                and marker_observed_at is not None
+                and managed.readiness_deadline is not None
+                and marker_observed_at <= managed.readiness_deadline
+                and process is not None
+                and process.poll() is None
+                and self._is_current_pending_locked(managed)
+            ):
+                callback = self._set_ready_locked(managed)
+                committed_ready = True
+            else:
+                changed = self._set_terminal_locked(managed, state)
+                if changed and record_running:
+                    self.health_manager.record_running(managed.name)
+        if callback is not None:
+            callback()
+        if committed_ready:
+            return True
         return changed
+
+    def _set_ready_locked(self, managed: ManagedProcess) -> Callable[[], None] | None:
+        managed.readiness_state = ReadinessState.READY
+        self._detach_ready_callback_locked(managed)
+        if managed.ready_event is not None:
+            managed.ready_event.set()
+        managed.readiness_done_event.set()
+        self.health_manager.record_ready(managed.name)
+        return managed.on_ready
 
     def _commit_ready(
         self,
@@ -796,13 +864,7 @@ class ProcessManager:
             if effective_deadline is not None and evidence_time > effective_deadline:
                 self._set_terminal_locked(managed, ReadinessState.TIMED_OUT)
                 return False
-            managed.readiness_state = ReadinessState.READY
-            self._detach_ready_callback_locked(managed)
-            if managed.ready_event is not None:
-                managed.ready_event.set()
-            managed.readiness_done_event.set()
-            callback = managed.on_ready
-            self.health_manager.record_ready(managed.name)
+            callback = self._set_ready_locked(managed)
         if callback is not None:
             callback()
         return True
@@ -985,6 +1047,7 @@ class ProcessManager:
         with self._lock:
             self._set_terminal_locked(managed, ReadinessState.STOPPED)
             monitor = managed.ready_monitor
+            process = managed.process
 
         if monitor is not None and monitor is not threading.current_thread():
             monitor.join(timeout=5)
@@ -994,6 +1057,26 @@ class ProcessManager:
             managed.stdout_reader.stop()
         if managed.stderr_reader:
             managed.stderr_reader.stop()
+
+        for stream in (
+            None if process is None else process.stdout,
+            None if process is None else process.stderr,
+        ):
+            if stream is not None and not stream.closed:
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
+
+        for reader in (managed.stdout_reader, managed.stderr_reader):
+            if (
+                reader is not None
+                and reader is not threading.current_thread()
+                and reader.is_alive()
+            ):
+                reader.join(timeout=5)
+                if reader.is_alive():
+                    logger.warning("Stream reader did not stop for %s", managed.name)
 
         # Stop log capture
         self.log_manager.stop_capture(managed.name)

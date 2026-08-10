@@ -2,16 +2,31 @@
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import os
 import threading
+import time
 from contextlib import AbstractContextManager
 from pathlib import Path
 
 from .deployment_errors import StableDeploymentError
 
+logger = logging.getLogger(__name__)
+
 
 class LifecycleConflict(StableDeploymentError):
     """A stable lifecycle identity or lease conflict."""
+
+
+class ConfigTransactionLockTimeout(StableDeploymentError):
+    """A cross-process config transaction lock exceeded its bounded wait."""
+
+    def __init__(self, timeout_seconds: float) -> None:
+        super().__init__(
+            "CONFIG_LOCK_TIMEOUT",
+            f"config transaction lock was not acquired within {timeout_seconds:g}s",
+        )
 
 
 def _is_windows_lease_contention(error: Exception) -> bool:
@@ -164,8 +179,16 @@ class ConfigTransactionLock(AbstractContextManager["ConfigTransactionLock"]):
     the canonical config path. Same-process reentrancy is owned by the caller.
     """
 
-    def __init__(self, config_path: Path) -> None:
+    DEFAULT_TIMEOUT_SECONDS = 5.0
+    POLL_INTERVAL_SECONDS = 0.05
+
+    def __init__(self, config_path: Path, timeout_seconds: float | None = None) -> None:
         self.config_path = config_path.expanduser().resolve(strict=False)
+        self.timeout_seconds = (
+            self.DEFAULT_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+        )
+        if self.timeout_seconds <= 0:
+            raise ValueError("config transaction lock timeout must be positive")
         self._directory_handle: int | None = None
         self._windows_handle = None
         self._kernel32 = None
@@ -174,12 +197,47 @@ class ConfigTransactionLock(AbstractContextManager["ConfigTransactionLock"]):
         else:
             self._acquire_posix()
 
+    @staticmethod
+    def identity_path(config_path: Path) -> Path:
+        resolved = config_path.expanduser().resolve(strict=False)
+        return resolved if os.name == "nt" else resolved.parent
+
+    @classmethod
+    def identity_key(cls, config_path: Path) -> str:
+        return os.path.normcase(str(cls.identity_path(config_path)))
+
+    @staticmethod
+    def windows_mutex_name(config_path: Path) -> str:
+        canonical = os.path.normcase(
+            str(config_path.expanduser().resolve(strict=False))
+        )
+        identity = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return f"Local\\HanielConfigWrite_{identity}"
+
     def _acquire_posix(self) -> None:
         import fcntl
 
         handle = os.open(self.config_path.parent, os.O_RDONLY)
+        deadline = time.monotonic() + self.timeout_seconds
+        waiting_logged = False
         try:
-            fcntl.flock(handle, fcntl.LOCK_EX)
+            while True:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as error:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ConfigTransactionLockTimeout(
+                            self.timeout_seconds
+                        ) from error
+                    if not waiting_logged:
+                        logger.warning(
+                            "Config transaction lock is contended; waiting up to %gs",
+                            self.timeout_seconds,
+                        )
+                        waiting_logged = True
+                    time.sleep(min(self.POLL_INTERVAL_SECONDS, remaining))
         except Exception:
             os.close(handle)
             raise
@@ -187,12 +245,9 @@ class ConfigTransactionLock(AbstractContextManager["ConfigTransactionLock"]):
 
     def _acquire_windows(self) -> None:
         import ctypes
-        import hashlib
         from ctypes import wintypes
 
-        canonical = os.path.normcase(str(self.config_path))
-        identity = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        name = f"Global\\HanielConfigWrite_{identity}"
+        name = self.windows_mutex_name(self.config_path)
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateMutexW.argtypes = (
             wintypes.LPVOID,
@@ -209,7 +264,11 @@ class ConfigTransactionLock(AbstractContextManager["ConfigTransactionLock"]):
         handle = kernel32.CreateMutexW(None, False, name)
         if not handle:
             raise ctypes.WinError(ctypes.get_last_error())
-        result = kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)
+        timeout_ms = max(1, int(self.timeout_seconds * 1000))
+        result = kernel32.WaitForSingleObject(handle, timeout_ms)
+        if result == 0x00000102:
+            kernel32.CloseHandle(handle)
+            raise ConfigTransactionLockTimeout(self.timeout_seconds)
         if result not in (0x00000000, 0x00000080):
             kernel32.CloseHandle(handle)
             raise OSError(f"WaitForSingleObject failed: {result}")

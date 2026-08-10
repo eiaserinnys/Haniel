@@ -151,6 +151,34 @@ class TestRunCommand:
         assert result.exit_code == 0
         assert "dry-run" in result.output.lower()
 
+    def test_run_dry_run_does_not_reject_partial_readiness_migration(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        config = tmp_path / "haniel.yaml"
+        config.write_text(
+            """
+services:
+  missing-ready:
+    run: python missing.py
+  ready-a:
+    run: python a.py
+    ready: delay:0.01
+  ready-b:
+    run: python b.py
+    ready: delay:0.01
+  ready-c:
+    run: python c.py
+    ready: delay:0.01
+""",
+            encoding="utf-8",
+        )
+
+        result = cli_runner.invoke(main, ["run", "--dry-run", str(config)])
+
+        assert result.exit_code == 0
+        assert "missing-ready" in result.output
+        assert "Configuration errors" not in result.output
+
 
 class TestStatusCommand:
     """Test the status command."""

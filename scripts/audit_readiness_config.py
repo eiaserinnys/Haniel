@@ -35,12 +35,17 @@ def audit(path: Path) -> tuple[str, ...]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("config", type=Path)
+    parser.add_argument("config", type=Path, nargs="+")
     args = parser.parse_args()
-    errors = audit(args.config)
-    for error in errors:
-        print(error)
-    return 1 if errors else 0
+    found = False
+    include_path = len(args.config) > 1
+    for path in args.config:
+        errors = audit(path)
+        found = found or bool(errors)
+        for error in errors:
+            prefix = f"{path}: " if include_path else ""
+            print(f"{prefix}{error}")
+    return 1 if found else 0
 
 
 if __name__ == "__main__":

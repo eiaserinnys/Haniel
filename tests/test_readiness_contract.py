@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import shlex
 import socket
 import subprocess
@@ -17,7 +18,7 @@ import pytest
 import yaml
 
 from haniel.config import HanielConfig, RepoConfig, ServiceConfig
-from haniel.config.validators import validate_config
+from haniel.config.validators import require_valid_config, validate_config
 from haniel.core.health import ServiceState
 from haniel.core.logs import StreamReader
 from haniel.core.process import ManagedProcess, ProcessManager
@@ -34,6 +35,33 @@ def _wait(predicate, timeout: float = 5.0) -> bool:
             return True
         threading.Event().wait(0.01)
     return bool(predicate())
+
+
+def _process_is_running(pid: int) -> bool:
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(0x00100000, False, pid)
+    if not handle:
+        return False
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == 0x00000102
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _status(path: Path) -> dict[str, object]:
@@ -104,8 +132,36 @@ def _runner_with_manager(
     return runner
 
 
-def test_enabled_service_without_ready_is_validation_error(tmp_path: Path) -> None:
-    """R1: validator and every release writer reject one invalid candidate."""
+def test_enabled_service_without_ready_is_warning_not_global_rejection(
+    tmp_path: Path,
+) -> None:
+    """R1: migration warnings do not reject an otherwise valid config."""
+    config_path = tmp_path / "haniel.yaml"
+    migrating = HanielConfig(
+        repos={
+            "app": RepoConfig(
+                url="https://example.invalid/app.git",
+                path="./app",
+                auto_apply=False,
+            )
+        },
+        services={"app": ServiceConfig(run="python app.py", repo="app")},
+    )
+    _dump_config(config_path, migrating)
+    findings = validate_config(migrating)
+    warning = next(
+        error
+        for error in findings
+        if error.location == "services.app.ready"
+        and getattr(error, "code", None) == "READINESS_REQUIRED"
+    )
+    assert warning.severity == "warning"
+    assert require_valid_config(migrating).error_count == 0
+
+
+def test_release_activation_still_rejects_invalid_provided_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     activation = importlib.import_module("haniel.config.release_activation")
     semantic_error = getattr(activation, "ReleaseActivationSemanticError", RuntimeError)
     identity_error = getattr(activation, "ReleaseActivationIdentityDrift", RuntimeError)
@@ -119,15 +175,18 @@ def test_enabled_service_without_ready_is_validation_error(tmp_path: Path) -> No
                 auto_apply=False,
             )
         },
-        services={"app": ServiceConfig(run="python app.py", repo="app")},
+        services={
+            "app": ServiceConfig(run="python app.py", repo="app", ready="port:0")
+        },
     )
     original = _dump_config(config_path, invalid)
     before_entries = {entry.name for entry in tmp_path.iterdir()}
-    errors = validate_config(invalid)
+    findings = validate_config(invalid)
     assert any(
         error.location == "services.app.ready"
-        and getattr(error, "code", None) == "READINESS_REQUIRED"
-        for error in errors
+        and getattr(error, "code", None) == "READINESS_PORT_INVALID"
+        and error.severity == "error"
+        for error in findings
     ), "validator-direct"
 
     with pytest.raises(semantic_error) as planned:
@@ -144,6 +203,11 @@ def test_enabled_service_without_ready_is_validation_error(tmp_path: Path) -> No
         update={"ready": "delay:0.01"}
     )
     valid_bytes = _dump_config(config_path, valid)
+    monkeypatch.setattr(
+        activation,
+        "_remote_release_identity",
+        lambda *_args: ("remote-head", "manifest-digest"),
+    )
     plan = activation.plan_release_manifest_activation(
         config_path, "app", activation.DEFAULT_RELEASE_MANIFEST
     )
@@ -191,28 +255,46 @@ def test_unknown_or_semantically_invalid_ready_is_validation_error() -> None:
     assert parse("http:localhost:8080/health").endpoint.endswith("/health")
 
 
-def test_missing_or_invalid_ready_never_spawns_or_signals_ready(
+def test_missing_ready_runs_but_remains_never_ready(tmp_path: Path) -> None:
+    command, status = _child_command(tmp_path, "hold")
+    manager = _manager(tmp_path)
+    config = _config(command, None)
+    managed = manager.start_service("migrating", config, ready_timeout=0.05)
+    runner = _runner_with_manager(tmp_path, manager, "migrating", config)
+    try:
+        assert _wait(status.exists)
+        assert manager.is_running("migrating")
+        assert manager.wait_for_ready("migrating", timeout=0.05) is False
+        assert managed.readiness_state.value == "pending"
+        assert manager.health_manager.get_health("migrating").state is not (
+            ServiceState.READY
+        )
+        assert runner._collect_services_info()[0]["ready"] is False
+    finally:
+        manager.stop_service("migrating", force=True)
+
+
+def test_invalid_provided_ready_never_spawns_or_signals_ready(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """R3: direct ProcessManager callers fail before every observable side effect."""
+    """R3: malformed provided readiness fails before every observable side effect."""
     validators = importlib.import_module("haniel.config.validators")
     semantic_error = getattr(validators, "ConfigSemanticError", RuntimeError)
     manager = _manager(tmp_path)
     spawn = MagicMock(side_effect=AssertionError("spawn side effect"))
     monkeypatch.setattr(manager, "_spawn_process", spawn)
 
-    for index, ready in enumerate((None, "port:0")):
-        callbacks: list[str] = []
-        with pytest.raises(semantic_error):
-            manager.start_service(
-                f"invalid-{index}",
-                _config("python app.py", ready),
-                on_ready=lambda callbacks=callbacks: callbacks.append("ready"),
-            )
-        assert callbacks == []
-        assert manager.get_pid(f"invalid-{index}") is None
-        assert not (tmp_path / "logs" / f"invalid-{index}.log").exists()
-    assert spawn.call_count == 0
+    callbacks: list[str] = []
+    with pytest.raises(semantic_error):
+        manager.start_service(
+            "invalid",
+            _config("python app.py", "port:0"),
+            on_ready=lambda: callbacks.append("ready"),
+        )
+    assert callbacks == []
+    assert manager.get_pid("invalid") is None
+    assert not (tmp_path / "logs" / "invalid.log").exists()
+    spawn.assert_not_called()
 
 
 def test_immediate_log_marker_from_real_child_is_not_missed(
@@ -441,6 +523,128 @@ def test_timeout_marker_and_generation_races_never_end_ready(
         manager.stop_service("app", force=True)
 
 
+def test_timeout_commit_rechecks_timely_marker_evidence_under_lock(
+    tmp_path: Path,
+) -> None:
+    readiness = importlib.import_module("haniel.config.readiness")
+    manager = _manager(tmp_path)
+    process = MagicMock(pid=103)
+    process.poll.return_value = None
+    managed = ManagedProcess(
+        name="deadline-race",
+        config=_config("python app.py", f"log:{MARKER}"),
+        process=process,
+        ready_event=threading.Event(),
+        generation=21,
+        ready_condition=readiness.parse_ready_condition(f"log:{MARKER}"),
+        readiness_started_at=1.0,
+        readiness_deadline=10.0,
+        marker_observed_at=9.0,
+    )
+    manager._processes[managed.name] = managed
+    manager.health_manager.record_start(managed.name)
+
+    manager._commit_terminal(
+        managed,
+        importlib.import_module("haniel.core.process").ReadinessState.TIMED_OUT,
+        record_running=True,
+    )
+
+    assert managed.readiness_state.value == "ready"
+    assert managed.ready_event.is_set()
+    assert managed.readiness_done_event.is_set()
+    assert manager.health_manager.get_health(managed.name).state is ServiceState.READY
+
+
+def test_stop_reaps_grandchild_and_closes_reader_threads_and_pipes(
+    tmp_path: Path,
+) -> None:
+    command, status = _child_command(tmp_path, "hold", grandchild=True)
+    manager = _manager(tmp_path)
+    managed = manager.start_service(
+        "process-tree",
+        _config(command, "delay:0.01"),
+        ready_timeout=1,
+    )
+    process = managed.process
+    assert process is not None
+    assert _wait(status.exists)
+    grandchild_pid = int(_status(status)["grandchild_pid"])
+
+    assert manager.stop_service("process-tree", force=True)
+
+    assert not _process_is_running(grandchild_pid)
+    assert managed.stdout_reader is not None
+    assert managed.stderr_reader is not None
+    assert not managed.stdout_reader.is_alive()
+    assert not managed.stderr_reader.is_alive()
+    assert process.stdout is not None and process.stdout.closed
+    assert process.stderr is not None and process.stderr.closed
+
+
+def test_ready_monitor_exception_commits_terminal_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = _manager(tmp_path)
+    process = MagicMock(pid=102)
+    process.poll.return_value = None
+    managed = ManagedProcess(
+        name="probe-error",
+        config=_config("python app.py", "port:8080"),
+        process=process,
+        ready_event=threading.Event(),
+        generation=20,
+        ready_condition=importlib.import_module(
+            "haniel.config.readiness"
+        ).parse_ready_condition("port:8080"),
+        readiness_started_at=1.0,
+        readiness_deadline=10.0,
+    )
+    manager._processes[managed.name] = managed
+    monkeypatch.setattr(
+        manager,
+        "_check_ready_condition",
+        MagicMock(side_effect=OSError("probe infrastructure failed")),
+    )
+    monkeypatch.setattr("haniel.core.process.time.monotonic", lambda: 2.0)
+
+    manager._ready_monitor_loop(managed)
+
+    assert managed.readiness_state.value != "pending"
+    assert managed.readiness_done_event.is_set()
+    assert managed.ready_callback_handle is None
+
+
+def test_stream_reader_start_failure_reaps_process_and_detaches_callback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command, _status_path = _child_command(tmp_path, "hold")
+    manager = _manager(tmp_path)
+    monkeypatch.setattr(
+        StreamReader,
+        "start",
+        MagicMock(side_effect=RuntimeError("reader start failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="reader start failed"):
+        manager.start_service(
+            "reader-error",
+            _config(command, f"log:{MARKER}"),
+            ready_timeout=1,
+        )
+
+    managed = manager._processes["reader-error"]
+    try:
+        assert managed.readiness_state.value != "pending"
+        assert managed.readiness_done_event.is_set()
+        assert managed.ready_callback_handle is None
+        assert managed.log_capture is not None
+        assert managed.log_capture.callback_count == 0
+        assert managed.process is None or managed.process.poll() is not None
+    finally:
+        manager.stop_all()
+
+
 def test_invalid_reload_preserves_resident_snapshot_and_generation(
     tmp_path: Path,
 ) -> None:
@@ -466,7 +670,9 @@ def test_invalid_reload_preserves_resident_snapshot_and_generation(
     original_service = runner._enabled_services["app"]
 
     invalid = valid.model_copy(deep=True)
-    invalid.services["app"] = invalid.services["app"].model_copy(update={"ready": None})
+    invalid.services["app"] = invalid.services["app"].model_copy(
+        update={"ready": "port:0"}
+    )
     _dump_config(config_path, invalid)
 
     with pytest.raises(semantic_error):
@@ -485,7 +691,7 @@ def test_invalid_handover_preserves_resident_snapshot_and_generation(
     handover = importlib.import_module("haniel.core.handover_config")
     config_path = tmp_path / "haniel.yaml"
     invalid = HanielConfig(
-        services={"app": ServiceConfig(run="python app.py", ready=None)}
+        services={"app": ServiceConfig(run="python app.py", ready="port:0")}
     )
     before = _dump_config(config_path, invalid)
     callbacks: list[str] = []

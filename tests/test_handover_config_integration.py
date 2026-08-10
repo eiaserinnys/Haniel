@@ -24,6 +24,7 @@ from haniel.core.deployment_command_runner import (
     subprocess_command_runner,
 )
 from haniel.core.lifecycle_control import LifecycleControl
+from haniel.core.lifecycle_locks import ConfigTransactionLock
 from haniel.core.lifecycle_request_server import LifecycleRequestServer
 from haniel.core.one_shot_handover import (
     _resolve_bound_manifest_environment,
@@ -88,6 +89,121 @@ def test_config_write_transaction_serializes_across_processes(tmp_path: Path) ->
         if child.poll() is None:
             child.kill()
             child.wait(timeout=5)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory flock contract")
+def test_config_lock_timeout_does_not_wedge_unrelated_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from haniel.core.service_lifecycle import config_file_transaction
+
+    blocked_dir = tmp_path / "blocked"
+    unrelated_dir = tmp_path / "unrelated"
+    blocked_dir.mkdir()
+    unrelated_dir.mkdir()
+    blocked = blocked_dir / "haniel.yaml"
+    unrelated = unrelated_dir / "haniel.yaml"
+    blocked.write_text("services: {}\n", encoding="utf-8")
+    unrelated.write_text("services: {}\n", encoding="utf-8")
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "\n".join(
+                (
+                    "import fcntl, os, sys",
+                    "handle = os.open(sys.argv[1], os.O_RDONLY)",
+                    "fcntl.flock(handle, fcntl.LOCK_EX)",
+                    "print('locked', flush=True)",
+                    "sys.stdin.readline()",
+                )
+            ),
+            str(blocked_dir),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert holder.stdout is not None
+    assert holder.stdout.readline().strip() == "locked"
+    monkeypatch.setattr(
+        ConfigTransactionLock, "DEFAULT_TIMEOUT_SECONDS", 0.2, raising=False
+    )
+    blocked_done = threading.Event()
+    unrelated_done = threading.Event()
+    failures: list[BaseException] = []
+
+    def enter_blocked() -> None:
+        try:
+            with config_file_transaction(blocked):
+                pass
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            blocked_done.set()
+
+    def enter_unrelated() -> None:
+        with config_file_transaction(unrelated):
+            unrelated_done.set()
+
+    blocked_thread = threading.Thread(target=enter_blocked, daemon=True)
+    unrelated_thread = threading.Thread(target=enter_unrelated, daemon=True)
+    try:
+        blocked_thread.start()
+        time.sleep(0.05)
+        unrelated_thread.start()
+        assert unrelated_done.wait(timeout=0.5)
+        assert blocked_done.wait(timeout=0.5)
+        assert len(failures) == 1
+        assert getattr(failures[0], "code", None) == "CONFIG_LOCK_TIMEOUT"
+    finally:
+        if holder.stdin is not None:
+            holder.stdin.write("release\n")
+            holder.stdin.flush()
+        holder.wait(timeout=5)
+        blocked_thread.join(timeout=2)
+        unrelated_thread.join(timeout=2)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory flock identity")
+def test_nested_configs_in_same_directory_share_reentrant_identity(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.yaml"
+    second = tmp_path / "second.yaml"
+    first.write_text("services: {}\n", encoding="utf-8")
+    second.write_text("services: {}\n", encoding="utf-8")
+    script = "\n".join(
+        (
+            "import sys",
+            "from pathlib import Path",
+            "from haniel.core.service_lifecycle import config_file_transaction",
+            "with config_file_transaction(Path(sys.argv[1])):",
+            "    with config_file_transaction(Path(sys.argv[2])):",
+            "        print('nested', flush=True)",
+        )
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(first), str(second)],
+        capture_output=True,
+        text=True,
+        timeout=1,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "nested"
+
+
+def test_windows_config_mutex_uses_non_privileged_local_namespace(
+    tmp_path: Path,
+) -> None:
+    name = ConfigTransactionLock.windows_mutex_name(tmp_path / "haniel.yaml")
+
+    assert name.startswith("Local\\HanielConfigWrite_")
+    assert not name.startswith("Global\\")
 
 
 def _write_config(

@@ -308,8 +308,13 @@ class StreamReader(threading.Thread):
             pass
 
     def stop(self) -> None:
-        """Signal the reader to stop."""
+        """Signal the reader to stop and wake a blocking ``readline``."""
         self._stop_event.set()
+        if not self.stream.closed:
+            try:
+                self.stream.close()
+            except (OSError, ValueError):
+                pass
 
 
 def get_log_tail(
