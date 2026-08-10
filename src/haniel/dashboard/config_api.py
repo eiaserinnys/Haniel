@@ -16,7 +16,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from ..config.model import HanielConfig, RepoConfig, ServiceConfig
-from ..config.validators import validate_config
+from ..config.validators import require_valid_config
 from ..config.io import backup_config, read_config, restore_config, write_config
 from ..core.service_lifecycle import (
     config_write_transaction,
@@ -52,6 +52,7 @@ def _commit_config(config_path, config: HanielConfig, runner: "ServiceRunner") -
     Raises:
         RuntimeError: If writing the config file fails (restores from backup first)
     """
+    require_valid_config(config)
     _ = backup_config(config_path)
     try:
         write_config(config_path, config)
@@ -148,9 +149,7 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
 
                 config.services[name] = new_svc
 
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
+                require_valid_config(config)
 
                 _commit_config(config_path, config, runner)
 
@@ -198,9 +197,7 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
 
                 config.services[svc_name] = new_svc
 
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
+                require_valid_config(config)
 
                 _commit_config(config_path, config, runner)
 
@@ -312,9 +309,7 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
 
                 config.repos[name] = new_repo
 
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
+                require_valid_config(config)
 
                 _commit_config(config_path, config, runner)
 
@@ -395,9 +390,7 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
 
                 del config.repos[name]
 
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
+                require_valid_config(config)
 
                 _commit_config(config_path, config, runner)
 

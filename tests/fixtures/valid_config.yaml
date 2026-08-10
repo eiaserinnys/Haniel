@@ -41,6 +41,7 @@ services:
 
   main-app:
     run: python -m main_app
+    ready: delay:0.01
     cwd: ./projects/test
     repo: test-repo
     after: mcp-server

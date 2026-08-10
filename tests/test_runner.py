@@ -405,6 +405,7 @@ class TestHookExecution:
             services={
                 "test-service": ServiceConfig(
                     run="sleep 100",
+                    ready="delay:0.01",
                     hooks=HooksConfig(pre_start="echo hi"),
                 ),
             },
@@ -430,6 +431,7 @@ class TestHookExecution:
             services={
                 "test-service": ServiceConfig(
                     run="sleep 100",
+                    ready="delay:0.01",
                     hooks=HooksConfig(pre_start="false"),
                 ),
             },
@@ -455,7 +457,7 @@ class TestHookExecution:
             poll_interval=5,
             repos={},
             services={
-                "test-service": ServiceConfig(run="sleep 100"),
+                "test-service": ServiceConfig(run="sleep 100", ready="delay:0.01"),
             },
         )
         runner = ServiceRunner(config, config_dir=tmp_path)
@@ -1568,8 +1570,8 @@ class TestServiceRunnerServices:
             poll_interval=5,
             repos={},
             services={
-                "db": ServiceConfig(run="sleep 100"),
-                "api": ServiceConfig(run="sleep 100", after=["db"]),
+                "db": ServiceConfig(run="sleep 100", ready="delay:0.01"),
+                "api": ServiceConfig(run="sleep 100", ready="delay:0.01", after=["db"]),
             },
         )
         runner = ServiceRunner(config, config_dir=tmp_path)
@@ -1600,11 +1602,13 @@ class TestServiceRunnerServices:
             services={
                 "auto-service": ServiceConfig(
                     run="echo auto",
+                    ready="delay:0.01",
                     repo="auto-repo",
                     hooks={"post_pull": "echo auto build"},
                 ),
                 "manual-service": ServiceConfig(
                     run="echo manual",
+                    ready="delay:0.01",
                     repo="manual-repo",
                     hooks={"post_pull": "echo manual build"},
                 ),
@@ -1642,6 +1646,7 @@ class TestServiceRunnerServices:
             services={
                 "app": ServiceConfig(
                     run="echo app",
+                    ready="delay:0.01",
                     repo="app-repo",
                     hooks={"post_pull": "echo build"},
                 ),
@@ -1816,7 +1821,9 @@ class TestReloadConfig:
         original = HanielConfig(
             poll_interval=5,
             repos={},
-            services={"web": ServiceConfig(run="python -m http.server")},
+            services={
+                "web": ServiceConfig(run="python -m http.server", ready="delay:0.01")
+            },
         )
         self._write_yaml(config_file, original)
 
@@ -1827,8 +1834,12 @@ class TestReloadConfig:
             poll_interval=5,
             repos={},
             services={
-                "web": ServiceConfig(run="python -m http.server"),
-                "worker": ServiceConfig(run="python worker.py", after=["web"]),
+                "web": ServiceConfig(run="python -m http.server", ready="delay:0.01"),
+                "worker": ServiceConfig(
+                    run="python worker.py",
+                    after=["web"],
+                    ready="delay:0.01",
+                ),
             },
         )
         self._write_yaml(config_file, updated)
@@ -2039,12 +2050,13 @@ class TestRemoteServiceCommandHandler:
 
         config_path = tmp_path / "haniel.yaml"
         config_path.write_text(
-            "services:\n  web:\n    run: python app.py\n", encoding="utf-8"
+            "services:\n  web:\n    run: python app.py\n    ready: delay:0.01\n",
+            encoding="utf-8",
         )
         config = HanielConfig(
             poll_interval=60,
             repos={},
-            services={"web": ServiceConfig(run="python app.py")},
+            services={"web": ServiceConfig(run="python app.py", ready="delay:0.01")},
         )
         runner = ServiceRunner(config, config_dir=tmp_path, config_path=config_path)
         writer_holds_lock = threading.Event()

@@ -11,6 +11,7 @@ from typing import Callable, Literal
 import click
 
 from haniel.config import HanielConfig
+from haniel.config.readiness import ready_port
 from haniel.installer import InstallOrchestrator, InstallPhase
 from haniel.installer.state import InstallState
 
@@ -374,7 +375,6 @@ def _print_completion(
     if haniel_config.services:
         click.echo("\nService endpoints:")
         for name, service in haniel_config.services.items():
-            if service.ready and service.ready.startswith("port:"):
-                click.echo(
-                    f"  {name}: http://localhost:{service.ready.split(':', 1)[1]}"
-                )
+            port = ready_port(service.ready)
+            if port is not None:
+                click.echo(f"  {name}: http://localhost:{port}")

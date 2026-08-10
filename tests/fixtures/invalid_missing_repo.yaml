@@ -10,4 +10,5 @@ repos:
 services:
   my-service:
     run: python -m my_service
+    ready: delay:0.01
     repo: non-existent-repo

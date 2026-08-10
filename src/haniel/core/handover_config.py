@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from ..config import HanielConfig
+from ..config.validators import ConfigSemanticError, require_valid_config
 from .path_identity import canonical_path_text
 from .service_environment import (
     ServiceEnvironmentFile,
@@ -137,9 +138,9 @@ def prepare_runner_handover_config(
             "CONFIG_RELOAD_FAILED: resident owner has no config path"
         )
 
-    from .service_lifecycle import CONFIG_WRITE_LOCK
+    from .service_lifecycle import config_file_transaction
 
-    with CONFIG_WRITE_LOCK:
+    with config_file_transaction(runner.config_path):
         resident = runner._snapshot_config_state()
         try:
             candidate, actual_digest, service_environments = _load_config_identity(
@@ -302,6 +303,10 @@ def _load_config_projection(
     raw = resolved.read_bytes()
     data = yaml.safe_load(raw.decode("utf-8"))
     config = HanielConfig.model_validate(data or {})
+    try:
+        require_valid_config(config)
+    except ConfigSemanticError as error:
+        raise HandoverConfigError(f"CONFIG_SEMANTIC_INVALID: {error}") from error
     projection, environment_snapshots = _canonical_projection(config, resolved.parent)
     if resolved.read_bytes() != raw:
         raise HandoverConfigError(

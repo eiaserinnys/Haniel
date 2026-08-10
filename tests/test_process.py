@@ -69,11 +69,20 @@ class TestReadyCondition:
         assert cond.type == ReadyConditionType.LOG
         assert cond.value == "Server started"
 
-    def test_parse_http_condition(self):
+    def test_parse_http_condition(self, process_manager: ProcessManager):
         """Should parse http conditions correctly."""
         cond = ReadyCondition.parse("http:localhost:8080/health")
         assert cond.type == ReadyConditionType.HTTP
         assert cond.value == "localhost:8080/health"
+        assert cond.endpoint == "http://localhost:8080/health"
+
+        absolute = ReadyCondition.parse("http://localhost:8080/health")
+        assert absolute.endpoint == "http://localhost:8080/health"
+        process_manager._check_http_ready = MagicMock(return_value=True)
+        assert process_manager._check_ready_condition(absolute)
+        process_manager._check_http_ready.assert_called_once_with(
+            "http://localhost:8080/health"
+        )
 
     def test_parse_invalid_condition(self):
         """Should raise ValueError for invalid conditions."""
@@ -297,6 +306,7 @@ class TestProcessManager:
         """Should start a simple process."""
         config = ServiceConfig(
             run=f"{sys.executable} -c \"import time; print('Hello'); time.sleep(60)\"",
+            ready="delay:0.01",
         )
 
         managed = process_manager.start_service("test", config)
@@ -312,6 +322,7 @@ class TestProcessManager:
         """Should stop a running process."""
         config = ServiceConfig(
             run=f'{sys.executable} -c "import time; time.sleep(60)"',
+            ready="delay:0.01",
         )
 
         process_manager.start_service("test", config)
@@ -328,6 +339,7 @@ class TestProcessManager:
         """Intentional stops should not invoke crash handling."""
         config = ServiceConfig(
             run=f'{sys.executable} -c "import time; time.sleep(60)"',
+            ready="delay:0.01",
         )
         crash_codes: list[int | None] = []
 
@@ -490,6 +502,7 @@ while True:
 """
         config = ServiceConfig(
             run=f'{sys.executable} -c "{script}"',
+            ready="delay:0.01",
         )
 
         process_manager.start_service("test", config)
@@ -513,6 +526,7 @@ while True:
 """
         config = ServiceConfig(
             run=f'{sys.executable} -c "{script}"',
+            ready="delay:0.01",
         )
 
         process_manager.start_service("test", config)
@@ -528,6 +542,7 @@ while True:
         for i in range(3):
             config = ServiceConfig(
                 run=f'{sys.executable} -c "import time; time.sleep(60)"',
+                ready="delay:0.01",
             )
             process_manager.start_service(f"test-{i}", config)
 
@@ -550,6 +565,7 @@ while True:
 
         config = ServiceConfig(
             run=f'{sys.executable} -c "import sys; sys.exit(1)"',
+            ready="delay:0.01",
         )
 
         process_manager.start_service("test", config, on_crash=on_crash)
@@ -592,6 +608,7 @@ while True:
         config = ServiceConfig(
             run=f'{sys.executable} -u -c "import os; print(os.getcwd()); import time; time.sleep(60)"',
             cwd="workdir",
+            ready="delay:0.01",
         )
 
         managed = process_manager.start_service("test", config)
@@ -608,6 +625,7 @@ while True:
         """Should raise error when starting already running service."""
         config = ServiceConfig(
             run=f'{sys.executable} -c "import time; time.sleep(60)"',
+            ready="delay:0.01",
         )
 
         process_manager.start_service("test", config)

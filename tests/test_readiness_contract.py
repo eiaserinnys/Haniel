@@ -1,0 +1,566 @@
+"""Readiness parsing, lifecycle, and runtime apply contracts."""
+
+from __future__ import annotations
+
+import importlib
+import json
+import shlex
+import socket
+import sys
+import threading
+import urllib.request
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+import yaml
+
+from haniel.config import HanielConfig, RepoConfig, ServiceConfig
+from haniel.config.validators import validate_config
+from haniel.core.health import ServiceState
+from haniel.core.logs import StreamReader
+from haniel.core.process import ManagedProcess, ProcessManager
+from haniel.core.runner import ServiceRunner
+
+CHILD = Path(__file__).parent / "fixtures" / "readiness_child.py"
+MARKER = "READY-MARKER"
+
+
+def _wait(predicate, timeout: float = 5.0) -> bool:
+    deadline = __import__("time").monotonic() + timeout
+    while __import__("time").monotonic() < deadline:
+        if predicate():
+            return True
+        threading.Event().wait(0.01)
+    return bool(predicate())
+
+
+def _status(path: Path) -> dict[str, object]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _child_command(
+    tmp_path: Path,
+    mode: str,
+    *,
+    release: Path | None = None,
+    exit_after_marker: bool = False,
+    grandchild: bool = False,
+) -> tuple[str, Path]:
+    status = tmp_path / f"{mode}-{len(list(tmp_path.glob('*.json')))}.json"
+    command = [
+        sys.executable,
+        str(CHILD),
+        "--mode",
+        mode,
+        "--status",
+        str(status),
+        "--marker",
+        MARKER,
+    ]
+    if release is not None:
+        command.extend(("--release", str(release)))
+    if exit_after_marker:
+        command.append("--exit-after-marker")
+    if grandchild:
+        command.append("--grandchild")
+    return shlex.join(command), status
+
+
+def _manager(tmp_path: Path) -> ProcessManager:
+    return ProcessManager(config_dir=tmp_path, log_dir=tmp_path / "logs")
+
+
+def _config(run: str, ready: str | None) -> ServiceConfig:
+    return ServiceConfig(run=run, ready=ready)
+
+
+def _dump_config(path: Path, config: HanielConfig) -> bytes:
+    rendered = yaml.safe_dump(
+        config.model_dump(mode="json", by_alias=True, exclude_none=True),
+        sort_keys=False,
+        allow_unicode=True,
+    ).encode("utf-8")
+    path.write_bytes(rendered)
+    return rendered
+
+
+def _runner_with_manager(
+    tmp_path: Path,
+    manager: ProcessManager,
+    name: str,
+    config: ServiceConfig,
+) -> ServiceRunner:
+    runner = ServiceRunner(
+        HanielConfig(services={name: config}),
+        config_dir=tmp_path,
+        config_path=tmp_path / "haniel.yaml",
+    )
+    runner.process_manager = manager
+    runner.health_manager = manager.health_manager
+    return runner
+
+
+def test_enabled_service_without_ready_is_validation_error(tmp_path: Path) -> None:
+    """R1: validator and every release writer reject one invalid candidate."""
+    activation = importlib.import_module("haniel.config.release_activation")
+    semantic_error = getattr(activation, "ReleaseActivationSemanticError", RuntimeError)
+    identity_error = getattr(activation, "ReleaseActivationIdentityDrift", RuntimeError)
+
+    config_path = tmp_path / "haniel.yaml"
+    invalid = HanielConfig(
+        repos={
+            "app": RepoConfig(
+                url="https://example.invalid/app.git",
+                path="./app",
+                auto_apply=False,
+            )
+        },
+        services={"app": ServiceConfig(run="python app.py", repo="app")},
+    )
+    original = _dump_config(config_path, invalid)
+    before_entries = {entry.name for entry in tmp_path.iterdir()}
+    errors = validate_config(invalid)
+    assert any(
+        error.location == "services.app.ready"
+        and getattr(error, "code", None) == "READINESS_REQUIRED"
+        for error in errors
+    ), "validator-direct"
+
+    with pytest.raises(semantic_error) as planned:
+        activation.plan_release_manifest_activation(
+            config_path, "app", activation.DEFAULT_RELEASE_MANIFEST
+        )
+    assert getattr(planned.value, "code", None) == "CONFIG_SEMANTIC_INVALID"
+    assert config_path.read_bytes() == original
+    assert {entry.name for entry in tmp_path.iterdir()} == before_entries
+    assert list(tmp_path.glob("*.bak")) == []
+
+    valid = invalid.model_copy(deep=True)
+    valid.services["app"] = valid.services["app"].model_copy(
+        update={"ready": "delay:0.01"}
+    )
+    valid_bytes = _dump_config(config_path, valid)
+    plan = activation.plan_release_manifest_activation(
+        config_path, "app", activation.DEFAULT_RELEASE_MANIFEST
+    )
+    drifted = valid.model_copy(deep=True)
+    drifted.poll_interval += 1
+    drifted_bytes = _dump_config(config_path, drifted)
+    callback_count = 0
+    reload_count = 0
+
+    with pytest.raises(identity_error) as drift:
+        activation.activate_release_manifest(config_path, plan=plan)
+    assert getattr(drift.value, "code", None) == "CONFIG_IDENTITY_DRIFT"
+    assert config_path.read_bytes() == drifted_bytes
+    assert config_path.read_bytes() != valid_bytes
+    assert list(tmp_path.glob("*.bak")) == []
+    assert callback_count == reload_count == 0
+
+
+def test_unknown_or_semantically_invalid_ready_is_validation_error() -> None:
+    """R2: the canonical parser rejects every malformed readiness shape."""
+    readiness = importlib.import_module("haniel.config.readiness")
+    parse = readiness.parse_ready_condition
+
+    for value in (
+        "",
+        "unknown:value",
+        "port:0",
+        "port:65536",
+        "port:not-a-port",
+        "delay:0",
+        "delay:-1",
+        "delay:nan",
+        "delay:inf",
+        "log:",
+        "log:(",
+        "http:",
+    ):
+        with pytest.raises(ValueError, match="READINESS_"):
+            parse(value)
+
+    assert parse("port:1").port == 1
+    assert parse("port:65535").port == 65535
+    assert parse("delay:0.01").delay == pytest.approx(0.01)
+    assert parse("log:READY").pattern.pattern == "READY"
+    assert parse("http:localhost:8080/health").endpoint.endswith("/health")
+
+
+def test_missing_or_invalid_ready_never_spawns_or_signals_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3: direct ProcessManager callers fail before every observable side effect."""
+    validators = importlib.import_module("haniel.config.validators")
+    semantic_error = getattr(validators, "ConfigSemanticError", RuntimeError)
+    manager = _manager(tmp_path)
+    spawn = MagicMock(side_effect=AssertionError("spawn side effect"))
+    monkeypatch.setattr(manager, "_spawn_process", spawn)
+
+    for index, ready in enumerate((None, "port:0")):
+        callbacks: list[str] = []
+        with pytest.raises(semantic_error):
+            manager.start_service(
+                f"invalid-{index}",
+                _config("python app.py", ready),
+                on_ready=lambda callbacks=callbacks: callbacks.append("ready"),
+            )
+        assert callbacks == []
+        assert manager.get_pid(f"invalid-{index}") is None
+        assert not (tmp_path / "logs" / f"invalid-{index}.log").exists()
+    assert spawn.call_count == 0
+
+
+def test_immediate_log_marker_from_real_child_is_not_missed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4: callback arm happens before a reader consumes the first marker."""
+    original_start = StreamReader.start
+
+    def start_after_consumption_barrier(reader: StreamReader) -> None:
+        original_start(reader)
+        if reader.source == "stdout":
+            assert _wait(
+                lambda: any(
+                    MARKER in line for line in reader.log_capture.get_recent_lines()
+                )
+            )
+
+    monkeypatch.setattr(StreamReader, "start", start_after_consumption_barrier)
+    manager = _manager(tmp_path)
+    try:
+        for index in range(50):
+            command, _ = _child_command(tmp_path, "immediate-log")
+            name = f"immediate-{index}"
+            manager.start_service(
+                name,
+                _config(command, f"log:{MARKER}"),
+                ready_timeout=1,
+            )
+            assert manager.wait_for_ready(name, timeout=1), index
+            assert manager.stop_service(name, force=True)
+    finally:
+        manager.stop_all()
+
+
+def test_stale_generation_callback_cannot_ready_replacement(tmp_path: Path) -> None:
+    """R5: only the currently installed process generation may commit ready."""
+    manager = _manager(tmp_path)
+    process = MagicMock(pid=100)
+    process.poll.return_value = None
+    old = ManagedProcess(
+        name="app",
+        config=_config("python app.py", f"log:{MARKER}"),
+        process=process,
+        ready_event=threading.Event(),
+        generation=1,
+    )
+    replacement = ManagedProcess(
+        name="app",
+        config=_config("python app.py", f"log:{MARKER}"),
+        process=process,
+        ready_event=threading.Event(),
+        generation=2,
+    )
+    manager._processes["app"] = replacement
+
+    assert manager._commit_ready(old) is False
+    assert not replacement.ready_event.is_set()
+    assert manager.health_manager.get_health("app").state is not ServiceState.READY
+
+
+def test_timeout_marker_and_generation_races_never_end_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R6: timeout, deadline, and replacement are terminal generation barriers."""
+    release = tmp_path / "release.marker"
+    command, status = _child_command(tmp_path, "tcp-before-log", release=release)
+    manager = _manager(tmp_path)
+    managed = manager.start_service(
+        "app",
+        _config(command, f"log:{MARKER}"),
+        ready_timeout=0.05,
+    )
+    try:
+        assert _wait(status.exists)
+        assert manager.wait_for_ready("app", timeout=0.2) is False
+        assert managed.readiness_state.value == "timed_out", "timeout-late-marker"
+        assert managed.ready_callback_handle is None
+        assert managed.log_capture is not None
+        assert managed.log_capture.callback_count == 0
+        assert managed.ready_monitor is None or not managed.ready_monitor.is_alive()
+
+        release.touch()
+        assert _wait(lambda: bool(_status(status).get("marker_emitted")))
+        assert manager.health_manager.get_health("app").state is not ServiceState.READY
+        assert not managed.ready_event.is_set()
+
+        process = MagicMock(pid=101)
+        process.poll.return_value = None
+        before_deadline = ManagedProcess(
+            name="deadline",
+            config=_config("python app.py", f"log:{MARKER}"),
+            process=process,
+            ready_event=threading.Event(),
+            generation=10,
+        )
+        manager._processes["deadline"] = before_deadline
+        assert manager._commit_ready(
+            before_deadline, observed_at=10.0, deadline=10.0
+        ), "marker-deadline-barrier"
+
+        timed_out = ManagedProcess(
+            name="replace",
+            config=_config("python app.py", f"log:{MARKER}"),
+            process=process,
+            ready_event=threading.Event(),
+            generation=11,
+        )
+        replacement = ManagedProcess(
+            name="replace",
+            config=_config("python app.py", f"log:{MARKER}"),
+            process=process,
+            ready_event=threading.Event(),
+            generation=12,
+        )
+        timed_out.readiness_state = importlib.import_module(
+            "haniel.core.process"
+        ).ReadinessState.TIMED_OUT
+        manager._processes["replace"] = replacement
+        assert manager._commit_ready(timed_out) is False, "timeout-generation-replace"
+        assert not replacement.ready_event.is_set()
+
+        # A READY commit and process exit must share one lifecycle order.  If
+        # health publication happens after releasing the generation lock, a
+        # delayed record_ready() can overwrite the later CRASHED state.
+        health_race = ManagedProcess(
+            name="health-race",
+            config=_config("python app.py", f"log:{MARKER}"),
+            process=process,
+            ready_event=threading.Event(),
+            generation=13,
+        )
+        manager._processes["health-race"] = health_race
+        ready_publish_entered = threading.Event()
+        release_ready_publish = threading.Event()
+        terminal_committed = threading.Event()
+        original_record_ready = manager.health_manager.record_ready
+
+        def blocking_record_ready(name: str) -> None:
+            ready_publish_entered.set()
+            assert release_ready_publish.wait(timeout=2)
+            original_record_ready(name)
+
+        monkeypatch.setattr(
+            manager.health_manager, "record_ready", blocking_record_ready
+        )
+        ready_thread = threading.Thread(
+            target=manager._commit_ready,
+            args=(health_race,),
+        )
+
+        def exit_generation() -> None:
+            assert manager._commit_terminal(
+                health_race,
+                importlib.import_module("haniel.core.process").ReadinessState.EXITED,
+            )
+            manager.health_manager.record_crash("health-race", 1)
+            terminal_committed.set()
+
+        exit_thread = threading.Thread(target=exit_generation)
+        ready_thread.start()
+        assert ready_publish_entered.wait(timeout=2), "ready-health-publish-entered"
+        exit_thread.start()
+        try:
+            assert not terminal_committed.wait(timeout=0.1), (
+                "health-publish-inside-generation-lock"
+            )
+        finally:
+            release_ready_publish.set()
+            ready_thread.join(timeout=2)
+            exit_thread.join(timeout=2)
+        assert not ready_thread.is_alive()
+        assert not exit_thread.is_alive()
+        assert health_race.readiness_state.value == "exited"
+        assert (
+            manager.health_manager.get_health("health-race").state
+            is ServiceState.CRASHED
+        )
+
+        stale_crash = ManagedProcess(
+            name="stale-crash",
+            config=_config("python old.py", f"log:{MARKER}"),
+            process=process,
+            ready_event=threading.Event(),
+            generation=14,
+        )
+        current_crash = ManagedProcess(
+            name="stale-crash",
+            config=_config("python new.py", f"log:{MARKER}"),
+            process=process,
+            ready_event=threading.Event(),
+            generation=15,
+        )
+        manager._processes["stale-crash"] = current_crash
+        assert manager._commit_crash(stale_crash, 1) is False
+        assert (
+            manager.health_manager.get_health("stale-crash").state
+            is ServiceState.STOPPED
+        )
+
+        for name, terminal in (
+            ("monitor-exit-first", "exited"),
+            ("timeout-before-crash", "timed_out"),
+        ):
+            crashed = ManagedProcess(
+                name=name,
+                config=_config("python app.py", f"log:{MARKER}"),
+                process=process,
+                ready_event=threading.Event(),
+                generation=16,
+            )
+            manager._processes[name] = crashed
+            manager.health_manager.record_start(name)
+            terminal_state = getattr(
+                importlib.import_module("haniel.core.process").ReadinessState,
+                terminal.upper(),
+            )
+            assert manager._commit_terminal(
+                crashed,
+                terminal_state,
+                record_running=terminal == "timed_out",
+            )
+            assert manager._commit_crash(crashed, 23), terminal
+            assert crashed.readiness_state is terminal_state
+            assert manager.health_manager.get_health(name).state is ServiceState.CRASHED
+    finally:
+        manager.stop_service("app", force=True)
+
+
+def test_invalid_reload_preserves_resident_snapshot_and_generation(
+    tmp_path: Path,
+) -> None:
+    """R7: reload validates before replacing any resident identity."""
+    validators = importlib.import_module("haniel.config.validators")
+    semantic_error = getattr(validators, "ConfigSemanticError", RuntimeError)
+    config_path = tmp_path / "haniel.yaml"
+    valid_service = ServiceConfig(run="python app.py", ready="delay:0.01")
+    valid = HanielConfig(services={"app": valid_service})
+    _dump_config(config_path, valid)
+    runner = ServiceRunner(valid, tmp_path, config_path=config_path)
+    process = MagicMock(pid=1234)
+    process.poll.return_value = None
+    managed = ManagedProcess(
+        name="app",
+        config=valid_service,
+        process=process,
+        ready_event=threading.Event(),
+        generation=7,
+    )
+    runner.process_manager._processes["app"] = managed
+    original_config = runner.config
+    original_service = runner._enabled_services["app"]
+
+    invalid = valid.model_copy(deep=True)
+    invalid.services["app"] = invalid.services["app"].model_copy(update={"ready": None})
+    _dump_config(config_path, invalid)
+
+    with pytest.raises(semantic_error):
+        runner.reload_config()
+    assert runner.config is original_config
+    assert runner._enabled_services["app"] is original_service
+    assert runner.process_manager._processes["app"] is managed
+    assert runner.process_manager.get_pid("app") == 1234
+    assert managed.generation == 7
+
+
+def test_invalid_handover_preserves_resident_snapshot_and_generation(
+    tmp_path: Path,
+) -> None:
+    """R8: exact handover bytes pass semantic validation before projection."""
+    handover = importlib.import_module("haniel.core.handover_config")
+    config_path = tmp_path / "haniel.yaml"
+    invalid = HanielConfig(
+        services={"app": ServiceConfig(run="python app.py", ready=None)}
+    )
+    before = _dump_config(config_path, invalid)
+    callbacks: list[str] = []
+
+    with pytest.raises(handover.HandoverConfigError):
+        handover._load_config_projection(config_path)
+    assert config_path.read_bytes() == before
+    assert callbacks == []
+
+
+def test_live_socket_and_late_marker_after_timeout_stay_not_ready(
+    tmp_path: Path,
+) -> None:
+    """I1: a live TCP child is not readiness evidence for a log probe."""
+    release = tmp_path / "late.marker"
+    command, status = _child_command(tmp_path, "tcp-before-log", release=release)
+    manager = _manager(tmp_path)
+    config = _config(command, f"log:{MARKER}")
+    managed = manager.start_service("app", config, ready_timeout=0.05)
+    capture = managed.log_capture
+    runner = _runner_with_manager(tmp_path, manager, "app", config)
+    try:
+        assert _wait(status.exists)
+        port = int(_status(status)["port"])
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            pass
+        assert manager.wait_for_ready("app", timeout=0.2) is False
+        assert runner._collect_services_info()[0]["ready"] is False
+        release.touch()
+        assert _wait(lambda: bool(_status(status).get("marker_emitted")))
+        assert manager.health_manager.get_health("app").state is not ServiceState.READY
+        assert runner._collect_services_info()[0]["ready"] is False
+    finally:
+        manager.stop_service("app", force=True)
+    assert capture is not None
+    assert len(capture._pattern_callbacks) == 0
+    monitor = getattr(managed, "ready_monitor", None)
+    assert monitor is None or not monitor.is_alive()
+
+
+def test_http_200_before_readiness_marker_stays_not_ready(tmp_path: Path) -> None:
+    """I2: service-owned HTTP is not a substitute for the configured log marker."""
+    release = tmp_path / "http.marker"
+    command, status = _child_command(tmp_path, "http-before-log", release=release)
+    manager = _manager(tmp_path)
+    managed = manager.start_service(
+        "app", _config(command, f"log:{MARKER}"), ready_timeout=2
+    )
+    try:
+        assert _wait(status.exists)
+        port = int(_status(status)["port"])
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) as r:
+            assert r.status == 200
+        assert not managed.ready_event.is_set()
+        release.touch()
+        assert manager.wait_for_ready("app", timeout=2)
+        assert manager.health_manager.get_health("app").state is ServiceState.READY
+    finally:
+        manager.stop_service("app", force=True)
+
+
+def test_collect_services_info_ready_matches_current_probe_transition(
+    tmp_path: Path,
+) -> None:
+    """I3: external ready follows only the current process probe transition."""
+    release = tmp_path / "collector.marker"
+    command, status = _child_command(tmp_path, "tcp-before-log", release=release)
+    manager = _manager(tmp_path)
+    config = _config(command, f"log:{MARKER}")
+    runner = _runner_with_manager(tmp_path, manager, "app", config)
+    manager.start_service("app", config, ready_timeout=2)
+    try:
+        assert _wait(status.exists)
+        assert runner._collect_services_info()[0]["ready"] is False
+        release.touch()
+        assert manager.wait_for_ready("app", timeout=2)
+        assert runner._collect_services_info()[0]["ready"] is True
+        assert manager.stop_service("app", force=True)
+        assert runner._collect_services_info()[0]["ready"] is False
+    finally:
+        manager.stop_service("app", force=True)

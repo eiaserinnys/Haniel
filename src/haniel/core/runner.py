@@ -36,6 +36,7 @@ from ..config import (
     ServiceConfig,
     ShutdownConfig,
 )
+from ..config.readiness import ready_port
 from ..config.release_activation import (
     ReleaseManifestActivationRequired,
     activate_release_manifest,
@@ -436,15 +437,16 @@ class ServiceRunner:
         Raises:
             RuntimeError: If config_path was not provided at construction time.
         """
-        from ..config import load_config
-        from .service_lifecycle import CONFIG_WRITE_LOCK
+        from ..config import load_config, require_valid_config
+        from .service_lifecycle import config_file_transaction
 
         if not self.config_path:
             raise RuntimeError("config_path is not set — cannot reload configuration")
 
-        with CONFIG_WRITE_LOCK:
+        with config_file_transaction(self.config_path):
             snapshot = self._snapshot_config_state()
             new_config = load_config(self.config_path)
+            require_valid_config(new_config)
             self._replace_config_snapshot(new_config, snapshot.generation)
 
         logger.info("Configuration reloaded from %s", self.config_path)
@@ -929,6 +931,9 @@ class ServiceRunner:
         logger.info(f"Starting service: {name}")
 
         try:
+            from ..config.validators import require_valid_service_readiness
+
+            require_valid_service_readiness(name, config)
             if not self.execute_hook(name, "pre_start"):
                 logger.error(f"pre_start hook failed for {name}, aborting start")
                 self._record_start_failure(name, "pre_start hook failed")
@@ -1314,13 +1319,7 @@ class ServiceRunner:
         services = []
         for name, svc_config in snapshot.config.services.items():
             health = self.health_manager.get_health(name)
-            # Extract port from ready condition (format: "port:N")
-            port = None
-            if svc_config.ready and svc_config.ready.startswith("port:"):
-                try:
-                    port = int(svc_config.ready.split(":")[1])
-                except (ValueError, IndexError):
-                    pass
+            port = ready_port(svc_config.ready)
             # Get PID via public method
             pid = self.process_manager.get_pid(name)
             process_status = "running" if pid is not None else "stopped"
@@ -2343,17 +2342,15 @@ class ServiceRunner:
             raise ReleaseManifestActivationRequired(
                 f"release manifest discovered for {repo_name}, but config_path is unavailable"
             )
-        from .service_lifecycle import CONFIG_WRITE_LOCK
+        from .service_lifecycle import config_file_transaction
 
-        with CONFIG_WRITE_LOCK:
+        with config_file_transaction(self.config_path):
             plan = plan_release_manifest_activation(
                 self.config_path, repo_name, discovered
             )
             result = activate_release_manifest(
                 self.config_path,
-                repo_name,
-                discovered,
-                expected_sha256=plan.config_sha256,
+                plan=plan,
             )
             self.reload_config()
         logger.warning(

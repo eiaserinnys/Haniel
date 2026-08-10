@@ -17,8 +17,9 @@ from .child_env import sanitized_child_env
 
 from ..config.io import backup_config, read_config, restore_config, write_config
 from ..config.model import HanielConfig, RepoConfig, ServiceConfig
-from ..config.validators import validate_config
+from ..config.validators import require_valid_config
 from .git import clone_repo
+from .lifecycle_locks import ConfigTransactionLock
 
 if TYPE_CHECKING:
     from .runner import ServiceRunner
@@ -26,13 +27,40 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 CONFIG_WRITE_LOCK = threading.RLock()
+_CONFIG_TRANSACTION_LOCAL = threading.local()
+
+
+@contextmanager
+def config_file_transaction(config_path: Path):
+    """Serialize one config identity across threads and operating processes."""
+
+    resolved = Path(config_path).expanduser().resolve(strict=False)
+    key = os.path.normcase(str(resolved))
+    with CONFIG_WRITE_LOCK:
+        depths = getattr(_CONFIG_TRANSACTION_LOCAL, "depths", None)
+        if depths is None:
+            depths = {}
+            _CONFIG_TRANSACTION_LOCAL.depths = depths
+        depth = depths.get(key, 0)
+        depths[key] = depth + 1
+        try:
+            if depth:
+                yield
+            else:
+                with ConfigTransactionLock(resolved):
+                    yield
+        finally:
+            if depth:
+                depths[key] = depth
+            else:
+                depths.pop(key, None)
 
 
 @contextmanager
 def config_write_transaction(runner: "ServiceRunner"):
     """Serialize disk config bytes and the resident snapshot in one order."""
 
-    with CONFIG_WRITE_LOCK:
+    with config_file_transaction(_require_config_path(runner)):
         yield
 
 
@@ -48,6 +76,7 @@ def _commit_config(
     config: HanielConfig,
     runner: "ServiceRunner",
 ) -> None:
+    require_valid_config(config)
     backup_config(config_path)
     try:
         write_config(config_path, config)
@@ -58,9 +87,7 @@ def _commit_config(
 
 
 def _validate_or_raise(config: HanielConfig) -> None:
-    errors = validate_config(config)
-    if errors:
-        raise ValueError(str(errors[0]))
+    require_valid_config(config)
 
 
 def _repo_path(config_dir: Path, repo_config: RepoConfig) -> Path:

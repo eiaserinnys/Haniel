@@ -7,12 +7,15 @@ repos: {}
 services:
   service-a:
     run: python -m service_a
+    ready: delay:0.01
     after: service-c
 
   service-b:
     run: python -m service_b
+    ready: delay:0.01
     after: service-a
 
   service-c:
     run: python -m service_c
+    ready: delay:0.01
     after: service-b

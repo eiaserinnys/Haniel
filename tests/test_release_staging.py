@@ -258,6 +258,7 @@ def test_required_manifest_without_config_identity_fails_before_live_activation(
             services={
                 "writer": ServiceConfig(
                     run="writer",
+                    ready="delay:0.01",
                     repo="app",
                     release_env_file=str(env_file),
                 )
@@ -310,6 +311,7 @@ def test_required_manifest_public_callers_bind_config_before_live_activation(
                 "services": {
                     "writer": {
                         "run": "writer",
+                        "ready": "delay:0.01",
                         "repo": "app",
                         "release_env_file": str(env_file),
                     }

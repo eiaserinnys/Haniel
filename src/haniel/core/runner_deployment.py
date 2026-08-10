@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import uuid4
 
+from ..config.readiness import ready_port
+
 from .deployment import (
     DeploymentCallbacks,
     DeploymentCoordinator,
@@ -410,12 +412,8 @@ class RunnerDeploymentAdapter:
                 down.append(f"{name} (process not running)")
                 continue
             service = self.config_snapshot.enabled_services[name]
-            if service.ready and service.ready.startswith("port:"):
-                try:
-                    port = int(service.ready.removeprefix("port:"))
-                except ValueError:
-                    down.append(f"{name} (invalid ready port: {service.ready})")
-                    continue
+            port = ready_port(service.ready)
+            if port is not None:
                 if not self.runner.process_manager.platform.is_port_owned_by_process_tree(
                     port, pid
                 ):

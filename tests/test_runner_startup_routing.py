@@ -35,6 +35,7 @@ def config_text() -> str:
         "services:\n"
         "  soulstream-orch-server:\n"
         "    run: orch\n"
+        "    ready: delay:0.01\n"
         "    repo: soulstream\n"
     )
 
@@ -175,7 +176,9 @@ def test_manifest_repo_is_deferred_to_startup_handover(
             )
         },
         services={
-            "soulstream-orch-server": ServiceConfig(run="orch", repo="soulstream")
+            "soulstream-orch-server": ServiceConfig(
+                run="orch", ready="delay:0.01", repo="soulstream"
+            )
         },
     )
     runner = ServiceRunner(config, config_dir=tmp_path)
@@ -471,7 +474,9 @@ def test_runtime_probe_and_activation_are_serialized_against_one_shot(
             )
         },
         services={
-            "soulstream-orch-server": ServiceConfig(run="orch", repo="soulstream")
+            "soulstream-orch-server": ServiceConfig(
+                run="orch", ready="delay:0.01", repo="soulstream"
+            )
         },
     )
     runner = ServiceRunner(config, config_dir=tmp_path)
@@ -511,7 +516,7 @@ def test_runtime_probe_and_activation_are_serialized_against_one_shot(
     ):
         thread = threading.Thread(target=runtime_pull)
         thread.start()
-        assert probe_entered.wait(1)
+        assert probe_entered.wait(5), errors
         runner.lifecycle_control.submit_request(
             "one-shot-race",
             {

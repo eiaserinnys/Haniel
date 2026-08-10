@@ -71,6 +71,7 @@ def test_digest_canonicalizes_relative_and_absolute_env_paths(tmp_path: Path) ->
                     "services:",
                     "  app:",
                     "    run: node app.js",
+                    "    ready: delay:0.01",
                     "    repo: app",
                     f"    release_env_file: {json.dumps(env_path)}",
                     "",

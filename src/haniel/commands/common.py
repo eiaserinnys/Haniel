@@ -5,7 +5,12 @@ from pathlib import Path
 import click
 from pydantic import ValidationError as PydanticValidationError
 
-from haniel.config import HanielConfig, load_config, validate_config
+from haniel.config import (
+    ConfigSemanticError,
+    HanielConfig,
+    load_config,
+    require_valid_config,
+)
 
 
 def validate_config_file(
@@ -33,4 +38,8 @@ def load_and_validate(config_path: Path) -> tuple[HanielConfig | None, list[str]
     except Exception as error:
         return None, [f"Failed to load config: {error}"]
 
-    return config, [str(error) for error in validate_config(config)]
+    try:
+        require_valid_config(config)
+    except ConfigSemanticError as error:
+        return config, [str(detail) for detail in error.errors]
+    return config, []

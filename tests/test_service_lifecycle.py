@@ -47,6 +47,7 @@ def test_register_service_clones_repo_runs_initial_hook_and_starts(tmp_path: Pat
             name="web",
             service_config={
                 "run": "python app.py",
+                "ready": "delay:0.01",
                 "repo": "main",
                 "hooks": {"post_pull": "echo build"},
             },
@@ -98,7 +99,11 @@ def test_register_service_reuses_existing_clone_without_cloning(tmp_path: Path):
         result = register_service(
             runner,
             name="web",
-            service_config={"run": "python app.py", "repo": "main"},
+            service_config={
+                "run": "python app.py",
+                "ready": "delay:0.01",
+                "repo": "main",
+            },
         )
 
     assert result["clone"] == "existing"
@@ -171,7 +176,11 @@ def test_register_service_rolls_back_config_and_partial_clone_on_clone_failure(
             register_service(
                 runner,
                 name="web",
-                service_config={"run": "python app.py", "repo": "main"},
+                service_config={
+                    "run": "python app.py",
+                    "ready": "delay:0.01",
+                    "repo": "main",
+                },
                 repo="main",
                 repo_config={
                     "url": "git@github.com:test/web.git",
@@ -192,8 +201,10 @@ def test_reload_service_definition_restarts_only_the_target_service(tmp_path: Pa
     old_config = HanielConfig(
         poll_interval=60,
         services={
-            "web": ServiceConfig(run="python old.py"),
-            "worker": ServiceConfig(run="python worker.py", after=["web"]),
+            "web": ServiceConfig(run="python old.py", ready="delay:0.01"),
+            "worker": ServiceConfig(
+                run="python worker.py", ready="delay:0.01", after=["web"]
+            ),
         },
         repos={},
     )
@@ -201,8 +212,10 @@ def test_reload_service_definition_restarts_only_the_target_service(tmp_path: Pa
     new_config = HanielConfig(
         poll_interval=60,
         services={
-            "web": ServiceConfig(run="python new.py"),
-            "worker": ServiceConfig(run="python worker.py", after=["web"]),
+            "web": ServiceConfig(run="python new.py", ready="delay:0.01"),
+            "worker": ServiceConfig(
+                run="python worker.py", ready="delay:0.01", after=["web"]
+            ),
         },
         repos={},
     )

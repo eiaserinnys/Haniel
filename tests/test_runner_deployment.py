@@ -968,11 +968,12 @@ def test_quiescence_receipt_and_fresh_cleanup_use_real_managed_processes(
     config = HanielConfig(
         repos={"app": RepoConfig(url="git@example/app", path="./repo")},
         services={
-            "first": ServiceConfig(run=sleep_command, repo="app"),
+            "first": ServiceConfig(run=sleep_command, repo="app", ready="delay:0.01"),
             "second": ServiceConfig(
                 run=sleep_command,
                 repo="app",
                 after=["first"],
+                ready="delay:0.01",
             ),
         },
     )
@@ -1034,11 +1035,11 @@ def test_fresh_coordinator_failure_stops_actual_partial_processes(
     second = (
         "/definitely/not/a/haniel-test-command" if failure == "second-start" else sleep
     )
-    second_ready = "log:NEVER" if failure == "readiness" else None
+    second_ready = "log:NEVER" if failure == "readiness" else "delay:0.01"
     config = original.config.model_copy(
         update={
             "services": {
-                "first": ServiceConfig(run=sleep, repo="app"),
+                "first": ServiceConfig(run=sleep, repo="app", ready="delay:0.01"),
                 "second": ServiceConfig(
                     run=second,
                     repo="app",

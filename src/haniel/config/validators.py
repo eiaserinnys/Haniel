@@ -13,9 +13,9 @@ Validations performed:
 
 from dataclasses import dataclass
 from typing import Literal
-import re
 
-from .model import HanielConfig
+from .model import HanielConfig, ServiceConfig
+from .readiness import ReadinessConfigError, ReadyConditionType, parse_ready_condition
 
 
 @dataclass
@@ -25,6 +25,7 @@ class ValidationError:
     message: str
     severity: Literal["error", "warning"]
     location: str | None = None
+    code: str | None = None
 
     def __str__(self) -> str:
         if self.location:
@@ -43,11 +44,86 @@ def validate_config(config: HanielConfig) -> list[ValidationError]:
     """
     errors: list[ValidationError] = []
 
+    errors.extend(check_readiness(config))
     errors.extend(check_circular_dependencies(config))
     errors.extend(check_port_conflicts(config))
     errors.extend(check_duplicate_paths(config))
     errors.extend(check_missing_references(config))
 
+    return errors
+
+
+class ConfigSemanticError(ValueError):
+    """A schema-valid configuration violates runtime semantics."""
+
+    code = "CONFIG_SEMANTIC_INVALID"
+
+    def __init__(self, errors: list[ValidationError]):
+        self.errors = tuple(errors)
+        detail = "; ".join(str(error) for error in errors)
+        super().__init__(f"{self.code}: {detail}")
+
+
+@dataclass(frozen=True)
+class ConfigValidationEvidence:
+    """Stable evidence that the canonical validator accepted a candidate."""
+
+    revision: str
+    error_count: int
+
+
+VALIDATOR_REVISION = "readiness-v1"
+
+
+def require_valid_config(config: HanielConfig) -> ConfigValidationEvidence:
+    """Require the complete canonical semantic validator to pass."""
+
+    errors = validate_config(config)
+    if errors:
+        raise ConfigSemanticError(errors)
+    return ConfigValidationEvidence(VALIDATOR_REVISION, 0)
+
+
+def require_valid_service_readiness(name: str, service: ServiceConfig) -> None:
+    """Validate a direct ProcessManager call before any lifecycle side effect."""
+
+    errors = _readiness_errors(name, service)
+    if errors:
+        raise ConfigSemanticError(errors)
+
+
+def _readiness_errors(name: str, service: ServiceConfig) -> list[ValidationError]:
+    if not service.enabled:
+        return []
+    if service.ready is None:
+        return [
+            ValidationError(
+                message="Enabled service requires an explicit readiness condition",
+                severity="error",
+                location=f"services.{name}.ready",
+                code="READINESS_REQUIRED",
+            )
+        ]
+    try:
+        parse_ready_condition(service.ready)
+    except ReadinessConfigError as error:
+        return [
+            ValidationError(
+                message=str(error),
+                severity="error",
+                location=f"services.{name}.ready",
+                code=error.code,
+            )
+        ]
+    return []
+
+
+def check_readiness(config: HanielConfig) -> list[ValidationError]:
+    """Require one valid explicit readiness condition per enabled service."""
+
+    errors: list[ValidationError] = []
+    for name, service in config.services.items():
+        errors.extend(_readiness_errors(name, service))
     return errors
 
 
@@ -131,15 +207,17 @@ def check_port_conflicts(config: HanielConfig) -> list[ValidationError]:
     """
     errors: list[ValidationError] = []
 
-    # Extract ports from ready conditions
-    port_pattern = re.compile(r"^port:(\d+)$")
     port_users: dict[int, list[str]] = {}
 
     for name, service in config.services.items():
         if service.ready:
-            match = port_pattern.match(service.ready)
-            if match:
-                port = int(match.group(1))
+            try:
+                condition = parse_ready_condition(service.ready)
+            except ReadinessConfigError:
+                continue
+            if condition.type is ReadyConditionType.PORT:
+                port = condition.port
+                assert port is not None
                 if port not in port_users:
                     port_users[port] = []
                 port_users[port].append(name)

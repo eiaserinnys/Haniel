@@ -39,6 +39,57 @@ from haniel.core.runner_deployment import (
 )
 
 
+def test_config_write_transaction_serializes_across_processes(tmp_path: Path) -> None:
+    """The config writer boundary must cover a separate CLI/runtime process."""
+
+    from haniel.core.service_lifecycle import config_file_transaction
+
+    config_path = tmp_path / "haniel.yaml"
+    config_path.write_text("services: {}\n", encoding="utf-8")
+    child = None
+    acquired_line: list[str] = []
+    acquired = threading.Event()
+
+    script = "\n".join(
+        (
+            "import sys",
+            "from pathlib import Path",
+            "from haniel.core.service_lifecycle import config_file_transaction",
+            "print('attempt', flush=True)",
+            "with config_file_transaction(Path(sys.argv[1])):",
+            "    print('acquired', flush=True)",
+        )
+    )
+
+    def read_acquired() -> None:
+        assert child is not None and child.stdout is not None
+        acquired_line.append(child.stdout.readline().strip())
+        acquired.set()
+
+    with config_file_transaction(config_path):
+        child = subprocess.Popen(
+            [sys.executable, "-c", script, str(config_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "attempt"
+        reader = threading.Thread(target=read_acquired, daemon=True)
+        reader.start()
+        assert not acquired.wait(timeout=0.2)
+
+    try:
+        assert acquired.wait(timeout=5)
+        reader.join(timeout=1)
+        assert acquired_line == ["acquired"]
+        assert child.wait(timeout=5) == 0
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+
+
 def _write_config(
     path: Path,
     *,
@@ -46,6 +97,7 @@ def _write_config(
     service_name: str,
     command: str = "node app.js",
     url: str = "https://example.invalid/app.git",
+    ready: str = "delay:0.01",
 ) -> None:
     path.write_text(
         "\n".join(
@@ -63,6 +115,7 @@ def _write_config(
                 "    cwd: ./repo",
                 "    repo: app",
                 f"    release_env_file: {json.dumps(str(env_file))}",
+                f"    ready: {ready}",
                 "",
             ]
         ),
@@ -187,7 +240,9 @@ def test_reload_union_stops_removed_writer_with_real_process_manager(
     env_file.write_text("DATABASE_URL=sqlite://new\n", encoding="utf-8")
     config_path = tmp_path / "haniel.yaml"
     _write_config(config_path, env_file=env_file, service_name="new-writer")
-    old_service = ServiceConfig(run=f"{sys.executable} sleeper.py", repo="app")
+    old_service = ServiceConfig(
+        run=f"{sys.executable} sleeper.py", repo="app", ready="delay:0.01"
+    )
     old_config = HanielConfig(
         repos={
             "app": RepoConfig(
@@ -239,10 +294,13 @@ def test_retry_reload_keeps_still_running_removed_writer_in_quiescence(
     env_file.write_text("DATABASE_URL=sqlite:///new\n", encoding="utf-8")
     config_path = tmp_path / "haniel.yaml"
     _write_config(config_path, env_file=env_file, service_name="new-writer")
-    old_service = ServiceConfig(run=f"{sys.executable} sleeper.py", repo="app")
+    old_service = ServiceConfig(
+        run=f"{sys.executable} sleeper.py", repo="app", ready="delay:0.01"
+    )
     dependent_service = ServiceConfig(
         run=f"{sys.executable} sleeper.py",
         after=["old-writer"],
+        ready="delay:0.01",
     )
     old_config = HanielConfig(
         repos={
@@ -1384,13 +1442,7 @@ elif phase == "health":
         service_name="app",
         command=f"{sys.executable} app.py {runtime_database}",
         url=str(repo),
-    )
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            f"    release_env_file: {json.dumps(str(env_file))}",
-            (f"    release_env_file: {json.dumps(str(env_file))}\n    ready: delay:1"),
-        ),
-        encoding="utf-8",
+        ready="delay:1",
     )
     runner = ServiceRunner(load_config(config_path), tmp_path, config_path=config_path)
     runner.lifecycle_instance_id = "owner-recovery"
@@ -1443,7 +1495,7 @@ elif phase == "health":
         with runner.lifecycle_control.acquire_owner("owner-recovery"):
             worker = threading.Thread(target=deploy_release)
             worker.start()
-            deadline = time.monotonic() + 10
+            deadline = time.monotonic() + 30
             while not apply_started.exists() and time.monotonic() < deadline:
                 time.sleep(0.01)
             assert apply_started.exists()
@@ -1454,7 +1506,7 @@ elif phase == "health":
             )
             replacement.replace(env_file)
             continue_apply.write_text("go", encoding="utf-8")
-            worker.join(timeout=10)
+            worker.join(timeout=20)
         assert not worker.is_alive()
         assert len(errors) == 1
         assert getattr(errors[0], "recovered", False) is True

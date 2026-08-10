@@ -7,11 +7,19 @@ It also supports real-time pattern matching for ready: log:{pattern} conditions.
 
 import re
 import threading
+from dataclasses import dataclass
 from collections import deque
 from datetime import datetime
 from io import TextIOWrapper
 from pathlib import Path
 from typing import Callable
+
+
+@dataclass(frozen=True)
+class PatternCallbackHandle:
+    """Exact identity for one registered pattern callback."""
+
+    identifier: int
 
 
 class LogCapture:
@@ -43,7 +51,10 @@ class LogCapture:
         self.buffer_size = buffer_size
 
         self._buffer: deque[str] = deque(maxlen=buffer_size)
-        self._pattern_callbacks: list[tuple[re.Pattern, Callable[[str], None]]] = []
+        self._pattern_callbacks: list[
+            tuple[PatternCallbackHandle, re.Pattern[str], Callable[[str], None]]
+        ] = []
+        self._next_callback_identifier = 1
         self._lock = threading.Lock()
         self._log_file: TextIOWrapper | None = None
         self._log_path: Path | None = None
@@ -89,6 +100,7 @@ class LogCapture:
         timestamp = datetime.now().strftime("%H:%M:%S")
         formatted = f"[{timestamp}] [{source}] {line}"
 
+        matched_callbacks: list[Callable[[str], None]] = []
         with self._lock:
             # Add to buffer
             self._buffer.append(formatted)
@@ -98,20 +110,20 @@ class LogCapture:
                 self._log_file.write(f"{formatted}\n")
 
             # Check pattern callbacks
-            for pattern, callback in self._pattern_callbacks:
+            for _handle, pattern, callback in self._pattern_callbacks:
                 if pattern.search(line):
-                    # Call callback in a separate thread to avoid blocking
-                    threading.Thread(
-                        target=callback,
-                        args=(line,),
-                        daemon=True,
-                    ).start()
+                    matched_callbacks.append(callback)
+
+        # Readiness callbacks only record evidence. Calling outside the capture
+        # lock gives their lifecycle owner an explicit happens-before boundary.
+        for callback in matched_callbacks:
+            callback(line)
 
     def add_pattern_callback(
         self,
         pattern: str,
         callback: Callable[[str], None],
-    ) -> None:
+    ) -> PatternCallbackHandle:
         """Add a callback to be called when a pattern is matched.
 
         Args:
@@ -120,18 +132,33 @@ class LogCapture:
         """
         compiled = re.compile(pattern)
         with self._lock:
-            self._pattern_callbacks.append((compiled, callback))
+            handle = PatternCallbackHandle(self._next_callback_identifier)
+            self._next_callback_identifier += 1
+            self._pattern_callbacks.append((handle, compiled, callback))
+            return handle
 
-    def remove_pattern_callback(self, pattern: str) -> None:
+    def remove_pattern_callback(self, handle: PatternCallbackHandle | str) -> None:
         """Remove a pattern callback.
 
         Args:
             pattern: The pattern string to remove
         """
         with self._lock:
-            self._pattern_callbacks = [
-                (p, c) for p, c in self._pattern_callbacks if p.pattern != pattern
-            ]
+            if isinstance(handle, PatternCallbackHandle):
+                self._pattern_callbacks = [
+                    entry for entry in self._pattern_callbacks if entry[0] != handle
+                ]
+            else:
+                self._pattern_callbacks = [
+                    entry
+                    for entry in self._pattern_callbacks
+                    if entry[1].pattern != handle
+                ]
+
+    @property
+    def callback_count(self) -> int:
+        with self._lock:
+            return len(self._pattern_callbacks)
 
     def get_recent_lines(self, n: int | None = None) -> list[str]:
         """Get recent log lines from the buffer.

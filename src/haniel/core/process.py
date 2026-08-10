@@ -20,60 +20,37 @@ import threading
 import time
 import urllib.request
 import urllib.error
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Callable
 
 from ..config import ServiceConfig, ShutdownConfig
+from ..config.readiness import ReadyCondition, ReadyConditionType
+from ..config.validators import require_valid_service_readiness
 from ..platform import get_platform_handler
 from .health import HealthManager, ServiceState
-from .logs import LogCapture, LogManager, StreamReader
+from .logs import (
+    LogCapture,
+    LogManager,
+    PatternCallbackHandle,
+    StreamReader,
+)
 from .service_environment import ServiceEnvironmentFile, service_process_environment
 from .stale_instance import PortInUseError, StaleInstanceCleaner, extract_ready_port
 
 logger = logging.getLogger(__name__)
 
 
-class ReadyConditionType(Enum):
-    """Types of ready conditions."""
+class ReadinessState(Enum):
+    """Terminal-monotonic readiness state for one process generation."""
 
-    PORT = "port"
-    DELAY = "delay"
-    LOG = "log"
-    HTTP = "http"
-
-
-@dataclass
-class ReadyCondition:
-    """Parsed ready condition."""
-
-    type: ReadyConditionType
-    value: str
-
-    @classmethod
-    def parse(cls, condition: str) -> "ReadyCondition":
-        """Parse a ready condition string.
-
-        Args:
-            condition: Condition string like "port:8080", "delay:5", "log:Ready", "http://..."
-
-        Returns:
-            ReadyCondition instance
-
-        Raises:
-            ValueError: If the condition format is invalid
-        """
-        if condition.startswith("port:"):
-            return cls(ReadyConditionType.PORT, condition[5:])
-        elif condition.startswith("delay:"):
-            return cls(ReadyConditionType.DELAY, condition[6:])
-        elif condition.startswith("log:"):
-            return cls(ReadyConditionType.LOG, condition[4:])
-        elif condition.startswith("http:"):
-            return cls(ReadyConditionType.HTTP, condition[5:])
-        else:
-            raise ValueError(f"Unknown ready condition format: {condition}")
+    PENDING = "pending"
+    READY = "ready"
+    TIMED_OUT = "timed_out"
+    EXITED = "exited"
+    STOPPED = "stopped"
+    REPLACED = "replaced"
 
 
 @dataclass
@@ -88,6 +65,18 @@ class ManagedProcess:
     stderr_reader: StreamReader | None = None
     ready_event: threading.Event | None = None
     intentional_stop: bool = False
+    generation: int = 0
+    readiness_state: ReadinessState = ReadinessState.PENDING
+    readiness_started_at: float | None = None
+    readiness_deadline: float | None = None
+    ready_condition: ReadyCondition | None = None
+    marker_observed_at: float | None = None
+    marker_event: threading.Event = field(default_factory=threading.Event)
+    readiness_done_event: threading.Event = field(default_factory=threading.Event)
+    ready_callback_handle: PatternCallbackHandle | None = None
+    ready_monitor: threading.Thread | None = None
+    on_ready: Callable[[], None] | None = None
+    crash_committed: bool = False
     _ready_callback_added: bool = False
 
 
@@ -133,7 +122,8 @@ class ProcessManager:
         self.immediate_exit_window = self.IMMEDIATE_EXIT_WINDOW
 
         self._processes: dict[str, ManagedProcess] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._next_generation = 1
 
     def start_service(
         self,
@@ -161,6 +151,11 @@ class ProcessManager:
         Raises:
             RuntimeError: If the service is already running
         """
+        # This is the direct-call boundary. It must fail before stale-process
+        # cleanup, log files, health mutation, environment reads, or spawn.
+        require_valid_service_readiness(name, config)
+        condition = ReadyCondition.parse(config.ready or "")
+
         with self._lock:
             if name in self._processes and self._processes[name].process:
                 if self._processes[name].process.poll() is None:
@@ -234,7 +229,24 @@ class ProcessManager:
             process=process,
             log_capture=log_capture,
             ready_event=threading.Event(),
+            ready_condition=condition,
+            on_ready=on_ready,
         )
+
+        timeout = self.DEFAULT_READY_TIMEOUT if ready_timeout is None else ready_timeout
+        managed.readiness_started_at = time.monotonic()
+        managed.readiness_deadline = managed.readiness_started_at + timeout
+
+        # Install current generation and arm log evidence before either stream
+        # reader can consume the first child line.
+        with self._lock:
+            previous = self._processes.get(name)
+            if previous is not None:
+                self._set_terminal_locked(previous, ReadinessState.REPLACED)
+            managed.generation = self._next_generation
+            self._next_generation += 1
+            self._processes[name] = managed
+            self._arm_log_evidence_locked(managed)
 
         # Start stream readers
         if process.stdout:
@@ -253,12 +265,7 @@ class ProcessManager:
             )
             managed.stderr_reader.start()
 
-        # Store the managed process
-        with self._lock:
-            self._processes[name] = managed
-
         # Start ready condition monitoring
-        timeout = ready_timeout or self.DEFAULT_READY_TIMEOUT
         self._start_ready_monitor(managed, timeout, on_ready)
 
         # Start crash monitor
@@ -598,8 +605,9 @@ class ProcessManager:
         if managed.ready_event is None:
             return True
 
-        timeout = timeout or self.DEFAULT_READY_TIMEOUT
-        return managed.ready_event.wait(timeout=timeout)
+        timeout = self.DEFAULT_READY_TIMEOUT if timeout is None else timeout
+        managed.readiness_done_event.wait(timeout=timeout)
+        return managed.readiness_state is ReadinessState.READY
 
     def _start_ready_monitor(
         self,
@@ -614,100 +622,213 @@ class ProcessManager:
             timeout: Maximum time to wait for ready
             on_ready: Callback when ready
         """
-        ready_str = managed.config.ready
-        if not ready_str:
-            # No ready condition, mark as ready immediately
-            if managed.ready_event:
-                managed.ready_event.set()
-            self.health_manager.record_running(managed.name)
-            if on_ready:
-                on_ready()
-            return
-
-        try:
-            condition = ReadyCondition.parse(ready_str)
-        except ValueError:
-            # Invalid condition, mark as ready
-            if managed.ready_event:
-                managed.ready_event.set()
-            self.health_manager.record_running(managed.name)
-            return
-
-        # Start ready monitor thread
         thread = threading.Thread(
             target=self._ready_monitor_loop,
-            args=(managed, condition, timeout, on_ready),
+            args=(managed,),
             daemon=True,
+            name=f"haniel-ready-{managed.name}-{managed.generation}",
         )
+        with self._lock:
+            if self._is_current_pending_locked(managed):
+                managed.ready_monitor = thread
         thread.start()
+
+    def _arm_log_evidence_locked(self, managed: ManagedProcess) -> None:
+        condition = managed.ready_condition
+        if condition is None or condition.type is not ReadyConditionType.LOG:
+            return
+        if managed.log_capture is None:
+            return
+
+        def record_marker(_line: str) -> None:
+            observed_at = time.monotonic()
+            with self._lock:
+                if not self._is_current_pending_locked(managed):
+                    return
+                if managed.marker_observed_at is None:
+                    managed.marker_observed_at = observed_at
+                managed.marker_event.set()
+
+        managed.ready_callback_handle = managed.log_capture.add_pattern_callback(
+            condition.value, record_marker
+        )
+        managed._ready_callback_added = True
 
     def _ready_monitor_loop(
         self,
         managed: ManagedProcess,
-        condition: ReadyCondition,
-        timeout: float,
-        on_ready: Callable[[], None] | None,
     ) -> None:
-        """Monitor loop for ready condition."""
-        start_time = time.time()
+        """The only authority that may commit READY for this generation."""
+        condition = managed.ready_condition
+        assert condition is not None
+        try:
+            while True:
+                with self._lock:
+                    if not self._is_current_pending_locked(managed):
+                        return
+                    process = managed.process
+                    deadline = managed.readiness_deadline
+                    started_at = managed.readiness_started_at
+                    marker_observed_at = managed.marker_observed_at
 
-        # Special handling for delay condition
-        if condition.type == ReadyConditionType.DELAY:
-            try:
-                delay = float(condition.value)
-                if delay > 0:
-                    time.sleep(min(delay, timeout))
-            except ValueError:
-                pass
-            # Mark as ready after delay
-            if managed.ready_event:
+                if process is None or process.poll() is not None:
+                    self._commit_terminal(managed, ReadinessState.EXITED)
+                    return
+
+                now = time.monotonic()
+                assert deadline is not None
+                assert started_at is not None
+
+                if condition.type is ReadyConditionType.LOG:
+                    if marker_observed_at is not None:
+                        self._commit_ready(
+                            managed,
+                            observed_at=marker_observed_at,
+                            deadline=deadline,
+                        )
+                        return
+                elif condition.type is ReadyConditionType.DELAY:
+                    observed_at = started_at + float(condition.value)
+                    if now >= observed_at:
+                        self._commit_ready(
+                            managed,
+                            observed_at=observed_at,
+                            deadline=deadline,
+                        )
+                        return
+                elif self._check_ready_condition(condition, managed):
+                    self._commit_ready(
+                        managed,
+                        observed_at=time.monotonic(),
+                        deadline=deadline,
+                    )
+                    return
+
+                now = time.monotonic()
+                if now >= deadline:
+                    self._commit_terminal(
+                        managed, ReadinessState.TIMED_OUT, record_running=True
+                    )
+                    return
+                managed.marker_event.wait(min(self.POLL_INTERVAL, deadline - now))
+                managed.marker_event.clear()
+        finally:
+            with self._lock:
+                if managed.ready_monitor is threading.current_thread():
+                    managed.ready_monitor = None
+
+    def _is_current_pending_locked(self, managed: ManagedProcess) -> bool:
+        return (
+            self._processes.get(managed.name) is managed
+            and managed.readiness_state is ReadinessState.PENDING
+        )
+
+    def _detach_ready_callback_locked(self, managed: ManagedProcess) -> None:
+        handle = managed.ready_callback_handle
+        if handle is not None and managed.log_capture is not None:
+            managed.log_capture.remove_pattern_callback(handle)
+        managed.ready_callback_handle = None
+        managed._ready_callback_added = False
+
+    def _set_terminal_locked(
+        self, managed: ManagedProcess, state: ReadinessState
+    ) -> bool:
+        current = managed.readiness_state
+        if state is ReadinessState.TIMED_OUT:
+            if current is not ReadinessState.PENDING:
+                return False
+        elif state in (
+            ReadinessState.EXITED,
+            ReadinessState.STOPPED,
+            ReadinessState.REPLACED,
+        ):
+            if current in (
+                ReadinessState.TIMED_OUT,
+                ReadinessState.EXITED,
+                ReadinessState.STOPPED,
+                ReadinessState.REPLACED,
+            ):
+                return False
+        elif current is not ReadinessState.PENDING:
+            return False
+        managed.readiness_state = state
+        self._detach_ready_callback_locked(managed)
+        managed.marker_event.set()
+        managed.readiness_done_event.set()
+        return True
+
+    def _commit_terminal(
+        self,
+        managed: ManagedProcess,
+        state: ReadinessState,
+        *,
+        record_running: bool = False,
+    ) -> bool:
+        with self._lock:
+            if self._processes.get(managed.name) is not managed:
+                return False
+            changed = self._set_terminal_locked(managed, state)
+            if changed and record_running:
+                self.health_manager.record_running(managed.name)
+        return changed
+
+    def _commit_ready(
+        self,
+        managed: ManagedProcess,
+        *,
+        observed_at: float | None = None,
+        deadline: float | None = None,
+    ) -> bool:
+        """Atomically commit READY only for live, current, nonterminal evidence."""
+
+        callback: Callable[[], None] | None = None
+        with self._lock:
+            if not self._is_current_pending_locked(managed):
+                return False
+            process = managed.process
+            if process is None or process.poll() is not None:
+                self._set_terminal_locked(managed, ReadinessState.EXITED)
+                return False
+            evidence_time = time.monotonic() if observed_at is None else observed_at
+            effective_deadline = (
+                managed.readiness_deadline if deadline is None else deadline
+            )
+            if effective_deadline is not None and evidence_time > effective_deadline:
+                self._set_terminal_locked(managed, ReadinessState.TIMED_OUT)
+                return False
+            managed.readiness_state = ReadinessState.READY
+            self._detach_ready_callback_locked(managed)
+            if managed.ready_event is not None:
                 managed.ready_event.set()
+            managed.readiness_done_event.set()
+            callback = managed.on_ready
             self.health_manager.record_ready(managed.name)
-            if on_ready:
-                on_ready()
-            return
+        if callback is not None:
+            callback()
+        return True
 
-        # Special handling for log pattern
-        if condition.type == ReadyConditionType.LOG:
-            log_ready_event = threading.Event()
+    def _commit_crash(self, managed: ManagedProcess, exit_code: int | None) -> bool:
+        """Publish an exit only if this generation still owns the service."""
 
-            def log_callback(line: str) -> None:
-                log_ready_event.set()
-
-            if managed.log_capture:
-                managed.log_capture.add_pattern_callback(
-                    condition.value,
-                    log_callback,
-                )
-                managed._ready_callback_added = True
-
-            # Wait for log pattern or timeout
-            if log_ready_event.wait(timeout=timeout):
-                if managed.ready_event:
-                    managed.ready_event.set()
-                self.health_manager.record_ready(managed.name)
-                if on_ready:
-                    on_ready()
-            return
-
-        # Polling-based conditions
-        while time.time() - start_time < timeout:
-            # Check if process is still running
-            if managed.process and managed.process.poll() is not None:
-                return  # Process exited
-
-            if self._check_ready_condition(condition, managed):
-                if managed.ready_event:
-                    managed.ready_event.set()
-                self.health_manager.record_ready(managed.name)
-                if on_ready:
-                    on_ready()
-                return
-
-            time.sleep(self.POLL_INTERVAL)
-
-        # Timeout - still mark as running but not ready
-        # Service will continue, but ready wasn't detected
+        with self._lock:
+            if self._processes.get(managed.name) is not managed:
+                return False
+            if managed.crash_committed or managed.readiness_state in (
+                ReadinessState.STOPPED,
+                ReadinessState.REPLACED,
+            ):
+                return False
+            if managed.readiness_state not in (
+                ReadinessState.TIMED_OUT,
+                ReadinessState.EXITED,
+            ) and not self._set_terminal_locked(managed, ReadinessState.EXITED):
+                return False
+            health = self.health_manager.get_health(managed.name)
+            if managed.intentional_stop or health.state is ServiceState.STOPPING:
+                return False
+            managed.crash_committed = True
+            self.health_manager.record_crash(managed.name, exit_code)
+            return True
 
     def _check_ready_condition(
         self,
@@ -741,7 +862,9 @@ class ProcessManager:
                 return True
 
         elif condition.type == ReadyConditionType.HTTP:
-            return self._check_http_ready(condition.value)
+            endpoint = condition.endpoint
+            assert endpoint is not None
+            return self._check_http_ready(endpoint)
 
         return False
 
@@ -846,14 +969,9 @@ class ProcessManager:
         # Wait for process to exit
         exit_code = process.wait()
 
-        # Check if this was a graceful stop
-        health = self.health_manager.get_health(managed.name)
-        if managed.intentional_stop or health.state == ServiceState.STOPPING:
-            # Intentional stop, not a crash
+        # Close readiness and publish crash health in the same generation order.
+        if not self._commit_crash(managed, exit_code):
             return
-
-        # This is a crash
-        self.health_manager.record_crash(managed.name, exit_code)
 
         if on_crash:
             on_crash(exit_code)
@@ -864,18 +982,18 @@ class ProcessManager:
         Args:
             managed: The managed process to clean up
         """
+        with self._lock:
+            self._set_terminal_locked(managed, ReadinessState.STOPPED)
+            monitor = managed.ready_monitor
+
+        if monitor is not None and monitor is not threading.current_thread():
+            monitor.join(timeout=5)
+
         # Stop stream readers
         if managed.stdout_reader:
             managed.stdout_reader.stop()
         if managed.stderr_reader:
             managed.stderr_reader.stop()
-
-        # Remove pattern callbacks
-        if managed.log_capture and managed._ready_callback_added:
-            ready_str = managed.config.ready
-            if ready_str and ready_str.startswith("log:"):
-                pattern = ready_str[4:]
-                managed.log_capture.remove_pattern_callback(pattern)
 
         # Stop log capture
         self.log_manager.stop_capture(managed.name)

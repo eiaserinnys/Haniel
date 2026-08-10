@@ -11,6 +11,7 @@ import yaml
 from haniel.config import HanielConfig, RepoConfig, ServiceConfig, load_config
 from haniel.config.release_activation import (
     DEFAULT_RELEASE_MANIFEST,
+    ReleaseActivationWriteError,
     ReleaseManifestActivationRequired,
     activate_release_manifest,
     plan_release_manifest_activation,
@@ -28,13 +29,17 @@ def write_config(path: Path) -> None:
         },
         services={
             "soulstream-orch-server": ServiceConfig(
-                run="node orch.js", repo="soulstream", cwd="./services/soulstream"
+                run="node orch.js",
+                repo="soulstream",
+                cwd="./services/soulstream",
+                ready="delay:0.01",
             ),
             "soulstream-soul-server-ts": ServiceConfig(
                 run="node soul.js",
                 repo="soulstream",
                 cwd="./services/soulstream",
                 after=["soulstream-orch-server"],
+                ready="delay:0.01",
             ),
         },
     )
@@ -98,3 +103,36 @@ def test_apply_rejects_stale_config_hash_without_writing(tmp_path: Path) -> None
         )
 
     assert config_path.read_bytes() == before
+
+
+def test_apply_restores_exact_original_when_target_verification_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import haniel.config.release_activation as activation
+
+    config_path = tmp_path / "haniel.yaml"
+    write_config(config_path)
+    before = config_path.read_bytes()
+    plan = plan_release_manifest_activation(
+        config_path, "soulstream", DEFAULT_RELEASE_MANIFEST
+    )
+    actual_atomic_write = activation._atomic_write
+    failed_once = False
+
+    def fail_after_target_replace(
+        path: Path, content: bytes, permission_source: Path
+    ) -> None:
+        nonlocal failed_once
+        actual_atomic_write(path, content, permission_source)
+        if path == config_path and content != before and not failed_once:
+            failed_once = True
+            raise OSError("post-replace verification boundary")
+
+    monkeypatch.setattr(activation, "_atomic_write", fail_after_target_replace)
+
+    with pytest.raises(ReleaseActivationWriteError) as failed:
+        activate_release_manifest(config_path, plan=plan)
+
+    assert failed.value.code == "CONFIG_WRITE_FAILED"
+    assert config_path.read_bytes() == before
+    assert failed_once is True

@@ -867,7 +867,7 @@ class HanielMcpServer:
             restore_config,
         )
         from ..config.model import ServiceConfig
-        from ..config.validators import validate_config
+        from ..config.validators import require_valid_config
 
         service = arguments["service"]
         config_data = arguments["config"]
@@ -881,9 +881,7 @@ class HanielMcpServer:
                 if service not in config.services:
                     raise KeyError(f"Service not found: {service}")
                 config.services[service] = new_svc
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
+                require_valid_config(config)
                 backup_config(config_path)
                 try:
                     write_config(config_path, config)
@@ -906,7 +904,7 @@ class HanielMcpServer:
             restore_config,
         )
         from ..config.model import ServiceConfig
-        from ..config.validators import validate_config
+        from ..config.validators import require_valid_config
 
         name = arguments["name"]
         config_data = arguments["config"]
@@ -920,9 +918,7 @@ class HanielMcpServer:
                 if name in config.services:
                     raise ValueError(f"Service already exists: {name}")
                 config.services[name] = new_svc
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
+                require_valid_config(config)
                 backup_config(config_path)
                 try:
                     write_config(config_path, config)
@@ -959,7 +955,7 @@ class HanielMcpServer:
             restore_config,
         )
         from ..config.model import RepoConfig
-        from ..config.validators import validate_config
+        from ..config.validators import require_valid_config
 
         repo = arguments["repo"]
         config_data = arguments["config"]
@@ -973,9 +969,7 @@ class HanielMcpServer:
                 if repo not in config.repos:
                     raise KeyError(f"Repo not found: {repo}")
                 config.repos[repo] = new_repo
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
+                require_valid_config(config)
                 backup_config(config_path)
                 try:
                     write_config(config_path, config)
@@ -998,7 +992,7 @@ class HanielMcpServer:
             restore_config,
         )
         from ..config.model import RepoConfig
-        from ..config.validators import validate_config
+        from ..config.validators import require_valid_config
 
         name = arguments["name"]
         config_data = arguments["config"]
@@ -1012,9 +1006,7 @@ class HanielMcpServer:
                 if name in config.repos:
                     raise ValueError(f"Repo already exists: {name}")
                 config.repos[name] = new_repo
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
+                require_valid_config(config)
                 backup_config(config_path)
                 try:
                     write_config(config_path, config)
@@ -1036,7 +1028,7 @@ class HanielMcpServer:
             backup_config,
             restore_config,
         )
-        from ..config.validators import validate_config
+        from ..config.validators import require_valid_config
 
         repo = arguments["repo"]
         config_path = self.runner.config_path
@@ -1051,9 +1043,7 @@ class HanielMcpServer:
                 if using:
                     raise ValueError(f"Cannot delete: used by services {using}")
                 del config.repos[repo]
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
+                require_valid_config(config)
                 backup_config(config_path)
                 try:
                     write_config(config_path, config)

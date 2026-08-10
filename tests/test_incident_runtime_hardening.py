@@ -117,6 +117,7 @@ def _runner_with_failed_and_healthy_repo(
         {
             "healthy-service": ServiceConfig(
                 run=_python_command(service_script),
+                ready="delay:0.01",
                 repo="healthy",
             )
         }

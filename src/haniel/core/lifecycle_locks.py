@@ -152,3 +152,89 @@ class SerialFileLock(AbstractContextManager["SerialFileLock"]):
                 self._handle = None
         finally:
             self._local_lock.release()
+
+
+class ConfigTransactionLock(AbstractContextManager["ConfigTransactionLock"]):
+    """Artifact-free cross-process lock for one configuration identity.
+
+    POSIX locks the stable parent directory inode, so atomic replacement of the
+    config file cannot bypass the lease. Windows uses a named kernel mutex for
+    the canonical config path. Same-process reentrancy is owned by the caller.
+    """
+
+    def __init__(self, config_path: Path) -> None:
+        self.config_path = config_path.expanduser().resolve(strict=False)
+        self._directory_handle: int | None = None
+        self._windows_handle = None
+        self._kernel32 = None
+        if os.name == "nt":
+            self._acquire_windows()
+        else:
+            self._acquire_posix()
+
+    def _acquire_posix(self) -> None:
+        import fcntl
+
+        handle = os.open(self.config_path.parent, os.O_RDONLY)
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+        except Exception:
+            os.close(handle)
+            raise
+        self._directory_handle = handle
+
+    def _acquire_windows(self) -> None:
+        import ctypes
+        import hashlib
+        from ctypes import wintypes
+
+        canonical = os.path.normcase(str(self.config_path))
+        identity = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        name = f"Global\\HanielConfigWrite_{identity}"
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = (
+            wintypes.LPVOID,
+            wintypes.BOOL,
+            wintypes.LPCWSTR,
+        )
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.ReleaseMutex.argtypes = (wintypes.HANDLE,)
+        kernel32.ReleaseMutex.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.CreateMutexW(None, False, name)
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        result = kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)
+        if result not in (0x00000000, 0x00000080):
+            kernel32.CloseHandle(handle)
+            raise OSError(f"WaitForSingleObject failed: {result}")
+        self._kernel32 = kernel32
+        self._windows_handle = handle
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        if os.name == "nt":
+            if self._windows_handle is not None and self._kernel32 is not None:
+                import ctypes
+
+                released = self._kernel32.ReleaseMutex(self._windows_handle)
+                release_error = ctypes.get_last_error() if not released else None
+                closed = self._kernel32.CloseHandle(self._windows_handle)
+                close_error = ctypes.get_last_error() if not closed else None
+                self._windows_handle = None
+                if release_error is not None:
+                    raise ctypes.WinError(release_error)
+                if close_error is not None:
+                    raise ctypes.WinError(close_error)
+            return
+
+        if self._directory_handle is not None:
+            import fcntl
+
+            try:
+                fcntl.flock(self._directory_handle, fcntl.LOCK_UN)
+            finally:
+                os.close(self._directory_handle)
+                self._directory_handle = None

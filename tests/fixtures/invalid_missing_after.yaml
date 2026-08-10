@@ -6,4 +6,5 @@ repos: {}
 services:
   service-a:
     run: python -m service_a
+    ready: delay:0.01
     after: non-existent-service

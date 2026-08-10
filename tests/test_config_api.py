@@ -47,8 +47,10 @@ def base_config() -> HanielConfig:
     return HanielConfig(
         poll_interval=60,
         services={
-            "web": ServiceConfig(run="python -m http.server"),
-            "worker": ServiceConfig(run="python worker.py", after=["web"]),
+            "web": ServiceConfig(run="python -m http.server", ready="delay:0.01"),
+            "worker": ServiceConfig(
+                run="python worker.py", ready="delay:0.01", after=["web"]
+            ),
         },
         repos={
             "main": RepoConfig(url="git@github.com:test/repo.git", path="./repo"),
@@ -89,7 +91,7 @@ def mock_runner(config_file: Path, base_config: HanielConfig):
                     "cwd": None,
                     "repo": None,
                     "after": [],
-                    "ready": None,
+                    "ready": "delay:0.01",
                     "enabled": True,
                 },
             },
@@ -103,7 +105,7 @@ def mock_runner(config_file: Path, base_config: HanielConfig):
                     "cwd": None,
                     "repo": None,
                     "after": ["web"],
-                    "ready": None,
+                    "ready": "delay:0.01",
                     "enabled": True,
                 },
             },
@@ -217,7 +219,10 @@ class TestPutService:
         self, dashboard_app, mock_runner, config_file
     ):
         """PUT /api/config/services/{name} updates the service and calls reload_config."""
-        payload = {"run": "python -m http.server 9090"}
+        payload = {
+            "run": "python -m http.server 9090",
+            "ready": "delay:0.01",
+        }
         client = TestClient(dashboard_app)
         resp = client.put(
             "/api/config/services/web",
@@ -270,7 +275,7 @@ class TestPostService:
         """POST /api/config/services adds a new service and calls reload_config."""
         payload = {
             "name": "cache",
-            "config": {"run": "redis-server"},
+            "config": {"run": "redis-server", "ready": "delay:0.01"},
         }
         client = TestClient(dashboard_app)
         resp = client.post(
@@ -466,7 +471,9 @@ class TestDeleteRepo:
         config_with_ref = HanielConfig(
             poll_interval=60,
             services={
-                "web": ServiceConfig(run="python app.py", repo="main"),
+                "web": ServiceConfig(
+                    run="python app.py", ready="delay:0.01", repo="main"
+                ),
             },
             repos={
                 "main": RepoConfig(url="git@github.com:test/repo.git", path="./repo"),

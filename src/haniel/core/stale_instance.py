@@ -8,6 +8,7 @@ import shlex
 import time
 
 from ..config import ServiceConfig
+from ..config.readiness import ready_port
 from ..platform import PlatformHandler
 
 
@@ -17,12 +18,7 @@ class PortInUseError(RuntimeError):
 
 def extract_ready_port(config: ServiceConfig) -> int | None:
     """Return the configured ready port, if the service uses ``ready: port:N``."""
-    if not config.ready or not config.ready.startswith("port:"):
-        return None
-    try:
-        return int(config.ready.split(":", 1)[1])
-    except ValueError:
-        return None
+    return ready_port(config.ready)
 
 
 class StaleInstanceCleaner:
