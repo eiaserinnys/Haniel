@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .deployment_errors import (
+    KNOWN_DEPLOYMENT_ERROR_CODES,
+    stable_deployment_error_code,
+)
 from .safety_redaction import bounded_redact_text, redact_value
 
 _JOURNAL_MESSAGE_MAX_CHARS = 16384
@@ -231,6 +235,38 @@ class DeploymentStateStore:
         current.setdefault("history", []).append(self._entry("staging_probed"))
         self._write(repo_name, current)
 
+    def fail_handover_if_current(
+        self,
+        repo_name: str,
+        request_id: str,
+        code: str,
+        message: str,
+    ) -> bool:
+        """Fail only the matching live handover without replacing newer evidence."""
+
+        if code not in KNOWN_DEPLOYMENT_ERROR_CODES:
+            raise ValueError(f"unregistered deployment error code: {code}")
+        current = self.read(repo_name)
+        if (
+            current is None
+            or current.get("request_id") != request_id
+            or current.get("state") in self.TERMINAL_STATES
+        ):
+            return False
+        safe_message = bounded_redact_text(
+            message,
+            max_chars=_JOURNAL_MESSAGE_MAX_CHARS,
+        )
+        current["state"] = "failed"
+        current["error_code"] = code
+        current["error"] = safe_message
+        current["completed_at"] = datetime.now(timezone.utc).isoformat()
+        current.setdefault("history", []).append(
+            self._entry("failed", f"{code}: {safe_message}")
+        )
+        self._write(repo_name, current)
+        return True
+
     def transition(
         self,
         repo_name: str,
@@ -238,6 +274,7 @@ class DeploymentStateStore:
         *,
         message: str | None = None,
         recovered: bool | None = None,
+        error: BaseException | None = None,
     ) -> None:
         current = self.read(repo_name)
         if current is None:
@@ -245,6 +282,17 @@ class DeploymentStateStore:
         current["state"] = state
         if state in self.TERMINAL_STATES:
             current["completed_at"] = datetime.now(timezone.utc).isoformat()
+        if error is not None and state != "failed":
+            raise ValueError("typed transition errors are only valid for failed state")
+        if state == "failed" and message:
+            error_code = (
+                stable_deployment_error_code(error)
+                if error is not None
+                else "HANDOVER_FAILED"
+            )
+            if error_code not in KNOWN_DEPLOYMENT_ERROR_CODES:
+                raise ValueError(f"unregistered deployment error code: {error_code}")
+            current["error_code"] = error_code
         if recovered is not None:
             current["recovered"] = recovered
         current.setdefault("history", []).append(self._entry(state, message))

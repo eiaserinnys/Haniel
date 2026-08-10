@@ -25,6 +25,7 @@ from haniel.config import (
     WebhookConfig,
 )
 from haniel.integrations.webhook import EventType, EVENT_METADATA
+from haniel.core.deployment_errors import StableDeploymentError
 
 
 # --- Exit Code Tests ---
@@ -150,6 +151,7 @@ class TestRunnerSelfUpdate:
         runner._ws_handler = None
         runner._state_lock = threading.Lock()
         runner._config_reload_lock = threading.RLock()
+        runner._config_generation = 0
         runner._restart_lock = threading.Lock()
         runner._stop_event = threading.Event()
         runner._self_update_requested = threading.Event()
@@ -161,6 +163,7 @@ class TestRunnerSelfUpdate:
             name: RepoState(name=name, config=repo)
             for name, repo in config.repos.items()
         }
+        runner._pull_locks = {name: threading.Lock() for name in config.repos}
         runner.process_manager = MagicMock()
         runner.process_manager.is_running.return_value = False
         runner._dependency_graph = MagicMock()
@@ -169,6 +172,8 @@ class TestRunnerSelfUpdate:
         runner._dependency_graph.topological_sort.return_value = list(
             config.services.keys()
         )
+        runner._startup_order = tuple(config.services.keys())
+        runner._shutdown_order = tuple(reversed(runner._startup_order))
 
         return runner
 
@@ -198,6 +203,36 @@ class TestRunnerSelfUpdate:
         runner._initiate_self_update()
 
         assert runner._state.self_update_pending is True
+        assert runner.self_update_requested is False
+
+    def test_apply_changes_rejects_stale_self_repo_before_shutdown(self):
+        config = self._make_config(auto_update=True)
+        runner = self._make_runner(config)
+        runner.stop = MagicMock()
+        original_snapshot = runner._snapshot_config_state
+        calls = 0
+
+        def snapshot_with_reload():
+            nonlocal calls
+            calls += 1
+            snapshot = original_snapshot()
+            if calls == 1:
+                replacement = snapshot.config.model_copy(
+                    update={
+                        "self_update": SelfUpdateConfig(repo="app", auto_update=True)
+                    },
+                    deep=True,
+                )
+                runner._replace_config_snapshot(replacement, snapshot.generation)
+            return snapshot
+
+        runner._snapshot_config_state = MagicMock(side_effect=snapshot_with_reload)
+
+        with pytest.raises(StableDeploymentError) as caught:
+            runner._apply_changes(["haniel"])
+
+        assert caught.value.code == "CONFIG_GENERATION_CHANGED"
+        runner.stop.assert_not_called()
         assert runner.self_update_requested is False
 
     def test_approve_self_update_signals_event(self):

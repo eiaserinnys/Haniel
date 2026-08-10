@@ -1,17 +1,23 @@
-"""Single resident-owned handover boundary for every manifest release caller."""
+"""Single resident-owned handover boundary for every manifest release caller.
+
+This orchestration boundary intentionally remains above 500 lines so staging,
+activation, deployment, rollback, and terminal journal identity stay in one
+transaction. Pure helpers remain extracted into their owning modules.
+"""
 
 from __future__ import annotations
 
 import subprocess
 import sys
 import time
-from functools import wraps
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from .deployment import DeploymentError, DeploymentStateStore
-from .git import activate_repo_target, get_head, reset_repo_to
+from .deployment_errors import StableDeploymentError
+from .git import GitError, activate_repo_target, get_head, reset_repo_to
 from .handover_result import (
     HandoverResult,
     Operation,
@@ -20,6 +26,7 @@ from .handover_result import (
 )
 from .handover_config import (
     BoundServiceEnvironment,
+    HandoverConfigError,
     handover_config_digest,
     require_handover_config_digest,
 )
@@ -32,21 +39,40 @@ from .release_staging import (
 )
 from .release_manifest import resolve_manifest_service_environment
 from .runner_deployment import run_manifest_deployment
+from .runner_config_snapshot import RepoObservation, RepoRuntimeSnapshot
 from .safety_redaction import bounded_redact_text
 
 if TYPE_CHECKING:
     from .runner import ServiceRunner
 
+logger = logging.getLogger(__name__)
 
-def _runner_config_guard(function):
-    """Keep one resident handover on a single applied config snapshot."""
 
-    @wraps(function)
-    def guarded(runner, *args, **kwargs):
-        with runner._config_reload_lock:
-            return function(runner, *args, **kwargs)
+def _runtime_snapshot(runner: "ServiceRunner", repo_name: str) -> Any:
+    if hasattr(runner, "_snapshot_repo_runtime"):
+        return runner._snapshot_repo_runtime(repo_name)
+    return runner._repo_states[repo_name]
 
-    return guarded
+
+def _commit_runtime_head(runner: "ServiceRunner", runtime: Any, head: str) -> None:
+    if isinstance(runtime, RepoRuntimeSnapshot):
+        if not runner._commit_repo_observation(
+            RepoObservation(
+                generation=runtime.generation,
+                repo_name=runtime.repo_name,
+                repo_config=runtime.config,
+                last_fetch=runtime.last_fetch,
+                fetch_error=runtime.fetch_error,
+                last_head=head,
+                pending_changes=runtime.pending_changes,
+                changed=True,
+            )
+        ):
+            raise StableDeploymentError(
+                "CONFIG_GENERATION_CHANGED", "handover result is stale"
+            )
+        return
+    setattr(runtime, "last_head", head)
 
 
 def execute_manifest_handover_once(
@@ -73,11 +99,13 @@ def execute_manifest_handover_once(
     except LifecycleConflict as owner_error:
         if expected_operation == "upgrade":
             raise LifecycleConflict(
-                "LIFECYCLE_OWNER_REQUIRED: upgrade requires an existing resident owner"
+                "LIFECYCLE_OWNER_REQUIRED",
+                "upgrade requires an existing resident owner",
             ) from owner_error
         if not start_owner:
             raise LifecycleConflict(
-                "LIFECYCLE_OWNER_MISSING: fresh_install requires --start-owner"
+                "LIFECYCLE_OWNER_MISSING",
+                "fresh_install requires --start-owner",
             ) from owner_error
         control.submit_request(request_id, payload)
         try:
@@ -145,8 +173,8 @@ def _resolve_bound_manifest_environment(
 ) -> dict[str, str]:
     if manifest.requires_service_env_file and config_digest is None:
         raise ReleaseIdentityError(
-            "CONFIG_DIGEST_REQUIRED: manifest service environment requires "
-            "a config-bound detached probe"
+            "CONFIG_DIGEST_REQUIRED",
+            "manifest service environment requires a config-bound detached probe",
         )
     if config_digest is not None:
         assert runner.config_path is not None
@@ -176,7 +204,6 @@ def _resolve_bound_manifest_environment(
     ).child_environment()
 
 
-@_runner_config_guard
 def probe_manifest_target(
     runner: "ServiceRunner",
     repo_name: str,
@@ -189,17 +216,21 @@ def probe_manifest_target(
     service_environment_bindings: dict[str, BoundServiceEnvironment] | None = None,
 ) -> StagedRelease:
     """Run and clean a detached probe, returning immutable target evidence."""
-    state = runner._repo_states[repo_name]
-    manifest_path = state.config.release_manifest
+    runtime = _runtime_snapshot(runner, repo_name)
+    manifest_path = runtime.config.release_manifest
     if manifest_path is None:
         raise ValueError(f"release manifest is not configured for {repo_name}")
-    repo_path = source_repo_path or (runner.config_dir / state.config.path).resolve()
-    affected = runner.get_affected_services(repo_name)
+    repo_path = source_repo_path or (runner.config_dir / runtime.config.path).resolve()
+    affected = (
+        list(runtime.affected_services)
+        if hasattr(runtime, "affected_services")
+        else runner.get_affected_services(repo_name)
+    )
     with stage_release(
         repo_path=repo_path,
         staging_root=runner.config_dir / ".haniel" / "staging",
         repo_name=repo_name,
-        branch=state.config.branch,
+        branch=runtime.config.branch,
         manifest_path=manifest_path,
         request_id=request_id,
         expected_operation=expected_operation,
@@ -217,8 +248,8 @@ def probe_manifest_target(
     ) as staged:
         if staged.manifest.requires_service_env_file and config_digest is None:
             raise ReleaseIdentityError(
-                "CONFIG_DIGEST_REQUIRED: manifest service environment requires "
-                "a config-bound detached probe"
+                "CONFIG_DIGEST_REQUIRED",
+                "manifest service environment requires a config-bound detached probe",
             )
         return staged
 
@@ -234,10 +265,7 @@ def execute_owner_handover(
     config_digest: str | None = None,
 ) -> HandoverResult:
     """Execute target staging, live checkout, deployment, and terminal result."""
-    with (
-        control.acquire_deployment(repo_name, request_id) as lease,
-        runner._config_reload_lock,
-    ):
+    with control.acquire_deployment(repo_name, request_id) as lease:
         existing = control.read_result(request_id)
         if lease.attached and existing.get("terminal"):
             return HandoverResult(**existing["terminal"])
@@ -261,18 +289,27 @@ def execute_owner_handover(
         staged: StagedRelease | None = None
         live_changed = False
         try:
-            state = runner._repo_states[repo_name]
+            if hasattr(runner, "_snapshot_repo_and_config"):
+                config_snapshot, state = runner._snapshot_repo_and_config(repo_name)
+            else:
+                state = _runtime_snapshot(runner, repo_name)
+                config_snapshot = (
+                    runner._snapshot_config_state()
+                    if hasattr(runner, "_snapshot_config_state")
+                    else None
+                )
             repo_path = (runner.config_dir / state.config.path).resolve()
             deferred_clone = initial_clone_path(repo_path)
             initial_install = not repo_path.exists()
             if initial_install:
                 if expected_operation != "fresh_install":
-                    raise RuntimeError(
-                        "PULL_FAILED: upgrade requires an existing live checkout"
+                    raise StableDeploymentError(
+                        "PULL_FAILED",
+                        "upgrade requires an existing live checkout",
                     )
                 if not deferred_clone.exists():
-                    raise RuntimeError(
-                        "PULL_FAILED: deferred initial clone does not exist"
+                    raise StableDeploymentError(
+                        "PULL_FAILED", "deferred initial clone does not exist"
                     )
                 source_repo_path = deferred_clone
             else:
@@ -316,6 +353,8 @@ def execute_owner_handover(
             )
             if config_digest is not None:
                 require_handover_config_digest(runner.config_path, config_digest)
+            if config_snapshot is not None:
+                runner._require_config_generation(config_snapshot)
             if initial_install:
                 deferred_clone.replace(repo_path)
                 live_changed = True
@@ -332,15 +371,16 @@ def execute_owner_handover(
                     and get_head(repo_path) != previous_head
                 ):
                     reset_repo_to(repo_path, previous_head)
-                    state.last_head = get_head(repo_path)
+                    _commit_runtime_head(runner, state, get_head(repo_path))
                 raise
             live_changed = True
             actual_head = get_head(repo_path)
             if actual_head != staged.target_head:
-                raise RuntimeError(
-                    "PULL_FAILED: live checkout does not match the staged target"
+                raise StableDeploymentError(
+                    "PULL_FAILED",
+                    "live checkout does not match the staged target",
                 )
-            state.last_head = actual_head
+            _commit_runtime_head(runner, state, actual_head)
             affected = (
                 list(reload_plan.new_affected)
                 if reload_plan is not None
@@ -368,6 +408,7 @@ def execute_owner_handover(
                     if reload_plan is not None
                     else None
                 ),
+                config_snapshot=config_snapshot,
             )
             result = build_handover_result(
                 control,
@@ -383,6 +424,16 @@ def execute_owner_handover(
                 config_digest=config_digest,
             )
         except Exception as error:
+            if isinstance(error, GitError):
+                error = StableDeploymentError("PULL_FAILED", str(error))
+            programming_error = not isinstance(
+                error, (DeploymentError, HandoverConfigError, StableDeploymentError)
+            )
+            if programming_error:
+                logger.exception(
+                    "Unexpected programming failure in one-shot handover for %s",
+                    repo_name,
+                )
             recovered = isinstance(error, DeploymentError) and error.recovered
             if (
                 live_changed
@@ -395,13 +446,38 @@ def execute_owner_handover(
                     restored_head = get_head(repo_path)
                     if restored_head != previous_head:
                         raise RuntimeError("previous HEAD equality verification failed")
-                    state.last_head = restored_head
+                    try:
+                        _commit_runtime_head(runner, state, restored_head)
+                    except StableDeploymentError as commit_error:
+                        if commit_error.code != "CONFIG_GENERATION_CHANGED":
+                            raise
                     recovered = True
                 except Exception as recovery_error:
-                    error = RuntimeError(
-                        f"RECOVERY_FAILED: {error}; repo recovery failed: {recovery_error}"
+                    error = StableDeploymentError(
+                        "RECOVERY_FAILED",
+                        f"{error}; repo recovery failed: {recovery_error}",
                     )
                     recovered = False
+                    programming_error = False
+            error_code = handover_error_code(error)
+            try:
+                DeploymentStateStore(
+                    runner.config_dir / ".haniel" / "deployments"
+                ).fail_handover_if_current(
+                    repo_name,
+                    request_id,
+                    error_code,
+                    str(error),
+                )
+            except Exception as journal_error:
+                logger.error(
+                    "Failed to persist one-shot failure for %s [%s]: %s",
+                    repo_name,
+                    error_code,
+                    journal_error,
+                )
+            if programming_error:
+                raise
             result = build_handover_result(
                 control,
                 request_id=request_id,
@@ -414,7 +490,7 @@ def execute_owner_handover(
                 recovered=recovered,
                 retryable=not live_changed,
                 error={
-                    "code": handover_error_code(error),
+                    "code": error_code,
                     "message": bounded_redact_text(str(error)),
                 },
                 config_digest=config_digest,

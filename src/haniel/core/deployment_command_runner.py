@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import shlex
 import shutil
 import subprocess
@@ -16,6 +17,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from .child_env import sanitized_child_env
+from .deployment_errors import StableDeploymentError
 from .safety_redaction import (
     redact_text,
     redact_value,
@@ -52,7 +54,24 @@ CommandRunner = Callable[[CommandSpec, dict[str, str]], CommandResult | None]
 
 _STDERR_TAIL_CHARS = 8192
 _STDOUT_TAIL_CHARS = 4096
+_POST_TIMEOUT_DRAIN_SECONDS = 2.0
 _JSON_RESULT_MAX_CHARS = 65536
+
+
+class DeploymentCommandError(StableDeploymentError):
+    """One release child command failed at the subprocess boundary."""
+
+    def __init__(
+        self,
+        code: str,
+        command_name: str,
+        message: str,
+        *,
+        returncode: int | None = None,
+    ) -> None:
+        self.command_name = command_name
+        self.returncode = returncode
+        super().__init__(code, message)
 
 
 def _output_tail(output: str | bytes | None, max_chars: int) -> str | None:
@@ -114,18 +133,26 @@ def subprocess_command_runner(
                 try:
                     snapshot = read_service_environment_file(Path(service_env_file))
                 except RuntimeError as error:
-                    raise RuntimeError(str(error)) from error
+                    raise DeploymentCommandError(
+                        "SERVICE_ENV_FILE_CHANGED",
+                        command.name,
+                        str(error),
+                    ) from error
             else:
                 snapshot = approved_service_environment
                 if canonical_path_text(Path(service_env_file)) != canonical_path_text(
                     snapshot.path
                 ):
-                    raise RuntimeError(
-                        "SERVICE_ENV_FILE_CHANGED: release env file path changed"
+                    raise DeploymentCommandError(
+                        "SERVICE_ENV_FILE_CHANGED",
+                        command.name,
+                        "release env file path changed",
                     )
             if expected_digest is None or snapshot.sha256 != expected_digest:
-                raise RuntimeError(
-                    "SERVICE_ENV_FILE_CHANGED: release env file identity changed"
+                raise DeploymentCommandError(
+                    "SERVICE_ENV_FILE_CHANGED",
+                    command.name,
+                    "release env file identity changed",
                 )
             service_env_secret_values = sensitive_values(snapshot.values)
             snapshot_directory = tempfile.TemporaryDirectory(
@@ -174,28 +201,75 @@ def _execute_subprocess(
     executable = argv[0] if argv else ""
     resolved_executable = shutil.which(executable, path=env.get("PATH"))
     if resolved_executable is None:
-        raise RuntimeError(
-            f"command {command.name!r} executable not found: {executable!r}"
+        raise DeploymentCommandError(
+            "COMMAND_NOT_FOUND",
+            command.name,
+            f"command {command.name!r} executable not found: {executable!r}",
         )
     argv[0] = resolved_executable
     try:
-        completed = subprocess.run(
+        completed = _run_process_tree(
             argv,
             cwd=repo_path,
             env=env,
-            check=True,
-            capture_output=True,
-            text=True,
             timeout=command.timeout_seconds,
         )
     except subprocess.CalledProcessError as error:
-        raise RuntimeError(
-            _command_failure_message(command, error, secret_values)
+        raise DeploymentCommandError(
+            "COMMAND_EXIT_NONZERO",
+            command.name,
+            _command_failure_message(command, error, secret_values),
+            returncode=error.returncode,
+        ) from error
+    except subprocess.TimeoutExpired as error:
+        raw_stderr = (
+            error.stderr.decode("utf-8", errors="replace")
+            if isinstance(error.stderr, bytes)
+            else (error.stderr or "")
+        )
+        raw_stdout = (
+            error.stdout.decode("utf-8", errors="replace")
+            if isinstance(error.stdout, bytes)
+            else (error.stdout or "")
+        )
+        stderr = _output_tail(
+            redact_text(raw_stderr, secret_values), _STDERR_TAIL_CHARS
+        )
+        stdout = _output_tail(
+            redact_text(raw_stdout, secret_values), _STDOUT_TAIL_CHARS
+        )
+        evidence = "\n".join(
+            part
+            for part in (
+                f"command {command.name!r} timed out after {command.timeout_seconds}s",
+                (
+                    f"cleanup: {error.cleanup_detail}"
+                    if getattr(error, "cleanup_detail", None)
+                    else ""
+                ),
+                f"stderr:\n{stderr}" if stderr else "",
+                f"stdout:\n{stdout}" if stdout else "",
+            )
+            if part
+        )
+        raise DeploymentCommandError(
+            "COMMAND_TIMEOUT",
+            command.name,
+            evidence,
         ) from error
     except FileNotFoundError as error:
-        raise RuntimeError(
+        raise DeploymentCommandError(
+            "COMMAND_START_FAILED",
+            command.name,
             f"command {command.name!r} could not start executable "
-            f"{resolved_executable}: {error}"
+            f"{resolved_executable}: {error}",
+        ) from error
+    except OSError as error:
+        raise DeploymentCommandError(
+            "COMMAND_START_FAILED",
+            command.name,
+            f"command {command.name!r} could not start executable "
+            f"{resolved_executable}: {error}",
         ) from error
 
     raw_stdout = completed.stdout.rstrip()
@@ -208,6 +282,108 @@ def _execute_subprocess(
         stderr=_output_tail(safe_stderr, _STDERR_TAIL_CHARS) or "",
         json_data=redact_value(json_data, secret_values),
     )
+
+
+def _run_process_tree(
+    argv: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: int,
+) -> subprocess.CompletedProcess[str]:
+    """Run one command in an isolated process group and reap its descendants."""
+
+    process_kwargs: dict[str, Any] = {}
+    if os.name == "nt":
+        process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        process_kwargs["start_new_session"] = True
+    process = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        **process_kwargs,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        cleanup_details = _terminate_process_tree(process)
+        try:
+            stdout, stderr = process.communicate(timeout=_POST_TIMEOUT_DRAIN_SECONDS)
+        except subprocess.TimeoutExpired as drain_error:
+            cleanup_details.append("COMMAND_TIMEOUT_DRAIN_EXPIRED")
+            for stream_name in ("stdout", "stderr"):
+                stream = getattr(process, stream_name)
+                if stream is None or stream.closed:
+                    continue
+                try:
+                    stream.close()
+                    cleanup_details.append(f"{stream_name.upper()}_PIPE_CLOSED")
+                except OSError as close_error:
+                    cleanup_details.append(
+                        f"{stream_name.upper()}_PIPE_CLOSE_FAILED:{close_error.errno}"
+                    )
+            cleanup_details.append("PIPE_CLOSE_ATTEMPTED")
+            stdout = drain_error.output or error.output or ""
+            stderr = drain_error.stderr or error.stderr or ""
+        timeout_error = subprocess.TimeoutExpired(
+            argv,
+            timeout,
+            output=stdout,
+            stderr=stderr,
+        )
+        timeout_error.cleanup_detail = (
+            ",".join(cleanup_details) or "PROCESS_TREE_REAPED"
+        )
+        raise timeout_error from error
+    completed = subprocess.CompletedProcess(
+        argv,
+        process.returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+    if process.returncode:
+        raise subprocess.CalledProcessError(
+            process.returncode,
+            argv,
+            output=stdout,
+            stderr=stderr,
+        )
+    return completed
+
+
+def _terminate_process_tree(process: subprocess.Popen[str]) -> list[str]:
+    evidence: list[str] = []
+    if process.poll() is not None:
+        return ["PROCESS_ALREADY_EXITED"]
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            evidence.append("TASKKILL_FAILED")
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return ["PROCESS_GROUP_ALREADY_EXITED"]
+        except OSError:
+            evidence.append("PROCESS_GROUP_KILL_FAILED")
+    if process.poll() is None:
+        try:
+            process.kill()
+        except OSError:
+            evidence.append("DIRECT_PROCESS_KILL_FAILED")
+    evidence.append("PROCESS_TREE_TERMINATE_ATTEMPTED")
+    return evidence
 
 
 def _split_command(command: str, *, windows: bool | None = None) -> list[str]:
@@ -229,14 +405,19 @@ def _parse_json_result(command: CommandSpec, stdout: str) -> dict[str, Any] | No
     if not stdout:
         return None
     if len(stdout) > _JSON_RESULT_MAX_CHARS:
-        raise RuntimeError(
-            f"command {command.name!r} JSON result exceeds "
-            f"{_JSON_RESULT_MAX_CHARS} characters"
+        raise DeploymentCommandError(
+            "COMMAND_RESULT_TOO_LARGE",
+            command.name,
+            f"JSON result exceeds {_JSON_RESULT_MAX_CHARS} characters",
         )
     try:
         value = json.loads(stdout)
     except json.JSONDecodeError:
         return None
     if not isinstance(value, dict):
-        raise RuntimeError(f"command {command.name!r} JSON result must be an object")
+        raise DeploymentCommandError(
+            "COMMAND_RESULT_INVALID",
+            command.name,
+            "JSON result must be an object",
+        )
     return value

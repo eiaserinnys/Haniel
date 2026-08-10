@@ -1,4 +1,9 @@
-"""ServiceRunner adapter for migration-aware repository deployments."""
+"""ServiceRunner adapter for migration-aware repository deployments.
+
+This compensation boundary intentionally remains above 500 lines: splitting
+its generation guard, service lifecycle, and rollback state would distribute
+one deployment transaction across shallow modules. Pure helpers stay extracted.
+"""
 
 from __future__ import annotations
 
@@ -33,6 +38,12 @@ from .release_manifest import (
 )
 from .service_environment import ServiceEnvironmentFile
 from .safety_redaction import bounded_redact_text
+from .deployment_errors import StableDeploymentError
+from .runner_config_snapshot import (
+    RepoObservation,
+    RepoRuntimeSnapshot,
+    RunnerConfigSnapshot,
+)
 
 if TYPE_CHECKING:
     from .runner import ServiceRunner
@@ -59,6 +70,8 @@ class RunnerDeploymentAdapter:
         service_environment_bindings: (
             dict[str, BoundServiceEnvironment] | None
         ) = None,
+        config_snapshot: RunnerConfigSnapshot | None = None,
+        repo_runtime_snapshot: RepoRuntimeSnapshot | None = None,
     ) -> None:
         self.runner = runner
         self.repo_name = repo_name
@@ -72,8 +85,21 @@ class RunnerDeploymentAdapter:
         self.quiesce_services = sorted(set(quiesce_services or affected))
         self.config_digest = config_digest
         self.service_environment_bindings = service_environment_bindings
+        if config_snapshot is None or repo_runtime_snapshot is None:
+            captured_config, captured_runtime = runner._snapshot_repo_and_config(
+                repo_name
+            )
+            config_snapshot = config_snapshot or captured_config
+            repo_runtime_snapshot = repo_runtime_snapshot or captured_runtime
+        self.config_snapshot = config_snapshot
+        self.repo_runtime_snapshot = repo_runtime_snapshot
         self.handover_started = False
         self.quiescence_nonce = uuid4().hex
+
+    def require_current_config(self) -> None:
+        """Reject forward lifecycle effects from an obsolete config generation."""
+
+        self.runner._require_config_generation(self.config_snapshot)
 
     def callbacks(self) -> DeploymentCallbacks:
         return DeploymentCallbacks(
@@ -92,14 +118,22 @@ class RunnerDeploymentAdapter:
 
     def service_cwd(self, service_name: str) -> Path:
         resolved = resolve_manifest_service_cwd(
-            self.runner, self.repo_name, self.affected, service_name
+            self.runner,
+            self.repo_name,
+            self.affected,
+            service_name,
+            enabled_services=self.config_snapshot.enabled_services,
         )
         assert resolved is not None
         return resolved
 
     def derive_service_cwd(self) -> Path | None:
         return resolve_manifest_service_cwd(
-            self.runner, self.repo_name, self.affected, None
+            self.runner,
+            self.repo_name,
+            self.affected,
+            None,
+            enabled_services=self.config_snapshot.enabled_services,
         )
 
     def service_environment(
@@ -124,6 +158,7 @@ class RunnerDeploymentAdapter:
                 self.repo_name,
                 self.affected,
                 service_name,
+                enabled_services=self.config_snapshot.enabled_services,
             )
             return ManifestServiceEnvironment(
                 cwd=cwd,
@@ -138,6 +173,7 @@ class RunnerDeploymentAdapter:
             requires_env_file=requires_env_file,
             expected_env_path=binding.path if binding is not None else None,
             expected_env_sha256=binding.sha256 if binding is not None else None,
+            enabled_services=self.config_snapshot.enabled_services,
         )
 
     def approved_service_environment(
@@ -149,6 +185,7 @@ class RunnerDeploymentAdapter:
         return binding.snapshot if binding is not None else None
 
     def build(self) -> None:
+        self.require_current_config()
         failed = [
             service
             for service in self.affected
@@ -160,6 +197,7 @@ class RunnerDeploymentAdapter:
             )
 
     def stop(self) -> dict[str, Any]:
+        self.require_current_config()
         if self.config_digest is not None:
             assert self.runner.config_path is not None
             require_handover_config_digest(self.runner.config_path, self.config_digest)
@@ -181,12 +219,14 @@ class RunnerDeploymentAdapter:
         return receipt
 
     def start_and_wait(self, selected: set[str]) -> None:
+        self.require_current_config()
         startup_order = [
             service
-            for service in self.runner.get_startup_order()
+            for service in self.config_snapshot.startup_order
             if service in selected
         ]
         for service in startup_order:
+            self.require_current_config()
             self.runner._cancel_pending_restart(service)
             blockers = self.runner._blocked_start_dependencies(service)
             if blockers:
@@ -204,7 +244,8 @@ class RunnerDeploymentAdapter:
             )
             if (
                 self.config_digest is not None
-                and self.runner._enabled_services[service].release_env_file is not None
+                and self.config_snapshot.enabled_services[service].release_env_file
+                is not None
                 and binding is None
             ):
                 raise RuntimeError(
@@ -223,17 +264,41 @@ class RunnerDeploymentAdapter:
             )
             if not started:
                 raise RuntimeError(f"failed to start {service}")
+            self.require_current_config()
             if not self.runner.process_manager.wait_for_ready(service):
                 raise RuntimeError(f"readiness timeout for {service}")
             if not self.runner.process_manager.is_running(service):
                 raise RuntimeError(f"{service} exited before readiness verification")
 
     def rollback(self) -> None:
-        if self.handover_started:
+        generation_current = True
+        try:
+            self.require_current_config()
+        except StableDeploymentError:
+            generation_current = False
+        if self.handover_started and generation_current:
             self._stop_running()
         reset_repo_to(self.repo_path, self.previous_head)
-        state = self.runner._repo_states[self.repo_name]
-        state.last_head = get_head(self.repo_path)
+        head = get_head(self.repo_path)
+        if head != self.previous_head:
+            raise StableDeploymentError(
+                "RECOVERY_FAILED", "rollback did not restore the previous HEAD"
+            )
+        state = self.repo_runtime_snapshot
+        if not self.runner._commit_repo_observation(
+            RepoObservation(
+                generation=state.generation,
+                repo_name=self.repo_name,
+                repo_config=state.config,
+                last_fetch=state.last_fetch,
+                fetch_error=state.fetch_error,
+                last_head=head,
+                pending_changes=state.pending_changes,
+                changed=True,
+            )
+        ):
+            self._restore_current_generation_services()
+            return
         self.build()
         recovery_services = (
             self.desired_running
@@ -249,12 +314,55 @@ class RunnerDeploymentAdapter:
                 ) from error
             self._assert_recovery_availability(recovery_services)
 
+    def _restore_current_generation_services(self) -> None:
+        """Recover availability from the new config without touching stale names."""
+
+        try:
+            config_snapshot, runtime = self.runner._snapshot_repo_and_config(
+                self.repo_name
+            )
+        except ValueError:
+            return
+        selected = set(runtime.affected_services)
+        if self.desired_running is not None:
+            selected.intersection_update(self.desired_running)
+        for service in config_snapshot.startup_order:
+            if service not in selected:
+                continue
+            self.runner._require_config_generation(config_snapshot)
+            if self.runner.process_manager.is_running(service):
+                continue
+            if not self.runner.execute_hook(service, "post_pull"):
+                raise StableDeploymentError(
+                    "RECOVERY_FAILED",
+                    f"current-generation post_pull failed for {service}",
+                )
+            self.runner._require_config_generation(config_snapshot)
+            if not self.runner._start_service(service):
+                raise StableDeploymentError(
+                    "RECOVERY_FAILED",
+                    f"current-generation service failed to start: {service}",
+                )
+            self.runner._require_config_generation(config_snapshot)
+            if not self.runner.process_manager.wait_for_ready(service):
+                raise StableDeploymentError(
+                    "RECOVERY_FAILED",
+                    f"current-generation readiness timeout: {service}",
+                )
+            if not self.runner.process_manager.is_running(service):
+                raise StableDeploymentError(
+                    "RECOVERY_FAILED",
+                    f"current-generation service exited before readiness: {service}",
+                )
+
     def prepare_roll_forward(self) -> None:
+        self.require_current_config()
         self.handover_started = True
         self._stop_running()
 
     def stop_partial(self) -> None:
         """Stop only target processes; never mutate DB or repository state."""
+        self.require_current_config()
         self._stop_running()
 
     def _stop_running(self) -> tuple[list[str], list[str]]:
@@ -294,13 +402,14 @@ class RunnerDeploymentAdapter:
         return getattr(self.runner, "lifecycle_instance_id", None)
 
     def _assert_recovery_availability(self, services: set[str]) -> None:
+        self.require_current_config()
         down: list[str] = []
         for name in sorted(services):
             pid = self.runner.process_manager.get_pid(name)
             if pid is None:
                 down.append(f"{name} (process not running)")
                 continue
-            service = self.runner._enabled_services[name]
+            service = self.config_snapshot.enabled_services[name]
             if service.ready and service.ready.startswith("port:"):
                 try:
                     port = int(service.ready.removeprefix("port:"))
@@ -333,10 +442,38 @@ def run_manifest_deployment(
     quiesce_services: list[str] | None = None,
     config_digest: str | None = None,
     service_environment_bindings: dict[str, BoundServiceEnvironment] | None = None,
+    config_snapshot: RunnerConfigSnapshot | None = None,
 ) -> None:
     """Load the pulled release manifest and run the auditable handover."""
 
-    repo_config = runner._repo_states[repo_name].config
+    captured_config, captured_runtime = runner._snapshot_repo_and_config(repo_name)
+    if config_snapshot is None:
+        config_snapshot = captured_config
+        repo_runtime = captured_runtime
+    elif (
+        captured_runtime.generation == config_snapshot.generation
+        and captured_runtime.config == config_snapshot.repo_identity.get(repo_name)
+    ):
+        repo_runtime = captured_runtime
+    else:
+        repo_config_identity = config_snapshot.repo_identity.get(repo_name)
+        if repo_config_identity is None:
+            raise StableDeploymentError(
+                "CONFIG_GENERATION_CHANGED",
+                f"deployment config no longer contains repository {repo_name}",
+            )
+        repo_runtime = RepoRuntimeSnapshot(
+            generation=config_snapshot.generation,
+            repo_name=repo_name,
+            config=repo_config_identity,
+            last_head=None,
+            last_fetch=None,
+            fetch_error=None,
+            pending_changes=None,
+            pull_lock=None,
+            affected_services=tuple(affected),
+        )
+    repo_config = repo_runtime.config
     if repo_config.release_manifest is None:
         raise ValueError(f"release manifest is not configured for {repo_name}")
     repo_path = (runner.config_dir / repo_config.path).resolve()
@@ -370,6 +507,8 @@ def run_manifest_deployment(
         quiesce_services=quiesce_services,
         config_digest=config_digest,
         service_environment_bindings=service_environment_bindings,
+        config_snapshot=config_snapshot,
+        repo_runtime_snapshot=repo_runtime,
     )
     lifecycle = getattr(runner, "lifecycle_control", None)
     owner_instance = getattr(runner, "lifecycle_instance_id", None)
@@ -415,6 +554,7 @@ def run_manifest_deployment(
                 "failed",
                 message=f"invalid fresh-install manifest; target preserved: {error}",
                 recovered=False,
+                error=error,
             )
             raise DeploymentError(
                 f"invalid manifest: {error}", recovered=False
@@ -422,22 +562,25 @@ def run_manifest_deployment(
         try:
             adapter.rollback()
         except Exception as recovery_error:
+            terminal_error = DeploymentError(
+                f"invalid manifest and recovery failed: {recovery_error}",
+                recovered=False,
+                recovery_error=recovery_error,
+            )
             state_store.transition(
                 repo_name,
                 "failed",
                 message=f"manifest recovery failed: {recovery_error}",
                 recovered=False,
+                error=terminal_error,
             )
-            raise DeploymentError(
-                f"invalid manifest and recovery failed: {recovery_error}",
-                recovered=False,
-                recovery_error=recovery_error,
-            ) from error
+            raise terminal_error from error
         state_store.transition(
             repo_name,
             "failed",
             message=f"invalid manifest; previous release restored: {error}",
             recovered=True,
+            error=error,
         )
         raise DeploymentError(
             f"invalid manifest; previous release restored: {error}",
@@ -466,7 +609,13 @@ def run_manifest_deployment(
 
     def run_command(command, environment):
         nonlocal apply_started
-        is_recovery = environment.get("HANIEL_DATABASE_OPERATION") == "recovery"
+        is_recovery = (
+            environment.get("HANIEL_DATABASE_OPERATION") == "recovery"
+            or command is manifest.recovery.command
+            or command is manifest.recovery.fallback
+        )
+        if not is_recovery:
+            adapter.require_current_config()
         if config_digest is not None and not apply_started and not is_recovery:
             assert runner.config_path is not None
             require_handover_config_digest(runner.config_path, config_digest)

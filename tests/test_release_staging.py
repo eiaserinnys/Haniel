@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -79,6 +82,60 @@ def base_manifest(*, with_probe: bool) -> dict[str, object]:
             },
         }
     return payload
+
+
+def python_command(script: Path) -> str:
+    argv = [sys.executable, str(script)]
+    return subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected_code"),
+    [
+        ("not-json", "PROVENANCE_PROBE_FAILED"),
+        ("", "PROVENANCE_PROBE_FAILED"),
+        ("[1, 2, 3]", "COMMAND_RESULT_INVALID"),
+    ],
+)
+def test_real_malformed_probe_preserves_live_head_and_cleans_staging(
+    tmp_path: Path,
+    stdout: str,
+    expected_code: str,
+) -> None:
+    prepare = tmp_path / "prepare.py"
+    prepare.write_text("pass\n", encoding="utf-8")
+    probe = tmp_path / "probe.py"
+    probe.write_text(f"print({stdout!r})\n", encoding="utf-8")
+    manifest = base_manifest(with_probe=True)
+    migration = manifest["migration"]
+    assert isinstance(migration, dict)
+    provenance = migration["provenance_probe"]
+    assert isinstance(provenance, dict)
+    provenance["prepare"] = {
+        "name": "prepare",
+        "command": python_command(prepare),
+    }
+    provenance["probe"] = {
+        "name": "probe",
+        "command": python_command(probe),
+    }
+    live, _remote, previous = make_remote(tmp_path, manifest)
+
+    with pytest.raises(RuntimeError) as raised:
+        with stage_release(
+            repo_path=live,
+            staging_root=tmp_path / "staging",
+            repo_name="app",
+            branch="main",
+            manifest_path="deploy/release.json",
+            request_id="malformed-probe",
+            expected_operation="upgrade",
+        ):
+            pass
+
+    assert getattr(raised.value, "code", None) == expected_code
+    assert get_head(live) == previous
+    assert not (tmp_path / "staging" / "malformed-probe" / "app").exists()
 
 
 def test_probe_identity_mismatch_preserves_live_head_and_cleans_staging(

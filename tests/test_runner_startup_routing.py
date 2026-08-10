@@ -12,6 +12,7 @@ from haniel.core.runner import ServiceRunner
 from haniel.config import HanielConfig, RepoConfig, ServiceConfig, load_config
 from haniel.config.release_activation import DEFAULT_RELEASE_MANIFEST
 from haniel.core.deployment import DeploymentError
+from haniel.core.git import GitError
 from haniel.core.deployment import DeploymentStateStore
 from haniel.core.lifecycle_control import LifecycleConflict
 from haniel.core.one_shot_handover import execute_owner_handover
@@ -97,7 +98,7 @@ def test_start_services_routes_manifest_repo_once_in_global_order(
 
 @pytest.mark.parametrize("recovered", [True, False])
 @patch("haniel.core.runner.run_manifest_deployment")
-def test_start_services_only_continues_after_recovered_handover(
+def test_start_services_continues_after_typed_handover_failure(
     mock_deploy, recovered: bool, tmp_path: Path
 ) -> None:
     config = HanielConfig(
@@ -128,18 +129,117 @@ def test_start_services_only_continues_after_recovered_handover(
     runner._start_service = MagicMock(return_value=True)
     mock_deploy.side_effect = DeploymentError("injected", recovered=recovered)
 
-    if recovered:
-        runner.start_services()
-        runner._start_service.assert_called_once_with("after")
-    else:
-        with pytest.raises(DeploymentError, match="injected"):
-            runner.start_services()
-        runner._start_service.assert_not_called()
+    runner.start_services()
+    runner._start_service.assert_called_once_with("after")
 
     with runner.lifecycle_control.acquire_deployment(
         "soulstream", f"after-startup-{recovered}"
     ):
         pass
+
+
+@patch("haniel.core.runner.run_manifest_deployment")
+def test_start_services_does_not_hide_programming_runtime_error(
+    mock_deploy, tmp_path: Path
+) -> None:
+    config = HanielConfig(
+        repos={
+            "app": RepoConfig(
+                url="git@test/app",
+                path="./app",
+                release_manifest=DEFAULT_RELEASE_MANIFEST,
+            )
+        },
+        services={"app": ServiceConfig(run="app", repo="app")},
+    )
+    runner = ServiceRunner(config, config_dir=tmp_path)
+    runner._startup_manifest_updates = {"app": "old-head"}
+    mock_deploy.side_effect = RuntimeError("programming defect")
+
+    with pytest.raises(RuntimeError, match="programming defect"):
+        runner.start_services()
+
+
+@patch("haniel.core.runner.run_manifest_deployment")
+def test_start_services_isolates_git_error_to_manifest_repo(
+    mock_deploy, tmp_path: Path
+) -> None:
+    config = HanielConfig(
+        repos={
+            "app": RepoConfig(
+                url="git@test/app",
+                path="./app",
+                release_manifest=DEFAULT_RELEASE_MANIFEST,
+            ),
+            "after": RepoConfig(url="git@test/after", path="./after"),
+        },
+        services={
+            "app": ServiceConfig(run="app", repo="app"),
+            "after": ServiceConfig(run="after", repo="after"),
+        },
+    )
+    runner = ServiceRunner(config, config_dir=tmp_path)
+    runner._startup_manifest_updates = {"app": "old-head"}
+    started: list[str] = []
+    runner._start_service = MagicMock(
+        side_effect=lambda name: started.append(name) or True
+    )
+    mock_deploy.side_effect = GitError("manifest checkout failed")
+
+    runner.start_services()
+
+    assert started == ["after"]
+
+
+@patch("haniel.core.runner.fetch_repo", return_value=False)
+def test_startup_repo_lease_conflict_is_isolated_and_next_repo_runs(
+    mock_fetch, tmp_path: Path
+) -> None:
+    for name in ("blocked", "after"):
+        repo = tmp_path / name
+        repo.mkdir()
+        (repo / ".git").mkdir()
+    config = HanielConfig(
+        repos={
+            name: RepoConfig(url=f"git@test/{name}", path=f"./{name}")
+            for name in ("blocked", "after")
+        },
+        services={},
+    )
+    runner = ServiceRunner(config, config_dir=tmp_path)
+    real_acquire = runner.lifecycle_control.acquire_deployment
+
+    def acquire(repo_name: str, request_id: str):
+        if repo_name == "blocked":
+            raise LifecycleConflict("DEPLOYMENT_LEASE_CONFLICT", "held elsewhere")
+        return real_acquire(repo_name, request_id)
+
+    with patch.object(
+        runner.lifecycle_control, "acquire_deployment", side_effect=acquire
+    ):
+        runner._apply_startup_updates()
+
+    assert mock_fetch.call_count == 1
+    assert mock_fetch.call_args.kwargs["path"] == tmp_path / "after"
+
+
+@patch("haniel.core.runner.fetch_repo", side_effect=RuntimeError("programming defect"))
+def test_startup_repo_does_not_hide_programming_runtime_error(
+    _mock_fetch, tmp_path: Path
+) -> None:
+    repo = tmp_path / "app"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    runner = ServiceRunner(
+        HanielConfig(
+            repos={"app": RepoConfig(url="git@test/app", path="./app")},
+            services={},
+        ),
+        config_dir=tmp_path,
+    )
+
+    with pytest.raises(RuntimeError, match="programming defect"):
+        runner._apply_startup_updates()
 
 
 @patch("haniel.core.runner.get_head", side_effect=["old-head", "new-head"])
@@ -346,7 +446,7 @@ def test_startup_cannot_mix_old_repo_target_with_reloaded_repo_identity(
         )
         reload_thread = threading.Thread(target=reload)
         reload_thread.start()
-        assert not reload_finished.wait(timeout=0.1)
+        assert reload_finished.wait(timeout=1)
         allow_target_read.set()
         startup_thread.join(timeout=5)
         reload_thread.join(timeout=5)
@@ -364,7 +464,7 @@ def test_startup_cannot_mix_old_repo_target_with_reloaded_repo_identity(
     )
 
 
-def test_startup_manifest_transaction_blocks_concurrent_reload(
+def test_startup_probe_allows_reload_and_rejects_stale_generation(
     tmp_path: Path,
 ) -> None:
     make_repo(tmp_path)
@@ -420,7 +520,7 @@ def test_startup_manifest_transaction_blocks_concurrent_reload(
             side_effect=blocking_probe,
         ),
         patch("haniel.core.runner.activate_repo_target", return_value=[]),
-        patch("haniel.core.runner.run_manifest_deployment"),
+        patch("haniel.core.runner.run_manifest_deployment") as deploy,
     ):
         startup_thread = threading.Thread(target=startup)
         startup_thread.start()
@@ -428,7 +528,7 @@ def test_startup_manifest_transaction_blocks_concurrent_reload(
         reload_thread = threading.Thread(target=reload)
         reload_thread.start()
         assert reload_started.wait(timeout=1)
-        assert not reload_finished.wait(timeout=0.1)
+        assert reload_finished.wait(timeout=1)
         allow_probe.set()
         startup_thread.join(timeout=5)
         reload_thread.join(timeout=5)
@@ -438,6 +538,7 @@ def test_startup_manifest_transaction_blocks_concurrent_reload(
     assert startup_finished.is_set()
     assert reload_finished.is_set()
     assert errors == []
+    deploy.assert_not_called()
 
 
 def test_runtime_probe_and_activation_are_serialized_against_one_shot(
@@ -855,7 +956,7 @@ def test_interrupted_fresh_install_preserves_operation_and_absent_rollback(
 )
 @patch("haniel.core.runner.get_head", return_value="current-head")
 @patch("haniel.core.runner.fetch_repo", return_value=False)
-def test_startup_activation_without_new_commits_still_runs_manifest_once(
+def test_startup_activation_does_not_run_after_config_generation_changes(
     mock_fetch, mock_head, mock_discover, tmp_path: Path
 ) -> None:
     make_repo(tmp_path)
@@ -896,13 +997,22 @@ def test_startup_activation_without_new_commits_still_runs_manifest_once(
 
     reload_thread = threading.Thread(target=reload)
     reload_thread.start()
-    assert not reload_finished.wait(timeout=0.1)
-    with patch("haniel.core.runner.run_manifest_deployment"):
+    assert reload_finished.wait(timeout=1)
+    runner._start_service = MagicMock(return_value=True)
+    with patch("haniel.core.runner.run_manifest_deployment") as deploy:
         runner.start_services()
     reload_thread.join(timeout=5)
     assert not reload_thread.is_alive()
     assert reload_finished.is_set()
     assert errors == []
+    deploy.assert_not_called()
+    runner._start_service.assert_called_once_with("soulstream-orch-server")
+    journal = DeploymentStateStore(tmp_path / ".haniel" / "deployments").read(
+        "soulstream"
+    )
+    assert journal is not None
+    assert journal["state"] == "failed"
+    assert journal["error_code"] == "CONFIG_GENERATION_CHANGED"
 
 
 def test_runner_start_closes_nonterminal_manifest_journal_before_startup_work(

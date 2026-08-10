@@ -5,8 +5,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from ..integrations.deploy_reporting import ApprovalRevalidationError
+from .deployment_errors import StableDeploymentError
 from .git import get_head, get_pending_changes, get_remote_head
 from .runner_deployment import ProgressCallback, run_manifest_deployment
+from .runner_config_snapshot import RepoObservation
 
 if TYPE_CHECKING:
     from .deploy_retry_planner import DeployRetryPlanner, RetryPlan
@@ -80,7 +82,7 @@ def execute_approved_plan(
 
 def assert_remote_target(runner: "ServiceRunner", repo: str, target_head: str) -> None:
     """Fail before side effects if the approved branch no longer names target."""
-    state = runner._repo_states[repo]
+    state = runner._snapshot_repo_runtime(repo)
     repo_path = runner.config_dir / state.config.path
     remote_head = get_remote_head(repo_path, state.config.branch)
     if remote_head != target_head:
@@ -99,17 +101,32 @@ def _execute_normal(
     *,
     progress_callback: ProgressCallback | None,
 ) -> None:
-    state = runner._repo_states[repo]
+    state = runner._snapshot_repo_runtime(repo)
     if not state.pending_changes:
         repo_path = runner.config_dir / state.config.path
         current_head = get_head(repo_path)
         if current_head == target and repo not in runner._startup_repo_locks:
             return
         if current_head != target:
-            state.pending_changes = get_pending_changes(repo_path, state.config.branch)
-            if not state.pending_changes.get("commits"):
-                raise RuntimeError(
+            pending_changes = get_pending_changes(repo_path, state.config.branch)
+            if not pending_changes.get("commits"):
+                raise ApprovalRevalidationError(
                     f"approval target {target} is not present and no pending change is available"
+                )
+            if not runner._commit_repo_observation(
+                RepoObservation(
+                    generation=state.generation,
+                    repo_name=repo,
+                    repo_config=state.config,
+                    last_fetch=state.last_fetch,
+                    fetch_error=state.fetch_error,
+                    last_head=state.last_head,
+                    pending_changes=pending_changes,
+                    changed=True,
+                )
+            ):
+                raise ApprovalRevalidationError(
+                    "CONFIG_GENERATION_CHANGED: config changed before approval execution"
                 )
     progress_kwargs = (
         {"progress_callback": progress_callback}
@@ -157,17 +174,31 @@ def _execute_retry(
     *,
     progress_callback: ProgressCallback | None,
 ) -> None:
-    with runner._config_reload_lock:
-        state = runner._repo_states[repo]
-        repo_path = runner.config_dir / state.config.path
-        current_head = get_head(repo_path)
-        lock = runner._pull_locks[repo]
+    state = runner._snapshot_repo_runtime(repo)
+    repo_path = runner.config_dir / state.config.path
+    current_head = get_head(repo_path)
+    lock = state.pull_lock
     target = probe["target_head"]
     if current_head != target:
         if not state.pending_changes:
             from .git import get_pending_changes
 
-            state.pending_changes = get_pending_changes(repo_path, branch)
+            pending = get_pending_changes(repo_path, branch)
+            if not runner._commit_repo_observation(
+                RepoObservation(
+                    generation=state.generation,
+                    repo_name=repo,
+                    repo_config=state.config,
+                    last_fetch=state.last_fetch,
+                    fetch_error=state.fetch_error,
+                    last_head=state.last_head,
+                    pending_changes=pending,
+                    changed=True,
+                )
+            ):
+                raise ApprovalRevalidationError(
+                    "CONFIG_GENERATION_CHANGED: config changed before retry"
+                )
         progress_kwargs = (
             {"progress_callback": progress_callback}
             if progress_callback is not None
@@ -185,30 +216,30 @@ def _execute_retry(
         return
 
     if not lock.acquire(blocking=False):
-        raise RuntimeError(f"already deploying {repo}")
+        raise StableDeploymentError(
+            "DEPLOYMENT_LEASE_CONFLICT", f"already deploying {repo}"
+        )
     deployment_lease = None
-    config_lock_acquired = False
     suppressed: list[str] = []
     try:
         deployment_lease = runner.lifecycle_control.acquire_deployment(
             repo, approval["orchestrator_attempt_id"]
         )
-        runner._config_reload_lock.acquire()
-        config_lock_acquired = True
-        state = runner._repo_states[repo]
+        config_snapshot, state = runner._snapshot_repo_and_config(repo)
         repo_path = runner.config_dir / state.config.path
         if get_head(repo_path) != target:
             raise ApprovalRevalidationError(
                 "approved target changed before manifest retry execution"
             )
         if state.config.release_manifest is None:
-            affected = runner.get_affected_services(repo)
+            affected = list(state.affected_services)
             suppressed = affected
             runner._suppress_pending_restarts(suppressed)
+            runner._require_config_generation(config_snapshot)
             runner._restart_after_pull_legacy(repo, affected)
             return
         reload_plan = runner._prepare_current_manifest_config(repo)
-        state = runner._repo_states[repo]
+        config_snapshot, state = runner._snapshot_repo_and_config(repo)
         repo_path = runner.config_dir / state.config.path
         if get_head(repo_path) != target:
             raise ApprovalRevalidationError(
@@ -217,7 +248,7 @@ def _execute_retry(
         affected = (
             list(reload_plan.new_affected)
             if reload_plan is not None
-            else runner.get_affected_services(repo)
+            else list(state.affected_services)
         )
         suppressed = (
             list(reload_plan.quiesce_services) if reload_plan is not None else affected
@@ -242,6 +273,7 @@ def _execute_retry(
             if reload_plan is not None
             else {}
         )
+        runner._require_config_generation(config_snapshot)
         run_manifest_deployment(
             runner,
             repo,
@@ -252,13 +284,12 @@ def _execute_retry(
             branch=branch,
             expected_operation="upgrade",
             request_id=approval["orchestrator_attempt_id"],
+            config_snapshot=config_snapshot,
             **config_kwargs,
             **progress_kwargs,
         )
     finally:
-        if config_lock_acquired:
-            runner._release_restart_suppression(suppressed)
-            runner._config_reload_lock.release()
+        runner._release_restart_suppression(suppressed)
         if deployment_lease is not None:
             deployment_lease.__exit__(None, None, None)
         lock.release()

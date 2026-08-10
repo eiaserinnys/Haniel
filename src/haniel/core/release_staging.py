@@ -13,15 +13,22 @@ from typing import Callable, Iterator, Literal
 from .deployment import ReleaseManifest
 from .deployment_command_runner import CommandRunner
 from .deployment_command_runner import subprocess_command_runner
+from .deployment_errors import StableDeploymentError
 from .safety_redaction import redact_text
 
 
-class ReleaseStagingError(RuntimeError):
+class ReleaseStagingError(StableDeploymentError):
     """A target could not be prepared in a detached staging checkout."""
+
+    def __init__(self, message: str, *, code: str = "PULL_FAILED") -> None:
+        super().__init__(code, message)
 
 
 class ReleaseIdentityError(ReleaseStagingError):
     """The target probe disagrees with immutable handover intent."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message, code=code)
 
 
 @dataclass(frozen=True)
@@ -133,18 +140,23 @@ def _validate_probe(
     manifest_digest: str,
 ) -> Literal["fresh_install", "upgrade"]:
     if not isinstance(payload, dict):
-        raise ReleaseIdentityError("PROVENANCE_PROBE_FAILED: JSON object required")
+        raise ReleaseIdentityError("PROVENANCE_PROBE_FAILED", "JSON object required")
     operation = payload.get("operation")
     if operation not in ("fresh_install", "upgrade"):
-        raise ReleaseIdentityError("PROVENANCE_PROBE_FAILED: invalid operation")
+        raise ReleaseIdentityError("PROVENANCE_PROBE_FAILED", "invalid operation")
     if operation != expected_operation:
         raise ReleaseIdentityError(
-            f"OPERATION_MISMATCH: expected {expected_operation}, got {operation}"
+            "OPERATION_MISMATCH", f"expected {expected_operation}, got {operation}"
         )
     if payload.get("target_head") != target_head:
-        raise ReleaseIdentityError("TARGET_IDENTITY_MISMATCH")
+        raise ReleaseIdentityError(
+            "TARGET_IDENTITY_MISMATCH", "probe target_head does not match target"
+        )
     if payload.get("manifest_digest") != manifest_digest:
-        raise ReleaseIdentityError("MANIFEST_IDENTITY_MISMATCH")
+        raise ReleaseIdentityError(
+            "MANIFEST_IDENTITY_MISMATCH",
+            "probe manifest_digest does not match manifest",
+        )
     return operation
 
 
@@ -165,7 +177,13 @@ def _git(path: Path, *args: str) -> str:
     except subprocess.CalledProcessError as error:
         detail = redact_text((error.stderr or error.stdout or "").strip())
         raise ReleaseStagingError(
-            f"git {' '.join(args)} failed for {path}: {detail}"
+            f"git {' '.join(args)} failed for {path}: {detail}",
+            code="PULL_FAILED",
+        ) from error
+    except subprocess.TimeoutExpired as error:
+        raise ReleaseStagingError(
+            f"git {' '.join(args)} timed out for {path}",
+            code="PULL_TIMEOUT",
         ) from error
     return result.stdout.strip()
 

@@ -22,9 +22,9 @@ import shlex
 import subprocess
 import threading
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 from uuid import uuid4
@@ -35,6 +35,7 @@ from ..config import (
     RepoConfig,
     ServiceConfig,
     ShutdownConfig,
+    validate_config,
 )
 from ..config.release_activation import (
     ReleaseManifestActivationRequired,
@@ -58,6 +59,15 @@ from .git import (
 from .health import HealthManager, ServiceState
 from .process import ProcessManager
 from .deployment import DeploymentError, DeploymentStateStore
+from .deployment_errors import (
+    StableDeploymentError,
+    stable_deployment_error_code,
+)
+from .runner_config_snapshot import (
+    RepoObservation,
+    RepoRuntimeSnapshot,
+    RunnerConfigSnapshot,
+)
 from .repo_reconciliation import (
     RepoReconciliationSnapshot,
     capture_repo_snapshot,
@@ -69,8 +79,8 @@ from .handover_config import (
     HandoverConfigError,
     require_handover_config_digest,
 )
-from .safety_redaction import redact_text, sensitive_values
-from .lifecycle_control import DeploymentLease, LifecycleControl
+from .safety_redaction import bounded_redact_text, redact_text, sensitive_values
+from .lifecycle_control import DeploymentLease, LifecycleConflict, LifecycleControl
 from .deploy_retry_planner import DeployRetryPlanner
 from .orchestrated_deploy_execution import (
     OrchestratedDeployRegistry,
@@ -88,6 +98,7 @@ from .orch_pending_deploy import (
     write as _write_orch_pending_deploy,
 )
 from ..integrations.deploy_reporting import ApprovalRevalidationError
+from ..integrations.deploy_attempt_gate import DeployPermissionError
 
 if TYPE_CHECKING:
     from ..integrations.orchestrator_client import OrchestratorClient
@@ -97,16 +108,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
-def _config_snapshot_guard(method):
-    """Serialize config-derived readers with atomic reload application."""
-
-    @wraps(method)
-    def guarded(self, *args, **kwargs):
-        with self._config_reload_lock:
-            return method(self, *args, **kwargs)
-
-    return guarded
+_OPERATIONAL_DEPLOYMENT_ERRORS = (
+    ApprovalRevalidationError,
+    DeploymentError,
+    DeployPermissionError,
+    GitError,
+    HandoverConfigError,
+    LifecycleConflict,
+    ReleaseManifestActivationRequired,
+    StableDeploymentError,
+)
 
 
 class CyclicDependencyError(Exception):
@@ -348,6 +359,8 @@ class ServiceRunner:
             name: svc for name, svc in config.services.items() if svc.enabled
         }
         self._dependency_graph = DependencyGraph(self._enabled_services)
+        self._startup_order = tuple(self._dependency_graph.topological_sort())
+        self._shutdown_order = tuple(reversed(self._startup_order))
 
         # Initialize repo states
         self._repo_states: dict[str, RepoState] = {}
@@ -358,6 +371,7 @@ class ServiceRunner:
         self._state = RunnerState()
         self._state_lock = threading.Lock()
         self._config_reload_lock = threading.RLock()
+        self._config_generation = 0
         self._stop_event = threading.Event()
         self._poll_thread: threading.Thread | None = None
 
@@ -395,9 +409,10 @@ class ServiceRunner:
         self._startup_manifest_request_ids: dict[str, str] = {}
         self._startup_manifest_operations: dict[str, str] = {}
         self._startup_manifest_reload_plans: dict[str, "HandoverReloadPlan"] = {}
+        self._startup_manifest_config_snapshots: dict[str, RunnerConfigSnapshot] = {}
         self._startup_deployment_leases: dict[str, DeploymentLease] = {}
-        self._startup_config_locks: set[str] = set()
         self._startup_repo_locks: set[str] = set()
+        self._startup_pull_locks: dict[str, threading.Lock] = {}
 
         # Self-update (see ADR-0002)
         self._self_repo: str | None = (
@@ -425,13 +440,15 @@ class ServiceRunner:
             RuntimeError: If config_path was not provided at construction time.
         """
         from ..config import load_config
+        from .service_lifecycle import CONFIG_WRITE_LOCK
 
         if not self.config_path:
             raise RuntimeError("config_path is not set — cannot reload configuration")
 
-        with self._config_reload_lock:
+        with CONFIG_WRITE_LOCK:
+            snapshot = self._snapshot_config_state()
             new_config = load_config(self.config_path)
-            self._apply_config_snapshot(new_config)
+            self._replace_config_snapshot(new_config, snapshot.generation)
 
         logger.info("Configuration reloaded from %s", self.config_path)
 
@@ -454,68 +471,208 @@ class ServiceRunner:
         digest = handover_config_digest(self.config_path)
         return self.prepare_handover_config(repo_name, digest)
 
-    def _apply_config_snapshot(self, new_config: HanielConfig) -> None:
-        """Replace config-derived indexes while preserving live process state."""
+    def _snapshot_config_state(self) -> RunnerConfigSnapshot:
+        """Copy config-derived memory while holding the resident lock briefly."""
+
+        with self._config_reload_lock:
+            return RunnerConfigSnapshot(
+                generation=self._config_generation,
+                config=self.config.model_copy(deep=True),
+                enabled_services=deepcopy(self._enabled_services),
+                repo_identity={
+                    name: state.config.model_copy(deep=True)
+                    for name, state in self._repo_states.items()
+                },
+                self_repo=self._self_repo,
+                startup_order=self._startup_order,
+                shutdown_order=self._shutdown_order,
+            )
+
+    def _snapshot_repo_runtime(self, name: str) -> RepoRuntimeSnapshot:
+        """Copy one repo state and its stable pull-lock reference."""
+
+        with self._config_reload_lock:
+            state = self._repo_states.get(name)
+            if state is None:
+                raise ValueError(f"Unknown repo: {name}")
+            directly_affected = {
+                service
+                for service, config in self._enabled_services.items()
+                if config.repo == name
+            }
+            affected = set(directly_affected)
+            for service in directly_affected:
+                affected.update(self._dependency_graph.get_all_dependents(service))
+            return RepoRuntimeSnapshot(
+                generation=self._config_generation,
+                repo_name=name,
+                config=state.config.model_copy(deep=True),
+                last_head=state.last_head,
+                last_fetch=state.last_fetch,
+                fetch_error=state.fetch_error,
+                pending_changes=deepcopy(state.pending_changes),
+                pull_lock=self._pull_locks[name],
+                affected_services=tuple(affected),
+            )
+
+    def _snapshot_repo_and_config(
+        self, name: str
+    ) -> tuple[RunnerConfigSnapshot, RepoRuntimeSnapshot]:
+        """Capture config identity and one repo from the same generation."""
+
+        with self._config_reload_lock:
+            return self._snapshot_config_state(), self._snapshot_repo_runtime(name)
+
+    def _commit_repo_observation(self, observation: RepoObservation) -> bool:
+        """CAS one completed external observation into resident memory."""
+
+        with self._config_reload_lock:
+            state = self._repo_states.get(observation.repo_name)
+            if (
+                observation.generation != self._config_generation
+                or state is None
+                or state.config != observation.repo_config
+            ):
+                return False
+            state.last_fetch = observation.last_fetch
+            state.fetch_error = observation.fetch_error
+            state.last_head = observation.last_head
+            state.pending_changes = deepcopy(observation.pending_changes)
+            return True
+
+    def _replace_config_snapshot(
+        self,
+        candidate: HanielConfig,
+        expected_generation: int,
+    ) -> int:
+        """Prepare outside the lock, then atomically replace one generation."""
+
+        prepared_config = candidate.model_copy(deep=True)
+        semantic_errors = validate_config(prepared_config)
+        if semantic_errors:
+            raise StableDeploymentError(
+                "CONFIG_SEMANTIC_INVALID",
+                "; ".join(str(error) for error in semantic_errors),
+            )
         enabled_services = {
-            name: svc for name, svc in new_config.services.items() if svc.enabled
+            name: svc for name, svc in prepared_config.services.items() if svc.enabled
         }
         dependency_graph = DependencyGraph(enabled_services)
-
-        # Merge repo states — preserve last_fetch / last_head for existing repos
-        existing: dict[str, RepoState] = dict(self._repo_states)
-        repo_states: dict[str, RepoState] = {}
-        for name, repo_cfg in new_config.repos.items():
-            if name in existing:
-                current = existing[name]
+        try:
+            startup_order = tuple(dependency_graph.topological_sort())
+        except CyclicDependencyError as error:
+            raise StableDeploymentError(
+                "CONFIG_SEMANTIC_INVALID",
+                str(error),
+            ) from error
+        shutdown_order = tuple(reversed(startup_order))
+        resident_identity = self._snapshot_config_state().repo_identity
+        prepared_identity_states: dict[str, RepoState] = {}
+        prepared_new_locks: dict[str, threading.Lock] = {}
+        for name, repo_cfg in prepared_config.repos.items():
+            old_config = resident_identity.get(name)
+            checkout_identity_unchanged = old_config is not None and (
+                old_config.url,
+                old_config.path,
+                old_config.branch,
+            ) == (repo_cfg.url, repo_cfg.path, repo_cfg.branch)
+            if checkout_identity_unchanged:
+                continue
+            state = RepoState(name=name, config=repo_cfg.model_copy(deep=True))
+            repo_path = self.config_dir / repo_cfg.path
+            if repo_path.exists():
+                try:
+                    state.last_head = get_head(repo_path)
+                except GitError as error:
+                    state.fetch_error = bounded_redact_text(str(error))
+            prepared_identity_states[name] = state
+            if old_config is None:
+                prepared_new_locks[name] = threading.Lock()
+        self_update_repo = (
+            prepared_config.self_update.repo if prepared_config.self_update else None
+        )
+        with self._config_reload_lock:
+            if self._config_generation != expected_generation:
+                raise StableDeploymentError(
+                    "CONFIG_GENERATION_CHANGED",
+                    "resident config changed while preparing a replacement",
+                )
+            repo_states: dict[str, RepoState] = {}
+            pull_locks: dict[str, threading.Lock] = {}
+            for name, repo_cfg in prepared_config.repos.items():
+                current = self._repo_states.get(name)
+                prepared = prepared_identity_states.get(name)
+                if prepared is not None:
+                    repo_states[name] = prepared
+                    pull_locks[name] = (
+                        prepared_new_locks[name]
+                        if current is None
+                        else self._pull_locks[name]
+                    )
+                    continue
+                assert current is not None
                 repo_states[name] = RepoState(
                     name=name,
-                    config=repo_cfg,
+                    config=repo_cfg.model_copy(deep=True),
                     last_head=current.last_head,
                     last_fetch=current.last_fetch,
                     fetch_error=current.fetch_error,
-                    pending_changes=current.pending_changes,
+                    pending_changes=deepcopy(current.pending_changes),
                 )
-            else:
-                state = RepoState(name=name, config=repo_cfg)
-                repo_states[name] = state
-                self._initialize_repo_state(name, state)
+                pull_locks[name] = self._pull_locks[name]
+            self.config = prepared_config
+            self.poll_interval = prepared_config.poll_interval
+            self._enabled_services = enabled_services
+            self._dependency_graph = dependency_graph
+            self._startup_order = startup_order
+            self._shutdown_order = shutdown_order
+            self._repo_states = repo_states
+            self._pull_locks = pull_locks
+            self._self_repo = self_update_repo
+            self._config_generation += 1
+            return self._config_generation
 
-        # Sync pull locks — preserve existing locks, create new ones, drop removed
-        pull_locks = {
-            name: self._pull_locks.get(name, threading.Lock()) for name in repo_states
-        }
+    def _require_config_generation(self, snapshot: RunnerConfigSnapshot) -> None:
+        """Fail closed before an irreversible action after config drift."""
 
-        self_update_repo = (
-            new_config.self_update.repo if new_config.self_update else None
-        )
+        with self._config_reload_lock:
+            if snapshot.generation != self._config_generation:
+                raise StableDeploymentError(
+                    "CONFIG_GENERATION_CHANGED",
+                    "resident config changed during release preparation",
+                )
 
-        self.config = new_config
-        self.poll_interval = new_config.poll_interval
-        self._enabled_services = enabled_services
-        self._dependency_graph = dependency_graph
-        self._repo_states = repo_states
-        self._pull_locks = pull_locks
-        self._self_repo = self_update_repo
+    @staticmethod
+    def _restore_failed_activation(repo_path: Path, previous_head: str) -> None:
+        """Restore and verify the checkout before propagating activation failure."""
 
-    @_config_snapshot_guard
+        try:
+            if get_head(repo_path) != previous_head:
+                reset_repo_to(repo_path, previous_head)
+            if get_head(repo_path) != previous_head:
+                raise RuntimeError("previous HEAD equality verification failed")
+        except Exception as recovery_error:
+            raise StableDeploymentError(
+                "RECOVERY_FAILED",
+                f"failed to restore checkout after activation error: {recovery_error}",
+            ) from recovery_error
+
     def get_startup_order(self) -> list[str]:
         """Get the order in which services should start.
 
         Returns:
             List of service names in startup order
         """
-        return self._dependency_graph.topological_sort()
+        return list(self._snapshot_config_state().startup_order)
 
-    @_config_snapshot_guard
     def get_shutdown_order(self) -> list[str]:
         """Get the order in which services should stop.
 
         Returns:
             List of service names in shutdown order (reverse of startup)
         """
-        return self._dependency_graph.topological_sort(reverse=True)
+        return list(self._snapshot_config_state().shutdown_order)
 
-    @_config_snapshot_guard
     def get_affected_services(self, repo_name: str) -> list[str]:
         """Get services affected by changes to a repository.
 
@@ -525,20 +682,8 @@ class ServiceRunner:
         Returns:
             List of service names that depend on this repo
         """
-        # Find services that directly depend on this repo
-        directly_affected: set[str] = set()
-        for name, config in self._enabled_services.items():
-            if config.repo == repo_name:
-                directly_affected.add(name)
+        return list(self._snapshot_repo_runtime(repo_name).affected_services)
 
-        # Include transitively dependent services
-        all_affected: set[str] = set(directly_affected)
-        for service in directly_affected:
-            all_affected.update(self._dependency_graph.get_all_dependents(service))
-
-        return list(all_affected)
-
-    @_config_snapshot_guard
     def execute_hook(self, service_name: str, hook_name: str) -> bool:
         """Execute a lifecycle hook for a service.
 
@@ -549,10 +694,11 @@ class ServiceRunner:
         Returns:
             True if hook executed successfully or doesn't exist
         """
-        if service_name not in self._enabled_services:
+        snapshot = self._snapshot_config_state()
+        if service_name not in snapshot.enabled_services:
             return True
 
-        config = self._enabled_services[service_name]
+        config = snapshot.enabled_services[service_name]
         if not config.hooks:
             return True
 
@@ -629,7 +775,6 @@ class ServiceRunner:
             )
             return False
 
-    @_config_snapshot_guard
     def start_services(self) -> None:
         """Start services and always release startup deployment leases."""
         try:
@@ -645,14 +790,16 @@ class ServiceRunner:
         a controlled downtime window for pulling all repos, but unchanged repos
         should not pay rebuild cost.
         """
-        startup_order = self.get_startup_order()
+        config_snapshot = self._snapshot_config_state()
+        enabled_services = config_snapshot.enabled_services
+        startup_order = list(config_snapshot.startup_order)
         logger.info(f"Starting services in order: {startup_order}")
 
         # Run legacy post_pull hooks on first start only for repos updated at startup.
         if not self._post_pull_executed:
             self._post_pull_executed = True
             for name in startup_order:
-                service = self._enabled_services[name]
+                service = enabled_services[name]
                 if service.repo in self._startup_updated_repos:
                     self.execute_hook(name, "post_pull")
 
@@ -661,7 +808,7 @@ class ServiceRunner:
             manifest_services[repo_name] = [
                 name
                 for name in startup_order
-                if self._enabled_services[name].repo == repo_name
+                if enabled_services[name].repo == repo_name
             ]
 
         handled_manifest_services: set[str] = set()
@@ -671,7 +818,7 @@ class ServiceRunner:
             if self.process_manager.is_running(name):
                 logger.info("Service already running after handover: %s", name)
                 continue
-            repo_name = self._enabled_services[name].repo
+            repo_name = enabled_services[name].repo
             if repo_name not in self._startup_manifest_updates:
                 self._start_service(name)
                 continue
@@ -695,6 +842,16 @@ class ServiceRunner:
                 else {}
             )
             try:
+                startup_snapshot = self._startup_manifest_config_snapshots.get(
+                    repo_name
+                )
+                if startup_snapshot is not None:
+                    self._require_config_generation(startup_snapshot)
+                snapshot_kwargs = (
+                    {"config_snapshot": startup_snapshot}
+                    if startup_snapshot is not None
+                    else {}
+                )
                 run_manifest_deployment(
                     self,
                     repo_name,
@@ -707,33 +864,66 @@ class ServiceRunner:
                     request_id=self._startup_manifest_request_ids.get(
                         repo_name, f"startup-resume-{repo_name}"
                     ),
+                    **snapshot_kwargs,
                     **config_kwargs,
                 )
-            except DeploymentError as error:
-                if not error.recovered:
-                    raise
-                logger.error(
-                    "Startup deployment failed for %s but availability recovered: %s",
-                    repo_name,
-                    error,
+            except _OPERATIONAL_DEPLOYMENT_ERRORS as error:
+                code = stable_deployment_error_code(error)
+                request_id = self._startup_manifest_request_ids.get(
+                    repo_name, f"startup-resume-{repo_name}"
                 )
+                try:
+                    self._deployment_state_store().fail_handover_if_current(
+                        repo_name,
+                        request_id,
+                        code,
+                        str(error),
+                    )
+                except Exception as journal_error:
+                    logger.error(
+                        "Failed to persist startup deployment failure for %s [%s]: %s",
+                        repo_name,
+                        code,
+                        journal_error,
+                    )
+                logger.error(
+                    "Startup deployment failed for %s [%s]; continuing service "
+                    "lifecycle: %s",
+                    repo_name,
+                    code,
+                    bounded_redact_text(str(error)),
+                )
+                if code == "CONFIG_GENERATION_CHANGED":
+                    current_services = self._snapshot_config_state().enabled_services
+                    for service_name in affected:
+                        if (
+                            service_name in current_services
+                            and not self.process_manager.is_running(service_name)
+                        ):
+                            if not self._start_service(service_name):
+                                raise RuntimeError(
+                                    "failed to restore startup service after "
+                                    f"config generation drift: {service_name}"
+                                )
 
     def _release_startup_repo_locks(self) -> None:
         """Release repo leases retained across startup manifest handover."""
-        for repo_name in tuple(self._startup_config_locks):
-            self._config_reload_lock.release()
-            self._startup_config_locks.discard(repo_name)
         for repo_name, lease in tuple(self._startup_deployment_leases.items()):
             lease.__exit__(None, None, None)
             self._startup_deployment_leases.pop(repo_name, None)
             self._startup_manifest_reload_plans.pop(repo_name, None)
+            self._startup_manifest_config_snapshots.pop(repo_name, None)
         for repo_name in tuple(self._startup_repo_locks):
-            lock = self._pull_locks.get(repo_name)
+            lock = self._startup_pull_locks.pop(repo_name, None)
+            if lock is None:
+                try:
+                    lock = self._snapshot_repo_runtime(repo_name).pull_lock
+                except ValueError:
+                    lock = None
             if lock is not None and lock.locked():
                 lock.release()
             self._startup_repo_locks.discard(repo_name)
 
-    @_config_snapshot_guard
     def _start_service(
         self,
         name: str,
@@ -751,10 +941,11 @@ class ServiceRunner:
         Returns:
             True if started successfully
         """
-        if name not in self._enabled_services:
+        snapshot = self._snapshot_config_state()
+        if name not in snapshot.enabled_services:
             return False
 
-        config = self._enabled_services[name]
+        config = snapshot.enabled_services[name]
         logger.info(f"Starting service: {name}")
 
         try:
@@ -814,10 +1005,12 @@ class ServiceRunner:
             logger.error("Circuit breaker open for %s, not restarting", name)
 
     def _blocked_start_dependencies(self, name: str) -> list[str]:
+        snapshot = self._snapshot_config_state()
+        dependency_graph = DependencyGraph(snapshot.enabled_services)
         blockers = []
-        for dependency in self._dependency_graph.get_dependencies(name):
+        for dependency in dependency_graph.get_dependencies(name):
             if (
-                dependency in self._enabled_services
+                dependency in snapshot.enabled_services
                 and not self.process_manager.is_running(dependency)
             ):
                 blockers.append(dependency)
@@ -1044,7 +1237,8 @@ class ServiceRunner:
 
     def _start_mcp_server(self) -> None:
         """Start the MCP server if enabled."""
-        if not self.config.mcp or not self.config.mcp.enabled:
+        config = self._snapshot_config_state().config
+        if not config.mcp or not config.mcp.enabled:
             logger.info("MCP server is disabled")
             return
 
@@ -1061,7 +1255,8 @@ class ServiceRunner:
 
     def _start_slack_bot(self) -> None:
         """Start the Slack bot if configured and enabled."""
-        if not self.config.slack or not self.config.slack.enabled:
+        config = self._snapshot_config_state().config
+        if not config.slack or not config.slack.enabled:
             logger.info("Slack bot is disabled")
             return
 
@@ -1077,7 +1272,7 @@ class ServiceRunner:
 
         try:
             self._slack_bot = SlackBot(
-                config=self.config.slack,
+                config=config.slack,
                 approve_callback=self.trigger_pull,
                 app_home_controller=self,
             )
@@ -1088,7 +1283,7 @@ class ServiceRunner:
 
     def _start_orch_client(self) -> None:
         """Start orchestrator client if configured."""
-        orch_cfg = self.config.orchestrator_client
+        orch_cfg = self._snapshot_config_state().config.orchestrator_client
         if orch_cfg is None or not orch_cfg.enabled:
             return
         try:
@@ -1115,7 +1310,6 @@ class ServiceRunner:
             logger.warning(f"Failed to start orchestrator client: {e}")
             self._orch_client = None
 
-    @_config_snapshot_guard
     def _collect_services_info(self) -> list[dict]:
         """Collect service info for orchestrator reporting.
 
@@ -1136,8 +1330,9 @@ class ServiceRunner:
         consumes ``process_status`` (action buttons) and ``health_status``
         (display) separately. See atom 260519.01.
         """
+        snapshot = self._snapshot_config_state()
         services = []
-        for name, svc_config in self.config.services.items():
+        for name, svc_config in snapshot.config.services.items():
             health = self.health_manager.get_health(name)
             # Extract port from ready condition (format: "port:N")
             port = None
@@ -1176,11 +1371,9 @@ class ServiceRunner:
         """Revalidate the immutable plan, then enter its sole allowed mode."""
         deploy_id = approval["deploy_id"]
         _node_id, repo, branch, _target = deploy_id.split(":", 3)
-        with self._config_reload_lock:
-            if repo not in self._repo_states:
-                raise ValueError(f"Unknown repo: {repo}")
-            configured_branch = self._repo_states[repo].config.branch
-            is_self_repo = bool(self._self_repo and repo == self._self_repo)
+        config_snapshot, runtime = self._snapshot_repo_and_config(repo)
+        configured_branch = runtime.config.branch
+        is_self_repo = config_snapshot.self_repo == repo
         if branch != configured_branch:
             raise ApprovalRevalidationError(
                 f"approval branch {branch!r} differs from configured "
@@ -1235,7 +1428,6 @@ class ServiceRunner:
             progress_callback=progress_callback,
         )
 
-    @_config_snapshot_guard
     def _handle_deploy_plan_probe(self, probe: dict) -> dict:
         """Return a side-effect-free proposal and retain its immutable snapshot."""
         repo = probe["repo"]
@@ -1244,18 +1436,14 @@ class ServiceRunner:
         self._orchestrated_deploys.record_probe(probe)
         return plan.proposal(probe)
 
-    @_config_snapshot_guard
     def _deploy_retry_planner(self, repo: str) -> DeployRetryPlanner:
-        state = self._repo_states.get(repo)
-        if state is None:
-            raise ValueError(f"Unknown repo: {repo}")
+        state = self._snapshot_repo_runtime(repo)
         return DeployRetryPlanner(
             repo_path=(self.config_dir / state.config.path).resolve(),
             manifest_path=state.config.release_manifest,
             journal_store=self._deployment_state_store(),
         )
 
-    @_config_snapshot_guard
     def _capture_orchestrator_repo_snapshot(
         self,
         repo: str,
@@ -1263,16 +1451,19 @@ class ServiceRunner:
         deploy_id: str | None = None,
     ) -> RepoReconciliationSnapshot:
         """Capture the one Git-truth contract shared by every trigger."""
-        state = self._repo_states.get(repo)
-        if state is None:
-            raise ValueError(f"Unknown repo: {repo}")
-        return capture_repo_snapshot(
-            node_id=self.config.orchestrator_client.node_id,
+        config_snapshot, state = self._snapshot_repo_and_config(repo)
+        orchestrator = config_snapshot.config.orchestrator_client
+        if orchestrator is None:
+            raise RuntimeError("orchestrator client is not configured")
+        snapshot = capture_repo_snapshot(
+            node_id=orchestrator.node_id,
             repo=repo,
             branch=state.config.branch,
             path=self.config_dir / state.config.path,
             deploy_id=deploy_id,
         )
+        self._require_config_generation(config_snapshot)
+        return snapshot
 
     def _deferred_stop_for_self_update(self) -> None:
         """Helper: small delay then stop. Allows the orch_client coroutine
@@ -1337,6 +1528,12 @@ class ServiceRunner:
 
         status = "success" if last.ok else "failed"
         error = None if last.ok else (last.error or "self-update reported failure")
+        config_snapshot = self._snapshot_config_state()
+        self_repo = config_snapshot.self_repo
+        if self_repo is not None:
+            config_snapshot, self_runtime = self._snapshot_repo_and_config(self_repo)
+        else:
+            self_runtime = None
         self._orch_client.enqueue_deploy_result(
             pending.deploy_id,
             status=status,
@@ -1345,11 +1542,11 @@ class ServiceRunner:
             orchestrator_attempt_id=pending.orchestrator_attempt_id,
             connection_generation=pending.connection_generation,
             settled_snapshot=self._capture_orchestrator_repo_snapshot(
-                self._self_repo,
-                self._repo_states[self._self_repo].config.branch,
+                self_repo,
+                self_runtime.config.branch,
                 pending.deploy_id,
             )
-            if self._self_repo
+            if self_repo is not None and self_runtime is not None
             else None,
         )
         logger.info(
@@ -1405,23 +1602,22 @@ class ServiceRunner:
 
             return reload_service_definition(self, service_name)
 
-        with self._config_reload_lock:
-            if not service_name:
-                raise ValueError("Service name is required")
-            if service_name not in self.config.services:
-                raise ValueError(f"Unknown service: {service_name}")
+        if not service_name:
+            raise ValueError("Service name is required")
+        if service_name not in self._snapshot_config_state().config.services:
+            raise ValueError(f"Unknown service: {service_name}")
 
-            if action == "restart":
-                message = self.restart_service(service_name)
-                return {"ok": True, "service": service_name, "message": message}
-            if action == "stop":
-                self.stop_service(service_name)
-                return {"ok": True, "service": service_name, "action": action}
-            if action == "start":
-                if not self._start_service(service_name):
-                    raise RuntimeError(f"Failed to start service: {service_name}")
-                return {"ok": True, "service": service_name, "action": action}
-            raise ValueError(f"Unknown action: {action}")
+        if action == "restart":
+            message = self.restart_service(service_name)
+            return {"ok": True, "service": service_name, "message": message}
+        if action == "stop":
+            self.stop_service(service_name)
+            return {"ok": True, "service": service_name, "action": action}
+        if action == "start":
+            if not self._start_service(service_name):
+                raise RuntimeError(f"Failed to start service: {service_name}")
+            return {"ok": True, "service": service_name, "action": action}
+        raise ValueError(f"Unknown action: {action}")
 
     def trigger_pull(
         self,
@@ -1448,10 +1644,8 @@ class ServiceRunner:
             repo_name: Repository to pull
             auto: True if triggered automatically (affects Slack message wording)
         """
-        if repo_name not in self._pull_locks:
-            raise ValueError(f"Unknown repo: {repo_name}")
-
-        pull_lock = self._pull_locks[repo_name]
+        runtime = self._snapshot_repo_runtime(repo_name)
+        pull_lock = runtime.pull_lock
         if (
             orchestrator_attempt_id is not None
             and repo_name in self._startup_repo_locks
@@ -1465,38 +1659,33 @@ class ServiceRunner:
             pull_lock.acquire()
         elif not pull_lock.acquire(blocking=False):
             if orchestrator_attempt_id is not None:
-                raise RuntimeError(f"already pulling {repo_name}")
+                raise StableDeploymentError(
+                    "DEPLOYMENT_LEASE_CONFLICT", f"already pulling {repo_name}"
+                )
             logger.info("Already pulling %s, ignoring duplicate request", repo_name)
             return
 
         captured_changes: dict | None = None
         deployment_lease: DeploymentLease | None = None
-        config_lock_acquired = False
         lifecycle_request_id = orchestrator_attempt_id or f"runtime-{uuid4()}"
         try:
-            # All config consumers follow the same global lock order:
-            # deployment lease first, then the resident config snapshot lock.
-            # This preserves observable lease conflicts and prevents a reload
-            # from changing repo/service identity during a release.
             deployment_lease = self.lifecycle_control.acquire_deployment(
                 repo_name, lifecycle_request_id
             )
-            self._config_reload_lock.acquire()
-            config_lock_acquired = True
-            state = self._repo_states[repo_name]
-            if branch is not None and branch != state.config.branch:
+            runtime = self._snapshot_repo_runtime(repo_name)
+            if branch is not None and branch != runtime.config.branch:
                 raise ApprovalRevalidationError(
                     f"approval branch {branch!r} differs from configured "
-                    f"branch {state.config.branch!r} for {repo_name!r}"
+                    f"branch {runtime.config.branch!r} for {repo_name!r}"
                 )
 
             # Guard: skip if no pending changes (e.g. pull just completed, re-entry)
-            if not state.pending_changes:
+            if not runtime.pending_changes:
                 logger.info("No pending changes for %s, skipping", repo_name)
                 return
 
             # _pull_repo() clears state.pending_changes → capture before any ops
-            captured_changes = state.pending_changes
+            captured_changes = runtime.pending_changes
 
             if self._ws_handler is not None:
                 self._ws_handler.broadcast_repo_pulling(repo_name, True)
@@ -1505,16 +1694,17 @@ class ServiceRunner:
                 self._slack_bot.notify_pulling(repo_name, auto=auto)
 
             self._ensure_release_manifest_activation(repo_name)
+            runtime = self._snapshot_repo_runtime(repo_name)
             reload_plan = (
                 self._prepare_current_manifest_config(repo_name)
-                if self._repo_states[repo_name].config.release_manifest
+                if runtime.config.release_manifest
                 else None
             )
-            state = self._repo_states[repo_name]
+            config_snapshot, runtime = self._snapshot_repo_and_config(repo_name)
             affected = (
                 list(reload_plan.new_affected)
                 if reload_plan is not None
-                else self.get_affected_services(repo_name)
+                else list(runtime.affected_services)
             )
             quiesce_services = (
                 list(reload_plan.quiesce_services)
@@ -1526,19 +1716,19 @@ class ServiceRunner:
                 for svc in quiesce_services:
                     self._cancel_pending_restart(svc)
 
-                repo_path = self.config_dir / state.config.path
+                repo_path = self.config_dir / runtime.config.path
                 previous_head = (
                     get_head(repo_path)
-                    if (state.config.release_manifest or target_head is not None)
+                    if (runtime.config.release_manifest or target_head is not None)
                     else None
                 )
-                if state.config.release_manifest:
+                if runtime.config.release_manifest:
                     assert previous_head is not None
-                    resolved_branch = branch or state.config.branch
+                    resolved_branch = branch or runtime.config.branch
                     intended_target = target_head or get_remote_head(
-                        repo_path, state.config.branch
+                        repo_path, runtime.config.branch
                     )
-                    manifest_identity = state.config.release_manifest
+                    manifest_identity = runtime.config.release_manifest
                     journal_store = self._deployment_state_store()
                     journal_attempt_id = journal_store.begin_handover(
                         repo_name,
@@ -1584,32 +1774,50 @@ class ServiceRunner:
                         )
                 else:
                     journal_attempt_id = None
-                if state.config.release_manifest:
+                if runtime.config.release_manifest:
                     assert previous_head is not None
                     try:
+                        self._require_config_generation(config_snapshot)
                         discarded = activate_repo_target(
                             repo_path,
                             staged.target_head,
-                            strategy=state.config.pull_strategy or "merge",
+                            strategy=runtime.config.pull_strategy or "merge",
                         )
                         actual_head = get_head(repo_path)
                         if actual_head != staged.target_head:
-                            raise RuntimeError(
-                                "activated checkout differs from staged target"
+                            raise StableDeploymentError(
+                                "PULL_FAILED",
+                                "activated checkout differs from staged target",
+                            )
+                        if not self._commit_repo_observation(
+                            RepoObservation(
+                                generation=runtime.generation,
+                                repo_name=repo_name,
+                                repo_config=runtime.config,
+                                last_fetch=runtime.last_fetch,
+                                fetch_error=None,
+                                last_head=actual_head,
+                                pending_changes=None,
+                                changed=True,
+                            )
+                        ):
+                            raise StableDeploymentError(
+                                "CONFIG_GENERATION_CHANGED",
+                                "config changed before activation commit for "
+                                f"{repo_name}",
                             )
                     except Exception:
-                        if get_head(repo_path) != previous_head:
-                            reset_repo_to(repo_path, previous_head)
-                        state.last_head = get_head(repo_path)
+                        self._restore_failed_activation(repo_path, previous_head)
                         raise
-                    state.last_head = actual_head
-                    state.pending_changes = None
                 else:
+                    self._require_config_generation(config_snapshot)
                     success, discarded = self._pull_repo(repo_name)
                     if not success:
-                        raise RuntimeError(f"git pull failed for {repo_name}")
+                        raise StableDeploymentError(
+                            "PULL_FAILED", f"git pull failed for {repo_name}"
+                        )
 
-                if state.config.release_manifest:
+                if runtime.config.release_manifest:
                     assert previous_head is not None
                     progress_kwargs = (
                         {"progress_callback": progress_callback}
@@ -1638,6 +1846,7 @@ class ServiceRunner:
                             if reload_plan is not None
                             else None
                         ),
+                        config_snapshot=config_snapshot,
                         **progress_kwargs,
                     )
                 else:
@@ -1645,11 +1854,14 @@ class ServiceRunner:
             finally:
                 self._release_restart_suppression(quiesce_services)
 
-            if self._self_repo and repo_name == self._self_repo:
+            if repo_name == config_snapshot.self_repo:
                 # Self-update: signal wrapper to restart Haniel with new code.
                 # notify_done is skipped — startup notification fires after restart.
+                self._require_config_generation(config_snapshot)
                 self._prepare_self_update_shutdown()
+                self._require_config_generation(config_snapshot)
                 self._notify_self_update_approved()
+                self._require_config_generation(config_snapshot)
                 self._self_update_requested.set()
                 self._clear_self_update_pending_state()
                 self.stop()
@@ -1664,12 +1876,34 @@ class ServiceRunner:
                 )
 
         except Exception as e:
+            code = stable_deployment_error_code(e)
+            if code != "HANDOVER_FAILED":
+                logger.error(
+                    "Pull failed for %s [%s]: %s",
+                    repo_name,
+                    code,
+                    bounded_redact_text(str(e)),
+                )
+                try:
+                    self._deployment_state_store().fail_handover_if_current(
+                        repo_name,
+                        lifecycle_request_id,
+                        code,
+                        str(e),
+                    )
+                except Exception as journal_error:
+                    logger.error(
+                        "Failed to persist pull failure for %s [%s]: %s",
+                        repo_name,
+                        code,
+                        journal_error,
+                    )
             if self._slack_bot:
                 self._slack_bot.notify_done(
                     repo_name,
                     success=False,
                     pending_changes=captured_changes,
-                    error=str(e),
+                    error=bounded_redact_text(str(e)),
                 )
             raise
         finally:
@@ -1678,8 +1912,6 @@ class ServiceRunner:
                 self._ws_handler.broadcast_repo_pulling(repo_name, False)
             # Clear pending hash so new changes after this pull trigger fresh notifications
             self._last_pending_hash.pop(repo_name, None)
-            if config_lock_acquired:
-                self._config_reload_lock.release()
             if deployment_lease is not None:
                 deployment_lease.__exit__(None, None, None)
             pull_lock.release()
@@ -1700,7 +1932,9 @@ class ServiceRunner:
                 repo_name,
                 failed,
             )
-            raise RuntimeError(f"post_pull hook failed for: {failed}")
+            raise StableDeploymentError(
+                "APPLY_FAILED", f"post_pull hook failed for: {failed}"
+            )
 
         shutdown_order = [s for s in self.get_shutdown_order() if s in affected]
         for service in shutdown_order:
@@ -1708,7 +1942,10 @@ class ServiceRunner:
             if self.process_manager.is_running(service):
                 logger.info("Stopping %s for post-pull restart", service)
                 if not self.process_manager.stop_service(service):
-                    raise RuntimeError(f"failed to stop {service} after pull")
+                    raise StableDeploymentError(
+                        "QUIESCENCE_REQUIRED",
+                        f"failed to stop {service} after pull",
+                    )
             self._cancel_pending_restart(service)
 
         failed_starts: list[str] = []
@@ -1735,8 +1972,9 @@ class ServiceRunner:
                     service,
                 )
                 if not self.process_manager.stop_service(service):
-                    raise RuntimeError(
-                        f"failed to stop already-running {service} after pull"
+                    raise StableDeploymentError(
+                        "QUIESCENCE_REQUIRED",
+                        f"failed to stop already-running {service} after pull",
                     )
                 self._cancel_pending_restart(service)
 
@@ -1754,9 +1992,10 @@ class ServiceRunner:
                     for service, blockers in sorted(skipped_starts.items())
                 )
                 details.append(f"skipped: {skipped}")
-            raise RuntimeError(
+            raise StableDeploymentError(
+                "APPLY_FAILED",
                 "failed to restart services after pull for "
-                f"{repo_name}: {'; '.join(details)}"
+                f"{repo_name}: {'; '.join(details)}",
             )
 
     @staticmethod
@@ -1766,16 +2005,27 @@ class ServiceRunner:
 
     def _init_repo_states(self) -> None:
         """Initialize repo states with current HEAD."""
-        for name, state in self._repo_states.items():
-            self._initialize_repo_state(name, state)
+        for name in self._snapshot_config_state().repo_identity:
+            self._initialize_repo_state(name, self._snapshot_repo_runtime(name))
 
-    def _initialize_repo_state(self, name: str, state: RepoState) -> None:
+    def _initialize_repo_state(self, name: str, state: RepoRuntimeSnapshot) -> None:
         """Set a repository baseline from an existing local checkout."""
         repo_path = self.config_dir / state.config.path
         if repo_path.exists():
             try:
-                state.last_head = get_head(repo_path)
-                logger.info(f"Repo {name} at HEAD: {state.last_head[:8]}")
+                head = get_head(repo_path)
+                self._commit_repo_observation(
+                    RepoObservation(
+                        generation=state.generation,
+                        repo_name=name,
+                        repo_config=state.config,
+                        last_fetch=state.last_fetch,
+                        fetch_error=None,
+                        last_head=head,
+                        pending_changes=state.pending_changes,
+                    )
+                )
+                logger.info("Repo %s at HEAD: %s", name, head[:8])
             except GitError as e:
                 logger.warning(f"Failed to get HEAD for {name}: {e}")
 
@@ -1789,13 +2039,25 @@ class ServiceRunner:
         with self._state_lock:
             self._state.self_update_pending = False
 
-        if self._self_repo is None:
+        self_repo = self._snapshot_config_state().self_repo
+        if self_repo is None:
             return
-
-        state = self._repo_states.get(self._self_repo)
-        if state is not None:
-            state.pending_changes = None
-        self._last_pending_hash.pop(self._self_repo, None)
+        try:
+            state = self._snapshot_repo_runtime(self_repo)
+        except ValueError:
+            return
+        self._commit_repo_observation(
+            RepoObservation(
+                generation=state.generation,
+                repo_name=self_repo,
+                repo_config=state.config,
+                last_fetch=state.last_fetch,
+                fetch_error=state.fetch_error,
+                last_head=state.last_head,
+                pending_changes=None,
+            )
+        )
+        self._last_pending_hash.pop(self_repo, None)
 
     def _apply_startup_updates(self) -> None:
         """Fetch and pull all repos that have pending remote changes.
@@ -1815,45 +2077,35 @@ class ServiceRunner:
         self._startup_manifest_request_ids.clear()
         self._startup_manifest_operations.clear()
         self._startup_manifest_reload_plans.clear()
-        for repo_name in tuple(self._startup_config_locks):
-            self._config_reload_lock.release()
-            self._startup_config_locks.discard(repo_name)
+        self._startup_manifest_config_snapshots.clear()
         for lease in self._startup_deployment_leases.values():
             lease.__exit__(None, None, None)
         self._startup_deployment_leases.clear()
 
-        with self._config_reload_lock:
-            startup_repo_names = tuple(self._repo_states)
+        startup_repo_names = tuple(self._snapshot_config_state().repo_identity)
 
         for name in startup_repo_names:
-            # Skip self-update repo (haniel-runner.ps1 handles it)
-            if name == self._self_repo:
+            if name == self._snapshot_config_state().self_repo:
                 continue
 
-            pull_lock = self._pull_locks.get(name)
-            if pull_lock is None:
+            try:
+                runtime = self._snapshot_repo_runtime(name)
+            except ValueError:
                 continue
+            pull_lock = runtime.pull_lock
 
             self._startup_repo_locks.add(name)
+            self._startup_pull_locks[name] = pull_lock
             pull_lock.acquire()
             retain_for_manifest_handover = False
             deployment_lease: DeploymentLease | None = None
-            config_lock_acquired = False
             startup_request_id = f"startup-{name}-{uuid4()}"
             try:
-                # Startup uses the same global release order as runtime and
-                # one-shot handover. All repo/config-derived evidence is read
-                # only after both identities are held, so a concurrent reload
-                # cannot mix an old repo target with a new live checkout.
                 deployment_lease = self.lifecycle_control.acquire_deployment(
                     name, startup_request_id
                 )
-                self._config_reload_lock.acquire()
-                config_lock_acquired = True
-                state = self._repo_states.get(name)
-                if state is None:
-                    continue
-                repo_path = self.config_dir / state.config.path
+                runtime = self._snapshot_repo_runtime(name)
+                repo_path = self.config_dir / runtime.config.path
                 if not repo_path.exists():
                     logger.warning(
                         "Repo %s path does not exist: %s, skipping",
@@ -1863,27 +2115,27 @@ class ServiceRunner:
                     continue
                 has_updates = fetch_repo(
                     path=repo_path,
-                    branch=state.config.branch,
+                    branch=runtime.config.branch,
                 )
-                state.last_fetch = datetime.now()
-                state.fetch_error = None
+                observed_at = datetime.now()
 
                 activated = self._ensure_release_manifest_activation(name)
+                runtime = self._snapshot_repo_runtime(name)
                 reload_plan = (
                     self._prepare_current_manifest_config(name)
-                    if self._repo_states[name].config.release_manifest
+                    if runtime.config.release_manifest
                     else None
                 )
-                state = self._repo_states[name]
-                repo_path = self.config_dir / state.config.path
+                config_snapshot, runtime = self._snapshot_repo_and_config(name)
+                repo_path = self.config_dir / runtime.config.path
                 if has_updates:
                     logger.info("Startup update: pulling %s", name)
-                    previous_head = (
-                        get_head(repo_path) if state.config.release_manifest else None
-                    )
-                    if previous_head is not None:
-                        startup_target = get_remote_head(repo_path, state.config.branch)
-                        manifest_identity = state.config.release_manifest
+                    previous_head = get_head(repo_path)
+                    if runtime.config.release_manifest:
+                        startup_target = get_remote_head(
+                            repo_path, runtime.config.branch
+                        )
+                        manifest_identity = runtime.config.release_manifest
                         assert manifest_identity is not None
                         journal_store = self._deployment_state_store()
                         journal_store.begin_handover(
@@ -1923,55 +2175,105 @@ class ServiceRunner:
                             release_id=staged.manifest.release_id,
                             manifest_digest=staged.manifest_digest,
                         )
-                    if state.config.release_manifest:
+                    if runtime.config.release_manifest:
                         try:
                             if reload_plan is not None:
                                 assert self.config_path is not None
                                 require_handover_config_digest(
                                     self.config_path, reload_plan.config_digest
                                 )
+                            self._require_config_generation(config_snapshot)
                             activate_repo_target(
                                 repo_path,
                                 staged.target_head,
-                                strategy=state.config.pull_strategy or "merge",
+                                strategy=runtime.config.pull_strategy or "merge",
                             )
                             actual_head = get_head(repo_path)
                             if actual_head != staged.target_head:
-                                raise RuntimeError(
-                                    "activated checkout differs from staged target"
+                                raise StableDeploymentError(
+                                    "PULL_FAILED",
+                                    "activated checkout differs from staged target",
+                                )
+                            if not self._commit_repo_observation(
+                                RepoObservation(
+                                    generation=runtime.generation,
+                                    repo_name=name,
+                                    repo_config=runtime.config,
+                                    last_fetch=observed_at,
+                                    fetch_error=None,
+                                    last_head=actual_head,
+                                    pending_changes=None,
+                                    changed=True,
+                                )
+                            ):
+                                raise StableDeploymentError(
+                                    "CONFIG_GENERATION_CHANGED",
+                                    "config changed before startup result commit for "
+                                    f"{name}",
                                 )
                         except Exception:
                             assert previous_head is not None
-                            if get_head(repo_path) != previous_head:
-                                reset_repo_to(repo_path, previous_head)
-                            state.last_head = get_head(repo_path)
+                            self._restore_failed_activation(repo_path, previous_head)
                             raise
-                        state.last_head = actual_head
                     else:
-                        pull_repo(
-                            path=repo_path,
-                            branch=state.config.branch,
-                            strategy=state.config.pull_strategy or "merge",
-                        )
-                        state.last_head = get_head(repo_path)
-                    state.pending_changes = None
+                        try:
+                            self._require_config_generation(config_snapshot)
+                            pull_repo(
+                                path=repo_path,
+                                branch=runtime.config.branch,
+                                strategy=runtime.config.pull_strategy or "merge",
+                            )
+                            actual_head = get_head(repo_path)
+                            if not self._commit_repo_observation(
+                                RepoObservation(
+                                    generation=runtime.generation,
+                                    repo_name=name,
+                                    repo_config=runtime.config,
+                                    last_fetch=observed_at,
+                                    fetch_error=None,
+                                    last_head=actual_head,
+                                    pending_changes=None,
+                                    changed=True,
+                                )
+                            ):
+                                raise StableDeploymentError(
+                                    "CONFIG_GENERATION_CHANGED",
+                                    "config changed before startup result commit for "
+                                    f"{name}",
+                                )
+                        except Exception:
+                            self._restore_failed_activation(repo_path, previous_head)
+                            raise
                     updated.append(name)
-                    if state.config.release_manifest:
+                    if runtime.config.release_manifest:
                         assert previous_head is not None
                         self._startup_manifest_updates[name] = previous_head
                         self._startup_manifest_request_ids[name] = startup_request_id
                         self._startup_manifest_operations[name] = "upgrade"
                         if reload_plan is not None:
                             self._startup_manifest_reload_plans[name] = reload_plan
+                        self._startup_manifest_config_snapshots[name] = config_snapshot
                     else:
                         self._startup_updated_repos.add(name)
                 else:
+                    self._commit_repo_observation(
+                        RepoObservation(
+                            generation=runtime.generation,
+                            repo_name=name,
+                            repo_config=runtime.config,
+                            last_fetch=observed_at,
+                            fetch_error=None,
+                            last_head=runtime.last_head,
+                            pending_changes=runtime.pending_changes,
+                        )
+                    )
                     logger.debug("Startup update: %s is up to date", name)
                     self._queue_interrupted_manifest_deployment(
                         name,
                         activated,
                         request_id=startup_request_id,
                         reload_plan=reload_plan,
+                        config_snapshot=config_snapshot,
                     )
 
                 if name in self._startup_manifest_updates:
@@ -1979,27 +2281,53 @@ class ServiceRunner:
                     if deployment_lease is not None:
                         self._startup_deployment_leases[name] = deployment_lease
                         deployment_lease = None
-                    if config_lock_acquired:
-                        self._startup_config_locks.add(name)
-                        config_lock_acquired = False
 
-            except (
-                GitError,
-                ReleaseManifestActivationRequired,
-                ReleaseStagingError,
-                HandoverConfigError,
-            ) as e:
-                logger.error("Startup update failed for %s: %s", name, e)
-                state.fetch_error = str(e)
+            except _OPERATIONAL_DEPLOYMENT_ERRORS as e:
+                code = stable_deployment_error_code(e, default="STARTUP_UPDATE_FAILED")
+                logger.error(
+                    "Startup update failed for %s [%s]: %s",
+                    name,
+                    code,
+                    bounded_redact_text(str(e)),
+                )
+                try:
+                    failed_runtime = self._snapshot_repo_runtime(name)
+                    self._commit_repo_observation(
+                        RepoObservation(
+                            generation=failed_runtime.generation,
+                            repo_name=name,
+                            repo_config=failed_runtime.config,
+                            last_fetch=failed_runtime.last_fetch,
+                            fetch_error=bounded_redact_text(str(e)),
+                            last_head=failed_runtime.last_head,
+                            pending_changes=failed_runtime.pending_changes,
+                        )
+                    )
+                except ValueError:
+                    pass
+                if isinstance(e, StableDeploymentError):
+                    try:
+                        self._deployment_state_store().fail_handover_if_current(
+                            name,
+                            startup_request_id,
+                            code,
+                            str(e),
+                        )
+                    except Exception as journal_error:
+                        logger.error(
+                            "Failed to persist startup failure for %s [%s]: %s",
+                            name,
+                            code,
+                            journal_error,
+                        )
                 failed.append(name)
             finally:
                 if not retain_for_manifest_handover:
                     pull_lock.release()
                     self._startup_repo_locks.discard(name)
+                    self._startup_pull_locks.pop(name, None)
                 if deployment_lease is not None:
                     deployment_lease.__exit__(None, None, None)
-                if config_lock_acquired:
-                    self._config_reload_lock.release()
 
         if updated:
             logger.info(
@@ -2019,25 +2347,30 @@ class ServiceRunner:
 
     def _ensure_release_manifest_activation(self, repo_name: str) -> bool:
         """Activate a conventional remote manifest before any new code is pulled."""
-        state = self._repo_states[repo_name]
-        if state.config.release_manifest:
+        runtime = self._snapshot_repo_runtime(repo_name)
+        if runtime.config.release_manifest:
             return False
-        repo_path = self.config_dir / state.config.path
-        discovered = discover_remote_release_manifest(repo_path, state.config.branch)
+        repo_path = self.config_dir / runtime.config.path
+        discovered = discover_remote_release_manifest(repo_path, runtime.config.branch)
         if discovered is None:
             return False
         if self.config_path is None:
             raise ReleaseManifestActivationRequired(
                 f"release manifest discovered for {repo_name}, but config_path is unavailable"
             )
-        plan = plan_release_manifest_activation(self.config_path, repo_name, discovered)
-        result = activate_release_manifest(
-            self.config_path,
-            repo_name,
-            discovered,
-            expected_sha256=plan.config_sha256,
-        )
-        state.config.release_manifest = discovered
+        from .service_lifecycle import CONFIG_WRITE_LOCK
+
+        with CONFIG_WRITE_LOCK:
+            plan = plan_release_manifest_activation(
+                self.config_path, repo_name, discovered
+            )
+            result = activate_release_manifest(
+                self.config_path,
+                repo_name,
+                discovered,
+                expected_sha256=plan.config_sha256,
+            )
+            self.reload_config()
         logger.warning(
             "Activated release manifest for %s before pull (changed=%s, backup=%s)",
             repo_name,
@@ -2053,8 +2386,12 @@ class ServiceRunner:
         """Close attempts left nonterminal by a previous runner process."""
         store = self._deployment_state_store()
         reason = "runner restarted before deployment completed"
-        for repo_name, state in self._repo_states.items():
-            if not state.config.release_manifest:
+        for repo_name in self._snapshot_config_state().repo_identity:
+            try:
+                runtime = self._snapshot_repo_runtime(repo_name)
+            except ValueError:
+                continue
+            if not runtime.config.release_manifest:
                 continue
             journal = store.read(repo_name)
             if journal is None:
@@ -2100,13 +2437,14 @@ class ServiceRunner:
         *,
         request_id: str,
         reload_plan: "HandoverReloadPlan | None",
+        config_snapshot: RunnerConfigSnapshot,
     ) -> None:
         """Queue current-head manifest work under caller-owned startup locks."""
 
-        state = self._repo_states[repo_name]
-        if not state.config.release_manifest:
+        runtime = self._snapshot_repo_runtime(repo_name)
+        if not runtime.config.release_manifest:
             return
-        repo_path = self.config_dir / state.config.path
+        repo_path = self.config_dir / runtime.config.path
         current_head = get_head(repo_path)
         store = self._deployment_state_store()
         journal = store.read(repo_name)
@@ -2118,13 +2456,11 @@ class ServiceRunner:
             previous_head = journal.get("previous_head")
             if not isinstance(previous_head, str) or current_head == previous_head:
                 return
-        manifest_identity = state.config.release_manifest
+        manifest_identity = runtime.config.release_manifest
         assert manifest_identity is not None
         operation = journal.get("expected_operation") if journal is not None else None
         if operation not in {"fresh_install", "upgrade"}:
             operation = "upgrade"
-        manifest_identity = state.config.release_manifest
-        assert manifest_identity is not None
         store.begin_handover(
             repo_name,
             previous_head=previous_head,
@@ -2174,19 +2510,37 @@ class ServiceRunner:
         self._startup_manifest_updates[repo_name] = previous_head
         self._startup_manifest_request_ids[repo_name] = request_id
         self._startup_manifest_operations[repo_name] = operation
+        self._startup_manifest_config_snapshots[repo_name] = config_snapshot
         if reload_plan is not None:
             self._startup_manifest_reload_plans[repo_name] = reload_plan
 
     def _poll_loop(self) -> None:
         """Main poll loop."""
         while not self._stop_event.is_set():
+            interval = self.poll_interval
             try:
                 self._poll_cycle()
-            except Exception as e:
-                logger.exception(f"Error in poll cycle: {e}")
+                interval = self._snapshot_config_state().config.poll_interval
+            except _OPERATIONAL_DEPLOYMENT_ERRORS as error:
+                code = stable_deployment_error_code(error, default="POLL_CYCLE_FAILED")
+                logger.error(
+                    "Poll cycle failed [%s]: %s",
+                    code,
+                    bounded_redact_text(str(error)),
+                )
+            except Exception as error:
+                code = stable_deployment_error_code(
+                    error,
+                    default="POLL_CYCLE_FAILED",
+                )
+                logger.exception(
+                    "Poll cycle crashed [%s] and will retry: %s",
+                    code,
+                    bounded_redact_text(str(error)),
+                )
 
             # Wait for next poll interval (interruptible)
-            self._stop_event.wait(timeout=self.poll_interval)
+            self._stop_event.wait(timeout=interval)
 
     def _poll_cycle(self) -> None:
         """Execute one poll cycle.
@@ -2199,9 +2553,8 @@ class ServiceRunner:
             self._state.last_poll = datetime.now()
             self._state.poll_count += 1
 
-        # Phase 1: Change detection
-        with self._config_reload_lock:
-            changed_repos = self._detect_changes()
+        # Phase 1: external observation and generation-checked memory commit
+        changed_repos = self._detect_changes()
 
         # Phase 2: Apply changes
         if changed_repos:
@@ -2224,11 +2577,19 @@ class ServiceRunner:
             List of repo names that have changes
         """
         changed: list[str] = []
+        cycle_snapshot = self._snapshot_config_state()
 
-        for name, state in self._repo_states.items():
-            repo_path = self.config_dir / state.config.path
+        for name in cycle_snapshot.repo_identity:
+            try:
+                config_snapshot, runtime = self._snapshot_repo_and_config(name)
+            except ValueError:
+                continue
+            repo_path = self.config_dir / runtime.config.path
 
-            if name == self._self_repo and self._self_update_requested.is_set():
+            if (
+                name == config_snapshot.self_repo
+                and self._self_update_requested.is_set()
+            ):
                 self._clear_self_update_pending_state()
                 continue
 
@@ -2240,107 +2601,143 @@ class ServiceRunner:
                 # Fetch from remote (don't rely on return value)
                 fetch_repo(
                     path=repo_path,
-                    branch=state.config.branch,
+                    branch=runtime.config.branch,
                 )
-                state.last_fetch = datetime.now()
-                state.fetch_error = None
+                observed_at = datetime.now()
 
                 # Read current HEAD (may differ from last_head if externally pulled)
                 current_head = get_head(repo_path)
+                pending_changes = runtime.pending_changes
+                repo_changed = False
+                should_notify_pending = False
 
-                if current_head != state.last_head:
+                if current_head != runtime.last_head:
                     # External pull or other process advanced HEAD
-                    previous_head = state.last_head
+                    previous_head = runtime.last_head
                     self_checkout_matches_remote = False
-                    if name == self._self_repo and previous_head:
-                        remote_head = get_remote_head(repo_path, state.config.branch)
+                    if name == config_snapshot.self_repo and previous_head:
+                        remote_head = get_remote_head(repo_path, runtime.config.branch)
                         self_checkout_matches_remote = current_head == remote_head
-                    last_short = state.last_head[:8] if state.last_head else "None"
+                    last_short = runtime.last_head[:8] if runtime.last_head else "None"
                     logger.info(
                         f"Changes detected in repo: {name} "
                         f"(last_head={last_short} → current={current_head[:8]})"
                     )
                     changed.append(name)
-                    state.last_head = current_head
+                    repo_changed = True
                     if (
-                        name == self._self_repo
+                        name == config_snapshot.self_repo
                         and previous_head
                         and self_checkout_matches_remote
                     ):
-                        state.pending_changes = get_applied_change_evidence(
+                        pending_changes = get_applied_change_evidence(
                             repo_path, previous_head, current_head
                         )
+                        should_notify_pending = True
                     else:
-                        state.pending_changes = get_pending_changes(
+                        pending_changes = get_pending_changes(
                             path=repo_path,
-                            branch=state.config.branch,
+                            branch=runtime.config.branch,
                         )
-                    if self._ws_handler is not None:
-                        self._ws_handler.broadcast_repo_change(
-                            name, state.pending_changes or {}
-                        )
-                    # Self-repo: even after an external pull, Haniel needs a restart to
-                    # use the new code. Notify Slack so the user can approve the restart.
-                    if (
-                        name == self._self_repo
-                        and self._slack_bot
-                        and state.pending_changes
-                        and not self._pull_locks[name].locked()
-                    ):
-                        self._slack_bot.notify_pending(name, state.pending_changes)
                 else:
                     # current == last_head, check if remote has new commits
-                    remote_head = get_remote_head(repo_path, state.config.branch)
+                    remote_head = get_remote_head(repo_path, runtime.config.branch)
                     if remote_head != current_head:
                         logger.info(
                             f"Remote changes available for repo: {name} "
                             f"(current={current_head[:8]} → remote={remote_head[:8]})"
                         )
                         changed.append(name)
-                        state.pending_changes = get_pending_changes(
+                        repo_changed = True
+                        should_notify_pending = True
+                        pending_changes = get_pending_changes(
                             path=repo_path,
-                            branch=state.config.branch,
+                            branch=runtime.config.branch,
                         )
-                        if self._ws_handler is not None:
-                            self._ws_handler.broadcast_repo_change(
-                                name, state.pending_changes or {}
-                            )
-                        # Notify Slack only when remote has new commits (not already pulling)
-                        # and only when the pending content has actually changed.
-                        if (
-                            self._slack_bot
-                            and state.pending_changes
-                            and not self._pull_locks[name].locked()
-                        ):
-                            content_hash = self._hash_pending(state.pending_changes)
-                            if self._last_pending_hash.get(name) != content_hash:
-                                self._last_pending_hash[name] = content_hash
-                                self._slack_bot.notify_pending(
-                                    name, state.pending_changes
-                                )
                     else:
                         # A self checkout can already match origin while the running
                         # process still uses the previous code. Preserve the restart
                         # evidence so reconnecting orchestrators can recover the same
                         # deterministic Pending until approval restarts Haniel.
                         if not (
-                            name == self._self_repo and self._state.self_update_pending
+                            name == config_snapshot.self_repo
+                            and self._state.self_update_pending
                         ):
-                            state.pending_changes = None
+                            pending_changes = None
 
-                self._notify_orchestrator_change(name, state)
+                observation = RepoObservation(
+                    generation=runtime.generation,
+                    repo_name=name,
+                    repo_config=runtime.config,
+                    last_fetch=observed_at,
+                    fetch_error=None,
+                    last_head=current_head,
+                    pending_changes=pending_changes,
+                    changed=repo_changed,
+                )
+                if not self._commit_repo_observation(observation):
+                    logger.info(
+                        "Discarded stale repo observation for %s at generation %s",
+                        name,
+                        runtime.generation,
+                    )
+                    if name in changed:
+                        changed.remove(name)
+                    continue
+
+                _committed_config, committed = self._snapshot_repo_and_config(name)
+                if committed.generation != runtime.generation:
+                    if name in changed:
+                        changed.remove(name)
+                    continue
+                if repo_changed and self._ws_handler is not None:
+                    self._ws_handler.broadcast_repo_change(
+                        name, committed.pending_changes or {}
+                    )
+                if (
+                    should_notify_pending
+                    and self._slack_bot
+                    and committed.pending_changes
+                    and not committed.pull_lock.locked()
+                ):
+                    content_hash = self._hash_pending(committed.pending_changes)
+                    if self._last_pending_hash.get(name) != content_hash:
+                        self._last_pending_hash[name] = content_hash
+                        self._slack_bot.notify_pending(name, committed.pending_changes)
+
+                self._notify_orchestrator_change(name)
 
             except GitError as e:
-                logger.error(f"Failed to fetch {name}: {e}")
-                state.fetch_error = str(e)
+                safe_error = bounded_redact_text(str(e))
+                logger.error("Failed to fetch %s: %s", name, safe_error)
+                self._commit_repo_observation(
+                    RepoObservation(
+                        generation=runtime.generation,
+                        repo_name=name,
+                        repo_config=runtime.config,
+                        last_fetch=runtime.last_fetch,
+                        fetch_error=safe_error,
+                        last_head=runtime.last_head,
+                        pending_changes=runtime.pending_changes,
+                    )
+                )
 
         return changed
 
-    def _notify_orchestrator_change(self, name: str, state: RepoState) -> None:
+    def _notify_orchestrator_change(self, name: str) -> None:
         if not self._orch_client:
             return
-        snapshot = self._capture_orchestrator_repo_snapshot(name, state.config.branch)
-        self_restart_required = name == self._self_repo and (
+        config_snapshot, state = self._snapshot_repo_and_config(name)
+        orchestrator = config_snapshot.config.orchestrator_client
+        if orchestrator is None:
+            return
+        snapshot = capture_repo_snapshot(
+            node_id=orchestrator.node_id,
+            repo=name,
+            branch=state.config.branch,
+            path=self.config_dir / state.config.path,
+        )
+        self_restart_required = name == config_snapshot.self_repo and (
             self._state.self_update_pending
             or (snapshot.in_sync and bool(state.pending_changes))
         )
@@ -2363,21 +2760,33 @@ class ServiceRunner:
                             snapshot.remote_head,
                             exc,
                         )
+                try:
+                    self._require_config_generation(config_snapshot)
+                except StableDeploymentError:
+                    logger.info(
+                        "Discarded stale orchestrator change report for %s", name
+                    )
+                    return
                 self._orch_client.notify_change(
                     repo=name,
                     branch=state.config.branch,
                     commits=commits,
-                    affected_services=self.get_affected_services(name),
+                    affected_services=list(state.affected_services),
                     diff_stat=state.pending_changes.get("stat"),
                     deploy_id=snapshot.deploy_id,
                     target_head=snapshot.remote_head,
                     deployment_kind="manifest" if manifest_identity else "legacy",
                     expected_manifest_identity=manifest_identity,
                     expected_manifest_digest=manifest_digest,
-                    is_self_update=name == self._self_repo,
+                    is_self_update=name == config_snapshot.self_repo,
                     wait=True,
                 )
         if self_restart_required:
+            return
+        try:
+            self._require_config_generation(config_snapshot)
+        except StableDeploymentError:
+            logger.info("Discarded stale reconciliation report for %s", name)
             return
         self._orch_client.notify_repo_reconciliation(snapshot, "observed", wait=True)
 
@@ -2391,31 +2800,32 @@ class ServiceRunner:
         Args:
             changed_repos: List of repo names with changes
         """
+        config_snapshot = self._snapshot_config_state()
+        self_repo = config_snapshot.self_repo
+
         # Check for self-update repo
-        if self._self_repo and self._self_repo in changed_repos:
-            self._initiate_self_update()
+        if self_repo and self_repo in changed_repos:
+            self._initiate_self_update(config_snapshot)
             # Remove self-repo from list; remaining repos still get normal treatment
-            changed_repos = [r for r in changed_repos if r != self._self_repo]
+            changed_repos = [r for r in changed_repos if r != self_repo]
             if not changed_repos:
                 return
 
         # auto_apply=false: detection only, skip stop→pull→restart
-        if not self.config.auto_apply:
+        if not config_snapshot.config.auto_apply:
             logger.info("auto_apply=false, skipping apply for: %s", changed_repos)
             return
 
-        manual_repos = [
-            repo
-            for repo in changed_repos
-            if self._repo_states.get(repo) is not None
-            and not self._repo_states[repo].config.auto_apply
-        ]
-        changed_repos = [
-            repo
-            for repo in changed_repos
-            if self._repo_states.get(repo) is None
-            or self._repo_states[repo].config.auto_apply
-        ]
+        repo_auto_apply: dict[str, bool] = {}
+        for repo in changed_repos:
+            try:
+                repo_auto_apply[repo] = self._snapshot_repo_runtime(
+                    repo
+                ).config.auto_apply
+            except ValueError:
+                repo_auto_apply[repo] = True
+        manual_repos = [repo for repo in changed_repos if not repo_auto_apply[repo]]
+        changed_repos = [repo for repo in changed_repos if repo_auto_apply[repo]]
         if manual_repos:
             logger.info(
                 "repo auto_apply=false, pending manual approval for: %s",
@@ -2427,17 +2837,23 @@ class ServiceRunner:
         for repo in changed_repos:
             try:
                 self._run_auto_deploy(repo)
-            except Exception as e:
-                logger.error("Auto-deploy failed for %s: %s", repo, e)
+            except _OPERATIONAL_DEPLOYMENT_ERRORS as error:
+                code = stable_deployment_error_code(error, default="AUTO_DEPLOY_FAILED")
+                logger.error(
+                    "Auto-deploy failed for %s [%s]: %s",
+                    repo,
+                    code,
+                    bounded_redact_text(str(error)),
+                )
 
     def _run_auto_deploy(self, repo: str) -> None:
         """Run auto_apply through the same settled-HEAD reporting contract."""
-        with self._config_reload_lock:
-            has_orchestrator = not (
-                getattr(self, "_orch_client", None) is None
-                or self.config.orchestrator_client is None
-            )
-            configured_branch = self._repo_states[repo].config.branch
+        config_snapshot, runtime = self._snapshot_repo_and_config(repo)
+        has_orchestrator = not (
+            getattr(self, "_orch_client", None) is None
+            or config_snapshot.config.orchestrator_client is None
+        )
+        configured_branch = runtime.config.branch
         if not has_orchestrator:
             self.trigger_pull(repo, auto=True)
             return
@@ -2446,6 +2862,7 @@ class ServiceRunner:
         progress = self._orch_client.start_deploy_progress(permit)
         started = time.monotonic()
         operation_error: str | None = None
+        caught_error: Exception | None = None
         try:
             approval = {
                 "deploy_id": permit["deploy_id"],
@@ -2465,6 +2882,7 @@ class ServiceRunner:
             )
         except Exception as exc:
             operation_error = str(exc)
+            caught_error = exc
         finally:
             progress.stop()
         settled = self._capture_orchestrator_repo_snapshot(
@@ -2475,10 +2893,12 @@ class ServiceRunner:
             self._orch_client.report_deploy_attempt(
                 settled, operation_error, duration_ms, permit
             )
-        if operation_error:
-            raise RuntimeError(operation_error)
+        if caught_error is not None:
+            raise caught_error
 
-    def _initiate_self_update(self) -> None:
+    def _initiate_self_update(
+        self, snapshot: RunnerConfigSnapshot | None = None
+    ) -> None:
         """Handle detection of changes in haniel's own repo.
 
         If auto_update is true, immediately signals the main thread to exit
@@ -2491,18 +2911,25 @@ class ServiceRunner:
 
         See ADR-0002 for the full self-update architecture.
         """
-        if self.config.self_update is None:
+        snapshot = snapshot or self._snapshot_config_state()
+        self._require_config_generation(snapshot)
+        self_update = snapshot.config.self_update
+        if self_update is None:
             raise RuntimeError("self_update config required for self-update")
 
-        if self.config.self_update.auto_update:
+        if self_update.auto_update:
             logger.info("Self-update: auto_update=true, exiting for update")
+            self._require_config_generation(snapshot)
             self._notify_self_update_detected(auto=True)
+            self._require_config_generation(snapshot)
             self._prepare_self_update_shutdown()
+            self._require_config_generation(snapshot)
             self._self_update_requested.set()
             self.stop()
             return
 
         # Manual approval mode
+        self._require_config_generation(snapshot)
         with self._state_lock:
             if self._state.self_update_pending:
                 logger.debug("Self-update already pending, skipping duplicate")
@@ -2510,10 +2937,12 @@ class ServiceRunner:
             self._state.self_update_pending = True
 
         logger.info("Self-update: changes detected, awaiting approval")
+        self._require_config_generation(snapshot)
         self._notify_self_update_detected(auto=False)
 
-        if self._ws_handler is not None and self._self_repo:
-            self._ws_handler.broadcast_self_update_pending(self._self_repo)
+        if self._ws_handler is not None and snapshot.self_repo:
+            self._require_config_generation(snapshot)
+            self._ws_handler.broadcast_self_update_pending(snapshot.self_repo)
 
     def approve_self_update(self) -> str:
         """Approve a pending self-update.
@@ -2532,9 +2961,10 @@ class ServiceRunner:
 
         logger.info("Self-update approved, shutting down for update")
         self._prepare_self_update_shutdown()
+        self_repo = self._snapshot_config_state().self_repo
         slack_bot = getattr(self, "_slack_bot", None)
-        if slack_bot is not None and self._self_repo:
-            slack_bot.notify_pulling(self._self_repo, auto=False)
+        if slack_bot is not None and self_repo:
+            slack_bot.notify_pulling(self_repo, auto=False)
         self._notify_self_update_approved()
         self._self_update_requested.set()
         self._clear_self_update_pending_state()
@@ -2542,8 +2972,8 @@ class ServiceRunner:
         # to shut down). This is the canonical signal for the dashboard's
         # 'Updating…' overlay — the API response alone is insufficient.
         # ws_handler가 None이면(대시보드 비활성) broadcast 스킵 — 의도된 동작.
-        if self._ws_handler is not None and self._self_repo:
-            self._ws_handler.broadcast_self_update_started(self._self_repo)
+        if self._ws_handler is not None and self_repo:
+            self._ws_handler.broadcast_self_update_started(self_repo)
         return "Self-update approved. Shutting down for update."
 
     @property
@@ -2567,7 +2997,6 @@ class ServiceRunner:
 
     # ── AppHomeController interface methods ──────────────────────────────────
 
-    @_config_snapshot_guard
     def restart_service(self, name: str) -> str:
         """Restart a managed service (or request haniel restart).
 
@@ -2579,7 +3008,6 @@ class ServiceRunner:
         self._start_service(name)
         return f"Service '{name}' restarted"
 
-    @_config_snapshot_guard
     def start_service(self, name: str) -> None:
         """Start a managed service.
 
@@ -2587,7 +3015,6 @@ class ServiceRunner:
         """
         self._start_service(name)
 
-    @_config_snapshot_guard
     def stop_service(self, name: str) -> None:
         """Stop a managed service.
 
@@ -2595,7 +3022,6 @@ class ServiceRunner:
         """
         self.process_manager.stop_service(name)
 
-    @_config_snapshot_guard
     def enable_service(self, name: str) -> str:
         """Reset circuit breaker for a service.
 
@@ -2630,7 +3056,8 @@ class ServiceRunner:
                 WebhookNotifier,
             )
 
-            if not self.config.webhooks:
+            webhooks = self._snapshot_config_state().config.webhooks
+            if not webhooks:
                 return
 
             event_type = EventType[event_type_name]
@@ -2640,7 +3067,7 @@ class ServiceRunner:
                 message=message,
                 details=details or {},
             )
-            notifier = WebhookNotifier(self.config.webhooks)
+            notifier = WebhookNotifier(webhooks)
             notifier.notify_sync(msg)
         except Exception as e:
             logger.warning(f"Failed to send self-update notification: {e}")
@@ -2648,10 +3075,11 @@ class ServiceRunner:
     def _notify_self_update_detected(self, *, auto: bool) -> None:
         """Send webhook notification for self-update detection."""
         mode = "auto-updating" if auto else "awaiting approval"
+        self_repo = self._snapshot_config_state().self_repo
         self._notify_self_update(
             "SELF_UPDATE_DETECTED",
             f"Changes detected in haniel's own repository. {mode.capitalize()}.",
-            {"repo": self._self_repo, "mode": mode},
+            {"repo": self_repo, "mode": mode},
         )
 
     def _notify_self_update_approved(self) -> None:
@@ -2671,30 +3099,48 @@ class ServiceRunner:
             Tuple of (success, discarded_files). discarded_files is non-empty only
             when pull_strategy is 'force' and local changes were discarded.
         """
-        if repo_name not in self._repo_states:
+        try:
+            state = self._snapshot_repo_runtime(repo_name)
+        except ValueError:
             return False, []
-
-        state = self._repo_states[repo_name]
         self._ensure_release_manifest_activation(repo_name)
+        config_snapshot, state = self._snapshot_repo_and_config(repo_name)
         repo_path = self.config_dir / state.config.path
         strategy = state.config.pull_strategy or "merge"
 
         try:
+            previous_head = get_head(repo_path)
+            self._require_config_generation(config_snapshot)
             discarded = pull_repo(
                 path=repo_path,
                 branch=state.config.branch,
                 strategy=strategy,
             )
-            state.last_head = get_head(repo_path)
-            state.pending_changes = None
-            head_short = state.last_head[:8] if state.last_head else "unknown"
+            head = get_head(repo_path)
+            if not self._commit_repo_observation(
+                RepoObservation(
+                    generation=state.generation,
+                    repo_name=repo_name,
+                    repo_config=state.config,
+                    last_fetch=state.last_fetch,
+                    fetch_error=None,
+                    last_head=head,
+                    pending_changes=None,
+                    changed=True,
+                )
+            ):
+                self._restore_failed_activation(repo_path, previous_head)
+                raise StableDeploymentError(
+                    "CONFIG_GENERATION_CHANGED",
+                    f"config changed before pull result commit for {repo_name}",
+                )
+            head_short = head[:8] if head else "unknown"
             logger.info(f"Pulled {repo_name}, new HEAD: {head_short}")
             return True, discarded
         except GitError as e:
             logger.error(f"Failed to pull {repo_name}: {e}")
             return False, []
 
-    @_config_snapshot_guard
     def _process_pending_restarts(self) -> None:
         """Process any pending service restarts."""
         now = time.time()
@@ -2719,16 +3165,19 @@ class ServiceRunner:
                 if not self._start_service(name):
                     logger.error("Scheduled restart for %s failed", name)
 
-    @_config_snapshot_guard
     def get_status(self) -> dict:
         """Get current status of the runner.
 
         Returns:
             Status dict with runner state, services, repos, and dependency graph
         """
+        config_snapshot = self._snapshot_config_state()
+        enabled_services = config_snapshot.enabled_services
+        dependency_model = DependencyGraph(enabled_services)
+
         # Service states from health manager — includes config for dashboard
         service_status = {}
-        for name, svc_config in self._enabled_services.items():
+        for name, svc_config in enabled_services.items():
             health = self.health_manager.get_health(name)
             service_status[name] = {
                 "state": health.state.value,
@@ -2752,26 +3201,30 @@ class ServiceRunner:
 
         # Dependency graph
         dependency_graph = {}
-        for name in self._enabled_services:
+        for name in enabled_services:
             dependency_graph[name] = {
-                "dependencies": sorted(self._dependency_graph.get_dependencies(name)),
-                "dependents": sorted(self._dependency_graph.get_dependents(name)),
+                "dependencies": sorted(dependency_model.get_dependencies(name)),
+                "dependents": sorted(dependency_model.get_dependents(name)),
             }
 
         # Repo states
         repo_status = {}
-        for name, state in self._repo_states.items():
-            head_short = state.last_head[:8] if state.last_head else None
+        for name in config_snapshot.repo_identity:
+            try:
+                runtime = self._snapshot_repo_runtime(name)
+            except ValueError:
+                continue
+            head_short = runtime.last_head[:8] if runtime.last_head else None
             repo_status[name] = {
-                "path": str(state.config.path),
-                "branch": state.config.branch,
+                "path": str(runtime.config.path),
+                "branch": runtime.config.branch,
                 "last_head": head_short,
-                "last_fetch": state.last_fetch.isoformat()
-                if state.last_fetch
+                "last_fetch": runtime.last_fetch.isoformat()
+                if runtime.last_fetch
                 else None,
-                "fetch_error": state.fetch_error,
-                "pending_changes": state.pending_changes,
-                "pulling": self._pull_locks[name].locked(),
+                "fetch_error": runtime.fetch_error,
+                "pending_changes": runtime.pending_changes,
+                "pulling": runtime.pull_lock.locked(),
             }
 
         # Read runner state with lock for thread safety
@@ -2785,23 +3238,23 @@ class ServiceRunner:
                 if self._state.last_poll
                 else None,
                 "poll_count": self._state.poll_count,
-                "poll_interval": self.poll_interval,
+                "poll_interval": config_snapshot.config.poll_interval,
                 "services": service_status,
                 "pending_restarts": pending_restarts,
                 "dependency_graph": dependency_graph,
                 "repos": repo_status,
             }
-            if self._self_repo:
+            if config_snapshot.self_repo:
                 last_result = (
                     self._last_self_update_result.to_dict()
                     if self._last_self_update_result is not None
                     else None
                 )
                 result["self_update"] = {
-                    "repo": self._self_repo,
+                    "repo": config_snapshot.self_repo,
                     "pending": self._state.self_update_pending,
-                    "auto_update": self.config.self_update.auto_update
-                    if self.config.self_update
+                    "auto_update": config_snapshot.config.self_update.auto_update
+                    if config_snapshot.config.self_update
                     else False,
                     "last_result": last_result,
                 }

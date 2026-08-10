@@ -421,7 +421,9 @@ class OrchestratorClient:
             self._deploy_attempt_gate.reset_connection()
 
             # Send NodeHello
-            await self._send_json(self._build_node_hello(await self._services_snapshot()))
+            await self._send_json(
+                self._build_node_hello(await self._services_snapshot())
+            )
 
             self._connected = True
             self._reset_backoff()

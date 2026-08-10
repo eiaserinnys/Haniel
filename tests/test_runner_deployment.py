@@ -16,13 +16,18 @@ import pytest
 from haniel.config import HanielConfig, RepoConfig, ServiceConfig
 from haniel.core.deploy_retry_planner import DeployRetryPlanner
 from haniel.core.deployment import (
+    CommandResult,
     CommandSpec,
     DeploymentCoordinator,
     DeploymentError,
     DeploymentStateStore,
 )
+from haniel.core.deployment_errors import (
+    stable_deployment_error_code,
+)
 from haniel.core.git import get_head, reset_repo_to as actual_reset_repo_to
 from haniel.core.lifecycle_control import LifecycleConflict, LifecycleControl
+from haniel.core.release_manifest import ReleaseManifest
 from haniel.core.runner import ServiceRunner
 from haniel.core.runner_deployment import (
     RunnerDeploymentAdapter,
@@ -88,6 +93,92 @@ def manifest_runner(tmp_path: Path) -> tuple[ServiceRunner, Path, str]:
         services={"app": ServiceConfig(run="app", repo="app", ready="port:9999")},
     )
     return ServiceRunner(config, config_dir=tmp_path), repo, previous_head
+
+
+def test_manifest_generation_drift_during_load_blocks_stale_service_actions(
+    manifest_runner: tuple[ServiceRunner, Path, str],
+) -> None:
+    runner, _repo, previous_head = manifest_runner
+    original_load = ReleaseManifest.load
+    runner.execute_hook = MagicMock(return_value=True)
+
+    def load_and_reload(path: Path) -> ReleaseManifest:
+        manifest = original_load(path)
+        snapshot = runner._snapshot_config_state()
+        replacement = snapshot.config.model_copy(deep=True)
+        replacement.services["app"] = replacement.services["app"].model_copy(
+            update={"enabled": False}
+        )
+        runner._replace_config_snapshot(replacement, snapshot.generation)
+        return manifest
+
+    with (
+        patch(
+            "haniel.core.runner_deployment.ReleaseManifest.load",
+            side_effect=load_and_reload,
+        ),
+        patch(
+            "haniel.core.runner_deployment.subprocess_command_runner",
+            return_value=lambda _command, _environment: None,
+        ),
+        pytest.raises(DeploymentError) as caught,
+    ):
+        run_manifest_deployment(runner, "app", ["app"], previous_head)
+
+    assert stable_deployment_error_code(caught.value) == "CONFIG_GENERATION_CHANGED"
+    runner.execute_hook.assert_not_called()
+
+
+def test_reload_during_apply_blocks_stale_start_and_rollback_service_actions(
+    manifest_runner: tuple[ServiceRunner, Path, str],
+) -> None:
+    runner, repo, previous_head = manifest_runner
+    payload = release_manifest()
+    payload["recovery"] = {
+        "strategy": "rollback",
+        "command": {"name": "restore", "command": "run-restore"},
+    }
+    (repo / "deploy" / "release.json").write_text(json.dumps(payload), encoding="utf-8")
+    events: list[str] = []
+    running = configure_processes(runner, events)
+    runner.execute_hook = MagicMock(return_value=True)
+
+    def start_current(service: str) -> bool:
+        current = runner._snapshot_config_state().enabled_services[service]
+        events.append(f"start-current:{current.run}")
+        running[service] = True
+        return True
+
+    runner._start_service = MagicMock(side_effect=start_current)
+
+    def run_command(
+        command: CommandSpec, _environment: dict[str, str]
+    ) -> CommandResult:
+        events.append(f"command:{command.name}")
+        if command.name == "migrate":
+            snapshot = runner._snapshot_config_state()
+            replacement = snapshot.config.model_copy(deep=True)
+            replacement.services["app"] = replacement.services["app"].model_copy(
+                update={"run": "current-generation-app"}
+            )
+            runner._replace_config_snapshot(replacement, snapshot.generation)
+            events.append("config:reloaded")
+        return CommandResult(stdout="", json_data=None)
+
+    with (
+        patch(
+            "haniel.core.runner_deployment.subprocess_command_runner",
+            return_value=run_command,
+        ),
+        pytest.raises(DeploymentError) as caught,
+    ):
+        run_manifest_deployment(runner, "app", ["app"], previous_head)
+
+    assert stable_deployment_error_code(caught.value) == "CONFIG_GENERATION_CHANGED"
+    assert get_head(repo) == previous_head
+    assert "config:reloaded" in events
+    runner._start_service.assert_called_once_with("app")
+    assert "start-current:current-generation-app" in events
 
 
 def configure_processes(runner: ServiceRunner, events: list[str]) -> dict[str, bool]:

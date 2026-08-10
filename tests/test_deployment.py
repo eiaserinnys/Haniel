@@ -12,13 +12,17 @@ from pydantic import ValidationError
 
 from haniel.core.deployment import (
     CommandSpec,
+    DeploymentCommandError,
     DeploymentCallbacks,
     DeploymentCoordinator,
     DeploymentError,
     DeploymentStateStore,
     ReleaseManifest,
     subprocess_command_runner,
+    stable_deployment_error_code,
 )
+from haniel.core.deployment_errors import KNOWN_DEPLOYMENT_ERROR_CODES
+from haniel.core.deployment_errors import StableDeploymentError
 
 
 def command(name: str) -> CommandSpec:
@@ -59,6 +63,89 @@ def callbacks(events: list[str]) -> DeploymentCallbacks:
         rollback=lambda: events.append("rollback"),
         prepare_roll_forward=lambda: events.append("prepare-roll-forward"),
     )
+
+
+def test_recovery_failure_code_wins_over_typed_recovery_child() -> None:
+    error = DeploymentError(
+        "apply failed and rollback timed out",
+        recovered=False,
+        recovery_error=DeploymentCommandError(
+            "COMMAND_TIMEOUT",
+            "restore",
+            "restore timed out",
+        ),
+    )
+
+    assert stable_deployment_error_code(error) == "RECOVERY_FAILED"
+
+
+def test_coordinator_recovery_journal_preserves_typed_failure_code(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    def run(spec: CommandSpec, _env: dict[str, str]) -> None:
+        events.append(spec.name)
+        if spec.name in {"migrate", "recover", "restore-backup"}:
+            raise RuntimeError(f"{spec.name} failed")
+
+    deploy = DeploymentCoordinator(
+        state_store=DeploymentStateStore(tmp_path / "state"),
+        command_runner=run,
+    )
+
+    with pytest.raises(DeploymentError) as raised:
+        deploy.execute(
+            repo_name="soulstream",
+            previous_head="old",
+            target_head="new",
+            manifest=manifest(),
+            callbacks=callbacks(events),
+        )
+
+    assert raised.value.recovery_error is not None
+    journal = DeploymentStateStore(tmp_path / "state").read("soulstream")
+    assert journal is not None
+    assert journal["error_code"] == "RECOVERY_FAILED"
+
+
+def test_untyped_message_does_not_create_journal_error_code(tmp_path: Path) -> None:
+    store = DeploymentStateStore(tmp_path / "state")
+    store.begin("app", "old", "new", "release")
+
+    store.transition(
+        "app",
+        "failed",
+        message="PULL_FAILED happened after CONFIG_DIGEST_MISMATCH",
+    )
+
+    assert store.read("app")["error_code"] == "HANDOVER_FAILED"
+    assert "HANDOVER_FAILED" in KNOWN_DEPLOYMENT_ERROR_CODES
+
+
+def test_untyped_exception_uses_a_distinct_stable_fallback_code() -> None:
+    assert stable_deployment_error_code(RuntimeError("plain failure")) == (
+        "UNCLASSIFIED_DEPLOYMENT_ERROR"
+    )
+
+
+def test_transition_rejects_unregistered_typed_error_code(tmp_path: Path) -> None:
+    store = DeploymentStateStore(tmp_path / "state")
+    store.begin("app", "old", "new", "release")
+    error = RuntimeError("foreign typed failure")
+    error.code = "FOREIGN_UNREGISTERED_CODE"  # type: ignore[attr-defined]
+
+    with pytest.raises(ValueError, match="unregistered deployment error code"):
+        store.transition("app", "failed", message=str(error), error=error)
+
+    current = store.read("app")
+    assert current is not None
+    assert "error_code" not in current
+
+
+def test_stable_deployment_error_rejects_the_fallback_as_free_form_input() -> None:
+    with pytest.raises(ValueError, match="unregistered deployment error code"):
+        StableDeploymentError("FOREIGN_UNREGISTERED_CODE", "failure")
 
 
 def coordinator(
@@ -451,7 +538,7 @@ def test_failed_command_persists_bounded_stderr_and_stdout_in_journal(
             "haniel.core.deployment_command_runner.shutil.which",
             return_value="/tools/run-preflight",
         ),
-        patch("haniel.core.deployment_command_runner.subprocess.run") as run,
+        patch("haniel.core.deployment_command_runner._run_process_tree") as run,
     ):
         run.side_effect = subprocess.CalledProcessError(
             1,
@@ -604,3 +691,34 @@ def test_same_successful_target_is_idempotent(tmp_path: Path) -> None:
     assert second.status == "success"
     assert second.skipped is True
     assert events.count("migrate") == 1
+
+
+def test_staging_failure_only_terminates_matching_live_request(tmp_path: Path) -> None:
+    store = DeploymentStateStore(tmp_path / "state")
+    store.begin_handover(
+        "app",
+        previous_head="old",
+        target_ref="origin/main",
+        manifest_identity="deploy/release.json",
+        request_id="request-new",
+        expected_operation="upgrade",
+    )
+
+    assert (
+        store.fail_handover_if_current("app", "request-old", "COMMAND_TIMEOUT", "stale")
+        is False
+    )
+    current = store.read("app")
+    assert current is not None
+    assert current["state"] == "target_resolving"
+
+    assert (
+        store.fail_handover_if_current(
+            "app", "request-new", "COMMAND_TIMEOUT", "child timed out"
+        )
+        is True
+    )
+    terminal = store.read("app")
+    assert terminal is not None
+    assert terminal["state"] == "failed"
+    assert terminal["error_code"] == "COMMAND_TIMEOUT"
