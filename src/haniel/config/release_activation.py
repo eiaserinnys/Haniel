@@ -16,8 +16,6 @@ import yaml
 
 from .model import HanielConfig, load_config
 from .validators import ConfigSemanticError, require_valid_config
-from ..core.deployment import ReleaseManifest
-from ..core.git import GitError
 
 DEFAULT_RELEASE_MANIFEST = "deploy/release-manifest.json"
 
@@ -53,6 +51,8 @@ class ReleaseManifestActivationPlan:
     candidate_sha256: str
     validator_revision: str
     validator_error_count: int
+    repo_head: str
+    manifest_sha256: str
     changed: bool
 
 
@@ -69,6 +69,9 @@ def discover_remote_release_manifest(
     manifest_path: str = DEFAULT_RELEASE_MANIFEST,
 ) -> str | None:
     """Return a validated conventional manifest path from the fetched remote ref."""
+    from ..core.git import GitError
+    from ..core.release_manifest import ReleaseManifest
+
     # Unit fixtures may use a sentinel .git directory while mocking fetch/pull.
     # A real fetch cannot succeed for such a directory, so it is not a production
     # fail-open path.
@@ -135,7 +138,7 @@ def plan_release_manifest_activation(
     """Validate one semantic config change without writing it."""
     raw = config_path.read_bytes()
     digest = hashlib.sha256(raw).hexdigest()
-    config = load_config(config_path)
+    config = HanielConfig.model_validate(_load_mapping(raw))
     _require_activation_semantics(config)
     if repo_name not in config.repos:
         raise ReleaseManifestActivationRequired(
@@ -146,6 +149,9 @@ def plan_release_manifest_activation(
         raise ReleaseManifestActivationRequired(
             f"repository {repo_name} already uses a different release manifest: {current}"
         )
+    repo_head, manifest_sha256 = _remote_release_identity(
+        config_path, config, repo_name, manifest_path
+    )
 
     payload = _load_mapping(raw)
     repo_payload = payload.get("repos", {}).get(repo_name)
@@ -164,6 +170,8 @@ def plan_release_manifest_activation(
         candidate_sha256=hashlib.sha256(rendered).hexdigest(),
         validator_revision=evidence.revision,
         validator_error_count=evidence.error_count,
+        repo_head=repo_head,
+        manifest_sha256=manifest_sha256,
         changed=current != manifest_path,
     )
 
@@ -203,6 +211,28 @@ def activate_release_manifest(
 
         source = HanielConfig.model_validate(_load_mapping(original))
         _require_activation_semantics(source)
+        source_repo = source.repos.get(plan.repo_name)
+        if source_repo is None:
+            raise ReleaseActivationIdentityDrift(
+                "planned repository disappeared from config"
+            )
+        current_manifest = source_repo.release_manifest
+        if current_manifest not in (None, plan.release_manifest):
+            raise ReleaseActivationIdentityDrift(
+                "planned repository now uses a different release manifest"
+            )
+        try:
+            repo_head, manifest_sha256 = _remote_release_identity(
+                config_path, source, plan.repo_name, plan.release_manifest
+            )
+        except Exception as error:
+            raise ReleaseActivationIdentityDrift(
+                "remote release identity could not be revalidated"
+            ) from error
+        if repo_head != plan.repo_head or manifest_sha256 != plan.manifest_sha256:
+            raise ReleaseActivationIdentityDrift(
+                "remote release identity drifted after activation planning"
+            )
         payload = _load_mapping(original)
         repo_payload = payload.get("repos", {}).get(plan.repo_name)
         if not isinstance(repo_payload, dict):
@@ -224,7 +254,8 @@ def activate_release_manifest(
             raise ReleaseActivationIdentityDrift(
                 "Haniel config changed before activation write"
             )
-        if not plan.changed:
+        changed = current_manifest != plan.release_manifest
+        if not changed:
             return ReleaseManifestActivationResult(False, plan.config_sha256, None)
 
         backup_path = config_path.with_name(
@@ -266,6 +297,25 @@ def _validated_candidate(payload: dict[str, Any]) -> tuple[HanielConfig, bytes]:
         "utf-8"
     )
     return HanielConfig.model_validate(yaml.safe_load(rendered)), rendered
+
+
+def _remote_release_identity(
+    config_path: Path,
+    config: HanielConfig,
+    repo_name: str,
+    manifest_path: str,
+) -> tuple[str, str]:
+    """Capture the exact fetched ref and manifest bytes bound to an activation."""
+
+    from ..core.git import get_remote_head, sha256_file_at_commit
+
+    repo = config.repos[repo_name]
+    repo_path = (config_path.parent / repo.path).resolve(strict=False)
+    repo_head = get_remote_head(repo_path, repo.branch)
+    return (
+        repo_head,
+        sha256_file_at_commit(repo_path, repo_head, manifest_path),
+    )
 
 
 def _require_activation_semantics(config: HanielConfig):
@@ -350,6 +400,8 @@ def _plan_json(plan: ReleaseManifestActivationPlan) -> dict[str, Any]:
         "config_sha256": plan.config_sha256,
         "candidate_sha256": plan.candidate_sha256,
         "validator_revision": plan.validator_revision,
+        "repo_head": plan.repo_head,
+        "manifest_sha256": plan.manifest_sha256,
     }
 
 

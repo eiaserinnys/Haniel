@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -51,9 +54,58 @@ def write_config(path: Path) -> None:
     )
 
 
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _write_manifest(repo: Path, release_id: str) -> None:
+    manifest = repo / DEFAULT_RELEASE_MANIFEST
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "haniel.release.v1",
+                "release_id": release_id,
+                "post_start_verify": [
+                    {"name": "health", "command": "true", "timeout_seconds": 30}
+                ],
+                "recovery": {
+                    "strategy": "rollback",
+                    "command": {
+                        "name": "rollback",
+                        "command": "true",
+                        "timeout_seconds": 30,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _init_remote_manifest_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "services" / "soulstream"
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test")
+    _write_manifest(repo, "release-1")
+    _git(repo, "add", DEFAULT_RELEASE_MANIFEST)
+    _git(repo, "commit", "-m", "release 1")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    return repo
+
+
 def test_plan_is_read_only_and_reports_compare_and_swap_hash(tmp_path: Path) -> None:
     config_path = tmp_path / "haniel.yaml"
     write_config(config_path)
+    _init_remote_manifest_repo(tmp_path)
     before = config_path.read_bytes()
 
     plan = plan_release_manifest_activation(
@@ -71,6 +123,7 @@ def test_apply_updates_only_configured_repo_and_preserves_backup(
 ) -> None:
     config_path = tmp_path / "haniel.yaml"
     write_config(config_path)
+    _init_remote_manifest_repo(tmp_path)
     before = config_path.read_bytes()
     digest = hashlib.sha256(before).hexdigest()
 
@@ -92,6 +145,7 @@ def test_apply_updates_only_configured_repo_and_preserves_backup(
 def test_apply_rejects_stale_config_hash_without_writing(tmp_path: Path) -> None:
     config_path = tmp_path / "haniel.yaml"
     write_config(config_path)
+    _init_remote_manifest_repo(tmp_path)
     before = config_path.read_bytes()
 
     with pytest.raises(ReleaseManifestActivationRequired, match="changed"):
@@ -112,6 +166,7 @@ def test_apply_restores_exact_original_when_target_verification_fails(
 
     config_path = tmp_path / "haniel.yaml"
     write_config(config_path)
+    _init_remote_manifest_repo(tmp_path)
     before = config_path.read_bytes()
     plan = plan_release_manifest_activation(
         config_path, "soulstream", DEFAULT_RELEASE_MANIFEST
@@ -136,3 +191,64 @@ def test_apply_restores_exact_original_when_target_verification_fails(
     assert failed.value.code == "CONFIG_WRITE_FAILED"
     assert config_path.read_bytes() == before
     assert failed_once is True
+
+
+def test_plan_parses_the_exact_bytes_used_for_its_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import haniel.config.release_activation as activation
+
+    config_path = tmp_path / "haniel.yaml"
+    write_config(config_path)
+    _init_remote_manifest_repo(tmp_path)
+    monkeypatch.setattr(
+        activation,
+        "load_config",
+        lambda _path: (_ for _ in ()).throw(AssertionError("second config read")),
+    )
+
+    plan = activation.plan_release_manifest_activation(
+        config_path, "soulstream", DEFAULT_RELEASE_MANIFEST
+    )
+
+    assert plan.changed is True
+
+
+def test_apply_rederives_changed_from_locked_source_instead_of_plan_flag(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "haniel.yaml"
+    write_config(config_path)
+    _init_remote_manifest_repo(tmp_path)
+    plan = plan_release_manifest_activation(
+        config_path, "soulstream", DEFAULT_RELEASE_MANIFEST
+    )
+
+    result = activate_release_manifest(config_path, plan=replace(plan, changed=False))
+
+    assert result.changed is True
+    assert load_config(config_path).repos["soulstream"].release_manifest == (
+        DEFAULT_RELEASE_MANIFEST
+    )
+
+
+def test_apply_rejects_remote_head_or_manifest_drift_without_writing(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "haniel.yaml"
+    write_config(config_path)
+    repo = _init_remote_manifest_repo(tmp_path)
+    before = config_path.read_bytes()
+    plan = plan_release_manifest_activation(
+        config_path, "soulstream", DEFAULT_RELEASE_MANIFEST
+    )
+    _write_manifest(repo, "release-2")
+    _git(repo, "add", DEFAULT_RELEASE_MANIFEST)
+    _git(repo, "commit", "-m", "release 2")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+    with pytest.raises(ReleaseManifestActivationRequired, match="identity"):
+        activate_release_manifest(config_path, plan=plan)
+
+    assert config_path.read_bytes() == before
+    assert list(tmp_path.glob("*.bak")) == []

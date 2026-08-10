@@ -12,6 +12,7 @@ from haniel.core.runner import ServiceRunner
 from haniel.config import HanielConfig, RepoConfig, ServiceConfig, load_config
 from haniel.config.release_activation import DEFAULT_RELEASE_MANIFEST
 from haniel.core.deployment import DeploymentError
+from haniel.core.deployment_errors import StableDeploymentError
 from haniel.core.git import GitError
 from haniel.core.deployment import DeploymentStateStore
 from haniel.core.lifecycle_control import LifecycleConflict
@@ -757,6 +758,10 @@ def test_remote_manifest_without_writable_config_blocks_before_pull(
 
 
 @patch(
+    "haniel.config.release_activation._remote_release_identity",
+    return_value=("new-head", "manifest-digest"),
+)
+@patch(
     "haniel.core.runner.discover_remote_release_manifest",
     return_value=DEFAULT_RELEASE_MANIFEST,
 )
@@ -764,7 +769,7 @@ def test_remote_manifest_without_writable_config_blocks_before_pull(
 @patch("haniel.core.runner.pull_repo")
 @patch("haniel.core.runner.fetch_repo", return_value=True)
 def test_startup_atomically_activates_remote_manifest_before_pull(
-    mock_fetch, mock_pull, mock_head, mock_discover, tmp_path: Path
+    mock_fetch, mock_pull, mock_head, mock_discover, mock_identity, tmp_path: Path
 ) -> None:
     make_repo(tmp_path)
     config_path = tmp_path / "haniel.yaml"
@@ -792,8 +797,13 @@ def test_startup_atomically_activates_remote_manifest_before_pull(
     )
     assert "soulstream" in runner._startup_manifest_reload_plans
     mock_pull.assert_not_called()
+    assert mock_identity.call_count == 2
 
 
+@patch(
+    "haniel.config.release_activation._remote_release_identity",
+    return_value=("new-head", "manifest-digest"),
+)
 @patch("haniel.core.runner.sha256_file_at_commit", return_value="manifest-digest")
 @patch("haniel.core.runner.get_remote_head", return_value="new-head")
 @patch("haniel.core.runner.run_manifest_deployment")
@@ -810,6 +820,7 @@ def test_approved_pull_activates_before_capturing_previous_head(
     mock_deploy,
     mock_remote_head,
     mock_manifest_digest,
+    mock_activation_identity,
     tmp_path: Path,
 ) -> None:
     make_repo(tmp_path)
@@ -844,6 +855,7 @@ def test_approved_pull_activates_before_capturing_previous_head(
     assert probe.call_args.kwargs["config_digest"] == kwargs["config_digest"]
     mock_remote_head.assert_called_once()
     mock_manifest_digest.assert_not_called()
+    assert mock_activation_identity.call_count == 2
 
 
 @patch("haniel.core.runner.get_head", return_value="new-head")
@@ -956,13 +968,17 @@ def test_interrupted_fresh_install_preserves_operation_and_absent_rollback(
 
 
 @patch(
+    "haniel.config.release_activation._remote_release_identity",
+    return_value=("current-head", "manifest-digest"),
+)
+@patch(
     "haniel.core.runner.discover_remote_release_manifest",
     return_value=DEFAULT_RELEASE_MANIFEST,
 )
 @patch("haniel.core.runner.get_head", return_value="current-head")
 @patch("haniel.core.runner.fetch_repo", return_value=False)
 def test_startup_activation_does_not_run_after_config_generation_changes(
-    mock_fetch, mock_head, mock_discover, tmp_path: Path
+    mock_fetch, mock_head, mock_discover, mock_identity, tmp_path: Path
 ) -> None:
     make_repo(tmp_path)
     config_path = tmp_path / "haniel.yaml"
@@ -1018,6 +1034,41 @@ def test_startup_activation_does_not_run_after_config_generation_changes(
     assert journal is not None
     assert journal["state"] == "failed"
     assert journal["error_code"] == "CONFIG_GENERATION_CHANGED"
+    assert mock_identity.call_count == 2
+
+
+def test_manifest_activation_rejects_runner_generation_drift_before_write(
+    tmp_path: Path,
+) -> None:
+    make_repo(tmp_path)
+    config_path = tmp_path / "haniel.yaml"
+    config_path.write_text(config_text(), encoding="utf-8")
+    before = config_path.read_bytes()
+    runner = ServiceRunner(
+        load_config(config_path), config_dir=tmp_path, config_path=config_path
+    )
+
+    def drift_generation(*_args) -> str:
+        with runner._config_reload_lock:
+            runner._config_generation += 1
+        return DEFAULT_RELEASE_MANIFEST
+
+    with (
+        patch(
+            "haniel.core.runner.discover_remote_release_manifest",
+            side_effect=drift_generation,
+        ),
+        patch(
+            "haniel.config.release_activation._remote_release_identity",
+            return_value=("remote-head", "manifest-digest"),
+        ),
+        pytest.raises(StableDeploymentError) as drift,
+    ):
+        runner._ensure_release_manifest_activation("soulstream")
+
+    assert drift.value.code == "CONFIG_GENERATION_CHANGED"
+    assert config_path.read_bytes() == before
+    assert list(tmp_path.glob("*.bak")) == []
 
 
 def test_runner_start_closes_nonterminal_manifest_journal_before_startup_work(

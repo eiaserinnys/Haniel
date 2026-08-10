@@ -2326,7 +2326,7 @@ class ServiceRunner:
 
     def _ensure_release_manifest_activation(self, repo_name: str) -> bool:
         """Activate a conventional remote manifest before any new code is pulled."""
-        runtime = self._snapshot_repo_runtime(repo_name)
+        config_snapshot, runtime = self._snapshot_repo_and_config(repo_name)
         if runtime.config.release_manifest:
             return False
         repo_path = self.config_dir / runtime.config.path
@@ -2340,9 +2340,11 @@ class ServiceRunner:
         from .service_lifecycle import config_file_transaction
 
         with config_file_transaction(self.config_path):
+            self._require_config_generation(config_snapshot)
             plan = plan_release_manifest_activation(
                 self.config_path, repo_name, discovered
             )
+            self._require_config_generation(config_snapshot)
             result = activate_release_manifest(
                 self.config_path,
                 plan=plan,
