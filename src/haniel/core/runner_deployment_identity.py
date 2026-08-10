@@ -33,7 +33,7 @@ def validate_lifecycle_request(
         "runtime-handover",
     }:
         raise LifecycleConflict(
-            "REQUEST_IDENTITY_CONFLICT: request kind is not a deployment"
+            "REQUEST_IDENTITY_CONFLICT", "request kind is not a deployment"
         )
     stored_config_digest = payload.get("config_digest")
     if (
@@ -45,12 +45,12 @@ def validate_lifecycle_request(
         )
     ):
         raise LifecycleConflict(
-            "REQUEST_IDENTITY_CONFLICT: deployment request identity changed"
+            "REQUEST_IDENTITY_CONFLICT", "deployment request identity changed"
         )
     if payload["kind"] == "runtime-handover":
         if payload.get("target_ref") != target_head:
             raise LifecycleConflict(
-                "REQUEST_IDENTITY_CONFLICT: runtime target identity changed"
+                "REQUEST_IDENTITY_CONFLICT", "runtime target identity changed"
             )
         return
     journal = state_store.read(repo_name)
@@ -60,7 +60,8 @@ def validate_lifecycle_request(
         or journal.get("target_head") != target_head
     ):
         raise LifecycleConflict(
-            "REQUEST_IDENTITY_CONFLICT: staged target journal identity changed"
+            "REQUEST_IDENTITY_CONFLICT",
+            "staged target journal identity changed",
         )
 
 
@@ -71,10 +72,12 @@ def require_resident_owner(
 ) -> None:
     if lifecycle is None or not request_id or not isinstance(owner_instance, str):
         raise LifecycleConflict(
-            "LIFECYCLE_OWNER_REQUIRED: manifest deployment requires resident ownership"
+            "LIFECYCLE_OWNER_REQUIRED",
+            "manifest deployment requires resident ownership",
         )
     owner = lifecycle.read_active_owner()
     if owner.get("instance_id") != owner_instance:
         raise LifecycleConflict(
-            "LIFECYCLE_OWNER_CONFLICT: runner is not the active resident owner"
+            "LIFECYCLE_OWNER_CONFLICT",
+            "runner is not the active resident owner",
         )

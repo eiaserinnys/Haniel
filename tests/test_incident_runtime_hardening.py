@@ -39,6 +39,36 @@ def _python_command(script: Path) -> str:
     return subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
 
 
+def _process_is_running(pid: int) -> bool:
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+
+    import ctypes
+    from ctypes import wintypes
+
+    synchronize = 0x00100000
+    wait_timeout = 0x00000102
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    handle = kernel32.OpenProcess(synchronize, False, pid)
+    if not handle:
+        return False
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == wait_timeout
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _release_manifest(failing_command: str, *, timeout_seconds: int = 30) -> dict:
     def command(name: str, value: str, timeout: int = 30) -> dict:
         return {"name": name, "command": value, "timeout_seconds": timeout}
@@ -194,8 +224,7 @@ def test_startup_timeout_is_isolated_reaps_child_and_next_repo_continues(
     assert "COMMAND_TIMEOUT" in caplog.text
     assert get_head(healthy_live) == get_remote_head(healthy_live, "main")
     pid = int(pid_file.read_text(encoding="utf-8"))
-    with pytest.raises(OSError):
-        os.kill(pid, 0)
+    assert not _process_is_running(pid)
 
 
 def test_poll_git_barrier_does_not_block_reload_or_commit_stale_generation(

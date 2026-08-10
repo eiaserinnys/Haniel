@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import ast
-import concurrent.futures
-import socket
-import subprocess
 import sys
-import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 from haniel.config import HanielConfig, RepoConfig, ServiceConfig
+from haniel.config.model import OrchestratorClientConfig
 from haniel.core.runner import ServiceRunner
 
 
@@ -187,83 +185,102 @@ def test_external_subprocess_and_git_boundaries_never_own_config_lock(
     assert observed == ["boundary"]
 
 
-def test_each_inventory_boundary_runs_only_after_snapshot_lock_release(
-    tmp_path: Path,
+def test_reload_file_boundary_runs_only_after_snapshot_lock_release(
+    tmp_path: Path, monkeypatch
 ) -> None:
-    """Exercise every R7 boundary class after the real snapshot helper returns."""
-
-    runner = ServiceRunner(HanielConfig(), config_dir=tmp_path)
+    config_path = tmp_path / "haniel.yaml"
+    config_path.write_text("repos: {}\nservices: {}\n", encoding="utf-8")
+    runner = ServiceRunner(HanielConfig(), config_dir=tmp_path, config_path=config_path)
     observed: list[str] = []
 
-    def outside_lock(label: str) -> None:
+    def load_unlocked(path: Path) -> HanielConfig:
+        assert path == config_path
+        assert not runner._config_reload_lock._is_owned()
+        observed.append("file.load_config")
+        return HanielConfig()
+
+    monkeypatch.setattr("haniel.config.load_config", load_unlocked)
+
+    runner.reload_config()
+
+    assert observed == ["file.load_config"]
+
+
+def test_poll_git_future_network_and_callback_boundaries_run_unlocked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = HanielConfig(
+        repos={"app": RepoConfig(url="unused", path="repo")},
+        services={"svc": ServiceConfig(run="unused", repo="app")},
+        orchestrator_client=OrchestratorClientConfig(
+            url="ws://orchestrator.invalid/ws/node",
+            token="test-token",
+            node_id="test-node",
+        ),
+    )
+    runner = ServiceRunner(config, config_dir=tmp_path)
+    (tmp_path / "repo").mkdir()
+    runner._repo_states["app"].last_head = "old-head"
+    observed: list[str] = []
+
+    def outside_lock(label: str, result=None):
         assert not runner._config_reload_lock._is_owned(), label
         observed.append(label)
+        return result
 
-    runner._snapshot_config_state()
-
-    # file
-    evidence = tmp_path / "evidence.txt"
-    evidence.write_text("ok", encoding="utf-8")
-    outside_lock("file.read_text")
-    assert evidence.read_text(encoding="utf-8") == "ok"
-
-    # process + communicate, using git as the real executable boundary
-    outside_lock("git.process.Popen")
-    process = subprocess.Popen(
-        ["git", "--version"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+    monkeypatch.setattr(
+        "haniel.core.runner.fetch_repo",
+        lambda **_kwargs: outside_lock("git.fetch_repo", True),
     )
-    outside_lock("process.communicate")
-    stdout, _stderr = process.communicate(timeout=5)
-    assert process.returncode == 0 and stdout.startswith("git version")
+    monkeypatch.setattr(
+        "haniel.core.runner.get_head",
+        lambda _path: outside_lock("git.get_head", "old-head"),
+    )
+    monkeypatch.setattr(
+        "haniel.core.runner.get_remote_head",
+        lambda _path, _branch: outside_lock("git.get_remote_head", "new-head"),
+    )
+    monkeypatch.setattr(
+        "haniel.core.runner.get_pending_changes",
+        lambda **_kwargs: outside_lock(
+            "git.get_pending_changes", {"commits": [{"sha": "new-head"}]}
+        ),
+    )
+    monkeypatch.setattr(
+        "haniel.core.runner.capture_repo_snapshot",
+        lambda **_kwargs: outside_lock(
+            "git.capture_repo_snapshot",
+            SimpleNamespace(
+                in_sync=False,
+                remote_head="new-head",
+                deploy_id="deploy-1",
+            ),
+        ),
+    )
 
-    # future.result
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(lambda: "done")
-        outside_lock("future.result")
-        assert future.result(timeout=5) == "done"
+    runner._ws_handler = SimpleNamespace(
+        broadcast_repo_change=lambda *_args: outside_lock("callback.websocket")
+    )
+    runner._slack_bot = SimpleNamespace(
+        notify_pending=lambda *_args: outside_lock("callback.slack")
+    )
+    runner._orch_client = SimpleNamespace(
+        notify_change=lambda **_kwargs: outside_lock("future.network.notify_change"),
+        notify_repo_reconciliation=lambda *_args, **_kwargs: outside_lock(
+            "future.network.notify_repo_reconciliation"
+        ),
+    )
 
-    # network.connect against a loopback-only listener
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(1)
-    accepted = threading.Event()
-
-    def accept_once() -> None:
-        connection, _address = listener.accept()
-        connection.close()
-        accepted.set()
-
-    accept_thread = threading.Thread(target=accept_once)
-    accept_thread.start()
-    client = socket.socket()
-    try:
-        outside_lock("network.connect")
-        client.connect(listener.getsockname())
-        assert accepted.wait(5)
-    finally:
-        client.close()
-        listener.close()
-        accept_thread.join(timeout=5)
-
-    # callback and independent lock.acquire
-    def callback() -> None:
-        outside_lock("callback")
-
-    callback()
-    boundary_lock = threading.Lock()
-    outside_lock("lock.acquire")
-    assert boundary_lock.acquire(timeout=1)
-    boundary_lock.release()
+    assert runner._detect_changes() == ["app"]
 
     assert observed == [
-        "file.read_text",
-        "git.process.Popen",
-        "process.communicate",
-        "future.result",
-        "network.connect",
-        "callback",
-        "lock.acquire",
+        "git.fetch_repo",
+        "git.get_head",
+        "git.get_remote_head",
+        "git.get_pending_changes",
+        "callback.websocket",
+        "callback.slack",
+        "git.capture_repo_snapshot",
+        "future.network.notify_change",
+        "future.network.notify_repo_reconciliation",
     ]

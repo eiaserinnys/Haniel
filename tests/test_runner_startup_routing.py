@@ -211,7 +211,7 @@ def test_startup_repo_lease_conflict_is_isolated_and_next_repo_runs(
 
     def acquire(repo_name: str, request_id: str):
         if repo_name == "blocked":
-            raise LifecycleConflict("DEPLOYMENT_LEASE_CONFLICT: held elsewhere")
+            raise LifecycleConflict("DEPLOYMENT_LEASE_CONFLICT", "held elsewhere")
         return real_acquire(repo_name, request_id)
 
     with patch.object(

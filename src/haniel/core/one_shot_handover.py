@@ -99,11 +99,13 @@ def execute_manifest_handover_once(
     except LifecycleConflict as owner_error:
         if expected_operation == "upgrade":
             raise LifecycleConflict(
-                "LIFECYCLE_OWNER_REQUIRED: upgrade requires an existing resident owner"
+                "LIFECYCLE_OWNER_REQUIRED",
+                "upgrade requires an existing resident owner",
             ) from owner_error
         if not start_owner:
             raise LifecycleConflict(
-                "LIFECYCLE_OWNER_MISSING: fresh_install requires --start-owner"
+                "LIFECYCLE_OWNER_MISSING",
+                "fresh_install requires --start-owner",
             ) from owner_error
         control.submit_request(request_id, payload)
         try:

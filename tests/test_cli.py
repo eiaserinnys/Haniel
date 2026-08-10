@@ -7,6 +7,7 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from haniel.cli import main
+from haniel.core.lifecycle_control import LifecycleConflict
 
 
 class TestCLIBasics:
@@ -94,8 +95,9 @@ class TestHandoverCommand:
         secret = "super-secret-value"
         with patch(
             "haniel.commands.handover.execute_manifest_handover_once",
-            side_effect=RuntimeError(
-                f"LIFECYCLE_OWNER_MISSING: TOKEN={secret} " + ("x" * 10000)
+            side_effect=LifecycleConflict(
+                "LIFECYCLE_OWNER_MISSING",
+                f"TOKEN={secret} " + ("x" * 10000),
             ),
         ):
             result = cli_runner.invoke(

@@ -139,7 +139,8 @@ class LifecycleControl:
                 )
             if current is not None:
                 raise LifecycleConflict(
-                    f"DEPLOYMENT_LEASE_CONFLICT: {repo_name} is owned by {current}"
+                    "DEPLOYMENT_LEASE_CONFLICT",
+                    f"{repo_name} is owned by {current}",
                 )
             lease_path = self.leases_dir / f"{_safe(repo_name)}.lock"
             try:
@@ -150,7 +151,7 @@ class LifecycleControl:
                 )
             except LifecycleConflict as error:
                 raise LifecycleConflict(
-                    f"DEPLOYMENT_LEASE_CONFLICT: {repo_name} is active"
+                    "DEPLOYMENT_LEASE_CONFLICT", f"{repo_name} is active"
                 ) from error
             self._deployments[key] = request_id
         return DeploymentLease(self, repo_name, request_id, attached=False, lease=lease)
@@ -176,7 +177,8 @@ class LifecycleControl:
                 existing = read_json(path)
                 if existing != request:
                     raise LifecycleConflict(
-                        "REQUEST_IDENTITY_CONFLICT: request_id has different payload"
+                        "REQUEST_IDENTITY_CONFLICT",
+                        "request_id has different payload",
                     )
                 return RequestSubmission(request_id, True, path)
             atomic_json(path, request)
@@ -188,7 +190,8 @@ class LifecycleControl:
         owner = self.read_active_owner()
         if owner.get("instance_id") != expected_instance:
             raise LifecycleConflict(
-                "EXPECTED_INSTANCE_MISMATCH: refusing to stop a different resident owner"
+                "EXPECTED_INSTANCE_MISMATCH",
+                "refusing to stop a different resident owner",
             )
         return self.submit_request(
             request_id,
@@ -271,7 +274,8 @@ class LifecycleControl:
                 return existing
             if any(entry.get("state") == "accepted" for entry in result["acks"]):
                 raise LifecycleConflict(
-                    "REQUEST_IN_PROGRESS: resident owner already accepted request"
+                    "REQUEST_IN_PROGRESS",
+                    "resident owner already accepted request",
                 )
             result["acks"].append(
                 {
@@ -288,7 +292,7 @@ class LifecycleControl:
         if optional and not self.owner_path.exists():
             return {}
         if not self.owner_path.exists():
-            raise LifecycleConflict("LIFECYCLE_OWNER_MISSING: no resident owner")
+            raise LifecycleConflict("LIFECYCLE_OWNER_MISSING", "no resident owner")
         return read_json(self.owner_path)
 
     def read_active_owner(self) -> dict[str, Any]:
@@ -310,18 +314,21 @@ class LifecycleControl:
                     metadata = self.read_owner()
                     if metadata.get("config_identity") != self.identity:
                         raise LifecycleConflict(
-                            "LIFECYCLE_OWNER_CONFLICT: owner config identity mismatch"
+                            "LIFECYCLE_OWNER_CONFLICT",
+                            "owner config identity mismatch",
                         )
                     if not metadata.get("instance_id") or not metadata.get(
                         "process_start_identity"
                     ):
                         raise LifecycleConflict(
-                            "LIFECYCLE_OWNER_CONFLICT: owner metadata is incomplete"
+                            "LIFECYCLE_OWNER_CONFLICT",
+                            "owner metadata is incomplete",
                         )
                     pid = metadata.get("pid")
                     if not isinstance(pid, int):
                         raise LifecycleConflict(
-                            "LIFECYCLE_OWNER_CONFLICT: owner metadata is incomplete"
+                            "LIFECYCLE_OWNER_CONFLICT",
+                            "owner metadata is incomplete",
                         )
                     observed_start = process_start_identity(pid)
                     if (
@@ -329,17 +336,18 @@ class LifecycleControl:
                         and observed_start != metadata["process_start_identity"]
                     ):
                         raise LifecycleConflict(
-                            "LIFECYCLE_OWNER_CONFLICT: owner process identity is stale"
+                            "LIFECYCLE_OWNER_CONFLICT",
+                            "owner process identity is stale",
                         )
                     return metadata
                 else:
                     recheck.release()
                     raise LifecycleConflict(
-                        "LIFECYCLE_OWNER_MISSING: no resident owner"
+                        "LIFECYCLE_OWNER_MISSING", "no resident owner"
                     )
         else:
             probe.release()
-            raise LifecycleConflict("LIFECYCLE_OWNER_MISSING: no resident owner")
+            raise LifecycleConflict("LIFECYCLE_OWNER_MISSING", "no resident owner")
 
     def read_result(self, request_id: str) -> dict[str, Any]:
         path = self.result_path(request_id)

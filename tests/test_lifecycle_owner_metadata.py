@@ -197,7 +197,7 @@ def test_windows_general_permission_error_is_not_a_lease_conflict(
         patch.object(Path, "touch", side_effect=denied),
         pytest.raises(PermissionError, match="ACL denied"),
     ):
-        FileLease(tmp_path / "denied.lock", "owner", "LEASE_CONFLICT")
+        FileLease(tmp_path / "denied.lock", "owner", "LIFECYCLE_OWNER_CONFLICT")
 
 
 @pytest.mark.parametrize("winerror", [32, 33])
@@ -212,7 +212,11 @@ def test_windows_sharing_and_lock_violations_are_stable_lease_conflicts(
         patch.object(Path, "touch", side_effect=contention),
         pytest.raises(LifecycleConflict, match="OS lease is already held"),
     ):
-        FileLease(tmp_path / f"contention-{winerror}.lock", "owner", "LEASE_CONFLICT")
+        FileLease(
+            tmp_path / f"contention-{winerror}.lock",
+            "owner",
+            "LIFECYCLE_OWNER_CONFLICT",
+        )
 
 
 def test_cross_process_reader_uses_owner_sidecar_while_lifetime_lock_is_held(
