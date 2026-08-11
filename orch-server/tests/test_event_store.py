@@ -242,6 +242,20 @@ class TestNodeDeployReportReconciliation:
         assert succeeded["status"] == "success"
         assert (await store.get_deploy_event(deploy_id))["status"] == "success"
 
+    async def test_retro_terminal_without_started_closes_exact_pending(
+        self, store: EventStore
+    ):
+        deploy_id = await self._seed(store)
+
+        succeeded = await store.record_node_deploy_report(
+            node_report("succeeded").model_copy(
+                update={"trigger": "startup", "duration_ms": 0}
+            )
+        )
+
+        assert succeeded["status"] == "success"
+        assert (await store.get_deploy_event(deploy_id))["status"] == "success"
+
     async def test_terminal_trigger_may_reflect_startup_recovery(
         self, store: EventStore
     ):
