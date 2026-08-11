@@ -2,6 +2,7 @@
 
 import threading
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -1318,3 +1319,125 @@ def test_runner_start_closes_nonterminal_manifest_journal_before_startup_work(
     assert journal["state"] == "interrupted"
     assert journal["interrupted_from"] == "verifying"
     assert "runner restarted" in journal["interruption_reason"]
+
+
+def _make_retro_report_runner(
+    tmp_path: Path,
+    *,
+    release_manifest: str | None = DEFAULT_RELEASE_MANIFEST,
+) -> tuple[ServiceRunner, str]:
+    config = HanielConfig(
+        repos={
+            "soulstream": RepoConfig(
+                url="git@test/soulstream",
+                path="./soulstream",
+                release_manifest=release_manifest,
+            )
+        },
+        services={},
+        orchestrator_client={
+            "url": "ws://orch/ws/node",
+            "token": "secret",
+            "node_id": "node-1",
+        },
+    )
+    store = DeploymentStateStore(tmp_path / ".haniel" / "deployments")
+    attempt_id = store.begin(
+        "soulstream",
+        "old-head",
+        "target-head",
+        "release-1",
+    )
+    store.transition("soulstream", "success")
+    runner = ServiceRunner(config, config_dir=tmp_path)
+    runner._orch_client = MagicMock()
+    return runner, attempt_id
+
+
+def _start_retro_report_runner(
+    runner: ServiceRunner,
+    *,
+    local_head: str,
+    start_services: Callable[[], object] | None = None,
+) -> None:
+    with (
+        patch.object(runner, "_init_repo_states"),
+        patch.object(runner, "_start_mcp_server"),
+        patch.object(runner, "_start_slack_bot"),
+        patch.object(runner, "_start_orch_client"),
+        patch.object(runner, "_apply_startup_updates"),
+        patch.object(runner, "start_services", side_effect=start_services),
+        patch("haniel.core.runner.get_head", return_value=local_head),
+        patch("haniel.core.runner.threading.Thread"),
+    ):
+        runner.start()
+
+
+def test_runner_start_retro_reports_pre_fix_success_journal_after_services(
+    tmp_path: Path,
+) -> None:
+    runner, attempt_id = _make_retro_report_runner(tmp_path)
+    journal = DeploymentStateStore(tmp_path / ".haniel" / "deployments").read(
+        "soulstream"
+    )
+    assert journal is not None
+    assert journal["node_id"] is None
+    assert journal["orchestrator_attempt_id"] is None
+    events: list[str] = []
+    runner._orch_client.enqueue_node_deploy_report.side_effect = lambda **_kwargs: (
+        events.append("report")
+    )
+
+    _start_retro_report_runner(
+        runner,
+        local_head="target-head",
+        start_services=lambda: events.append("services"),
+    )
+
+    assert events == ["services", "report"]
+    runner._orch_client.enqueue_node_deploy_report.assert_called_once_with(
+        phase="succeeded",
+        node_attempt_id=attempt_id,
+        journal_attempt_id=attempt_id,
+        deploy_id="node-1:soulstream:main:target-head",
+        repo="soulstream",
+        branch="main",
+        target_head="target-head",
+        local_head="target-head",
+        trigger="startup",
+        duration_ms=0,
+    )
+
+
+def test_runner_start_does_not_retro_report_rolled_back_success_journal(
+    tmp_path: Path,
+) -> None:
+    runner, _attempt_id = _make_retro_report_runner(tmp_path)
+
+    _start_retro_report_runner(runner, local_head="rolled-back-head")
+
+    runner._orch_client.enqueue_node_deploy_report.assert_not_called()
+
+
+def test_runner_start_does_not_retro_report_legacy_repo_journal(
+    tmp_path: Path,
+) -> None:
+    runner, _attempt_id = _make_retro_report_runner(tmp_path, release_manifest=None)
+
+    _start_retro_report_runner(runner, local_head="target-head")
+
+    runner._orch_client.enqueue_node_deploy_report.assert_not_called()
+
+
+def test_runner_start_isolates_retro_report_enqueue_failure(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    runner, _attempt_id = _make_retro_report_runner(tmp_path)
+    runner._orch_client.enqueue_node_deploy_report.side_effect = RuntimeError(
+        "queue unavailable"
+    )
+
+    with caplog.at_level("WARNING"):
+        _start_retro_report_runner(runner, local_head="target-head")
+
+    assert "queue unavailable" in caplog.text

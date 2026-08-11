@@ -73,7 +73,10 @@ from .repo_reconciliation import (
     capture_repo_snapshot,
     deterministic_deploy_id,
 )
-from .node_deploy_reporting import NodeDeployReportContext
+from .node_deploy_reporting import (
+    NodeDeployReportContext,
+    enqueue_startup_retro_reports,
+)
 from .runner_deployment import run_manifest_deployment
 from .one_shot_handover import probe_manifest_target
 from .release_staging import ReleaseStagingError
@@ -1300,6 +1303,14 @@ class ServiceRunner:
 
         # Start services
         self.start_services()
+
+        enqueue_startup_retro_reports(
+            config=self._snapshot_config_state().config,
+            config_dir=self.config_dir,
+            orchestrator_client=self._orch_client,
+            journal_store=self._deployment_state_store(),
+            get_local_head=get_head,
+        )
 
         if self._stop_event.is_set():
             logger.info("Skipping poll thread because shutdown was requested")
