@@ -860,9 +860,7 @@ class TestServiceRunnerExtended:
         runner._start_mcp_server = MagicMock()
         runner._start_slack_bot = MagicMock()
         runner._start_orch_client = MagicMock()
-        runner._apply_startup_updates = MagicMock(
-            side_effect=runner._stop_event.set
-        )
+        runner._apply_startup_updates = MagicMock(side_effect=runner._stop_event.set)
         runner._release_startup_repo_locks = MagicMock()
         runner.start_services = MagicMock()
 

@@ -147,8 +147,6 @@ def test_updated_wrapper_reexecs_before_self_update_relaunch(tmp_path: Path) -> 
     assert fetches == ["fetch", "fetch", "fetch"]
     assert launches == ["10", "0"]
     marker = json.loads(
-        (tmp_path / ".local" / "self_update_result.json").read_text(
-            encoding="utf-8"
-        )
+        (tmp_path / ".local" / "self_update_result.json").read_text(encoding="utf-8")
     )
     assert marker["ok"] is True

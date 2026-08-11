@@ -101,4 +101,3 @@ def test_runner_stop_bounds_poll_thread_join(tmp_path) -> None:
     runner._poll_thread.join.assert_called_once_with(
         timeout=DEFAULT_THREAD_JOIN_TIMEOUT_SECONDS
     )
-
