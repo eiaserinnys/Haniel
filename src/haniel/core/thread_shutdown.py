@@ -17,11 +17,7 @@ def join_thread_with_timeout(
     timeout: float = DEFAULT_THREAD_JOIN_TIMEOUT_SECONDS,
 ) -> bool:
     """Wait briefly for a worker and let process exit reclaim a stuck daemon."""
-    if (
-        thread is None
-        or thread is threading.current_thread()
-        or not thread.is_alive()
-    ):
+    if thread is None or thread is threading.current_thread() or not thread.is_alive():
         return True
 
     thread.join(timeout=timeout)
