@@ -91,6 +91,7 @@ def test_start_services_routes_manifest_repo_once_in_global_order(
             "soulstream-orch-server",
             "soulstream-soul-server-ts",
         },
+        branch="main",
         expected_operation="upgrade",
         request_id="startup-resume-soulstream",
     )
@@ -920,6 +921,7 @@ def test_interrupted_fresh_install_preserves_operation_and_absent_rollback(
         manifest_identity=DEFAULT_RELEASE_MANIFEST,
         request_id="fresh-before-crash",
         expected_operation="fresh_install",
+        branch="main",
     )
     store.bind_handover_target(
         "soulstream",

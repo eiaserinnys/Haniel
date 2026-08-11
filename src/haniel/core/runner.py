@@ -880,6 +880,7 @@ class ServiceRunner:
                     affected,
                     self._startup_manifest_updates[repo_name],
                     desired_running=set(affected),
+                    branch=self._snapshot_repo_runtime(repo_name).config.branch,
                     expected_operation=self._startup_manifest_operations.get(
                         repo_name, "upgrade"
                     ),
@@ -1806,6 +1807,7 @@ class ServiceRunner:
                         manifest_identity=manifest_identity,
                         request_id=lifecycle_request_id,
                         expected_operation="upgrade",
+                        branch=resolved_branch,
                         config_digest=(
                             reload_plan.config_digest
                             if reload_plan is not None
@@ -2214,6 +2216,7 @@ class ServiceRunner:
                             manifest_identity=manifest_identity,
                             request_id=startup_request_id,
                             expected_operation="upgrade",
+                            branch=runtime.config.branch,
                             config_digest=(
                                 reload_plan.config_digest
                                 if reload_plan is not None
@@ -2537,6 +2540,7 @@ class ServiceRunner:
             manifest_identity=manifest_identity,
             request_id=request_id,
             expected_operation=operation,
+            branch=runtime.config.branch,
             config_digest=(
                 reload_plan.config_digest if reload_plan is not None else None
             ),

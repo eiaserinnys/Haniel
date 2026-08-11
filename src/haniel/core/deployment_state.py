@@ -158,6 +158,7 @@ class DeploymentStateStore:
         manifest_identity: str,
         request_id: str,
         expected_operation: str,
+        branch: str,
         config_digest: str | None = None,
     ) -> str:
         """Commit rollback identity before target fetch or staging starts."""
@@ -172,6 +173,7 @@ class DeploymentStateStore:
                 "manifest_identity": manifest_identity,
                 "expected_operation": expected_operation,
                 "target_ref": target_ref,
+                "branch": branch,
                 "config_digest": config_digest,
             }
             changed = [
@@ -188,6 +190,7 @@ class DeploymentStateStore:
             previous_head,
             target_ref,
             "handover-target-pending",
+            branch=branch,
             manifest_identity=manifest_identity,
             request_id=request_id,
             expected_operation=expected_operation,
