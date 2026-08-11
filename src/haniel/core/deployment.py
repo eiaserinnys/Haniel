@@ -18,7 +18,13 @@ from .deployment_errors import (
     UNCLASSIFIED_DEPLOYMENT_ERROR_CODE,
     stable_deployment_error_code as stable_deployment_error_code,
 )
+from .deployment_quiescence import validate_quiescence_receipt
 from .deployment_state import DeploymentStateStore
+from .deployment_verification import (
+    RetryWaiter,
+    blocking_retry_waiter,
+    verify_with_retry,
+)
 from .release_manifest import MigrationSpec, ReleaseManifest
 
 
@@ -61,6 +67,18 @@ class DeploymentError(RuntimeError):
         super().__init__(message)
 
 
+class DeploymentVerificationError(DeploymentError):
+    """Verification failed after readiness, so the target stays active."""
+
+    def __init__(self, error: BaseException) -> None:
+        self.code = stable_deployment_error_code(error)
+        self.target_preserved = True
+        super().__init__(
+            f"deployment verification failed; target preserved: {error}",
+            recovered=False,
+        )
+
+
 class DeploymentCoordinator:
     """Execute one manifest release and compensate every failed handover."""
 
@@ -69,9 +87,11 @@ class DeploymentCoordinator:
         *,
         state_store: DeploymentStateStore,
         command_runner: CommandRunner,
+        retry_waiter: RetryWaiter = blocking_retry_waiter,
     ) -> None:
         self.state_store = state_store
         self.command_runner = command_runner
+        self.retry_waiter = retry_waiter
 
     def execute(
         self,
@@ -158,12 +178,15 @@ class DeploymentCoordinator:
             if not contract_mode or operation == "upgrade":
                 quiescence_receipt = callbacks.stop()
             if contract_mode and operation == "upgrade":
-                self._validate_quiescence_receipt(
+                validate_quiescence_receipt(
                     quiescence_receipt,
                     request_id=request_id,
                     repo_name=repo_name,
                     target_head=target_head,
-                    callbacks=callbacks,
+                    owner_instance=callbacks.owner_instance,
+                    quiescence_nonce=callbacks.quiescence_nonce,
+                    config_digest=callbacks.config_digest,
+                    writer_services=callbacks.writer_services,
                 )
                 assert quiescence_receipt is not None
                 if callbacks.acknowledge_quiesced is not None:
@@ -219,9 +242,22 @@ class DeploymentCoordinator:
             target_start_attempted = True
             callbacks.start_and_wait()
             self.state_store.transition(repo_name, "verifying")
-            self._verify(manifest, environment)
+            try:
+                self._verify(manifest, environment)
+            except Exception as verify_error:
+                terminal_error = DeploymentVerificationError(verify_error)
+                self.state_store.transition(
+                    repo_name,
+                    "verification_failed",
+                    message=str(terminal_error),
+                    recovered=False,
+                    error=terminal_error,
+                )
+                raise terminal_error from verify_error
             self.state_store.transition(repo_name, "success")
             return DeploymentResult(status="success", recovered=False)
+        except DeploymentVerificationError:
+            raise
         except Exception as deployment_error:
             return self._recover_and_raise(
                 repo_name=repo_name,
@@ -363,70 +399,14 @@ class DeploymentCoordinator:
             recovered=True,
         ) from deployment_error
 
-    @staticmethod
-    def _validate_quiescence_receipt(
-        receipt: dict[str, Any] | None,
-        *,
-        request_id: str | None,
-        repo_name: str,
-        target_head: str,
-        callbacks: DeploymentCallbacks,
-    ) -> None:
-        if not isinstance(receipt, dict):
-            raise RuntimeError(
-                "QUIESCENCE_REQUIRED: resident owner did not acknowledge stop"
-            )
-        expected_fields = {
-            "request_id": request_id,
-            "repo": repo_name,
-            "target_head": target_head,
-            "owner_instance": callbacks.owner_instance,
-            "quiescence_nonce": callbacks.quiescence_nonce,
-        }
-        if callbacks.config_digest is not None:
-            expected_fields["config_digest"] = callbacks.config_digest
-        mismatched = [
-            key
-            for key, expected in expected_fields.items()
-            if not isinstance(expected, str)
-            or not expected
-            or receipt.get(key) != expected
-        ]
-        writer_services = set(callbacks.writer_services)
-        stopped = receipt.get("stopped_services")
-        already_stopped = receipt.get("already_stopped_services")
-        quiesced = receipt.get("quiesced_services")
-        if not all(
-            isinstance(value, list)
-            and all(isinstance(item, str) and item for item in value)
-            for value in (stopped, already_stopped, quiesced)
-        ):
-            mismatched.append("service_sets")
-        else:
-            stopped_set = set(stopped)
-            already_stopped_set = set(already_stopped)
-            quiesced_set = set(quiesced)
-            if (
-                not writer_services
-                or stopped_set & already_stopped_set
-                or stopped_set | already_stopped_set != writer_services
-                or quiesced_set != writer_services
-                or len(stopped) != len(stopped_set)
-                or len(already_stopped) != len(already_stopped_set)
-                or len(quiesced) != len(quiesced_set)
-            ):
-                mismatched.append("service_sets")
-        if mismatched:
-            raise RuntimeError(
-                "QUIESCENCE_REQUIRED: receipt does not match current deployment intent"
-            )
-
     def _verify(self, manifest: ReleaseManifest, environment: dict[str, str]) -> None:
-        for command in manifest.post_start_verify:
-            try:
-                self._run(command, environment)
-            except Exception as error:
-                raise StableDeploymentError("POST_VERIFY_FAILED", str(error)) from error
+        verify_with_retry(
+            manifest.post_start_verify,
+            environment,
+            command_runner=self.command_runner,
+            policy=manifest.post_start_verify_retry,
+            retry_waiter=self.retry_waiter,
+        )
 
     def _run(
         self, command: CommandSpec, environment: dict[str, str]

@@ -23,7 +23,9 @@ _JOURNAL_MESSAGE_MAX_CHARS = 16384
 class DeploymentStateStore:
     """Repo-scoped deployment journal with atomic replacement writes."""
 
-    TERMINAL_STATES = frozenset({"success", "failed", "interrupted", "aborted"})
+    TERMINAL_STATES = frozenset(
+        {"success", "failed", "verification_failed", "interrupted", "aborted"}
+    )
 
     def __init__(self, directory: Path) -> None:
         self.directory = directory
@@ -318,9 +320,12 @@ class DeploymentStateStore:
         current["state"] = state
         if state in self.TERMINAL_STATES:
             current["completed_at"] = datetime.now(timezone.utc).isoformat()
-        if error is not None and state != "failed":
-            raise ValueError("typed transition errors are only valid for failed state")
-        if state == "failed" and message:
+        error_states = {"failed", "verification_failed"}
+        if error is not None and state not in error_states:
+            raise ValueError(
+                "typed transition errors are only valid for failure states"
+            )
+        if state in error_states and message:
             error_code = (
                 stable_deployment_error_code(error)
                 if error is not None
@@ -329,6 +334,8 @@ class DeploymentStateStore:
             if error_code not in KNOWN_DEPLOYMENT_ERROR_CODES:
                 raise ValueError(f"unregistered deployment error code: {error_code}")
             current["error_code"] = error_code
+        if state == "verification_failed":
+            current["target_preserved"] = True
         if recovered is not None:
             current["recovered"] = recovered
         current.setdefault("history", []).append(self._entry(state, message))

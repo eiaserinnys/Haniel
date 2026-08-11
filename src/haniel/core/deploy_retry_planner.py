@@ -143,7 +143,7 @@ class DeployRetryPlanner:
                 "evidence_recovery", evidence, "durable_local_success", None
             )
         if (
-            journal.get("state") == "failed"
+            journal.get("state") in {"failed", "verification_failed"}
             and journal.get("previous_head")
             and journal.get("completed_at")
             and journal.get("orchestrator_attempt_id")
@@ -155,7 +155,8 @@ class DeployRetryPlanner:
             "fail_closed",
             evidence,
             "unsafe_journal",
-            "manifest retry requires a success journal or failed journal with original previous_head",
+            "manifest retry requires a success journal or terminal failure journal "
+            "with original previous_head",
         )
 
     def revalidate(self, probe: dict[str, Any], approval: dict[str, Any]) -> RetryPlan:

@@ -39,6 +39,12 @@ def manifest() -> ReleaseManifest:
                 "apply": command("apply"),
             },
             "post_start_verify": [command("health")],
+            "post_start_verify_retry": {
+                "max_attempts": 4,
+                "initial_backoff_seconds": 0,
+                "max_backoff_seconds": 0,
+                "total_grace_seconds": 1,
+            },
             "recovery": {"strategy": "rollback", "command": command("restore")},
         }
     )
@@ -133,7 +139,7 @@ def test_fresh_install_skips_quiescence_backup_and_restore_on_apply_failure(
     assert "repo-rollback" not in events
 
 
-def test_fresh_post_start_failure_stops_partial_target_without_restore(
+def test_fresh_post_start_failure_preserves_ready_target_without_restore(
     tmp_path: Path,
 ) -> None:
     events: list[str] = []
@@ -151,10 +157,16 @@ def test_fresh_post_start_failure_stops_partial_target_without_restore(
         )
 
     assert exc_info.value.recovered is False
+    assert getattr(exc_info.value, "target_preserved", False) is True
     assert "start" in events
-    assert events.count("stop-partial") == 1
+    assert events.count("health") == 4
+    assert "stop-partial" not in events
     assert "restore" not in events
     assert "repo-rollback" not in events
+    journal = DeploymentStateStore(tmp_path / "deployments").read("app")
+    assert journal is not None
+    assert journal["state"] == "verification_failed"
+    assert journal["target_preserved"] is True
 
 
 def test_upgrade_requires_quiescence_before_backup_and_apply(tmp_path: Path) -> None:
@@ -257,7 +269,7 @@ def test_upgrade_failure_restores_database_then_repo_symmetrically(
         ("backup", "BACKUP_CREATE_FAILED"),
         ("verify-backup", "BACKUP_VERIFY_FAILED"),
         ("apply", "APPLY_FAILED"),
-        ("health", "POST_VERIFY_FAILED"),
+        ("health", "POST_VERIFY_RETRIES_EXHAUSTED"),
     ],
 )
 def test_release_phase_failures_keep_stable_error_codes(
@@ -536,7 +548,7 @@ def test_one_shot_terminal_prioritizes_recovery_failure_code(tmp_path: Path) -> 
         },
     )
     deployment_error = DeploymentError(
-        "deployment failed: POST_VERIFY_FAILED; recovery failed",
+        "deployment failed: APPLY_FAILED; recovery failed",
         recovered=False,
         recovery_error=RuntimeError("repo reset failed"),
     )

@@ -154,8 +154,9 @@ def coordinator(
     *,
     fail_command: str | None = None,
     fail_once: str | None = None,
+    fail_times: int = 1,
 ) -> DeploymentCoordinator:
-    failures = {fail_once: 1} if fail_once else {}
+    failures = {fail_once: fail_times} if fail_once else {}
 
     def run(spec: CommandSpec, _env: dict[str, str]) -> None:
         events.append(spec.name)
@@ -168,6 +169,7 @@ def coordinator(
     return DeploymentCoordinator(
         state_store=DeploymentStateStore(tmp_path / "state"),
         command_runner=run,
+        retry_waiter=lambda _delay: False,
     )
 
 
@@ -423,6 +425,26 @@ def test_roll_forward_manifest_requires_previous_release_fallback() -> None:
         )
 
 
+def test_verify_retry_policy_has_bounded_defaults() -> None:
+    policy = manifest().post_start_verify_retry
+
+    assert policy.max_attempts == 4
+    assert policy.initial_backoff_seconds == 5.0
+    assert policy.max_backoff_seconds == 20.0
+    assert policy.total_grace_seconds == 60.0
+
+
+def test_verify_retry_policy_rejects_inverted_backoff_bounds() -> None:
+    payload = manifest().model_dump()
+    payload["post_start_verify_retry"] = {
+        "initial_backoff_seconds": 10,
+        "max_backoff_seconds": 5,
+    }
+
+    with pytest.raises(ValidationError, match="max_backoff_seconds"):
+        ReleaseManifest.model_validate(payload)
+
+
 def test_load_manifest_rejects_unknown_schema(tmp_path: Path) -> None:
     path = tmp_path / "release.json"
     path.write_text(
@@ -604,9 +626,71 @@ def test_migration_failure_enters_declared_recovery_and_rolls_forward(
     ]
 
 
-def test_post_start_failure_runs_roll_forward_and_reverifies(tmp_path: Path) -> None:
+def test_post_start_failures_retry_in_place_until_success(tmp_path: Path) -> None:
     events: list[str] = []
-    deploy = coordinator(tmp_path, events, fail_once="verify-http")
+    deploy = coordinator(tmp_path, events, fail_once="verify-http", fail_times=3)
+
+    result = deploy.execute(
+        repo_name="soulstream",
+        previous_head="old",
+        target_head="new",
+        manifest=manifest(),
+        callbacks=callbacks(events),
+    )
+
+    assert result.status == "success"
+    assert events == [
+        "build",
+        "preflight",
+        "stop",
+        "backup",
+        "verify-backup",
+        "migrate",
+        "start-and-wait",
+        "verify-http",
+        "verify-http",
+        "verify-http",
+        "verify-http",
+        "verify-mcp",
+    ]
+
+
+def test_successful_verify_commands_are_not_repeated(tmp_path: Path) -> None:
+    events: list[str] = []
+    deploy = coordinator(tmp_path, events, fail_once="verify-mcp")
+
+    result = deploy.execute(
+        repo_name="soulstream",
+        previous_head="old",
+        target_head="new",
+        manifest=manifest(),
+        callbacks=callbacks(events),
+    )
+
+    assert result.status == "success"
+    assert events.count("verify-http") == 1
+    assert events.count("verify-mcp") == 2
+
+
+def test_shutdown_interrupts_verify_backoff_without_recovery(tmp_path: Path) -> None:
+    events: list[str] = []
+
+    def run(spec: CommandSpec, _env: dict[str, str]) -> None:
+        events.append(spec.name)
+        if spec.name == "verify-http":
+            raise RuntimeError("hub registration is pending")
+
+    waits: list[float] = []
+
+    def interrupt_wait(delay: float) -> bool:
+        waits.append(delay)
+        return delay > 0
+
+    deploy = DeploymentCoordinator(
+        state_store=DeploymentStateStore(tmp_path / "state"),
+        command_runner=run,
+        retry_waiter=interrupt_wait,
+    )
 
     with pytest.raises(DeploymentError) as exc_info:
         deploy.execute(
@@ -617,25 +701,20 @@ def test_post_start_failure_runs_roll_forward_and_reverifies(tmp_path: Path) -> 
             callbacks=callbacks(events),
         )
 
-    assert exc_info.value.recovered is True
-    assert events == [
-        "build",
-        "preflight",
-        "stop",
-        "backup",
-        "verify-backup",
-        "migrate",
-        "start-and-wait",
-        "verify-http",
-        "prepare-roll-forward",
-        "recover",
-        "start-and-wait",
-        "verify-http",
-        "verify-mcp",
-    ]
+    assert stable_deployment_error_code(exc_info.value) == "VERIFY_RETRY_INTERRUPTED"
+    assert exc_info.value.recovered is False
+    assert getattr(exc_info.value, "target_preserved", False) is True
+    assert waits == [0, 5.0]
+    assert events.count("verify-http") == 1
+    assert "rollback" not in events
+    journal = DeploymentStateStore(tmp_path / "state").read("soulstream")
+    assert journal is not None
+    assert journal["state"] == "verification_failed"
+    assert journal["target_preserved"] is True
+    assert journal["error_code"] == "VERIFY_RETRY_INTERRUPTED"
 
 
-def test_persistent_roll_forward_failure_restores_backup_and_previous_release(
+def test_persistent_post_verify_failure_preserves_ready_target(
     tmp_path: Path,
 ) -> None:
     events: list[str] = []
@@ -650,8 +729,9 @@ def test_persistent_roll_forward_failure_restores_backup_and_previous_release(
             callbacks=callbacks(events),
         )
 
-    assert exc_info.value.recovered is True
-    assert events == [
+    assert exc_info.value.recovered is False
+    assert getattr(exc_info.value, "target_preserved", False) is True
+    assert events[:7] == [
         "build",
         "preflight",
         "stop",
@@ -659,18 +739,18 @@ def test_persistent_roll_forward_failure_restores_backup_and_previous_release(
         "verify-backup",
         "migrate",
         "start-and-wait",
-        "verify-http",
-        "prepare-roll-forward",
-        "recover",
-        "start-and-wait",
-        "verify-http",
-        "prepare-roll-forward",
-        "restore-backup",
-        "rollback",
     ]
+    assert events[7:] == ["verify-http"] * 4
+    assert "prepare-roll-forward" not in events
+    assert "recover" not in events
+    assert "restore-backup" not in events
+    assert "rollback" not in events
     journal = DeploymentStateStore(tmp_path / "state").read("soulstream")
-    assert journal["state"] == "failed"
-    assert journal["recovered"] is True
+    assert journal["state"] == "verification_failed"
+    assert journal["error_code"] == "POST_VERIFY_RETRIES_EXHAUSTED"
+    assert journal["recovered"] is False
+    assert journal["target_preserved"] is True
+    assert journal["completed_at"]
 
 
 def test_same_successful_target_is_idempotent(tmp_path: Path) -> None:

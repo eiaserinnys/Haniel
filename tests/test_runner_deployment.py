@@ -25,7 +25,7 @@ from haniel.core.deployment import (
 from haniel.core.deployment_errors import (
     stable_deployment_error_code,
 )
-from haniel.core.git import get_head, reset_repo_to as actual_reset_repo_to
+from haniel.core.git import get_head
 from haniel.core.lifecycle_control import LifecycleConflict, LifecycleControl
 from haniel.core.release_manifest import ReleaseManifest
 from haniel.core.runner import ServiceRunner
@@ -51,6 +51,12 @@ def release_manifest() -> dict[str, object]:
             "apply": command("migrate"),
         },
         "post_start_verify": [command("verify-http"), command("verify-mcp")],
+        "post_start_verify_retry": {
+            "max_attempts": 4,
+            "initial_backoff_seconds": 0,
+            "max_backoff_seconds": 0,
+            "total_grace_seconds": 1,
+        },
         "recovery": {
             "strategy": "roll_forward",
             "command": command("recover"),
@@ -626,7 +632,7 @@ def test_backup_verification_failure_restarts_previous_release(
     ]
 
 
-def test_contract_upgrade_recovery_orders_database_repo_build_start_health(
+def test_contract_upgrade_verify_failure_preserves_target_head_and_processes(
     manifest_runner: tuple[ServiceRunner, Path, str],
 ) -> None:
     runner, repo, previous_head = manifest_runner
@@ -667,18 +673,14 @@ def test_contract_upgrade_recovery_orders_database_repo_build_start_health(
             raise RuntimeError("post verify failed")
         return None
 
-    def reset(path: Path, revision: str) -> None:
-        events.append("repo-reset")
-        actual_reset_repo_to(path, revision)
-
     with (
         resident_owner(runner),
         patch(
             "haniel.core.runner_deployment.subprocess_command_runner",
             return_value=run_command,
         ),
-        patch("haniel.core.runner_deployment.reset_repo_to", side_effect=reset),
-        pytest.raises(DeploymentError),
+        patch("haniel.core.runner_deployment.reset_repo_to") as reset,
+        pytest.raises(DeploymentError) as raised,
     ):
         run_manifest_deployment(
             runner,
@@ -689,22 +691,21 @@ def test_contract_upgrade_recovery_orders_database_repo_build_start_health(
             request_id="request-1",
         )
 
-    ordered = [
-        "restore",
-        "stop:app",
-        "repo-reset",
-        "post_pull:app",
-        "start:app",
-        "ready:app",
-        "recovery-health",
-    ]
-    cursor = 0
-    for event in events:
-        if cursor < len(ordered) and event == ordered[cursor]:
-            cursor += 1
-    assert cursor == len(ordered), events
+    assert raised.value.recovered is False
+    assert getattr(raised.value, "target_preserved", False) is True
+    assert events.count("verify-http") == 4
+    assert "restore" not in events
+    assert running["app"] is True
+    assert get_head(repo) != previous_head
+    reset.assert_not_called()
+    journal = DeploymentStateStore(runner.config_dir / ".haniel" / "deployments").read(
+        "app"
+    )
+    assert journal is not None
+    assert journal["state"] == "verification_failed"
+    assert journal["target_preserved"] is True
     terminal = runner.lifecycle_control.read_result("request-1")["terminal"]
-    assert terminal["error"]["code"] == "POST_VERIFY_FAILED"
+    assert terminal["error"]["code"] == "POST_VERIFY_RETRIES_EXHAUSTED"
 
 
 def test_contract_upgrade_requires_active_resident_before_any_mutation(
@@ -949,14 +950,17 @@ def test_fresh_failure_stops_every_partial_target_without_repo_or_database_resto
             request_id="request-1",
         )
 
-    assert running == {"first": False, "second": False}
+    expected_running = failure == "post-verify"
+    assert running == {"first": expected_running, "second": expected_running}
     assert "restore" not in events
     reset.assert_not_called()
     journal = DeploymentStateStore(runner.config_dir / ".haniel" / "deployments").read(
         "app"
     )
     assert journal is not None
-    assert journal["state"] == "failed"
+    assert journal["state"] == (
+        "verification_failed" if failure == "post-verify" else "failed"
+    )
     assert journal["database_last_result_phase"] == "apply"
     assert journal["database_last_result"]["phase"] == "applied"
     assert get_head(repo) != previous_head
@@ -1100,9 +1104,12 @@ def test_fresh_coordinator_failure_stops_actual_partial_processes(
             )
 
         assert "first" in runner.process_manager._processes
-        assert not runner.process_manager.is_running("first")
-        assert not runner.process_manager.is_running("second")
-        assert runner.process_manager._processes["first"].process is None
+        expected_running = failure == "post-verify"
+        assert runner.process_manager.is_running("first") is expected_running
+        assert runner.process_manager.is_running("second") is expected_running
+        assert (
+            runner.process_manager._processes["first"].process is not None
+        ) is expected_running
         assert "restore" not in command_events
         reset.assert_not_called()
         assert get_head(repo) != "absent"
@@ -1120,6 +1127,10 @@ def test_runtime_terminal_prioritizes_recovery_failure_code(
     (repo / "deploy" / "release.json").write_text(json.dumps(payload), encoding="utf-8")
     events: list[str] = []
     configure_processes(runner, events)
+    ready_results = iter([False, True])
+    runner.process_manager.wait_for_ready = MagicMock(
+        side_effect=lambda name: events.append(f"ready:{name}") or next(ready_results)
+    )
     runner.execute_hook = MagicMock(return_value=True)
 
     def run_command(spec, _env):
@@ -1136,8 +1147,6 @@ def test_runtime_terminal_prioritizes_recovery_failure_code(
                     "journal_path": str(repo / "database-release.json"),
                 },
             )
-        if spec.name == "verify-http":
-            raise RuntimeError("POST_VERIFY_FAILED: health failed")
         return None
 
     with (
@@ -1217,6 +1226,10 @@ def test_rollback_without_restarted_service_is_reported_as_availability_down(
         return started
 
     runner._start_service = MagicMock(side_effect=start)
+    ready_results = iter([False, True])
+    runner.process_manager.wait_for_ready = MagicMock(
+        side_effect=lambda name: events.append(f"ready:{name}") or next(ready_results)
+    )
     runner.execute_hook = MagicMock(
         side_effect=lambda name, hook: events.append(f"{hook}:{name}") or True
     )
@@ -1254,6 +1267,10 @@ def test_rollback_process_without_ready_port_is_reported_as_availability_down(
     running["app"] = False
     runner.process_manager.platform.is_port_owned_by_process_tree = MagicMock(
         return_value=False
+    )
+    ready_results = iter([False, True, True])
+    runner.process_manager.wait_for_ready = MagicMock(
+        side_effect=lambda _name: next(ready_results)
     )
     runner.execute_hook = MagicMock(return_value=True)
 

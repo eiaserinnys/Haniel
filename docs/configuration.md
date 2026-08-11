@@ -190,6 +190,12 @@ A repository that changes persistent data should own an explicit release contrac
       "command": "node scripts/release-health.mjs"
     }
   ],
+  "post_start_verify_retry": {
+    "max_attempts": 4,
+    "initial_backoff_seconds": 5,
+    "max_backoff_seconds": 20,
+    "total_grace_seconds": 60
+  },
   "recovery": {
     "strategy": "roll_forward",
     "command": {
@@ -204,7 +210,7 @@ A repository that changes persistent data should own an explicit release contrac
 }
 ```
 
-Every command runs without a shell in the repository root. Commands receive `HANIEL_DEPLOY_REPO`, `HANIEL_RELEASE_ID`, `HANIEL_PREVIOUS_HEAD`, and `HANIEL_TARGET_HEAD`. `environment_service` is optional and must only be used when a manifest truly targets one stable Haniel service key; deployment-specific service names should stay out of repository manifests. A destructive migration is rejected unless both backup commands are present. Roll-forward recovery must declare a `fallback`: when the retry still fails, Haniel runs that command and then rolls code and processes back to the previous release. The repository decides whether the fallback preserves the new data layout or restores a verified backup. A database restore is safe only after the repository verifies a cluster-wide write fence; a rollback-compatible migration should use a data-preserving fallback instead.
+Every command runs without a shell in the repository root. Commands receive `HANIEL_DEPLOY_REPO`, `HANIEL_RELEASE_ID`, `HANIEL_PREVIOUS_HEAD`, and `HANIEL_TARGET_HEAD`. `environment_service` is optional and must only be used when a manifest truly targets one stable Haniel service key; deployment-specific service names should stay out of repository manifests. A destructive migration is rejected unless both backup commands are present. Post-start verification retries only the failed command with bounded exponential backoff; commands that already passed are not repeated. The defaults are four attempts with 5-second initial and 20-second maximum backoff inside one shared 60-second wait budget. A shutdown request interrupts the retry wait. If verification is still failing after services reached readiness, Haniel records `verification_failed` and reports failure while preserving the target HEAD and ready processes. Failures before readiness retain the declared rollback or roll-forward recovery. Roll-forward recovery must declare a `fallback`: when recovery itself still fails, Haniel runs that command and then rolls code and processes back to the previous release. The repository decides whether the fallback preserves the new data layout or restores a verified backup. A database restore is safe only after the repository verifies a cluster-wide write fence; a rollback-compatible migration should use a data-preserving fallback instead.
 
 The conventional path is `deploy/release-manifest.json`. If a fetched remote branch introduces a valid manifest at that path while `haniel.yaml` has no `release_manifest`, Haniel atomically adds the one field before pulling any new code, preserves a checksum-addressed backup of the previous config, and immediately uses the manifest state machine. If Haniel was started without a writable `config_path`, it blocks the pull and keeps the previous checkout.
 
