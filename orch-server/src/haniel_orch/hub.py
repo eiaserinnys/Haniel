@@ -190,7 +190,17 @@ class WebSocketHub:
                             incoming.node_id,
                         )
                         continue
-                    await self._handle_node_deploy_report(incoming)
+                    try:
+                        await self._handle_node_deploy_report(incoming)
+                    except Exception as e:
+                        logger.warning(
+                            "Ignoring failed node deploy report: "
+                            "node=%s node_attempt_id=%s error=%s",
+                            node_id,
+                            incoming.node_attempt_id,
+                            e,
+                        )
+                        continue
                 elif isinstance(incoming, DeployProgress):
                     await self.deploy_coordinator.handle_progress(incoming)
                 elif isinstance(incoming, RepoReconciliation):

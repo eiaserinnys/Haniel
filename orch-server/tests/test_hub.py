@@ -22,6 +22,7 @@ from haniel_orch.protocol import (
     DeployResult,
     NodeHello,
     NodeDeployReport,
+    NodeStatus,
     RepoReconciliation,
 )
 
@@ -1286,6 +1287,51 @@ class TestNodeDeployReport:
         await hub.handle_node_ws(websocket)
 
         assert (await store.get_deploy_event(deploy_id))["status"] == "pending"
+
+    async def test_poison_report_does_not_kill_node_message_loop(
+        self, hub, registry, store, caplog
+    ):
+        hello = NodeHello(
+            node_id="n1",
+            token="test-token",
+            hostname="node-one",
+            os="Linux",
+            arch="x86_64",
+            haniel_version="0.1.0",
+        )
+        report = NodeDeployReport(
+            phase="started",
+            node_attempt_id="node-attempt-1",
+            journal_attempt_id="journal-1",
+            deploy_id="n1:repo:main:target",
+            node_id="n1",
+            repo="repo",
+            branch="main",
+            target_head="target",
+            local_head="old",
+            trigger="local",
+        )
+        heartbeat = NodeStatus(node_id="n1")
+        websocket = AsyncMock()
+        websocket.receive_text.side_effect = [
+            hello.model_dump_json(),
+            report.model_dump_json(),
+            heartbeat.model_dump_json(),
+            WebSocketDisconnect(code=1000),
+        ]
+        store.record_node_deploy_report = AsyncMock(
+            side_effect=ValueError("poison identity")
+        )
+        registry.heartbeat = AsyncMock(wraps=registry.heartbeat)
+
+        with caplog.at_level("WARNING"):
+            await hub.handle_node_ws(websocket)
+
+        store.record_node_deploy_report.assert_awaited_once_with(report)
+        registry.heartbeat.assert_awaited_once_with(
+            "n1", services=None, websocket=websocket
+        )
+        assert "poison identity" in caplog.text
 
 
 class TestDeployTimeout:

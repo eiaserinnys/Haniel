@@ -11,7 +11,9 @@ from .event_store_rows import now_iso
 from .protocol import DeployStatus, NodeDeployReport
 
 
-def _rows(cursor: aiosqlite.Cursor, rows: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
+def _rows(
+    cursor: aiosqlite.Cursor, rows: list[tuple[Any, ...]]
+) -> list[dict[str, Any]]:
     columns = [column[0] for column in cursor.description or ()]
     return [dict(zip(columns, row)) for row in rows]
 
@@ -58,7 +60,6 @@ def _validate_identity(existing: dict[str, Any], report: NodeDeployReport) -> No
         "repo": report.repo,
         "branch": report.branch,
         "target_head": report.target_head,
-        "trigger": report.trigger,
     }
     conflicts = [
         f"{key} stored={existing.get(key)!r} provided={value!r}"
@@ -66,7 +67,9 @@ def _validate_identity(existing: dict[str, Any], report: NodeDeployReport) -> No
         if existing.get(key) != value
     ]
     if conflicts:
-        raise ValueError("node deploy attempt identity changed: " + ", ".join(conflicts))
+        raise ValueError(
+            "node deploy attempt identity changed: " + ", ".join(conflicts)
+        )
 
 
 async def _insert_started(
@@ -93,9 +96,7 @@ async def _insert_started(
     return await _attempt(db, report.node_attempt_id)  # type: ignore[return-value]
 
 
-async def record(
-    db: aiosqlite.Connection, report: NodeDeployReport
-) -> dict[str, Any]:
+async def record(db: aiosqlite.Connection, report: NodeDeployReport) -> dict[str, Any]:
     """Apply one report inside the caller-owned SQLite transaction."""
     canonical = await _canonical(db, report)
     if canonical is None or canonical["status"] not in {

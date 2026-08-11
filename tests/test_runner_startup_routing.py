@@ -854,9 +854,7 @@ def test_local_manifest_pull_reports_started_then_succeeded(tmp_path: Path) -> N
             )
         },
         services={
-            "soulstream-orch-server": ServiceConfig(
-                run="orch", repo="soulstream"
-            )
+            "soulstream-orch-server": ServiceConfig(run="orch", repo="soulstream")
         },
         orchestrator_client={
             "url": "ws://orch/ws/node",
@@ -1014,9 +1012,7 @@ def test_startup_manifest_reports_across_pull_and_service_handover(
             )
         },
         services={
-            "soulstream-orch-server": ServiceConfig(
-                run="orch", repo="soulstream"
-            )
+            "soulstream-orch-server": ServiceConfig(run="orch", repo="soulstream")
         },
         orchestrator_client={
             "url": "ws://orch/ws/node",
@@ -1071,9 +1067,7 @@ def test_startup_manifest_reports_service_handover_failure(tmp_path: Path) -> No
             )
         },
         services={
-            "soulstream-orch-server": ServiceConfig(
-                run="orch", repo="soulstream"
-            )
+            "soulstream-orch-server": ServiceConfig(run="orch", repo="soulstream")
         },
         orchestrator_client={
             "url": "ws://orch/ws/node",

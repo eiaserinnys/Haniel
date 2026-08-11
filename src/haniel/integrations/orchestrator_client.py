@@ -370,9 +370,7 @@ class OrchestratorClient:
             ]
         )
 
-    def _enqueue_buffered_deploy_messages(
-        self, messages: list[dict[str, Any]]
-    ) -> None:
+    def _enqueue_buffered_deploy_messages(self, messages: list[dict[str, Any]]) -> None:
         """Append messages atomically and kick the single ordered flush."""
         with self._pending_lock:
             self._pending_deploy_results.extend(messages)

@@ -53,7 +53,10 @@ class EventStoreLifecycleMixin:
         node_success_metadata = await node_deploy_store.success_metadata(self._db)
         for item in results:
             metadata = node_success_metadata.get(item.get("deploy_id"))
-            if metadata is not None and item.get("status") == DeployStatus.SUCCESS.value:
+            if (
+                metadata is not None
+                and item.get("status") == DeployStatus.SUCCESS.value
+            ):
                 item.update(metadata)
         results.extend(await node_deploy_store.history_rows(self._db))
         results.sort(

@@ -238,11 +238,27 @@ class TestNodeDeployReportReconciliation:
         assert started["status"] == "started"
         assert (await store.get_deploy_event(deploy_id))["status"] == "pending"
 
-        succeeded = await store.record_node_deploy_report(
-            node_report("succeeded")
-        )
+        succeeded = await store.record_node_deploy_report(node_report("succeeded"))
         assert succeeded["status"] == "success"
         assert (await store.get_deploy_event(deploy_id))["status"] == "success"
+
+    async def test_terminal_trigger_may_reflect_startup_recovery(
+        self, store: EventStore
+    ):
+        deploy_id = await self._seed(store)
+        await store.record_node_deploy_report(node_report("started"))
+
+        succeeded = await store.record_node_deploy_report(
+            node_report("succeeded").model_copy(update={"trigger": "startup"})
+        )
+
+        assert succeeded["status"] == "success"
+        event = next(
+            row
+            for row in await store.get_deploy_history()
+            if row["deploy_id"] == deploy_id
+        )
+        assert event["node_deploy_trigger"] == "local"
 
     async def test_failure_reopens_pending_and_adds_history(self, store: EventStore):
         deploy_id = await self._seed(store)
