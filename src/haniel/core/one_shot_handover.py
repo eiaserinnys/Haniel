@@ -328,6 +328,7 @@ def execute_owner_handover(
                 manifest_identity=manifest_identity,
                 request_id=request_id,
                 expected_operation=expected_operation,
+                branch=state.config.branch,
                 config_digest=config_digest,
             )
             staged = probe_manifest_target(
@@ -391,6 +392,7 @@ def execute_owner_handover(
                 repo_name,
                 affected,
                 previous_head or "absent",
+                branch=state.config.branch,
                 journal_attempt_id=journal_attempt_id,
                 expected_operation=expected_operation,
                 request_id=request_id,

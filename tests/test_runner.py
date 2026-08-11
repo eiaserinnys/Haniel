@@ -1443,6 +1443,67 @@ class TestServiceRunnerPollCycle:
         mock_remote_head.assert_called_once()
         mock_manifest_digest.assert_not_called()
 
+    @patch("haniel.core.runner.get_remote_head", return_value="target-head")
+    @patch("haniel.core.runner.run_manifest_deployment")
+    def test_trigger_pull_preserves_branch_when_handover_journal_is_activated(
+        self,
+        mock_deploy,
+        _mock_remote_head,
+        runner_with_mock_repo,
+    ):
+        runner = runner_with_mock_repo
+        state = runner._repo_states["test-repo"]
+        state.config.release_manifest = "deploy/release.json"
+        state.pending_changes = {"commits": ["a"]}
+        previous_head = get_head(runner.config_dir / state.config.path)
+
+        staged = MagicMock(
+            target_head="target-head",
+            manifest_digest="manifest-digest",
+        )
+        staged.manifest.release_id = "release-1"
+
+        def activate_journal(
+            _runner,
+            repo_name,
+            _affected,
+            deployment_previous_head,
+            **kwargs,
+        ):
+            store = runner._deployment_state_store()
+            journal = store.read(repo_name)
+            assert journal is not None
+            store.begin(
+                repo_name,
+                deployment_previous_head,
+                journal["target_head"],
+                journal["release_id"],
+                orchestrator_attempt_id=kwargs["orchestrator_attempt_id"],
+                node_id=kwargs["node_id"],
+                branch=kwargs["branch"],
+                manifest_identity=journal["manifest_identity"],
+                manifest_digest=journal["manifest_digest"],
+                journal_attempt_id=kwargs["journal_attempt_id"],
+                request_id=kwargs["request_id"],
+                expected_operation=kwargs["expected_operation"],
+                config_digest=kwargs["config_digest"],
+            )
+
+        mock_deploy.side_effect = activate_journal
+        with (
+            patch("haniel.core.runner.probe_manifest_target", return_value=staged),
+            patch("haniel.core.runner.activate_repo_target", return_value=[]),
+            patch(
+                "haniel.core.runner.get_head",
+                side_effect=[previous_head, "target-head"],
+            ),
+        ):
+            runner.trigger_pull("test-repo")
+
+        journal = runner._deployment_state_store().read("test-repo")
+        assert journal is not None
+        assert journal["branch"] == "main"
+
     def test_trigger_pull_persists_and_logs_untyped_git_failure(
         self,
         runner_with_mock_repo,

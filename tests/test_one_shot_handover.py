@@ -497,6 +497,7 @@ def test_fresh_owner_promotes_initial_clone_only_after_probe(tmp_path: Path) -> 
     assert events == ["probe", "activate:target-head"]
     assert (repo_path / "marker").read_text(encoding="utf-8") == "initial"
     deploy.assert_called_once()
+    assert deploy.call_args.kwargs["branch"] == "main"
 
 
 def test_one_shot_terminal_prioritizes_recovery_failure_code(tmp_path: Path) -> None:

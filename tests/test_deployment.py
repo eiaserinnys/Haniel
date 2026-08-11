@@ -702,6 +702,7 @@ def test_staging_failure_only_terminates_matching_live_request(tmp_path: Path) -
         manifest_identity="deploy/release.json",
         request_id="request-new",
         expected_operation="upgrade",
+        branch="main",
     )
 
     assert (

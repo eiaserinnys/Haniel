@@ -835,6 +835,7 @@ def test_one_shot_request_requires_matching_staged_target_journal(
             manifest_identity="deploy/release.json",
             request_id="request-1",
             expected_operation="upgrade",
+            branch="main",
         )
         store.bind_handover_target(
             "app",
