@@ -791,9 +791,7 @@ class ServiceRunner:
         try:
             self._start_services_in_dependency_order()
         finally:
-            for repo_name, context in tuple(
-                self._startup_node_deploy_reports.items()
-            ):
+            for repo_name, context in tuple(self._startup_node_deploy_reports.items()):
                 self._startup_node_deploy_reports.pop(repo_name, None)
                 try:
                     runtime = self._snapshot_repo_runtime(repo_name)
@@ -996,8 +994,7 @@ class ServiceRunner:
             self._finish_node_deploy_report(
                 node_report,
                 local_head=get_head(
-                    self.config_dir
-                    / self._snapshot_repo_runtime(repo_name).config.path
+                    self.config_dir / self._snapshot_repo_runtime(repo_name).config.path
                 ),
                 error="; ".join(errors) if errors else None,
             )
@@ -1622,7 +1619,11 @@ class ServiceRunner:
         """Queue one node-owned start report without coupling deployment success."""
         config_snapshot = self._snapshot_config_state()
         orchestrator = config_snapshot.config.orchestrator_client
-        if self._orch_client is None or orchestrator is None or not orchestrator.enabled:
+        if (
+            self._orch_client is None
+            or orchestrator is None
+            or not orchestrator.enabled
+        ):
             return None
         context = NodeDeployReportContext(
             node_attempt_id=node_attempt_id,
@@ -2170,9 +2171,7 @@ class ServiceRunner:
             code = stable_deployment_error_code(e)
             if node_report_context is not None:
                 try:
-                    report_local_head = get_head(
-                        self.config_dir / runtime.config.path
-                    )
+                    report_local_head = get_head(self.config_dir / runtime.config.path)
                 except Exception:
                     report_local_head = node_report_context.started_local_head
                 self._finish_node_deploy_report(
@@ -2524,7 +2523,9 @@ class ServiceRunner:
                                     journal_attempt_id=None,
                                 )
                                 if node_report is not None:
-                                    self._startup_node_deploy_reports[name] = node_report
+                                    self._startup_node_deploy_reports[name] = (
+                                        node_report
+                                    )
                     if runtime.config.release_manifest:
                         try:
                             if reload_plan is not None:
