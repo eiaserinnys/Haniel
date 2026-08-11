@@ -108,6 +108,16 @@ class DeployAttemptCoordinator(
             ):
                 self._resolve_probe(probe_id, PlanRejected(message, 409))
 
+    async def cancel_superseded_attempts(
+        self, deploy_id: str, orchestrator_attempt_ids: list[str]
+    ) -> None:
+        """Release timers and preflight waiters superseded by node-owned success."""
+        await self.resolve_terminal_canonicals(
+            {deploy_id}, message="canonical succeeded through node-owned deployment"
+        )
+        for orchestrator_attempt_id in orchestrator_attempt_ids:
+            self._cancel_timer(f"attempt:{orchestrator_attempt_id}")
+
     async def approve_manual(
         self, event: dict, *, approved_by: str, source: str
     ) -> str:

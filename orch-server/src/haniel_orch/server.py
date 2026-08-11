@@ -15,7 +15,6 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route, WebSocketRoute
-from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .api import create_api_routes
@@ -67,9 +66,7 @@ class AuthMiddleware:
                 return
 
         # Reject
-        response = JSONResponse(
-            {"error": "unauthorized"}, status_code=401
-        )
+        response = JSONResponse({"error": "unauthorized"}, status_code=401)
         await response(scope, receive, send)
 
 
@@ -164,9 +161,12 @@ class OrchestratorServer:
             # Path: __file__ = src/haniel_orch/server.py
             #   .parent = src/haniel_orch/  .parent = src/  .parent = orch-server/
             #   / "dashboard" / "dist" = orch-server/dashboard/dist/
-            dashboard_dir = pathlib.Path(__file__).parent.parent.parent / "dashboard" / "dist"
+            dashboard_dir = (
+                pathlib.Path(__file__).parent.parent.parent / "dashboard" / "dist"
+            )
         dashboard_routes: list[Route | Mount] = []
         if dashboard_dir.exists():
+
             async def serve_dashboard(request: Request) -> Response:
                 """SPA fallback: serve static file if exists, else index.html."""
                 path = request.path_params.get("path", "")

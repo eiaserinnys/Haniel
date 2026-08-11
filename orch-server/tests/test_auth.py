@@ -4,7 +4,7 @@ import hmac
 import hashlib
 import json
 import time
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 from starlette.applications import Starlette
@@ -14,7 +14,7 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocket
 
-from haniel_orch.auth import AuthConfig, SESSION_COOKIE, SESSION_MAX_AGE
+from haniel_orch.auth import AuthConfig
 from haniel_orch.hub import WebSocketHub
 from haniel_orch.event_store import EventStore
 from haniel_orch.node_registry import NodeRegistry
@@ -36,12 +36,14 @@ class TestAuthMiddleware:
         async def non_api_endpoint(request: Request) -> JSONResponse:
             return JSONResponse({"public": True})
 
-        app = Starlette(routes=[
-            Route("/api/orch/test", api_endpoint),
-            Route("/auth/login", non_api_endpoint),
-            Route("/dashboard", non_api_endpoint),
-            Route("/other", non_api_endpoint),
-        ])
+        app = Starlette(
+            routes=[
+                Route("/api/orch/test", api_endpoint),
+                Route("/auth/login", non_api_endpoint),
+                Route("/dashboard", non_api_endpoint),
+                Route("/other", non_api_endpoint),
+            ]
+        )
         return AuthMiddleware(app, auth_bearer_token=auth_token)
 
     def test_api_request_without_token_returns_401(self):
@@ -199,7 +201,10 @@ class TestAuthConfigTokens:
     def test_verify_expired_token_returns_none(self, config):
         # Create token with already-expired time
         import base64
-        payload = json.dumps({"email": "user@example.com", "exp": int(time.time()) - 100})
+
+        payload = json.dumps(
+            {"email": "user@example.com", "exp": int(time.time()) - 100}
+        )
         sig = hmac.new(
             config.session_secret.encode(), payload.encode(), hashlib.sha256
         ).hexdigest()

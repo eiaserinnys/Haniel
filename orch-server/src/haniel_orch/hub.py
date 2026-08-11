@@ -24,6 +24,7 @@ from .protocol import (
     DeployResult,
     DeployStatus,
     ManifestRecoveryEvidence,
+    NodeDeployReport,
     NodeHello,
     NodeStatus,
     OrchestratorMessage,
@@ -180,6 +181,26 @@ class WebSocketHub:
                     )
                 elif isinstance(incoming, DeployResult):
                     await self._handle_deploy_result(incoming)
+                elif isinstance(incoming, NodeDeployReport):
+                    if incoming.node_id != node_id:
+                        logger.warning(
+                            "Ignoring node deploy report with connection identity "
+                            "mismatch: connected=%s reported=%s",
+                            node_id,
+                            incoming.node_id,
+                        )
+                        continue
+                    try:
+                        await self._handle_node_deploy_report(incoming)
+                    except Exception as e:
+                        logger.warning(
+                            "Ignoring failed node deploy report: "
+                            "node=%s node_attempt_id=%s error=%s",
+                            node_id,
+                            incoming.node_attempt_id,
+                            e,
+                        )
+                        continue
                 elif isinstance(incoming, DeployProgress):
                     await self.deploy_coordinator.handle_progress(incoming)
                 elif isinstance(incoming, RepoReconciliation):
@@ -305,6 +326,30 @@ class WebSocketHub:
     async def _handle_deploy_result(self, msg: DeployResult) -> None:
         """Delegate result correlation to the durable attempt coordinator."""
         await self.deploy_coordinator.handle_result(msg)
+
+    async def _handle_node_deploy_report(self, msg: NodeDeployReport) -> None:
+        """Reconcile an attempt-independent node-owned deployment report."""
+        result = await self._store.record_node_deploy_report(msg)
+        if result["status"] in {"ignored", "started"}:
+            return
+        cancelled = result.get("cancelled_orchestrator_attempt_ids", [])
+        if cancelled:
+            await self.deploy_coordinator.cancel_superseded_attempts(
+                msg.deploy_id, cancelled
+            )
+        await self.broadcast_to_dashboards(
+            {
+                "type": "status_change",
+                "deploy_id": msg.deploy_id,
+                "status": result["canonical_status"],
+                "node_id": msg.node_id,
+            }
+        )
+        if result["status"] == "success" or (
+            result["status"] == "failed"
+            and result["canonical_status"] == DeployStatus.PENDING.value
+        ):
+            await self._on_deploy_terminal({**result, "node_id": msg.node_id})
 
     async def _on_deploy_terminal(self, result: dict[str, Any]) -> None:
         """Preserve terminal push UX without making it a state authority."""

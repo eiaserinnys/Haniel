@@ -287,6 +287,7 @@ def execute_owner_handover(
         )
         previous_head: str | None = None
         staged: StagedRelease | None = None
+        node_report_context: Any = None
         live_changed = False
         try:
             if hasattr(runner, "_snapshot_repo_and_config"):
@@ -321,6 +322,13 @@ def execute_owner_handover(
             journal_store = DeploymentStateStore(
                 runner.config_dir / ".haniel" / "deployments"
             )
+            orchestrator = (
+                config_snapshot.config.orchestrator_client
+                if config_snapshot is not None
+                else getattr(
+                    getattr(runner, "config", None), "orchestrator_client", None
+                )
+            )
             journal_attempt_id = journal_store.begin_handover(
                 repo_name,
                 previous_head=previous_head or "absent",
@@ -329,6 +337,7 @@ def execute_owner_handover(
                 request_id=request_id,
                 expected_operation=expected_operation,
                 branch=state.config.branch,
+                node_id=(orchestrator.node_id if orchestrator else None),
                 config_digest=config_digest,
             )
             staged = probe_manifest_target(
@@ -352,6 +361,16 @@ def execute_owner_handover(
                 release_id=staged.manifest.release_id,
                 manifest_digest=staged.manifest_digest,
             )
+            if hasattr(runner, "_begin_node_deploy_report"):
+                node_report_context = runner._begin_node_deploy_report(
+                    repo=repo_name,
+                    branch=state.config.branch,
+                    target_head=staged.target_head,
+                    local_head=previous_head or "absent",
+                    trigger="local",
+                    node_attempt_id=journal_attempt_id,
+                    journal_attempt_id=journal_attempt_id,
+                )
             if config_digest is not None:
                 require_handover_config_digest(runner.config_path, config_digest)
             if config_snapshot is not None:
@@ -412,6 +431,12 @@ def execute_owner_handover(
                 ),
                 config_snapshot=config_snapshot,
             )
+            if node_report_context is not None:
+                runner._finish_node_deploy_report(
+                    node_report_context,
+                    local_head=get_head(repo_path),
+                )
+                node_report_context = None
             result = build_handover_result(
                 control,
                 request_id=request_id,
@@ -426,6 +451,17 @@ def execute_owner_handover(
                 config_digest=config_digest,
             )
         except Exception as error:
+            if node_report_context is not None:
+                try:
+                    report_local_head = get_head(repo_path)
+                except Exception:
+                    report_local_head = node_report_context.started_local_head
+                runner._finish_node_deploy_report(
+                    node_report_context,
+                    local_head=report_local_head,
+                    error=str(error),
+                )
+                node_report_context = None
             if isinstance(error, GitError):
                 error = StableDeploymentError("PULL_FAILED", str(error))
             programming_error = not isinstance(

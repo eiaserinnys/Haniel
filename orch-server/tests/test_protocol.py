@@ -17,6 +17,7 @@ from haniel_orch.protocol import (
     DeployResult,
     DeployStatus,
     NodeHello,
+    NodeDeployReport,
     NodeStatus,
     RepoReconciliation,
     RejectedDeployAttemptAck,
@@ -190,6 +191,59 @@ class TestDeployResult:
         )
         assert msg.status == "failed"
         assert msg.error == "exit code 1"
+
+
+class TestNodeDeployReport:
+    def test_parse_out_of_band_success_without_orchestrator_identity(self):
+        msg = parse_node_message(
+            json.dumps(
+                {
+                    "type": "node_deploy_report",
+                    "phase": "succeeded",
+                    "node_attempt_id": "node-attempt-1",
+                    "journal_attempt_id": "journal-1",
+                    "deploy_id": "n:r:main:new",
+                    "node_id": "n",
+                    "repo": "r",
+                    "branch": "main",
+                    "target_head": "new",
+                    "local_head": "new",
+                    "trigger": "startup",
+                    "duration_ms": 15,
+                }
+            )
+        )
+
+        assert isinstance(msg, NodeDeployReport)
+        assert msg.phase == "succeeded"
+        assert "orchestrator_attempt_id" not in msg.model_dump()
+
+    @pytest.mark.parametrize(
+        ("phase", "error", "duration_ms"),
+        [
+            ("started", "unexpected", None),
+            ("started", None, 10),
+            ("succeeded", "unexpected", 10),
+            ("failed", None, 10),
+        ],
+    )
+    def test_phase_specific_evidence_is_strict(
+        self, phase: str, error: str | None, duration_ms: int | None
+    ):
+        with pytest.raises(ValidationError):
+            NodeDeployReport(
+                phase=phase,
+                node_attempt_id="node-attempt-1",
+                deploy_id="n:r:main:new",
+                node_id="n",
+                repo="r",
+                branch="main",
+                target_head="new",
+                local_head="new",
+                trigger="local",
+                error=error,
+                duration_ms=duration_ms,
+            )
 
 
 class TestDeployProgress:

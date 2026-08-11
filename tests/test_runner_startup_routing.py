@@ -12,6 +12,7 @@ from haniel.core.runner import ServiceRunner
 from haniel.config import HanielConfig, RepoConfig, ServiceConfig, load_config
 from haniel.config.release_activation import DEFAULT_RELEASE_MANIFEST
 from haniel.core.deployment import DeploymentError
+from haniel.core.deployment_errors import StableDeploymentError
 from haniel.core.git import GitError
 from haniel.core.deployment import DeploymentStateStore
 from haniel.core.lifecycle_control import LifecycleConflict
@@ -840,6 +841,272 @@ def test_approved_pull_activates_before_capturing_previous_head(
     assert probe.call_args.kwargs["config_digest"] == kwargs["config_digest"]
     mock_remote_head.assert_called_once()
     mock_manifest_digest.assert_not_called()
+
+
+def test_local_manifest_pull_reports_started_then_succeeded(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    config = HanielConfig(
+        repos={
+            "soulstream": RepoConfig(
+                url="git@test/soulstream",
+                path="./soulstream",
+                release_manifest=DEFAULT_RELEASE_MANIFEST,
+            )
+        },
+        services={
+            "soulstream-orch-server": ServiceConfig(run="orch", repo="soulstream")
+        },
+        orchestrator_client={
+            "url": "ws://orch/ws/node",
+            "token": "secret",
+            "node_id": "node-1",
+        },
+    )
+    runner = ServiceRunner(config, config_dir=tmp_path)
+    runner._orch_client = MagicMock()
+    runner._repo_states["soulstream"].pending_changes = {"commits": ["new"]}
+    activated = False
+
+    def activate(*_args, **_kwargs):
+        nonlocal activated
+        activated = True
+        return []
+
+    def head(_path: Path) -> str:
+        return "new-head" if activated else "old-head"
+
+    with (
+        patch("haniel.core.runner.get_head", side_effect=head),
+        patch("haniel.core.runner.get_remote_head", return_value="new-head"),
+        patch(
+            "haniel.core.runner.probe_manifest_target",
+            return_value=staged_release(),
+        ),
+        patch("haniel.core.runner.activate_repo_target", side_effect=activate),
+        patch("haniel.core.runner.run_manifest_deployment"),
+    ):
+        runner.trigger_pull("soulstream")
+
+    calls = runner._orch_client.enqueue_node_deploy_report.call_args_list
+    assert [call.kwargs["phase"] for call in calls] == ["started", "succeeded"]
+    assert calls[0].kwargs["trigger"] == "local"
+    assert calls[0].kwargs["target_head"] == "new-head"
+    assert calls[1].kwargs["local_head"] == "new-head"
+    assert calls[0].kwargs["node_attempt_id"] == calls[1].kwargs["node_attempt_id"]
+
+
+def test_local_manifest_pull_reports_terminal_failure(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    config = HanielConfig(
+        repos={
+            "soulstream": RepoConfig(
+                url="git@test/soulstream",
+                path="./soulstream",
+                release_manifest=DEFAULT_RELEASE_MANIFEST,
+            )
+        },
+        services={},
+        orchestrator_client={
+            "url": "ws://orch/ws/node",
+            "token": "secret",
+            "node_id": "node-1",
+        },
+    )
+    runner = ServiceRunner(config, config_dir=tmp_path)
+    runner._orch_client = MagicMock()
+    runner._repo_states["soulstream"].pending_changes = {"commits": ["new"]}
+    activated = False
+
+    def activate(*_args, **_kwargs):
+        nonlocal activated
+        activated = True
+        return []
+
+    with (
+        patch(
+            "haniel.core.runner.get_head",
+            side_effect=lambda _path: "new-head" if activated else "old-head",
+        ),
+        patch("haniel.core.runner.get_remote_head", return_value="new-head"),
+        patch(
+            "haniel.core.runner.probe_manifest_target",
+            return_value=staged_release(),
+        ),
+        patch("haniel.core.runner.activate_repo_target", side_effect=activate),
+        patch(
+            "haniel.core.runner.run_manifest_deployment",
+            side_effect=StableDeploymentError("APPLY_FAILED", "verify failed"),
+        ),
+        pytest.raises(StableDeploymentError, match="verify failed"),
+    ):
+        runner.trigger_pull("soulstream")
+
+    calls = runner._orch_client.enqueue_node_deploy_report.call_args_list
+    assert [call.kwargs["phase"] for call in calls] == ["started", "failed"]
+    assert "APPLY_FAILED" in calls[1].kwargs["error"]
+
+
+def test_orchestrated_manifest_pull_does_not_emit_node_owned_report(
+    tmp_path: Path,
+) -> None:
+    make_repo(tmp_path)
+    config = HanielConfig(
+        repos={
+            "soulstream": RepoConfig(
+                url="git@test/soulstream",
+                path="./soulstream",
+                release_manifest=DEFAULT_RELEASE_MANIFEST,
+            )
+        },
+        services={},
+        orchestrator_client={
+            "url": "ws://orch/ws/node",
+            "token": "secret",
+            "node_id": "node-1",
+        },
+    )
+    runner = ServiceRunner(config, config_dir=tmp_path)
+    runner._orch_client = MagicMock()
+    runner._repo_states["soulstream"].pending_changes = {"commits": ["new"]}
+    activated = False
+
+    def activate(*_args, **_kwargs):
+        nonlocal activated
+        activated = True
+        return []
+
+    with (
+        patch(
+            "haniel.core.runner.get_head",
+            side_effect=lambda _path: "new-head" if activated else "old-head",
+        ),
+        patch("haniel.core.runner.get_remote_head", return_value="new-head"),
+        patch(
+            "haniel.core.runner.probe_manifest_target",
+            return_value=staged_release(),
+        ),
+        patch("haniel.core.runner.activate_repo_target", side_effect=activate),
+        patch("haniel.core.runner.run_manifest_deployment"),
+    ):
+        runner.trigger_pull(
+            "soulstream",
+            orchestrator_attempt_id="orch-attempt-1",
+            node_id="node-1",
+            branch="main",
+            target_head="new-head",
+        )
+
+    runner._orch_client.enqueue_node_deploy_report.assert_not_called()
+
+
+def test_startup_manifest_reports_across_pull_and_service_handover(
+    tmp_path: Path,
+) -> None:
+    make_repo(tmp_path)
+    config = HanielConfig(
+        repos={
+            "soulstream": RepoConfig(
+                url="git@test/soulstream",
+                path="./soulstream",
+                release_manifest=DEFAULT_RELEASE_MANIFEST,
+            )
+        },
+        services={
+            "soulstream-orch-server": ServiceConfig(run="orch", repo="soulstream")
+        },
+        orchestrator_client={
+            "url": "ws://orch/ws/node",
+            "token": "secret",
+            "node_id": "node-1",
+        },
+    )
+    runner = ServiceRunner(config, config_dir=tmp_path)
+    runner._orch_client = MagicMock()
+    activated = False
+
+    def activate(*_args, **_kwargs):
+        nonlocal activated
+        activated = True
+        return []
+
+    with (
+        patch("haniel.core.runner.fetch_repo", return_value=True),
+        patch(
+            "haniel.core.runner.get_head",
+            side_effect=lambda _path: "new-head" if activated else "old-head",
+        ),
+        patch("haniel.core.runner.get_remote_head", return_value="new-head"),
+        patch(
+            "haniel.core.runner.probe_manifest_target",
+            return_value=staged_release(),
+        ),
+        patch("haniel.core.runner.activate_repo_target", side_effect=activate),
+        patch("haniel.core.runner.run_manifest_deployment"),
+    ):
+        runner._apply_startup_updates()
+        assert [
+            call.kwargs["phase"]
+            for call in runner._orch_client.enqueue_node_deploy_report.call_args_list
+        ] == ["started"]
+        runner.start_services()
+
+    calls = runner._orch_client.enqueue_node_deploy_report.call_args_list
+    assert [call.kwargs["phase"] for call in calls] == ["started", "succeeded"]
+    assert all(call.kwargs["trigger"] == "startup" for call in calls)
+    assert calls[0].kwargs["node_attempt_id"] == calls[1].kwargs["node_attempt_id"]
+
+
+def test_startup_manifest_reports_service_handover_failure(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    config = HanielConfig(
+        repos={
+            "soulstream": RepoConfig(
+                url="git@test/soulstream",
+                path="./soulstream",
+                release_manifest=DEFAULT_RELEASE_MANIFEST,
+            )
+        },
+        services={
+            "soulstream-orch-server": ServiceConfig(run="orch", repo="soulstream")
+        },
+        orchestrator_client={
+            "url": "ws://orch/ws/node",
+            "token": "secret",
+            "node_id": "node-1",
+        },
+    )
+    runner = ServiceRunner(config, config_dir=tmp_path)
+    runner._orch_client = MagicMock()
+    activated = False
+
+    def activate(*_args, **_kwargs):
+        nonlocal activated
+        activated = True
+        return []
+
+    with (
+        patch("haniel.core.runner.fetch_repo", return_value=True),
+        patch(
+            "haniel.core.runner.get_head",
+            side_effect=lambda _path: "new-head" if activated else "old-head",
+        ),
+        patch("haniel.core.runner.get_remote_head", return_value="new-head"),
+        patch(
+            "haniel.core.runner.probe_manifest_target",
+            return_value=staged_release(),
+        ),
+        patch("haniel.core.runner.activate_repo_target", side_effect=activate),
+        patch(
+            "haniel.core.runner.run_manifest_deployment",
+            side_effect=DeploymentError("verify failed", recovered=True),
+        ),
+    ):
+        runner._apply_startup_updates()
+        runner.start_services()
+
+    calls = runner._orch_client.enqueue_node_deploy_report.call_args_list
+    assert [call.kwargs["phase"] for call in calls] == ["started", "failed"]
+    assert "verify failed" in calls[1].kwargs["error"]
 
 
 @patch("haniel.core.runner.get_head", return_value="new-head")

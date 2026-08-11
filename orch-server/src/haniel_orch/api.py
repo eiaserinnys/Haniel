@@ -66,9 +66,7 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         Pass ?include_superseded=1 to expose them for audit chains.
         """
         limit = int(request.query_params.get("limit", "50"))
-        include_superseded = (
-            request.query_params.get("include_superseded") == "1"
-        )
+        include_superseded = request.query_params.get("include_superseded") == "1"
         history = await store.get_deploy_history(
             limit=limit, include_superseded=include_superseded
         )
@@ -83,9 +81,7 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         body = await request.json()
         deploy_id = body.get("deploy_id")
         if not deploy_id:
-            return JSONResponse(
-                {"error": "deploy_id is required"}, status_code=400
-            )
+            return JSONResponse({"error": "deploy_id is required"}, status_code=400)
 
         event = await store.get_deploy_event(deploy_id)
         if event is None:
@@ -125,9 +121,7 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         body = await request.json()
         deploy_id = body.get("deploy_id")
         if not deploy_id:
-            return JSONResponse(
-                {"error": "deploy_id is required"}, status_code=400
-            )
+            return JSONResponse({"error": "deploy_id is required"}, status_code=400)
 
         event = await store.get_deploy_event(deploy_id)
         if event is None:
@@ -153,12 +147,14 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         msg = DeployReject(deploy_id=deploy_id, reason=reason)
         await hub.send_to_node(event["node_id"], msg)
 
-        await hub.broadcast_to_dashboards({
-            "type": "status_change",
-            "deploy_id": deploy_id,
-            "status": DeployStatus.REJECTED.value,
-            "node_id": event["node_id"],
-        })
+        await hub.broadcast_to_dashboards(
+            {
+                "type": "status_change",
+                "deploy_id": deploy_id,
+                "status": DeployStatus.REJECTED.value,
+                "node_id": event["node_id"],
+            }
+        )
 
         return JSONResponse({"deploy_id": deploy_id, "status": "rejected"})
 
@@ -176,11 +172,13 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         pending = await store.get_pending_deploys()
 
         if not pending:
-            return JSONResponse({
-                "approved": [],
-                "failed": [],
-                "message": "no pending deploys",
-            })
+            return JSONResponse(
+                {
+                    "approved": [],
+                    "failed": [],
+                    "message": "no pending deploys",
+                }
+            )
 
         # Group by (node, repo, branch). `pending` is ordered by canonical
         # detected_at, then insertion time, so the first occurrence is latest. Older
@@ -220,10 +218,12 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
                 await _approve_one(event, "dashboard", "manual_batch")
                 approved.append(deploy_id)
             except (PlanRejected, ValueError) as exc:
-                failed.append({
-                    "deploy_id": deploy_id,
-                    "reason": str(exc),
-                })
+                failed.append(
+                    {
+                        "deploy_id": deploy_id,
+                        "reason": str(exc),
+                    }
+                )
 
         response: dict[str, Any] = {"approved": approved, "failed": failed}
         if auto_superseded:
@@ -253,9 +253,7 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
                 status_code=400,
             )
         if payload is not None and not isinstance(payload, dict):
-            return JSONResponse(
-                {"error": "payload must be an object"}, status_code=400
-            )
+            return JSONResponse({"error": "payload must be an object"}, status_code=400)
 
         payload = payload or {}
         command_target = service_name
@@ -305,14 +303,10 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         sent = await hub.send_to_node(node_id, msg)
 
         if not sent:
-            return JSONResponse(
-                {"error": "node not connected"}, status_code=503
-            )
+            return JSONResponse({"error": "node not connected"}, status_code=503)
 
         # Track in-flight command for timeout/disconnect handling.
-        await hub.register_pending_command(
-            command_id, node_id, command_target, action
-        )
+        await hub.register_pending_command(command_id, node_id, command_target, action)
 
         return JSONResponse({"command_id": command_id, "status": "sent"})
 

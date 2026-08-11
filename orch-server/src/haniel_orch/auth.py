@@ -17,7 +17,7 @@ from urllib.parse import urlencode
 
 import httpx
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,9 @@ class AuthConfig:
 
     def create_session_token(self, email: str) -> str:
         """Create HMAC-signed session token."""
-        payload = json.dumps({"email": email, "exp": int(time.time()) + SESSION_MAX_AGE})
+        payload = json.dumps(
+            {"email": email, "exp": int(time.time()) + SESSION_MAX_AGE}
+        )
         sig = hmac.new(
             self.session_secret.encode(), payload.encode(), hashlib.sha256
         ).hexdigest()

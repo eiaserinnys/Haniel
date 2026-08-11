@@ -65,6 +65,49 @@ class TestDeployRetryPlanner:
         assert plan.mode == "evidence_recovery"
         assert plan.evidence["journal_attempt_id"]
 
+    def test_handover_journal_accepts_late_orchestrator_link_for_recovery(
+        self, tmp_path, monkeypatch
+    ):
+        planner = self.planner(tmp_path, monkeypatch)
+        store = planner.journal_store
+        journal_attempt_id = store.begin_handover(
+            "r",
+            previous_head="previous",
+            target_ref="target",
+            manifest_identity="release.json",
+            request_id="request-1",
+            expected_operation="upgrade",
+            branch="main",
+            node_id="n",
+        )
+        store.bind_handover_target(
+            "r",
+            request_id="request-1",
+            target_head="target",
+            release_id="release",
+            manifest_digest=hashlib.sha256(b"manifest").hexdigest(),
+        )
+        store.begin(
+            "r",
+            "previous",
+            "target",
+            "release",
+            orchestrator_attempt_id="source",
+            node_id="n",
+            branch="main",
+            manifest_identity="release.json",
+            manifest_digest=hashlib.sha256(b"manifest").hexdigest(),
+            journal_attempt_id=journal_attempt_id,
+            request_id="request-1",
+            expected_operation="upgrade",
+        )
+        store.transition("r", "success")
+
+        plan = planner.plan(probe())
+
+        assert plan.mode == "evidence_recovery"
+        assert plan.reason == "durable_local_success"
+
     def test_legacy_success_journal_without_orchestrator_link_fails_closed(
         self, tmp_path, monkeypatch
     ):

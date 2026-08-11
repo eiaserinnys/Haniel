@@ -36,7 +36,9 @@ class DeployAttemptStoreSupport:
                     "node_id": attempt["node_id"],
                     "repo": attempt["repo"],
                     "branch": attempt["branch"],
-                    "status": "success" if "success" in attempt["outcome"] else "failed",
+                    "status": "success"
+                    if "success" in attempt["outcome"]
+                    else "failed",
                     "commits": json.loads(attempt["commits_json"]),
                     "affected_services": json.loads(attempt["affected_services_json"]),
                     "diff_stat": attempt["diff_stat"],
@@ -135,10 +137,16 @@ class DeployAttemptStoreSupport:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 orchestrator_attempt_id,
-                event["deploy_id"], event["node_id"], event["repo"], event["branch"],
+                event["deploy_id"],
+                event["node_id"],
+                event["repo"],
+                event["branch"],
                 event["target_head"] or event["deploy_id"].rsplit(":", 1)[-1],
-                source, mode, approved_by,
-                probe and probe["probe_id"], connection_generation,
+                source,
+                mode,
+                approved_by,
+                probe and probe["probe_id"],
+                connection_generation,
                 proposal and proposal.fingerprint,
                 probe and probe["source_orchestrator_attempt_id"],
                 proposal and proposal.journal_attempt_id,
@@ -147,19 +155,31 @@ class DeployAttemptStoreSupport:
                 proposal and proposal.journal_target_head,
                 proposal and proposal.journal_completed_at,
                 proposal and proposal.original_previous_head,
-                event["commits_json"], event["affected_services_json"], event["diff_stat"],
-                event["detected_at"], now, deadline_at,
+                event["commits_json"],
+                event["affected_services_json"],
+                event["diff_stat"],
+                event["detected_at"],
+                now,
+                deadline_at,
             ),
         )
         updated = await self._db.execute(
             "UPDATE deploy_events SET status = ?, approved_by = ?, updated_at = ? "
             "WHERE deploy_id = ? AND status = ?",
-            (DeployStatus.DEPLOYING.value, approved_by, now, event["deploy_id"], DeployStatus.PENDING.value),
+            (
+                DeployStatus.DEPLOYING.value,
+                approved_by,
+                now,
+                event["deploy_id"],
+                DeployStatus.PENDING.value,
+            ),
         )
         if updated.rowcount != 1:
             raise RuntimeError("canonical owner changed during begin")
 
-    async def _finalize_normal_if_ready(self, attempt: dict[str, Any]) -> dict[str, Any]:
+    async def _finalize_normal_if_ready(
+        self, attempt: dict[str, Any]
+    ) -> dict[str, Any]:
         if (
             attempt["result_status"] == "success"
             and attempt["settled_local_head"] == attempt["target_head"]
@@ -168,7 +188,9 @@ class DeployAttemptStoreSupport:
             return await self._success_unlocked(attempt, "success")
         return {"status": "recorded"}
 
-    async def _success_unlocked(self, attempt: dict[str, Any], outcome: str) -> dict[str, Any]:
+    async def _success_unlocked(
+        self, attempt: dict[str, Any], outcome: str
+    ) -> dict[str, Any]:
         now = _now_iso()
         changed = await self._db.execute(
             "UPDATE deploy_attempts SET outcome = ?, completed_at = ? "
@@ -180,7 +202,13 @@ class DeployAttemptStoreSupport:
         await self._db.execute(
             "UPDATE deploy_events SET status = ?, error = NULL, duration_ms = ?, updated_at = ? "
             "WHERE deploy_id = ? AND status = ?",
-            (DeployStatus.SUCCESS.value, attempt["duration_ms"], now, attempt["deploy_id"], DeployStatus.DEPLOYING.value),
+            (
+                DeployStatus.SUCCESS.value,
+                attempt["duration_ms"],
+                now,
+                attempt["deploy_id"],
+                DeployStatus.DEPLOYING.value,
+            ),
         )
         await self.cleanup_retry(attempt["deploy_id"])
         await self._terminalize_sibling_probes_unlocked(
@@ -215,7 +243,12 @@ class DeployAttemptStoreSupport:
             await self._db.execute(
                 "UPDATE deploy_events SET status = ?, reject_reason = ?, updated_at = ? "
                 "WHERE deploy_id = ?",
-                (DeployStatus.REJECTED.value, "superseded by newer canonical", now, attempt["deploy_id"]),
+                (
+                    DeployStatus.REJECTED.value,
+                    "superseded by newer canonical",
+                    now,
+                    attempt["deploy_id"],
+                ),
             )
             await self.cleanup_retry(attempt["deploy_id"])
             await self._terminalize_sibling_probes_unlocked(
@@ -227,7 +260,12 @@ class DeployAttemptStoreSupport:
             "UPDATE deploy_events SET status = ?, approved_by = NULL, error = NULL, "
             "duration_ms = NULL, "
             "updated_at = ? WHERE deploy_id = ? AND status = ?",
-            (DeployStatus.PENDING.value, now, attempt["deploy_id"], DeployStatus.DEPLOYING.value),
+            (
+                DeployStatus.PENDING.value,
+                now,
+                attempt["deploy_id"],
+                DeployStatus.DEPLOYING.value,
+            ),
         )
         current_retry = await self._retry_unlocked(attempt["deploy_id"])
         stable_source = (
@@ -245,7 +283,13 @@ class DeployAttemptStoreSupport:
                  source_orchestrator_attempt_id=excluded.source_orchestrator_attempt_id,
                  last_failed_orchestrator_attempt_id=excluded.last_failed_orchestrator_attempt_id,
                  updated_at=excluded.updated_at""",
-            (attempt["deploy_id"], stable_source, attempt["orchestrator_attempt_id"], created_at, now),
+            (
+                attempt["deploy_id"],
+                stable_source,
+                attempt["orchestrator_attempt_id"],
+                created_at,
+                now,
+            ),
         )
         await self._db.execute(
             "INSERT OR IGNORE INTO deploy_retry_source_attempts VALUES (?, ?, ?)",
@@ -276,17 +320,25 @@ class DeployAttemptStoreSupport:
         retry = await self._retry_unlocked(attempt["deploy_id"])
         checks = {
             "source lineage": retry is not None
-            and evidence.source_orchestrator_attempt_id == retry["source_orchestrator_attempt_id"]
+            and evidence.source_orchestrator_attempt_id
+            == retry["source_orchestrator_attempt_id"]
             and evidence.source_orchestrator_attempt_id in retry["lineage"],
-            "journal identity": evidence.journal_attempt_id == attempt["journal_attempt_id"],
-            "target": evidence.target_head == attempt["target_head"] == evidence.current_head,
-            "manifest identity": evidence.manifest_identity == attempt["manifest_identity"],
+            "journal identity": evidence.journal_attempt_id
+            == attempt["journal_attempt_id"],
+            "target": evidence.target_head
+            == attempt["target_head"]
+            == evidence.current_head,
+            "manifest identity": evidence.manifest_identity
+            == attempt["manifest_identity"],
             "manifest digest": evidence.manifest_digest == attempt["manifest_digest"],
-            "journal completion": evidence.journal_completed_at == attempt["journal_completed_at"],
+            "journal completion": evidence.journal_completed_at
+            == attempt["journal_completed_at"],
             "node": evidence.node_id == attempt["node_id"],
             "repo": evidence.repo == attempt["repo"],
             "branch": evidence.branch == attempt["branch"],
-            "latest canonical": await self._is_latest(await self._event(attempt["deploy_id"])),
+            "latest canonical": await self._is_latest(
+                await self._event(attempt["deploy_id"])
+            ),
         }
         failed = [name for name, value in checks.items() if not value]
         return f"recovery evidence mismatch: {', '.join(failed)}" if failed else None
@@ -298,11 +350,16 @@ class DeployAttemptStoreSupport:
         checks = {
             "journal success": proposal.journal_status == "success",
             "journal_attempt_id": bool(proposal.journal_attempt_id),
-            "linked source": proposal.linked_orchestrator_attempt_id == probe["source_orchestrator_attempt_id"],
+            "linked source": proposal.linked_orchestrator_attempt_id
+            == probe["source_orchestrator_attempt_id"],
             "source lineage": probe["source_orchestrator_attempt_id"] in lineage,
-            "target": proposal.current_head == probe["target_head"] == proposal.journal_target_head,
-            "manifest identity": proposal.manifest_identity == probe["expected_manifest_identity"],
-            "manifest digest": proposal.manifest_digest == probe["expected_manifest_digest"],
+            "target": proposal.current_head
+            == probe["target_head"]
+            == proposal.journal_target_head,
+            "manifest identity": proposal.manifest_identity
+            == probe["expected_manifest_identity"],
+            "manifest digest": proposal.manifest_digest
+            == probe["expected_manifest_digest"],
             "completion timestamp": bool(proposal.journal_completed_at),
         }
         failed = [name for name, value in checks.items() if not value]
@@ -347,13 +404,23 @@ class DeployAttemptStoreSupport:
         if any(getattr(proposal, field) != probe[field] for field in fields):
             return "proposal_snapshot_changed", "proposal snapshot changed"
         event = await self._event(probe["deploy_id"])
-        if event is None or event["status"] != DeployStatus.PENDING.value or not await self._is_latest(event):
-            return "canonical_not_latest_pending", "canonical is no longer latest pending"
+        if (
+            event is None
+            or event["status"] != DeployStatus.PENDING.value
+            or not await self._is_latest(event)
+        ):
+            return (
+                "canonical_not_latest_pending",
+                "canonical is no longer latest pending",
+            )
         retry = await self._retry_unlocked(probe["deploy_id"])
         probe_source = probe["source_orchestrator_attempt_id"]
         probe_lineage = json.loads(probe["retry_lineage_json"])
         if probe_source is None and retry is not None:
-            return "retry_requires_manual_approval", "retry now requires manual approval"
+            return (
+                "retry_requires_manual_approval",
+                "retry now requires manual approval",
+            )
         if probe_source is not None and (
             retry is None
             or retry["source_orchestrator_attempt_id"] != probe_source
@@ -383,7 +450,8 @@ class DeployAttemptStoreSupport:
         result = self._rows(cursor, [row])[0]
         lineage_cursor = await self._db.execute(
             "SELECT lineage_orchestrator_attempt_id FROM deploy_retry_source_attempts "
-            "WHERE deploy_id = ? ORDER BY added_at", (deploy_id,)
+            "WHERE deploy_id = ? ORDER BY added_at",
+            (deploy_id,),
         )
         result["lineage"] = [value[0] for value in await lineage_cursor.fetchall()]
         return result
