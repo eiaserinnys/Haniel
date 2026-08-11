@@ -1145,6 +1145,46 @@ def test_startup_resumes_manifest_pull_interrupted_before_state_machine(
     probe.assert_called_once()
 
 
+@patch("haniel.core.runner.get_head", return_value="new-head")
+@patch("haniel.core.runner.fetch_repo", return_value=False)
+def test_startup_retries_preserved_verification_failure(
+    mock_fetch, mock_head, tmp_path: Path
+) -> None:
+    make_repo(tmp_path)
+    config = HanielConfig(
+        repos={
+            "soulstream": RepoConfig(
+                url="git@test/soulstream",
+                path="./soulstream",
+                release_manifest=DEFAULT_RELEASE_MANIFEST,
+            )
+        },
+        services={
+            "soulstream-orch-server": ServiceConfig(run="orch", repo="soulstream")
+        },
+    )
+    store = DeploymentStateStore(tmp_path / ".haniel" / "deployments")
+    store.begin("soulstream", "old-head", "new-head", "release-1")
+    store.transition(
+        "soulstream",
+        "verification_failed",
+        message="health retries exhausted",
+        recovered=False,
+    )
+    runner = ServiceRunner(config, config_dir=tmp_path)
+
+    with patch(
+        "haniel.core.runner.probe_manifest_target",
+        return_value=staged_release("new-head"),
+    ) as probe:
+        runner._apply_startup_updates()
+
+    assert runner._startup_manifest_updates == {"soulstream": "old-head"}
+    probe.assert_called_once()
+    assert probe.call_args.kwargs["target_ref"] == "new-head"
+    assert probe.call_args.kwargs["expected_operation"] == "upgrade"
+
+
 def test_interrupted_fresh_install_preserves_operation_and_absent_rollback(
     tmp_path: Path,
 ) -> None:
@@ -1325,6 +1365,7 @@ def _make_retro_report_runner(
     tmp_path: Path,
     *,
     release_manifest: str | None = DEFAULT_RELEASE_MANIFEST,
+    terminal_state: str = "success",
 ) -> tuple[ServiceRunner, str]:
     config = HanielConfig(
         repos={
@@ -1348,7 +1389,15 @@ def _make_retro_report_runner(
         "target-head",
         "release-1",
     )
-    store.transition("soulstream", "success")
+    store.transition(
+        "soulstream",
+        terminal_state,
+        message=(
+            "health retries exhausted"
+            if terminal_state == "verification_failed"
+            else None
+        ),
+    )
     runner = ServiceRunner(config, config_dir=tmp_path)
     runner._orch_client = MagicMock()
     return runner, attempt_id
@@ -1415,6 +1464,18 @@ def test_runner_start_does_not_retro_report_rolled_back_success_journal(
     runner, _attempt_id = _make_retro_report_runner(tmp_path)
 
     _start_retro_report_runner(runner, local_head="rolled-back-head")
+
+    runner._orch_client.enqueue_node_deploy_report.assert_not_called()
+
+
+def test_runner_start_does_not_retro_report_verification_failure_as_success(
+    tmp_path: Path,
+) -> None:
+    runner, _attempt_id = _make_retro_report_runner(
+        tmp_path, terminal_state="verification_failed"
+    )
+
+    _start_retro_report_runner(runner, local_head="target-head")
 
     runner._orch_client.enqueue_node_deploy_report.assert_not_called()
 

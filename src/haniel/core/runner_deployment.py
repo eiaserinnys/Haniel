@@ -642,6 +642,7 @@ def run_manifest_deployment(
     coordinator = DeploymentCoordinator(
         state_store=state_store,
         command_runner=run_command,
+        retry_waiter=runner._stop_event.wait,
     )
     owns_spool_request = False
     lease = None

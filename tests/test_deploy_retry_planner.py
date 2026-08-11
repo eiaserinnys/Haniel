@@ -149,6 +149,35 @@ class TestDeployRetryPlanner:
         assert plan.mode == "execute"
         assert plan.evidence["original_previous_head"] == "original-previous"
 
+    def test_verification_failed_journal_retries_preserved_target(
+        self, tmp_path, monkeypatch
+    ):
+        planner = self.planner(tmp_path, monkeypatch)
+        store = planner.journal_store
+        store.begin(
+            "r",
+            "original-previous",
+            "target",
+            "release",
+            orchestrator_attempt_id="source",
+            node_id="n",
+            branch="main",
+            manifest_identity="release.json",
+            manifest_digest=hashlib.sha256(b"manifest").hexdigest(),
+        )
+        store.transition(
+            "r",
+            "verification_failed",
+            message="health retries exhausted",
+            error=RuntimeError("health retries exhausted"),
+        )
+
+        plan = planner.plan(probe())
+
+        assert plan.mode == "execute"
+        assert plan.reason == "manifest_retry"
+        assert plan.evidence["journal_status"] == "verification_failed"
+
     def test_head_mismatch_uses_normal_pull_without_inheriting_old_journal(
         self, tmp_path, monkeypatch
     ):

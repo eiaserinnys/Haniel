@@ -32,6 +32,12 @@ def manifest() -> dict[str, object]:
             "apply": command("migrate"),
         },
         "post_start_verify": [command("verify-http"), command("verify-mcp")],
+        "post_start_verify_retry": {
+            "max_attempts": 4,
+            "initial_backoff_seconds": 0,
+            "max_backoff_seconds": 0,
+            "total_grace_seconds": 1,
+        },
         "recovery": {
             "strategy": "roll_forward",
             "command": command("recover"),
@@ -102,7 +108,7 @@ def startup_runner(tmp_path: Path) -> tuple[ServiceRunner, Path, str]:
         "verify-http",
     ],
 )
-def test_startup_failure_recovers_availability_without_duplicate_legacy_start(
+def test_startup_failure_keeps_availability_without_duplicate_legacy_start(
     startup_runner: tuple[ServiceRunner, Path, str], failed_stage: str
 ) -> None:
     runner, repo, previous_head = startup_runner
@@ -174,7 +180,7 @@ def test_startup_failure_recovers_availability_without_duplicate_legacy_start(
         "haniel.core.runner_deployment.subprocess_command_runner",
         return_value=run_command,
     ):
-        with pytest.raises(DeploymentError) as exc_info:
+        if failed_stage == "verify-http":
             run_manifest_deployment(
                 runner,
                 "soulstream",
@@ -182,8 +188,16 @@ def test_startup_failure_recovers_availability_without_duplicate_legacy_start(
                 previous_head,
                 desired_running=set(services),
             )
+        else:
+            with pytest.raises(DeploymentError) as exc_info:
+                run_manifest_deployment(
+                    runner,
+                    "soulstream",
+                    services,
+                    previous_head,
+                    desired_running=set(services),
+                )
 
-    assert exc_info.value.recovered is True
     assert running == {name: True for name in services}
     assert events.count("start:soulstream-orch-server") <= 2
     assert events.count("start:soulstream-soul-server-ts") <= 2
@@ -191,6 +205,15 @@ def test_startup_failure_recovers_availability_without_duplicate_legacy_start(
         "soulstream"
     )
     assert journal is not None
+    if failed_stage == "verify-http":
+        assert events.count("verify-http") == 2
+        assert "recover" not in events
+        assert journal["state"] == "success"
+        assert journal["recovered"] is False
+        assert get_head(repo) != previous_head
+        return
+
+    assert exc_info.value.recovered is True
     assert journal["state"] == "failed"
     assert journal["recovered"] is True
     if failed_stage in {"build", "preflight", "backup", "verify-backup"}:
