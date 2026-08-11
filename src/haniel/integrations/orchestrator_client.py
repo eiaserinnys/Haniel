@@ -316,24 +316,66 @@ class OrchestratorClient:
             "orchestrator_attempt_id": orchestrator_attempt_id,
             "connection_generation": connection_generation,
         }
+        messages = [msg]
+        if settled_snapshot is not None:
+            messages.append(
+                {
+                    "type": "repo_reconciliation",
+                    "phase": "settled",
+                    "deploy_id": settled_snapshot.deploy_id,
+                    "node_id": settled_snapshot.node_id,
+                    "repo": settled_snapshot.repo,
+                    "branch": settled_snapshot.branch,
+                    "local_head": settled_snapshot.local_head,
+                    "remote_head": settled_snapshot.remote_head,
+                    "orchestrator_attempt_id": orchestrator_attempt_id,
+                    "connection_generation": connection_generation,
+                }
+            )
+        self._enqueue_buffered_deploy_messages(messages)
+
+    def enqueue_node_deploy_report(
+        self,
+        *,
+        phase: str,
+        node_attempt_id: str,
+        journal_attempt_id: str | None,
+        deploy_id: str,
+        repo: str,
+        branch: str,
+        target_head: str,
+        local_head: str,
+        trigger: str,
+        error: str | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
+        """Buffer one node-owned deploy lifecycle report across reconnects."""
+        self._enqueue_buffered_deploy_messages(
+            [
+                {
+                    "type": "node_deploy_report",
+                    "phase": phase,
+                    "node_attempt_id": node_attempt_id,
+                    "journal_attempt_id": journal_attempt_id,
+                    "deploy_id": deploy_id,
+                    "node_id": self._config.node_id,
+                    "repo": repo,
+                    "branch": branch,
+                    "target_head": target_head,
+                    "local_head": local_head,
+                    "trigger": trigger,
+                    "error": error,
+                    "duration_ms": duration_ms,
+                }
+            ]
+        )
+
+    def _enqueue_buffered_deploy_messages(
+        self, messages: list[dict[str, Any]]
+    ) -> None:
+        """Append messages atomically and kick the single ordered flush."""
         with self._pending_lock:
-            self._pending_deploy_results.append(msg)
-            if settled_snapshot is not None:
-                self._pending_deploy_results.append(
-                    {
-                        "type": "repo_reconciliation",
-                        "phase": "settled",
-                        "deploy_id": settled_snapshot.deploy_id,
-                        "node_id": settled_snapshot.node_id,
-                        "repo": settled_snapshot.repo,
-                        "branch": settled_snapshot.branch,
-                        "local_head": settled_snapshot.local_head,
-                        "remote_head": settled_snapshot.remote_head,
-                        "orchestrator_attempt_id": orchestrator_attempt_id,
-                        "connection_generation": connection_generation,
-                    }
-                )
-        # If already connected, kick a flush on the loop
+            self._pending_deploy_results.extend(messages)
         if self._connected and self._loop is not None:
             try:
                 asyncio.run_coroutine_threadsafe(

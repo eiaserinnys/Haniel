@@ -8,7 +8,30 @@ import textwrap
 import aiosqlite
 
 from haniel_orch.event_store import EventStore
-from haniel_orch.protocol import DeployStatus
+from haniel_orch.protocol import DeployStatus, NodeDeployReport
+
+
+def node_report(
+    phase: str,
+    *,
+    target_head: str = "target",
+    local_head: str | None = None,
+    error: str | None = None,
+) -> NodeDeployReport:
+    return NodeDeployReport(
+        phase=phase,
+        node_attempt_id="node-attempt-1",
+        journal_attempt_id="journal-1",
+        deploy_id=f"n1:repo:main:{target_head}",
+        node_id="n1",
+        repo="repo",
+        branch="main",
+        target_head=target_head,
+        local_head=local_head or ("old" if phase == "started" else target_head),
+        trigger="local",
+        error=error,
+        duration_ms=None if phase == "started" else 25,
+    )
 
 
 class TestCreateDeployEvent:
@@ -165,6 +188,7 @@ class TestMutationBoundary:
     PUBLIC_MUTATIONS = {
         "initialize",
         "create_deploy_event",
+        "record_node_deploy_report",
         "transition_deploy_status",
         "supersede_stale_pending_deploys",
         "update_deploy_status",
@@ -189,6 +213,107 @@ class TestMutationBoundary:
                 and call.func.attr in self.PUBLIC_MUTATIONS
             }
             assert nested == set(), (name, nested)
+
+
+class TestNodeDeployReportReconciliation:
+    async def _seed(self, store: EventStore, target_head: str = "target") -> str:
+        deploy_id = f"n1:repo:main:{target_head}"
+        await store.create_deploy_event(
+            deploy_id=deploy_id,
+            node_id="n1",
+            repo="repo",
+            branch="main",
+            commits=[f"{target_head} change"],
+            affected_services=["svc"],
+            diff_stat=None,
+            detected_at="2026-08-11T00:00:00Z",
+            target_head=target_head,
+        )
+        return deploy_id
+
+    async def test_started_then_success_closes_exact_pending(self, store: EventStore):
+        deploy_id = await self._seed(store)
+
+        started = await store.record_node_deploy_report(node_report("started"))
+        assert started["status"] == "started"
+        assert (await store.get_deploy_event(deploy_id))["status"] == "pending"
+
+        succeeded = await store.record_node_deploy_report(
+            node_report("succeeded")
+        )
+        assert succeeded["status"] == "success"
+        assert (await store.get_deploy_event(deploy_id))["status"] == "success"
+
+    async def test_failure_reopens_pending_and_adds_history(self, store: EventStore):
+        deploy_id = await self._seed(store)
+        await store.record_node_deploy_report(node_report("started"))
+
+        failed = await store.record_node_deploy_report(
+            node_report("failed", local_head="old", error="verify failed")
+        )
+
+        assert failed["status"] == "failed"
+        assert (await store.get_deploy_event(deploy_id))["status"] == "pending"
+        history = await store.get_deploy_history()
+        attempt = next(
+            row for row in history if row["deploy_id"] == "node-attempt:node-attempt-1"
+        )
+        assert attempt["status"] == "failed"
+        assert attempt["error"] == "verify failed"
+
+    async def test_other_target_success_does_not_touch_pending(self, store: EventStore):
+        deploy_id = await self._seed(store, "target-a")
+
+        result = await store.record_node_deploy_report(
+            node_report("succeeded", target_head="target-b")
+        )
+
+        assert result["status"] == "ignored"
+        assert (await store.get_deploy_event(deploy_id))["status"] == "pending"
+
+    async def test_success_supersedes_active_orchestrator_attempt(
+        self, store: EventStore
+    ):
+        deploy_id = await self._seed(store)
+        assert store.attempts is not None
+        await store.attempts.begin_normal_attempt(
+            orchestrator_attempt_id="orch-1",
+            deploy_id=deploy_id,
+            connection_generation="g1",
+            current_generation="g1",
+            source="manual_single",
+            approved_by="test",
+            deadline_at="2099-01-01T00:00:00Z",
+        )
+
+        result = await store.record_node_deploy_report(node_report("succeeded"))
+
+        assert result["cancelled_orchestrator_attempt_ids"] == ["orch-1"]
+        assert (await store.attempts.get_attempt("orch-1"))["outcome"] == "superseded"
+        assert (await store.get_deploy_event(deploy_id))["status"] == "success"
+
+    async def test_failure_does_not_overwrite_active_orchestrator_owner(
+        self, store: EventStore
+    ):
+        deploy_id = await self._seed(store)
+        assert store.attempts is not None
+        await store.attempts.begin_normal_attempt(
+            orchestrator_attempt_id="orch-1",
+            deploy_id=deploy_id,
+            connection_generation="g1",
+            current_generation="g1",
+            source="manual_single",
+            approved_by="test",
+            deadline_at="2099-01-01T00:00:00Z",
+        )
+
+        result = await store.record_node_deploy_report(
+            node_report("failed", local_head="old", error="local attempt failed")
+        )
+
+        assert result["canonical_status"] == "deploying"
+        assert (await store.get_deploy_event(deploy_id))["status"] == "deploying"
+        assert (await store.attempts.get_attempt("orch-1"))["outcome"] == "active"
 
 
 class TestGetPendingDeploys:

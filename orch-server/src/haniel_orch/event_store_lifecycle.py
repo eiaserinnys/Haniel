@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import event_store_mutations, event_store_nodes
+from . import event_store_mutations, event_store_nodes, node_deploy_store
 from .event_store_rows import decode_deploy_row, now_iso, row_to_dict
 from .protocol import DeployStatus
 
@@ -50,6 +50,12 @@ class EventStoreLifecycleMixin:
                 ):
                     item.update(metadata)
             results.extend(await self.attempts.history_rows(include_superseded))
+        node_success_metadata = await node_deploy_store.success_metadata(self._db)
+        for item in results:
+            metadata = node_success_metadata.get(item.get("deploy_id"))
+            if metadata is not None and item.get("status") == DeployStatus.SUCCESS.value:
+                item.update(metadata)
+        results.extend(await node_deploy_store.history_rows(self._db))
         results.sort(
             key=lambda item: (
                 item.get("updated_at") or item.get("created_at") or "",

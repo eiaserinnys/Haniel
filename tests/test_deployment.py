@@ -723,3 +723,165 @@ def test_staging_failure_only_terminates_matching_live_request(tmp_path: Path) -
     assert terminal is not None
     assert terminal["state"] == "failed"
     assert terminal["error_code"] == "COMMAND_TIMEOUT"
+
+
+def test_handover_records_node_id_when_identity_is_known(tmp_path: Path) -> None:
+    store = DeploymentStateStore(tmp_path / "state")
+
+    store.begin_handover(
+        "app",
+        previous_head="old",
+        target_ref="origin/main",
+        manifest_identity="deploy/release.json",
+        request_id="request-1",
+        expected_operation="upgrade",
+        branch="main",
+        node_id="node-1",
+    )
+
+    current = store.read("app")
+    assert current is not None
+    assert current["node_id"] == "node-1"
+
+
+def test_repeated_handover_fills_missing_node_link(tmp_path: Path) -> None:
+    store = DeploymentStateStore(tmp_path / "state")
+    first_id = store.begin_handover(
+        "app",
+        previous_head="old",
+        target_ref="origin/main",
+        manifest_identity="deploy/release.json",
+        request_id="request-1",
+        expected_operation="upgrade",
+        branch="main",
+    )
+
+    repeated_id = store.begin_handover(
+        "app",
+        previous_head="old",
+        target_ref="origin/main",
+        manifest_identity="deploy/release.json",
+        request_id="request-1",
+        expected_operation="upgrade",
+        branch="main",
+        node_id="node-1",
+    )
+
+    assert repeated_id == first_id
+    assert store.read("app")["node_id"] == "node-1"
+
+
+def test_repeated_handover_rejects_node_link_replacement(tmp_path: Path) -> None:
+    store = DeploymentStateStore(tmp_path / "state")
+    store.begin_handover(
+        "app",
+        previous_head="old",
+        target_ref="origin/main",
+        manifest_identity="deploy/release.json",
+        request_id="request-1",
+        expected_operation="upgrade",
+        branch="main",
+        node_id="node-1",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"node_id.*stored='node-1'.*provided='node-2'",
+    ):
+        store.begin_handover(
+            "app",
+            previous_head="old",
+            target_ref="origin/main",
+            manifest_identity="deploy/release.json",
+            request_id="request-1",
+            expected_operation="upgrade",
+            branch="main",
+            node_id="node-2",
+        )
+
+
+def test_begin_fills_missing_journal_links_without_changing_identity(
+    tmp_path: Path,
+) -> None:
+    store = DeploymentStateStore(tmp_path / "state")
+    journal_attempt_id = store.begin(
+        "app",
+        "old",
+        "new",
+        "release-1",
+        branch="main",
+    )
+
+    activated_id = store.begin(
+        "app",
+        "old",
+        "new",
+        "release-1",
+        branch="main",
+        node_id="node-1",
+        orchestrator_attempt_id="orch-1",
+        journal_attempt_id=journal_attempt_id,
+    )
+
+    assert activated_id == journal_attempt_id
+    current = store.read("app")
+    assert current is not None
+    assert current["node_id"] == "node-1"
+    assert current["orchestrator_attempt_id"] == "orch-1"
+
+
+def test_begin_preserves_existing_links_when_caller_has_no_link_values(
+    tmp_path: Path,
+) -> None:
+    store = DeploymentStateStore(tmp_path / "state")
+    journal_attempt_id = store.begin(
+        "app",
+        "old",
+        "new",
+        "release-1",
+        branch="main",
+        node_id="node-1",
+        orchestrator_attempt_id="orch-1",
+    )
+
+    store.begin(
+        "app",
+        "old",
+        "new",
+        "release-1",
+        branch="main",
+        journal_attempt_id=journal_attempt_id,
+    )
+
+    current = store.read("app")
+    assert current is not None
+    assert current["node_id"] == "node-1"
+    assert current["orchestrator_attempt_id"] == "orch-1"
+
+
+def test_begin_rejects_journal_link_replacement_with_both_values(
+    tmp_path: Path,
+) -> None:
+    store = DeploymentStateStore(tmp_path / "state")
+    journal_attempt_id = store.begin(
+        "app",
+        "old",
+        "new",
+        "release-1",
+        branch="main",
+        node_id="node-1",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"node_id.*stored='node-1'.*provided='node-2'",
+    ):
+        store.begin(
+            "app",
+            "old",
+            "new",
+            "release-1",
+            branch="main",
+            node_id="node-2",
+            journal_attempt_id=journal_attempt_id,
+        )

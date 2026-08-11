@@ -92,6 +92,27 @@ CREATE TABLE IF NOT EXISTS deploy_retry_source_attempts (
     added_at TEXT NOT NULL,
     PRIMARY KEY (deploy_id, lineage_orchestrator_attempt_id)
 );
+
+CREATE TABLE IF NOT EXISTS node_deploy_attempts (
+    node_attempt_id TEXT PRIMARY KEY,
+    journal_attempt_id TEXT,
+    deploy_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    target_head TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    outcome TEXT NOT NULL DEFAULT 'active',
+    started_local_head TEXT NOT NULL,
+    terminal_local_head TEXT,
+    error TEXT,
+    duration_ms INTEGER,
+    started_at TEXT NOT NULL,
+    completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS node_deploy_attempts_by_deploy
+ON node_deploy_attempts(deploy_id, completed_at);
 """
 
 CANONICAL_COLUMNS = {

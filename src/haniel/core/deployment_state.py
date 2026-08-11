@@ -81,8 +81,6 @@ class DeploymentStateStore:
             immutable = {
                 "previous_head": previous_head,
                 "target_head": target_head,
-                "orchestrator_attempt_id": orchestrator_attempt_id,
-                "node_id": node_id,
                 "branch": branch,
                 "manifest_identity": manifest_identity,
                 "manifest_digest": manifest_digest,
@@ -91,13 +89,30 @@ class DeploymentStateStore:
             }
             if existing.get("config_digest") is not None or config_digest is not None:
                 immutable["config_digest"] = config_digest
-            changed = [
-                key for key, value in immutable.items() if existing.get(key) != value
+            conflicts = [
+                (key, existing.get(key), value)
+                for key, value in immutable.items()
+                if existing.get(key) != value
             ]
-            if changed:
+            link_updates: dict[str, str] = {}
+            for key, provided in {
+                "orchestrator_attempt_id": orchestrator_attempt_id,
+                "node_id": node_id,
+            }.items():
+                stored = existing.get(key)
+                if stored is None and provided is not None:
+                    link_updates[key] = provided
+                elif stored is not None and provided is not None and stored != provided:
+                    conflicts.append((key, stored, provided))
+            if conflicts:
                 raise ValueError(
-                    "journal intent changed immutable fields: " + ", ".join(changed)
+                    "journal intent changed immutable fields: "
+                    + ", ".join(
+                        f"{key} stored={stored!r} provided={provided!r}"
+                        for key, stored, provided in conflicts
+                    )
                 )
+            existing.update(link_updates)
             existing["release_id"] = release_id
             existing["state"] = "build"
             existing["recovered"] = False
@@ -159,6 +174,7 @@ class DeploymentStateStore:
         request_id: str,
         expected_operation: str,
         branch: str,
+        node_id: str | None = None,
         config_digest: str | None = None,
     ) -> str:
         """Commit rollback identity before target fetch or staging starts."""
@@ -176,13 +192,29 @@ class DeploymentStateStore:
                 "branch": branch,
                 "config_digest": config_digest,
             }
-            changed = [
-                key for key, value in immutable.items() if existing.get(key) != value
+            conflicts = [
+                (key, existing.get(key), value)
+                for key, value in immutable.items()
+                if existing.get(key) != value
             ]
-            if changed:
+            stored_node_id = existing.get("node_id")
+            if (
+                stored_node_id is not None
+                and node_id is not None
+                and stored_node_id != node_id
+            ):
+                conflicts.append(("node_id", stored_node_id, node_id))
+            if conflicts:
                 raise ValueError(
-                    "handover request changed immutable fields: " + ", ".join(changed)
+                    "handover request changed immutable fields: "
+                    + ", ".join(
+                        f"{key} stored={stored!r} provided={provided!r}"
+                        for key, stored, provided in conflicts
+                    )
                 )
+            if stored_node_id is None and node_id is not None:
+                existing["node_id"] = node_id
+                self._write(repo_name, existing)
             return existing["journal_attempt_id"]
 
         attempt_id = self.begin(
@@ -191,6 +223,7 @@ class DeploymentStateStore:
             target_ref,
             "handover-target-pending",
             branch=branch,
+            node_id=node_id,
             manifest_identity=manifest_identity,
             request_id=request_id,
             expected_operation=expected_operation,

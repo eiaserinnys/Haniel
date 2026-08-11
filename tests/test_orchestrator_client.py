@@ -583,6 +583,47 @@ class TestHandleServiceCommand:
 
 
 class TestEnqueueDeployResult:
+    def test_node_deploy_report_uses_the_ordered_reconnect_buffer(self, config):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+
+        client.enqueue_node_deploy_report(
+            phase="started",
+            node_attempt_id="node-attempt-1",
+            journal_attempt_id="journal-1",
+            deploy_id="test-node-1:repo:main:new",
+            repo="repo",
+            branch="main",
+            target_head="new",
+            local_head="old",
+            trigger="local",
+        )
+        client.enqueue_node_deploy_report(
+            phase="succeeded",
+            node_attempt_id="node-attempt-1",
+            journal_attempt_id="journal-1",
+            deploy_id="test-node-1:repo:main:new",
+            repo="repo",
+            branch="main",
+            target_head="new",
+            local_head="new",
+            trigger="local",
+            duration_ms=25,
+        )
+
+        with client._pending_lock:
+            assert [message["phase"] for message in client._pending_deploy_results] == [
+                "started",
+                "succeeded",
+            ]
+            assert all(
+                message["type"] == "node_deploy_report"
+                for message in client._pending_deploy_results
+            )
+            assert all(
+                message["node_id"] == config.node_id
+                for message in client._pending_deploy_results
+            )
+
     def test_buffers_when_disconnected(self, config):
         client = OrchestratorClient(config, haniel_version="0.1.0")
         client.enqueue_deploy_result("d1", "success", duration_ms=1234)

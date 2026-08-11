@@ -8,12 +8,12 @@ from typing import Any
 
 import aiosqlite
 
-from . import event_store_mutations, event_store_nodes
+from . import event_store_mutations, event_store_nodes, node_deploy_store
 from .deploy_attempt_schema import initialize_attempt_schema
 from .deploy_attempt_store import DeployAttemptStore
 from .event_store_lifecycle import EventStoreLifecycleMixin
 from .event_store_rows import decode_deploy_row, now_iso
-from .protocol import DeployStatus
+from .protocol import DeployStatus, NodeDeployReport
 
 _CREATE_TABLES = """
 CREATE TABLE IF NOT EXISTS deploy_events (
@@ -210,6 +210,19 @@ class EventStore(EventStoreLifecycleMixin):
                 )
                 await self._db.commit()
                 return transitioned
+            except Exception:
+                await self._db.rollback()
+                raise
+
+    async def record_node_deploy_report(
+        self, report: NodeDeployReport
+    ) -> dict[str, Any]:
+        """Reconcile one node-owned deployment report transactionally."""
+        async with self._mutation_lock:
+            try:
+                result = await node_deploy_store.record(self._db, report)
+                await self._db.commit()
+                return result
             except Exception:
                 await self._db.rollback()
                 raise

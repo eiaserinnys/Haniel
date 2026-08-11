@@ -71,7 +71,9 @@ from .runner_config_snapshot import (
 from .repo_reconciliation import (
     RepoReconciliationSnapshot,
     capture_repo_snapshot,
+    deterministic_deploy_id,
 )
+from .node_deploy_reporting import NodeDeployReportContext
 from .runner_deployment import run_manifest_deployment
 from .one_shot_handover import probe_manifest_target
 from .release_staging import ReleaseStagingError
@@ -415,6 +417,7 @@ class ServiceRunner:
         self._startup_manifest_operations: dict[str, str] = {}
         self._startup_manifest_reload_plans: dict[str, "HandoverReloadPlan"] = {}
         self._startup_manifest_config_snapshots: dict[str, RunnerConfigSnapshot] = {}
+        self._startup_node_deploy_reports: dict[str, NodeDeployReportContext] = {}
         self._startup_deployment_leases: dict[str, DeploymentLease] = {}
         self._startup_repo_locks: set[str] = set()
         self._startup_pull_locks: dict[str, threading.Lock] = {}
@@ -788,6 +791,20 @@ class ServiceRunner:
         try:
             self._start_services_in_dependency_order()
         finally:
+            for repo_name, context in tuple(
+                self._startup_node_deploy_reports.items()
+            ):
+                self._startup_node_deploy_reports.pop(repo_name, None)
+                try:
+                    runtime = self._snapshot_repo_runtime(repo_name)
+                    local_head = get_head(self.config_dir / runtime.config.path)
+                except Exception:
+                    local_head = context.started_local_head
+                self._finish_node_deploy_report(
+                    context,
+                    local_head=local_head,
+                    error="startup deployment did not reach a terminal service state",
+                )
             self._release_startup_repo_locks()
 
     def _start_services_in_dependency_order(self) -> None:
@@ -801,6 +818,7 @@ class ServiceRunner:
         config_snapshot = self._snapshot_config_state()
         enabled_services = config_snapshot.enabled_services
         startup_order = list(config_snapshot.startup_order)
+        startup_report_errors: dict[str, list[str]] = {}
         logger.info(f"Starting services in order: {startup_order}")
 
         if self._stop_event.is_set():
@@ -818,7 +836,10 @@ class ServiceRunner:
                     return
                 service = enabled_services[name]
                 if service.repo in self._startup_updated_repos:
-                    self.execute_hook(name, "post_pull")
+                    if not self.execute_hook(name, "post_pull"):
+                        startup_report_errors.setdefault(service.repo, []).append(
+                            f"post_pull hook failed for {name}"
+                        )
 
         manifest_services: dict[str, list[str]] = {}
         for repo_name in self._startup_manifest_updates:
@@ -842,7 +863,10 @@ class ServiceRunner:
                 continue
             repo_name = enabled_services[name].repo
             if repo_name not in self._startup_manifest_updates:
-                self._start_service(name)
+                if not self._start_service(name):
+                    startup_report_errors.setdefault(repo_name, []).append(
+                        f"service start failed for {name}"
+                    )
                 continue
 
             reload_plan = self._startup_manifest_reload_plans.get(repo_name)
@@ -890,6 +914,15 @@ class ServiceRunner:
                     **snapshot_kwargs,
                     **config_kwargs,
                 )
+                node_report = self._startup_node_deploy_reports.pop(repo_name, None)
+                if node_report is not None:
+                    self._finish_node_deploy_report(
+                        node_report,
+                        local_head=get_head(
+                            self.config_dir
+                            / self._snapshot_repo_runtime(repo_name).config.path
+                        ),
+                    )
             except _OPERATIONAL_DEPLOYMENT_ERRORS as error:
                 code = stable_deployment_error_code(error)
                 request_id = self._startup_manifest_request_ids.get(
@@ -916,6 +949,20 @@ class ServiceRunner:
                     code,
                     bounded_redact_text(str(error)),
                 )
+                node_report = self._startup_node_deploy_reports.pop(repo_name, None)
+                if node_report is not None:
+                    try:
+                        report_local_head = get_head(
+                            self.config_dir
+                            / self._snapshot_repo_runtime(repo_name).config.path
+                        )
+                    except Exception:
+                        report_local_head = node_report.started_local_head
+                    self._finish_node_deploy_report(
+                        node_report,
+                        local_head=report_local_head,
+                        error=f"{code}: {error}",
+                    )
                 if code == "CONFIG_GENERATION_CHANGED":
                     current_services = self._snapshot_config_state().enabled_services
                     for service_name in affected:
@@ -928,6 +975,36 @@ class ServiceRunner:
                                     "failed to restore startup service after "
                                     f"config generation drift: {service_name}"
                                 )
+            except Exception as error:
+                node_report = self._startup_node_deploy_reports.pop(repo_name, None)
+                if node_report is not None:
+                    try:
+                        report_local_head = get_head(
+                            self.config_dir
+                            / self._snapshot_repo_runtime(repo_name).config.path
+                        )
+                    except Exception:
+                        report_local_head = node_report.started_local_head
+                    self._finish_node_deploy_report(
+                        node_report,
+                        local_head=report_local_head,
+                        error=str(error),
+                    )
+                raise
+
+        for repo_name in tuple(self._startup_updated_repos):
+            node_report = self._startup_node_deploy_reports.pop(repo_name, None)
+            if node_report is None:
+                continue
+            errors = startup_report_errors.get(repo_name, [])
+            self._finish_node_deploy_report(
+                node_report,
+                local_head=get_head(
+                    self.config_dir
+                    / self._snapshot_repo_runtime(repo_name).config.path
+                ),
+                error="; ".join(errors) if errors else None,
+            )
 
     def _release_startup_repo_locks(self) -> None:
         """Release repo leases retained across startup manifest handover."""
@@ -1535,6 +1612,100 @@ class ServiceRunner:
         self._require_config_generation(config_snapshot)
         return snapshot
 
+    def _begin_node_deploy_report(
+        self,
+        *,
+        repo: str,
+        branch: str,
+        target_head: str,
+        local_head: str,
+        trigger: str,
+        node_attempt_id: str,
+        journal_attempt_id: str | None,
+    ) -> NodeDeployReportContext | None:
+        """Queue one node-owned start report without coupling deployment success."""
+        config_snapshot = self._snapshot_config_state()
+        orchestrator = config_snapshot.config.orchestrator_client
+        if self._orch_client is None or orchestrator is None or not orchestrator.enabled:
+            return None
+        context = NodeDeployReportContext(
+            node_attempt_id=node_attempt_id,
+            journal_attempt_id=journal_attempt_id,
+            deploy_id=deterministic_deploy_id(
+                orchestrator.node_id, repo, branch, target_head
+            ),
+            node_id=orchestrator.node_id,
+            repo=repo,
+            branch=branch,
+            target_head=target_head,
+            started_local_head=local_head,
+            trigger=trigger,
+            started_monotonic=time.monotonic(),
+        )
+        try:
+            self._orch_client.enqueue_node_deploy_report(
+                phase="started",
+                node_attempt_id=context.node_attempt_id,
+                journal_attempt_id=context.journal_attempt_id,
+                deploy_id=context.deploy_id,
+                repo=context.repo,
+                branch=context.branch,
+                target_head=context.target_head,
+                local_head=context.started_local_head,
+                trigger=context.trigger,
+            )
+        except Exception as error:
+            logger.warning(
+                "Failed to queue node deploy start report for %s: %s",
+                repo,
+                bounded_redact_text(str(error)),
+            )
+        return context
+
+    def _finish_node_deploy_report(
+        self,
+        context: NodeDeployReportContext | None,
+        *,
+        local_head: str,
+        error: str | None = None,
+    ) -> None:
+        """Queue terminal node-owned evidence while isolating reporting failures."""
+        if context is None or self._orch_client is None:
+            return
+        terminal_error = error
+        if terminal_error is None and local_head != context.target_head:
+            terminal_error = (
+                "completed checkout does not match reported target: "
+                f"local={local_head} target={context.target_head}"
+            )
+        phase = "failed" if terminal_error is not None else "succeeded"
+        try:
+            self._orch_client.enqueue_node_deploy_report(
+                phase=phase,
+                node_attempt_id=context.node_attempt_id,
+                journal_attempt_id=context.journal_attempt_id,
+                deploy_id=context.deploy_id,
+                repo=context.repo,
+                branch=context.branch,
+                target_head=context.target_head,
+                local_head=local_head,
+                trigger=context.trigger,
+                error=(
+                    bounded_redact_text(terminal_error)
+                    if terminal_error is not None
+                    else None
+                ),
+                duration_ms=max(
+                    0, int((time.monotonic() - context.started_monotonic) * 1000)
+                ),
+            )
+        except Exception as report_error:
+            logger.warning(
+                "Failed to queue node deploy terminal report for %s: %s",
+                context.repo,
+                bounded_redact_text(str(report_error)),
+            )
+
     def _deferred_stop_for_self_update(self) -> None:
         """Helper: small delay then stop. Allows the orch_client coroutine
         that returned 'deferred' to finish before orch_client.stop() joins
@@ -1737,6 +1908,7 @@ class ServiceRunner:
 
         captured_changes: dict | None = None
         deployment_lease: DeploymentLease | None = None
+        node_report_context: NodeDeployReportContext | None = None
         lifecycle_request_id = orchestrator_attempt_id or f"runtime-{uuid4()}"
         try:
             deployment_lease = self.lifecycle_control.acquire_deployment(
@@ -1792,6 +1964,14 @@ class ServiceRunner:
                     if (runtime.config.release_manifest or target_head is not None)
                     else None
                 )
+                reporting_node_id = node_id
+                if (
+                    reporting_node_id is None
+                    and config_snapshot.config.orchestrator_client is not None
+                ):
+                    reporting_node_id = (
+                        config_snapshot.config.orchestrator_client.node_id
+                    )
                 if runtime.config.release_manifest:
                     assert previous_head is not None
                     resolved_branch = branch or runtime.config.branch
@@ -1808,12 +1988,28 @@ class ServiceRunner:
                         request_id=lifecycle_request_id,
                         expected_operation="upgrade",
                         branch=resolved_branch,
+                        node_id=reporting_node_id,
                         config_digest=(
                             reload_plan.config_digest
                             if reload_plan is not None
                             else None
                         ),
                     )
+                    if (
+                        orchestrator_attempt_id is None
+                        and self._orch_client is not None
+                        and config_snapshot.config.orchestrator_client is not None
+                        and config_snapshot.config.orchestrator_client.enabled
+                    ):
+                        node_report_context = self._begin_node_deploy_report(
+                            repo=repo_name,
+                            branch=resolved_branch,
+                            target_head=intended_target,
+                            local_head=previous_head,
+                            trigger="local",
+                            node_attempt_id=journal_attempt_id,
+                            journal_attempt_id=journal_attempt_id,
+                        )
                     staged = probe_manifest_target(
                         self,
                         repo_name,
@@ -1845,6 +2041,27 @@ class ServiceRunner:
                         )
                 else:
                     journal_attempt_id = None
+                    resolved_branch = branch or runtime.config.branch
+                    if (
+                        orchestrator_attempt_id is None
+                        and self._orch_client is not None
+                        and config_snapshot.config.orchestrator_client is not None
+                        and config_snapshot.config.orchestrator_client.enabled
+                    ):
+                        commits = captured_changes.get("commits", [])
+                        report_target = target_head or (
+                            commits[0].split()[0] if commits else None
+                        )
+                        if report_target is not None:
+                            node_report_context = self._begin_node_deploy_report(
+                                repo=repo_name,
+                                branch=resolved_branch,
+                                target_head=report_target,
+                                local_head=get_head(repo_path),
+                                trigger="local",
+                                node_attempt_id=lifecycle_request_id,
+                                journal_attempt_id=None,
+                            )
                 if runtime.config.release_manifest:
                     assert previous_head is not None
                     try:
@@ -1925,6 +2142,13 @@ class ServiceRunner:
             finally:
                 self._release_restart_suppression(quiesce_services)
 
+            if node_report_context is not None:
+                self._finish_node_deploy_report(
+                    node_report_context,
+                    local_head=get_head(repo_path),
+                )
+                node_report_context = None
+
             if repo_name == config_snapshot.self_repo:
                 # Self-update: signal wrapper to restart Haniel with new code.
                 # notify_done is skipped — startup notification fires after restart.
@@ -1948,6 +2172,19 @@ class ServiceRunner:
 
         except Exception as e:
             code = stable_deployment_error_code(e)
+            if node_report_context is not None:
+                try:
+                    report_local_head = get_head(
+                        self.config_dir / runtime.config.path
+                    )
+                except Exception:
+                    report_local_head = node_report_context.started_local_head
+                self._finish_node_deploy_report(
+                    node_report_context,
+                    local_head=report_local_head,
+                    error=f"{code}: {e}",
+                )
+                node_report_context = None
             if code != "HANDOVER_FAILED":
                 logger.error(
                     "Pull failed for %s [%s]: %s",
@@ -2149,6 +2386,7 @@ class ServiceRunner:
         self._startup_manifest_operations.clear()
         self._startup_manifest_reload_plans.clear()
         self._startup_manifest_config_snapshots.clear()
+        self._startup_node_deploy_reports.clear()
         for lease in self._startup_deployment_leases.values():
             lease.__exit__(None, None, None)
         self._startup_deployment_leases.clear()
@@ -2202,6 +2440,8 @@ class ServiceRunner:
                 if has_updates:
                     logger.info("Startup update: pulling %s", name)
                     previous_head = get_head(repo_path)
+                    startup_target: str | None = None
+                    journal_attempt_id: str | None = None
                     if runtime.config.release_manifest:
                         startup_target = get_remote_head(
                             repo_path, runtime.config.branch
@@ -2209,7 +2449,8 @@ class ServiceRunner:
                         manifest_identity = runtime.config.release_manifest
                         assert manifest_identity is not None
                         journal_store = self._deployment_state_store()
-                        journal_store.begin_handover(
+                        orchestrator = config_snapshot.config.orchestrator_client
+                        journal_attempt_id = journal_store.begin_handover(
                             name,
                             previous_head=previous_head,
                             target_ref=startup_target,
@@ -2217,12 +2458,24 @@ class ServiceRunner:
                             request_id=startup_request_id,
                             expected_operation="upgrade",
                             branch=runtime.config.branch,
+                            node_id=(orchestrator.node_id if orchestrator else None),
                             config_digest=(
                                 reload_plan.config_digest
                                 if reload_plan is not None
                                 else None
                             ),
                         )
+                        node_report = self._begin_node_deploy_report(
+                            repo=name,
+                            branch=runtime.config.branch,
+                            target_head=startup_target,
+                            local_head=previous_head,
+                            trigger="startup",
+                            node_attempt_id=journal_attempt_id,
+                            journal_attempt_id=journal_attempt_id,
+                        )
+                        if node_report is not None:
+                            self._startup_node_deploy_reports[name] = node_report
                         staged = probe_manifest_target(
                             self,
                             name,
@@ -2247,6 +2500,35 @@ class ServiceRunner:
                             release_id=staged.manifest.release_id,
                             manifest_digest=staged.manifest_digest,
                         )
+                    else:
+                        orchestrator = config_snapshot.config.orchestrator_client
+                        if (
+                            self._orch_client is not None
+                            and orchestrator is not None
+                            and orchestrator.enabled
+                        ):
+                            try:
+                                startup_target = get_remote_head(
+                                    repo_path, runtime.config.branch
+                                )
+                            except GitError as report_error:
+                                logger.warning(
+                                    "Cannot identify startup report target for %s: %s",
+                                    name,
+                                    bounded_redact_text(str(report_error)),
+                                )
+                            if startup_target is not None:
+                                node_report = self._begin_node_deploy_report(
+                                    repo=name,
+                                    branch=runtime.config.branch,
+                                    target_head=startup_target,
+                                    local_head=previous_head,
+                                    trigger="startup",
+                                    node_attempt_id=startup_request_id,
+                                    journal_attempt_id=None,
+                                )
+                                if node_report is not None:
+                                    self._startup_node_deploy_reports[name] = node_report
                     if runtime.config.release_manifest:
                         try:
                             if reload_plan is not None:
@@ -2392,7 +2674,35 @@ class ServiceRunner:
                             code,
                             journal_error,
                         )
+                node_report = self._startup_node_deploy_reports.pop(name, None)
+                if node_report is not None:
+                    try:
+                        report_local_head = get_head(
+                            self.config_dir / runtime.config.path
+                        )
+                    except Exception:
+                        report_local_head = node_report.started_local_head
+                    self._finish_node_deploy_report(
+                        node_report,
+                        local_head=report_local_head,
+                        error=f"{code}: {e}",
+                    )
                 failed.append(name)
+            except Exception as error:
+                node_report = self._startup_node_deploy_reports.pop(name, None)
+                if node_report is not None:
+                    try:
+                        report_local_head = get_head(
+                            self.config_dir / runtime.config.path
+                        )
+                    except Exception:
+                        report_local_head = node_report.started_local_head
+                    self._finish_node_deploy_report(
+                        node_report,
+                        local_head=report_local_head,
+                        error=str(error),
+                    )
+                raise
             finally:
                 if not retain_for_manifest_handover:
                     pull_lock.release()
@@ -2533,7 +2843,8 @@ class ServiceRunner:
         operation = journal.get("expected_operation") if journal is not None else None
         if operation not in {"fresh_install", "upgrade"}:
             operation = "upgrade"
-        store.begin_handover(
+        orchestrator = config_snapshot.config.orchestrator_client
+        journal_attempt_id = store.begin_handover(
             repo_name,
             previous_head=previous_head,
             target_ref=current_head,
@@ -2541,6 +2852,7 @@ class ServiceRunner:
             request_id=request_id,
             expected_operation=operation,
             branch=runtime.config.branch,
+            node_id=(orchestrator.node_id if orchestrator else None),
             config_digest=(
                 reload_plan.config_digest if reload_plan is not None else None
             ),
@@ -2574,6 +2886,17 @@ class ServiceRunner:
             release_id=staged.manifest.release_id,
             manifest_digest=staged.manifest_digest,
         )
+        node_report = self._begin_node_deploy_report(
+            repo=repo_name,
+            branch=runtime.config.branch,
+            target_head=staged.target_head,
+            local_head=current_head,
+            trigger="startup",
+            node_attempt_id=journal_attempt_id,
+            journal_attempt_id=journal_attempt_id,
+        )
+        if node_report is not None:
+            self._startup_node_deploy_reports[repo_name] = node_report
         logger.warning(
             "Resuming staged manifest deployment for %s from %s at %s",
             repo_name,

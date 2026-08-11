@@ -114,6 +114,41 @@ class DeployResult(StrictMessage):
     connection_generation: str
 
 
+class NodeDeployReport(StrictMessage):
+    """Attempt-independent lifecycle report for a node-owned deployment."""
+
+    type: Literal["node_deploy_report"] = "node_deploy_report"
+    phase: Literal["started", "succeeded", "failed"]
+    node_attempt_id: str
+    journal_attempt_id: str | None = None
+    deploy_id: str
+    node_id: str
+    repo: str
+    branch: str
+    target_head: str
+    local_head: str
+    trigger: Literal["startup", "local"]
+    error: str | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_phase_evidence(self) -> "NodeDeployReport":
+        if self.phase == "started":
+            if self.error is not None or self.duration_ms is not None:
+                raise ValueError("started report cannot carry terminal evidence")
+            return self
+        if self.duration_ms is None:
+            raise ValueError(f"{self.phase} requires duration_ms")
+        if self.phase == "succeeded":
+            if self.error is not None:
+                raise ValueError("succeeded report cannot carry error")
+            if self.local_head != self.target_head:
+                raise ValueError("succeeded report requires local_head == target_head")
+        elif not self.error:
+            raise ValueError("failed report requires error")
+        return self
+
+
 class DeployProgress(StrictMessage):
     """Lease-bearing progress sent while one deploy attempt is executing."""
 
@@ -343,6 +378,7 @@ NodeMessage = Union[
     ChangeNotification,
     NodeStatus,
     DeployResult,
+    NodeDeployReport,
     DeployProgress,
     RepoReconciliation,
     DeployPlanProposal,
@@ -357,6 +393,7 @@ _NODE_MESSAGE_TYPES: dict[str, type[NodeMessage]] = {
     "change_notification": ChangeNotification,
     "node_status": NodeStatus,
     "deploy_result": DeployResult,
+    "node_deploy_report": NodeDeployReport,
     "deploy_progress": DeployProgress,
     "repo_reconciliation": RepoReconciliation,
     "deploy_plan_proposal": DeployPlanProposal,

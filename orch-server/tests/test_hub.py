@@ -21,6 +21,7 @@ from haniel_orch.protocol import (
     DeployReportAck,
     DeployResult,
     NodeHello,
+    NodeDeployReport,
     RepoReconciliation,
 )
 
@@ -1198,6 +1199,93 @@ class TestRepoReconciliation:
         )
         assert failure["terminal_kind"] == "settled_head_mismatch"
         assert "local=local" in failure["error"]
+
+
+class TestNodeDeployReport:
+    async def test_hub_accepts_out_of_band_success_and_broadcasts(self, hub, store):
+        deploy_id = "n1:repo:main:target"
+        await store.create_deploy_event(
+            deploy_id=deploy_id,
+            node_id="n1",
+            repo="repo",
+            branch="main",
+            commits=["target change"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-08-11T00:00:00Z",
+            target_head="target",
+        )
+        hub.broadcast_to_dashboards = AsyncMock()
+
+        await hub._handle_node_deploy_report(
+            NodeDeployReport(
+                phase="succeeded",
+                node_attempt_id="node-attempt-1",
+                journal_attempt_id="journal-1",
+                deploy_id=deploy_id,
+                node_id="n1",
+                repo="repo",
+                branch="main",
+                target_head="target",
+                local_head="target",
+                trigger="startup",
+                duration_ms=50,
+            )
+        )
+
+        assert (await store.get_deploy_event(deploy_id))["status"] == "success"
+        hub.broadcast_to_dashboards.assert_awaited_once_with(
+            {
+                "type": "status_change",
+                "deploy_id": deploy_id,
+                "status": "success",
+                "node_id": "n1",
+            }
+        )
+
+    async def test_connection_cannot_report_for_another_node(self, hub, store):
+        deploy_id = "n1:repo:main:target"
+        await store.create_deploy_event(
+            deploy_id=deploy_id,
+            node_id="n1",
+            repo="repo",
+            branch="main",
+            commits=["target change"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-08-11T00:00:00Z",
+            target_head="target",
+        )
+        hello = NodeHello(
+            node_id="n2",
+            token="test-token",
+            hostname="other-node",
+            os="Linux",
+            arch="x86_64",
+            haniel_version="0.1.0",
+        )
+        report = NodeDeployReport(
+            phase="succeeded",
+            node_attempt_id="node-attempt-1",
+            deploy_id=deploy_id,
+            node_id="n1",
+            repo="repo",
+            branch="main",
+            target_head="target",
+            local_head="target",
+            trigger="local",
+            duration_ms=10,
+        )
+        websocket = AsyncMock()
+        websocket.receive_text.side_effect = [
+            hello.model_dump_json(),
+            report.model_dump_json(),
+            WebSocketDisconnect(code=1000),
+        ]
+
+        await hub.handle_node_ws(websocket)
+
+        assert (await store.get_deploy_event(deploy_id))["status"] == "pending"
 
 
 class TestDeployTimeout:
