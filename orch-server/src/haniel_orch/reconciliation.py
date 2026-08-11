@@ -8,6 +8,8 @@ from .event_store import EventStore
 from .protocol import DeployStatus, RepoReconciliation
 
 Broadcast = Callable[[dict], Awaitable[None]]
+
+
 class RepoReconciler:
     """Repair only non-retry stale Pending rows from observed Git truth."""
 

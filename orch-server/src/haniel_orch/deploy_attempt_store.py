@@ -171,7 +171,10 @@ class DeployAttemptStore(
                 probe = await self._probe(proposal.probe_id)
                 if probe is None:
                     return {"status": "ignored", "reason": "unknown_probe"}
-                if probe["status"] == "begun" and probe["proposal_fingerprint"] == proposal.fingerprint:
+                if (
+                    probe["status"] == "begun"
+                    and probe["proposal_fingerprint"] == proposal.fingerprint
+                ):
                     return {"status": "duplicate_begun"}
                 if probe["status"] != "active":
                     return {"status": "ignored", "reason": "terminal_probe"}
@@ -199,7 +202,12 @@ class DeployAttemptStore(
                 await self._db.execute(
                     "UPDATE deploy_plan_probes SET status = 'proposed', mode = ?, "
                     "proposal_fingerprint = ?, proposal_json = ? WHERE probe_id = ?",
-                    (proposal.mode, proposal.fingerprint, proposal.model_dump_json(), proposal.probe_id),
+                    (
+                        proposal.mode,
+                        proposal.fingerprint,
+                        proposal.model_dump_json(),
+                        proposal.probe_id,
+                    ),
                 )
                 if proposal.mode == "fail_closed":
                     await self._terminalize_probe_unlocked(
@@ -458,9 +466,7 @@ class DeployAttemptStore(
                 await self._db.rollback()
                 raise
 
-    async def get_attempt(
-        self, orchestrator_attempt_id: str
-    ) -> dict[str, Any] | None:
+    async def get_attempt(self, orchestrator_attempt_id: str) -> dict[str, Any] | None:
         return await self._attempt(orchestrator_attempt_id)
 
     async def terminalize_preflight(

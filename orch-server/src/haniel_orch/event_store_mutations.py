@@ -143,9 +143,7 @@ async def reject_pending_deploys_for_nodes(
     return rejected
 
 
-async def _cleanup_retry_rows(
-    db: aiosqlite.Connection, deploy_ids: list[str]
-) -> None:
+async def _cleanup_retry_rows(db: aiosqlite.Connection, deploy_ids: list[str]) -> None:
     if not deploy_ids:
         return
     placeholders = ", ".join("?" for _ in deploy_ids)

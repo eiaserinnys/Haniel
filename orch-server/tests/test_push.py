@@ -13,14 +13,20 @@ class TestRelayPushService:
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(return_value=mock_response)
 
-        svc = RelayPushService("https://relay.example.com", "inst_key", client=mock_client)
+        svc = RelayPushService(
+            "https://relay.example.com", "inst_key", client=mock_client
+        )
 
         await svc.notify("Deploy", "New deploy", {"type": "new_pending"})
 
         mock_client.post.assert_called_once_with(
             "https://relay.example.com/v1/push",
             headers={"Authorization": "Bearer inst_key"},
-            json={"title": "Deploy", "body": "New deploy", "data": {"type": "new_pending"}},
+            json={
+                "title": "Deploy",
+                "body": "New deploy",
+                "data": {"type": "new_pending"},
+            },
         )
 
     async def test_notify_strips_trailing_slash(self):
