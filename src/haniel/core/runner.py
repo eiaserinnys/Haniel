@@ -812,9 +812,7 @@ class ServiceRunner:
             self._post_pull_executed = True
             for name in startup_order:
                 if self._stop_event.is_set():
-                    logger.info(
-                        "Stopping startup hooks because shutdown was requested"
-                    )
+                    logger.info("Stopping startup hooks because shutdown was requested")
                     return
                 service = enabled_services[name]
                 if service.repo in self._startup_updated_repos:
@@ -831,9 +829,7 @@ class ServiceRunner:
         handled_manifest_services: set[str] = set()
         for name in startup_order:
             if self._stop_event.is_set():
-                logger.info(
-                    "Stopping service startup because shutdown was requested"
-                )
+                logger.info("Stopping service startup because shutdown was requested")
                 return
             if name in handled_manifest_services:
                 continue
