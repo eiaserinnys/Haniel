@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from .deploy_progress import DeployProgressEmitter, ProgressCallback
 from .deploy_reporting import DeployReporter, parse_deploy_id
 from .deploy_attempt_gate import DeployAttemptGate
+from ..core.thread_shutdown import join_thread_with_timeout
 
 if TYPE_CHECKING:
     from ..config.model import OrchestratorClientConfig
@@ -125,12 +126,10 @@ class OrchestratorClient:
     def stop(self) -> None:
         """Stop the background thread and close the connection."""
         self._stop_event.set()
-        if (
-            self._thread
-            and self._thread.is_alive()
-            and self._thread is not threading.current_thread()
-        ):
-            self._thread.join()
+        join_thread_with_timeout(
+            self._thread,
+            name="orchestrator client thread",
+        )
 
     def notify_change(
         self,

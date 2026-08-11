@@ -26,6 +26,7 @@ from ..core.service_lifecycle import (
     register_service,
     reload_service_definition,
 )
+from ..core.thread_shutdown import join_thread_with_timeout
 
 if TYPE_CHECKING:
     from ..core.runner import ServiceRunner
@@ -1250,12 +1251,10 @@ class HanielMcpServer:
         if self._server:
             self._server.should_exit = True
 
-        if (
-            self._server_thread
-            and self._server_thread.is_alive()
-            and self._server_thread is not threading.current_thread()
-        ):
-            self._server_thread.join()
+        join_thread_with_timeout(
+            self._server_thread,
+            name="MCP server thread",
+        )
 
         logger.info("MCP server stopped")
 

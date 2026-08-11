@@ -25,6 +25,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 from ..config.model import SlackBotConfig
+from ..core.thread_shutdown import join_thread_with_timeout
 
 if TYPE_CHECKING:
     from ..core.claude_session import ClaudeSessionManager
@@ -138,12 +139,10 @@ class SlackBot:
         """Shut down the bot (close Socket Mode connection)."""
         try:
             self._handler.close()
-            if (
-                self._socket_thread
-                and self._socket_thread.is_alive()
-                and self._socket_thread is not threading.current_thread()
-            ):
-                self._socket_thread.join()
+            join_thread_with_timeout(
+                self._socket_thread,
+                name="Slack Socket Mode thread",
+            )
         except Exception as e:
             logger.warning("SlackBot stop error: %s", e)
 

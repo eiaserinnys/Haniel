@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch, call
 import pytest
 
 from haniel.config.model import SlackBotConfig, load_config
+from haniel.core.thread_shutdown import DEFAULT_THREAD_JOIN_TIMEOUT_SECONDS
 from haniel.integrations.slack_bot import SlackBot
 
 
@@ -269,7 +270,7 @@ def test_start_opens_dm_channel(mock_web_client):
     assert bot._socket_thread.daemon is True
 
 
-def test_stop_waits_for_socket_thread(mock_web_client):
+def test_stop_bounds_socket_thread_wait(mock_web_client):
     config = _make_slack_config()
     with (
         patch("haniel.integrations.slack_bot.App"),
@@ -295,8 +296,8 @@ def test_stop_waits_for_socket_thread(mock_web_client):
     bot.stop()
 
     MockHandler.return_value.close.assert_called_once_with()
-    assert thread.join_timeout is None
-    assert thread.is_alive() is False
+    assert thread.join_timeout == DEFAULT_THREAD_JOIN_TIMEOUT_SECONDS
+    assert thread.is_alive() is True
 
 
 # ── Phase 2: approve button interaction ──────────────────────────────────────

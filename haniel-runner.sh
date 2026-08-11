@@ -10,6 +10,7 @@ set -u
 
 ROOT_DIR="$(pwd)"
 CONF_PATH="$ROOT_DIR/haniel-runner.conf"
+RUNNER_SCRIPT_PATH="$(readlink -f "$0")"
 
 if [[ ! -f "$CONF_PATH" ]]; then
   echo "Configuration file not found: $CONF_PATH" >&2
@@ -333,6 +334,7 @@ next_crash_delay() {
 
 while true; do
   if [[ "$skip_update" != "true" ]]; then
+    runner_hash_before="$(sha256sum "$RUNNER_SCRIPT_PATH" | awk '{print $1}')"
     echo "[haniel-runner] Updating haniel repository..."
     STEP_NAMES=()
     STEP_OKS=()
@@ -350,6 +352,12 @@ while true; do
       write_self_update_marker "$update_ok"
     fi
     write_self_update_marker=false
+
+    runner_hash_after="$(sha256sum "$RUNNER_SCRIPT_PATH" | awk '{print $1}')"
+    if [[ "$runner_hash_before" != "$runner_hash_after" ]]; then
+      echo "[haniel-runner] Runner script updated; re-executing new wrapper."
+      exec "$0"
+    fi
   fi
   skip_update=false
 

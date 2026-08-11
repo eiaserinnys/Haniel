@@ -18,6 +18,7 @@ from haniel.core.lifecycle_control import (
 )
 from haniel.core.handover_config import handover_config_digest
 from haniel.core.lifecycle_request_server import LifecycleRequestServer
+from haniel.core.thread_shutdown import DEFAULT_THREAD_JOIN_TIMEOUT_SECONDS
 from haniel.core.one_shot_handover import (
     _start_resident_owner,
     execute_manifest_handover_once,
@@ -774,7 +775,7 @@ def test_terminal_write_failure_is_isolated_from_next_spool_request(
     assert control.read_result("b-valid")["terminal"]["ok"] is True
 
 
-def test_lifecycle_server_close_waits_for_worker_completion(tmp_path: Path) -> None:
+def test_lifecycle_server_close_bounds_worker_wait(tmp_path: Path) -> None:
     control = LifecycleControl(tmp_path / "haniel.yaml")
     server = LifecycleRequestServer(
         control=control,
@@ -800,5 +801,5 @@ def test_lifecycle_server_close_waits_for_worker_completion(tmp_path: Path) -> N
     server.close()
 
     assert server._stopping.is_set()
-    assert thread.join_timeout is None
-    assert thread.is_alive() is False
+    assert thread.join_timeout == DEFAULT_THREAD_JOIN_TIMEOUT_SECONDS
+    assert thread.is_alive() is True
