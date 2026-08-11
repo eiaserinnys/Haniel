@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 from haniel.config import HanielConfig, McpConfig, ServiceConfig, RepoConfig
 from haniel.core.health import ServiceState
+from haniel.core.thread_shutdown import DEFAULT_THREAD_JOIN_TIMEOUT_SECONDS
 
 
 class TestHanielMcpServer:
@@ -758,7 +759,7 @@ class TestMcpServerLifecycle:
         # Should not raise
         mcp_server.stop_sync()
 
-    def test_stop_sync_waits_for_server_loop_to_close(self, mcp_server):
+    def test_stop_sync_bounds_server_loop_wait(self, mcp_server):
         class ThreadProbe:
             alive = True
             join_timeout = object()
@@ -778,8 +779,8 @@ class TestMcpServerLifecycle:
         mcp_server.stop_sync()
 
         assert mcp_server._server.should_exit is True
-        assert thread.join_timeout is None
-        assert thread.is_alive() is False
+        assert thread.join_timeout == DEFAULT_THREAD_JOIN_TIMEOUT_SECONDS
+        assert thread.is_alive() is True
 
     def test_stop_sync_records_request_before_server_is_initialized(self, mcp_server):
         """An immediate stop must survive the startup window before uvicorn exists."""

@@ -15,6 +15,7 @@ from .handover_result import (
 from .lifecycle_control import LifecycleControl
 from .deployment_errors import StableDeploymentError
 from .safety_redaction import bounded_redact_text
+from .thread_shutdown import join_thread_with_timeout
 
 if TYPE_CHECKING:
     from .runner import ServiceRunner
@@ -48,8 +49,10 @@ class LifecycleRequestServer:
 
     def close(self) -> None:
         self._stopping.set()
-        if self._thread is not None and self._thread is not threading.current_thread():
-            self._thread.join()
+        join_thread_with_timeout(
+            self._thread,
+            name="lifecycle request worker",
+        )
 
     def _serve(self) -> None:
         while not self._stopping.is_set():

@@ -99,6 +99,7 @@ from .orch_pending_deploy import (
 )
 from ..integrations.deploy_reporting import ApprovalRevalidationError
 from ..integrations.deploy_attempt_gate import DeployPermissionError
+from .thread_shutdown import join_thread_with_timeout
 
 if TYPE_CHECKING:
     from ..integrations.orchestrator_client import OrchestratorClient
@@ -802,10 +803,19 @@ class ServiceRunner:
         startup_order = list(config_snapshot.startup_order)
         logger.info(f"Starting services in order: {startup_order}")
 
+        if self._stop_event.is_set():
+            logger.info("Skipping service startup because shutdown was requested")
+            return
+
         # Run legacy post_pull hooks on first start only for repos updated at startup.
         if not self._post_pull_executed:
             self._post_pull_executed = True
             for name in startup_order:
+                if self._stop_event.is_set():
+                    logger.info(
+                        "Stopping startup hooks because shutdown was requested"
+                    )
+                    return
                 service = enabled_services[name]
                 if service.repo in self._startup_updated_repos:
                     self.execute_hook(name, "post_pull")
@@ -820,6 +830,11 @@ class ServiceRunner:
 
         handled_manifest_services: set[str] = set()
         for name in startup_order:
+            if self._stop_event.is_set():
+                logger.info(
+                    "Stopping service startup because shutdown was requested"
+                )
+                return
             if name in handled_manifest_services:
                 continue
             if self.process_manager.is_running(name):
@@ -1200,11 +1215,24 @@ class ServiceRunner:
         # Start orchestrator client if configured
         self._start_orch_client()
 
+        if self._stop_event.is_set():
+            logger.info("Skipping startup updates because shutdown was requested")
+            return
+
         # Apply pending updates before starting services
         self._apply_startup_updates()
 
+        if self._stop_event.is_set():
+            logger.info("Skipping service startup because shutdown was requested")
+            self._release_startup_repo_locks()
+            return
+
         # Start services
         self.start_services()
+
+        if self._stop_event.is_set():
+            logger.info("Skipping poll thread because shutdown was requested")
+            return
 
         # Start poll loop in background
         self._poll_thread = threading.Thread(
@@ -1257,12 +1285,10 @@ class ServiceRunner:
                     logger.warning("Error stopping MCP server: %s", e)
 
             # Wait for the poll thread unless it owns this stop invocation.
-            if (
-                self._poll_thread
-                and self._poll_thread.is_alive()
-                and self._poll_thread is not threading.current_thread()
-            ):
-                self._poll_thread.join()
+            join_thread_with_timeout(
+                self._poll_thread,
+                name="runner poll thread",
+            )
 
             # Stop orchestrator client after polling can no longer notify it.
             if self._orch_client:

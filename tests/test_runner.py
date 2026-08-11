@@ -831,6 +831,65 @@ class TestServiceRunnerExtended:
         assert runner._stop_event.is_set()
         assert not runner.is_running
 
+    def test_start_skips_startup_updates_when_stop_arrives_before_them(
+        self, tmp_path: Path
+    ) -> None:
+        runner = ServiceRunner(
+            HanielConfig(poll_interval=5, repos={}, services={}),
+            config_dir=tmp_path,
+        )
+        runner._start_mcp_server = MagicMock()
+        runner._start_slack_bot = MagicMock()
+        runner._start_orch_client = MagicMock(side_effect=runner._stop_event.set)
+        runner._apply_startup_updates = MagicMock()
+        runner.start_services = MagicMock()
+
+        runner.start()
+
+        runner._apply_startup_updates.assert_not_called()
+        runner.start_services.assert_not_called()
+        assert runner._poll_thread is None
+
+    def test_start_releases_startup_locks_when_stop_arrives_during_updates(
+        self, tmp_path: Path
+    ) -> None:
+        runner = ServiceRunner(
+            HanielConfig(poll_interval=5, repos={}, services={}),
+            config_dir=tmp_path,
+        )
+        runner._start_mcp_server = MagicMock()
+        runner._start_slack_bot = MagicMock()
+        runner._start_orch_client = MagicMock()
+        runner._apply_startup_updates = MagicMock(
+            side_effect=runner._stop_event.set
+        )
+        runner._release_startup_repo_locks = MagicMock()
+        runner.start_services = MagicMock()
+
+        runner.start()
+
+        runner.start_services.assert_not_called()
+        runner._release_startup_repo_locks.assert_called_once_with()
+        assert runner._poll_thread is None
+
+    def test_start_does_not_create_poll_thread_when_stop_arrives_during_services(
+        self, tmp_path: Path
+    ) -> None:
+        runner = ServiceRunner(
+            HanielConfig(poll_interval=5, repos={}, services={}),
+            config_dir=tmp_path,
+        )
+        runner._start_mcp_server = MagicMock()
+        runner._start_slack_bot = MagicMock()
+        runner._start_orch_client = MagicMock()
+        runner._apply_startup_updates = MagicMock()
+        runner.start_services = MagicMock(side_effect=runner._stop_event.set)
+
+        runner.start()
+
+        runner.start_services.assert_called_once_with()
+        assert runner._poll_thread is None
+
     def test_concurrent_stop_waits_for_cleanup_completion(self, tmp_path: Path):
         """A second stop caller must not return while the owner is still cleaning up."""
         runner = ServiceRunner(

@@ -598,3 +598,14 @@ class TestWrapperModeInstaller:
         restart_branch = script.index("elseif ($exitCode -eq $EXIT_RESTART)")
         flag_set = script.index("$writeSelfUpdateMarker = $true", self_update_branch)
         assert flag_set < restart_branch
+
+    def test_windows_runner_reloads_itself_after_its_file_changes(self):
+        """The running PowerShell AST must not outlive an updated wrapper file."""
+        script_path = Path(__file__).resolve().parents[1] / "haniel-runner.ps1"
+        script = script_path.read_text(encoding="utf-8-sig")
+
+        assert "Get-FileHash -Path $PSCommandPath" in script
+        assert "& $PSCommandPath" in script
+        marker_write = script.index("Write-SelfUpdateMarker -Ok $updateOk")
+        reload_wrapper = script.index("& $PSCommandPath")
+        assert marker_write < reload_wrapper

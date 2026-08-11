@@ -8,6 +8,7 @@ import pytest
 
 from haniel.config.model import OrchestratorClientConfig
 from haniel.core.repo_reconciliation import RepoReconciliationSnapshot
+from haniel.core.thread_shutdown import DEFAULT_THREAD_JOIN_TIMEOUT_SECONDS
 from haniel.integrations.orchestrator_client import OrchestratorClient
 
 
@@ -213,7 +214,7 @@ class TestStartStop:
         client.stop()
         assert client._stop_event.is_set()
 
-    def test_stop_requires_background_thread_to_finish(self, config):
+    def test_stop_bounds_background_thread_wait(self, config):
         client = OrchestratorClient(config, haniel_version="0.1.0")
 
         class ThreadProbe:
@@ -233,8 +234,8 @@ class TestStartStop:
 
         client.stop()
 
-        assert thread.join_timeout is None
-        assert thread.is_alive() is False
+        assert thread.join_timeout == DEFAULT_THREAD_JOIN_TIMEOUT_SECONDS
+        assert thread.is_alive() is True
 
     def test_double_start_noop(self, config):
         """Starting twice while thread is alive should not create a second thread."""

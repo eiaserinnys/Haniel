@@ -244,6 +244,7 @@ $writeSelfUpdateMarker = $false
 
 while ($true) {
     if (-not $skipUpdate) {
+        $runnerHashBefore = (Get-FileHash -Path $PSCommandPath -Algorithm SHA256).Hash
         Write-Host "[haniel-runner] Updating haniel repository..."
         $script:LastUpdateSteps      = New-Object System.Collections.ArrayList
         $script:LastUpdateError      = $null
@@ -256,6 +257,13 @@ while ($true) {
             Write-SelfUpdateMarker -Ok $updateOk
         }
         $writeSelfUpdateMarker = $false
+
+        $runnerHashAfter = (Get-FileHash -Path $PSCommandPath -Algorithm SHA256).Hash
+        if ($runnerHashBefore -ne $runnerHashAfter) {
+            Write-Host "[haniel-runner] Runner script updated; reloading new wrapper."
+            & $PSCommandPath
+            exit $LASTEXITCODE
+        }
     }
     $skipUpdate = $false
 
