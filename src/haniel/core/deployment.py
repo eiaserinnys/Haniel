@@ -23,6 +23,7 @@ from .deployment_state import DeploymentStateStore
 from .deployment_verification import (
     RetryWaiter,
     blocking_retry_waiter,
+    run_with_retry,
     verify_with_retry,
 )
 from .release_manifest import MigrationSpec, ReleaseManifest
@@ -151,7 +152,15 @@ class DeploymentCoordinator:
         )
 
         try:
-            callbacks.build()
+            run_with_retry(
+                callbacks.build,
+                operation_label="build phase",
+                policy=manifest.build_retry,
+                retry_waiter=self.retry_waiter,
+                exhausted_error_code="BUILD_RETRIES_EXHAUSTED",
+                interrupted_error_code="BUILD_RETRY_INTERRUPTED",
+                retry_if=lambda error: not isinstance(error, StableDeploymentError),
+            )
             self.state_store.transition(repo_name, "preflight")
             if manifest.migration:
                 preflight = self._run_database(

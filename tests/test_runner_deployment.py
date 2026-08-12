@@ -51,6 +51,12 @@ def release_manifest() -> dict[str, object]:
             "apply": command("migrate"),
         },
         "post_start_verify": [command("verify-http"), command("verify-mcp")],
+        "build_retry": {
+            "max_attempts": 4,
+            "initial_backoff_seconds": 0,
+            "max_backoff_seconds": 0,
+            "total_grace_seconds": 1,
+        },
         "post_start_verify_retry": {
             "max_attempts": 4,
             "initial_backoff_seconds": 0,
@@ -539,7 +545,7 @@ def test_progress_reporting_failure_does_not_abort_manifest_handover(
     assert "Failed to report deploy progress build" in caplog.text
 
 
-def test_build_failure_restores_code_without_stopping_old_process(
+def test_transient_build_hook_failure_retries_without_rollback(
     manifest_runner: tuple[ServiceRunner, Path, str],
 ) -> None:
     runner, repo, previous_head = manifest_runner
@@ -556,14 +562,18 @@ def test_build_failure_restores_code_without_stopping_old_process(
         "haniel.core.runner_deployment.subprocess_command_runner",
         return_value=lambda _spec, _env: None,
     ):
-        with pytest.raises(DeploymentError) as exc_info:
-            run_manifest_deployment(runner, "app", ["app"], previous_head)
+        run_manifest_deployment(runner, "app", ["app"], previous_head)
 
-    assert exc_info.value.recovered is True
     assert running["app"] is True
-    assert not any(event.startswith("stop:") for event in events)
-    assert get_head(repo) == previous_head
-    assert (repo / "app.txt").read_text(encoding="utf-8") == "old"
+    assert events[:2] == ["post_pull:app", "post_pull:app"]
+    assert events.count("stop:app") == 1
+    assert get_head(repo) != previous_head
+    assert (repo / "app.txt").read_text(encoding="utf-8") == "new"
+    journal = DeploymentStateStore(runner.config_dir / ".haniel" / "deployments").read(
+        "app"
+    )
+    assert journal is not None
+    assert journal["state"] == "success"
 
 
 def test_build_failure_does_not_probe_service_already_down_before_deployment(
@@ -573,7 +583,7 @@ def test_build_failure_does_not_probe_service_already_down_before_deployment(
     events: list[str] = []
     running = configure_processes(runner, events)
     running["app"] = False
-    hook_results = iter([False, True])
+    hook_results = iter([False, False, False, False, True])
     runner.execute_hook = MagicMock(
         side_effect=lambda name, hook: (
             events.append(f"{hook}:{name}") or next(hook_results)
@@ -588,7 +598,9 @@ def test_build_failure_does_not_probe_service_already_down_before_deployment(
             run_manifest_deployment(runner, "app", ["app"], previous_head)
 
     assert exc_info.value.recovered is True
+    assert stable_deployment_error_code(exc_info.value) == "BUILD_RETRIES_EXHAUSTED"
     assert running["app"] is False
+    assert runner.execute_hook.call_count == 5
     runner.process_manager.get_pid.assert_not_called()
     runner.process_manager.platform.is_port_owned_by_process_tree.assert_not_called()
     assert not any(event.startswith(("start:", "stop:")) for event in events)

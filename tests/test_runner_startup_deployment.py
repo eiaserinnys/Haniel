@@ -32,6 +32,12 @@ def manifest() -> dict[str, object]:
             "apply": command("migrate"),
         },
         "post_start_verify": [command("verify-http"), command("verify-mcp")],
+        "build_retry": {
+            "max_attempts": 4,
+            "initial_backoff_seconds": 0,
+            "max_backoff_seconds": 0,
+            "total_grace_seconds": 1,
+        },
         "post_start_verify_retry": {
             "max_attempts": 4,
             "initial_backoff_seconds": 0,
@@ -115,7 +121,7 @@ def test_startup_failure_keeps_availability_without_duplicate_legacy_start(
     services = ["soulstream-orch-server", "soulstream-soul-server-ts"]
     running = {name: False for name in services}
     events: list[str] = []
-    failures_left = 1
+    failures_left = len(services) * 4 if failed_stage == "build" else 1
 
     def fail_once(stage: str) -> bool:
         nonlocal failures_left

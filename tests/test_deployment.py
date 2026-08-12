@@ -434,6 +434,32 @@ def test_verify_retry_policy_has_bounded_defaults() -> None:
     assert policy.total_grace_seconds == 60.0
 
 
+def test_build_retry_policy_has_bounded_defaults() -> None:
+    policy = manifest().build_retry
+
+    assert policy.max_attempts == 4
+    assert policy.initial_backoff_seconds == 5.0
+    assert policy.max_backoff_seconds == 20.0
+    assert policy.total_grace_seconds == 60.0
+
+
+def test_build_retry_policy_is_manifest_configurable() -> None:
+    payload = manifest().model_dump()
+    payload["build_retry"] = {
+        "max_attempts": 2,
+        "initial_backoff_seconds": 1,
+        "max_backoff_seconds": 2,
+        "total_grace_seconds": 3,
+    }
+
+    policy = ReleaseManifest.model_validate(payload).build_retry
+
+    assert policy.max_attempts == 2
+    assert policy.initial_backoff_seconds == 1.0
+    assert policy.max_backoff_seconds == 2.0
+    assert policy.total_grace_seconds == 3.0
+
+
 def test_verify_retry_policy_rejects_inverted_backoff_bounds() -> None:
     payload = manifest().model_dump()
     payload["post_start_verify_retry"] = {
@@ -497,7 +523,7 @@ def test_success_waits_for_build_preflight_migration_readiness_and_verify(
 @pytest.mark.parametrize(
     "failure,expected_prefix",
     [
-        ("build", ["build"]),
+        ("build", ["build", "build", "build", "build"]),
         ("preflight", ["build", "preflight"]),
         (
             "verify-backup",
@@ -541,6 +567,136 @@ def test_failure_before_migration_commit_restores_previous_release(
     journal = DeploymentStateStore(tmp_path / "state").read("soulstream")
     assert journal["state"] == "failed"
     assert journal["recovered"] is True
+
+
+def test_build_failure_retries_before_recovery_and_then_succeeds(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    attempts = 0
+
+    def build() -> None:
+        nonlocal attempts
+        attempts += 1
+        events.append("build")
+        if attempts == 1:
+            raise RuntimeError("post_pull hook failed")
+
+    deploy_callbacks = callbacks(events)
+    deploy_callbacks = DeploymentCallbacks(
+        build=build,
+        stop=deploy_callbacks.stop,
+        start_and_wait=deploy_callbacks.start_and_wait,
+        rollback=deploy_callbacks.rollback,
+        prepare_roll_forward=deploy_callbacks.prepare_roll_forward,
+    )
+    deploy = coordinator(tmp_path, events)
+
+    result = deploy.execute(
+        repo_name="soulstream",
+        previous_head="old",
+        target_head="new",
+        manifest=manifest(),
+        callbacks=deploy_callbacks,
+    )
+
+    assert result.status == "success"
+    assert events == [
+        "build",
+        "build",
+        "preflight",
+        "stop",
+        "backup",
+        "verify-backup",
+        "migrate",
+        "start-and-wait",
+        "verify-http",
+        "verify-mcp",
+    ]
+    journal = DeploymentStateStore(tmp_path / "state").read("soulstream")
+    assert journal is not None
+    assert journal["state"] == "success"
+    assert all(entry["state"] != "recovering" for entry in journal["history"])
+
+
+def test_persistent_build_failure_exhausts_retries_before_rollback(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    def build() -> None:
+        events.append("build")
+        raise RuntimeError("post_pull hook failed")
+
+    deploy_callbacks = callbacks(events)
+    deploy_callbacks = DeploymentCallbacks(
+        build=build,
+        stop=deploy_callbacks.stop,
+        start_and_wait=deploy_callbacks.start_and_wait,
+        rollback=deploy_callbacks.rollback,
+        prepare_roll_forward=deploy_callbacks.prepare_roll_forward,
+    )
+    deploy = coordinator(tmp_path, events)
+
+    with pytest.raises(DeploymentError) as exc_info:
+        deploy.execute(
+            repo_name="soulstream",
+            previous_head="old",
+            target_head="new",
+            manifest=manifest(),
+            callbacks=deploy_callbacks,
+        )
+
+    assert stable_deployment_error_code(exc_info.value) == "BUILD_RETRIES_EXHAUSTED"
+    assert exc_info.value.recovered is True
+    assert events == ["build", "build", "build", "build", "rollback"]
+    journal = DeploymentStateStore(tmp_path / "state").read("soulstream")
+    assert journal is not None
+    assert journal["state"] == "failed"
+    assert journal["recovered"] is True
+    assert journal["error_code"] == "BUILD_RETRIES_EXHAUSTED"
+
+
+def test_shutdown_interrupts_build_backoff_before_next_attempt(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    waits: list[float] = []
+
+    def build() -> None:
+        events.append("build")
+        raise RuntimeError("post_pull hook failed")
+
+    def interrupt_wait(delay: float) -> bool:
+        waits.append(delay)
+        return delay > 0
+
+    deploy_callbacks = callbacks(events)
+    deploy_callbacks = DeploymentCallbacks(
+        build=build,
+        stop=deploy_callbacks.stop,
+        start_and_wait=deploy_callbacks.start_and_wait,
+        rollback=deploy_callbacks.rollback,
+        prepare_roll_forward=deploy_callbacks.prepare_roll_forward,
+    )
+    deploy = DeploymentCoordinator(
+        state_store=DeploymentStateStore(tmp_path / "state"),
+        command_runner=lambda _command, _environment: None,
+        retry_waiter=interrupt_wait,
+    )
+
+    with pytest.raises(DeploymentError) as exc_info:
+        deploy.execute(
+            repo_name="soulstream",
+            previous_head="old",
+            target_head="new",
+            manifest=manifest(),
+            callbacks=deploy_callbacks,
+        )
+
+    assert stable_deployment_error_code(exc_info.value) == "BUILD_RETRY_INTERRUPTED"
+    assert waits == [0, 5.0]
+    assert events == ["build", "rollback"]
 
 
 def test_failed_command_persists_bounded_stderr_and_stdout_in_journal(
@@ -704,7 +860,7 @@ def test_shutdown_interrupts_verify_backoff_without_recovery(tmp_path: Path) -> 
     assert stable_deployment_error_code(exc_info.value) == "VERIFY_RETRY_INTERRUPTED"
     assert exc_info.value.recovered is False
     assert getattr(exc_info.value, "target_preserved", False) is True
-    assert waits == [0, 5.0]
+    assert waits == [0, 0, 5.0]
     assert events.count("verify-http") == 1
     assert "rollback" not in events
     journal = DeploymentStateStore(tmp_path / "state").read("soulstream")
