@@ -59,6 +59,7 @@ from .git import (
 from .health import HealthManager, ServiceState
 from .process import ProcessManager
 from .deployment import DeploymentError, DeploymentStateStore
+from .deployment_command_runner import CommandSpec, _command_failure_message
 from .deployment_errors import (
     StableDeploymentError,
     stable_deployment_error_code,
@@ -770,11 +771,14 @@ class ServiceRunner:
             return True
         except subprocess.CalledProcessError as e:
             logger.error(
-                "Hook %s for %s failed with exit code %s: %s",
+                "Hook %s for %s failed: %s",
                 hook_name,
                 service_name,
-                e.returncode,
-                redact_text(str(e.stderr or ""), redaction_values),
+                _command_failure_message(
+                    CommandSpec(name="lifecycle-hook", command=hook_cmd),
+                    e,
+                    redaction_values,
+                ),
             )
             return False
         except subprocess.TimeoutExpired:

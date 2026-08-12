@@ -349,6 +349,29 @@ class TestHookExecution:
         assert result is False
 
     @patch("subprocess.run")
+    def test_hook_failure_logs_stdout_only_evidence(
+        self,
+        mock_run: MagicMock,
+        config_with_hooks: HanielConfig,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        mock_run.side_effect = subprocess.CalledProcessError(
+            1,
+            "cmd",
+            output="ERR_PNPM_FETCH_500 registry request failed",
+            stderr="",
+        )
+
+        runner = ServiceRunner(config_with_hooks, config_dir=tmp_path)
+        with caplog.at_level("ERROR"):
+            result = runner.execute_hook("test-service", "post_pull")
+
+        assert result is False
+        assert "stdout (last 4096 chars)" in caplog.text
+        assert "ERR_PNPM_FETCH_500 registry request failed" in caplog.text
+
+    @patch("subprocess.run")
     def test_hook_failure_redacts_command_stderr_and_environment_secret(
         self,
         mock_run: MagicMock,

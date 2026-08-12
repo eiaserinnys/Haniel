@@ -65,8 +65,8 @@ class RecoverySpec(BaseModel):
         return self
 
 
-class VerifyRetrySpec(BaseModel):
-    """Bounded retry policy for post-start verification commands."""
+class RetrySpec(BaseModel):
+    """Bounded retry policy for one deployment phase."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -76,13 +76,17 @@ class VerifyRetrySpec(BaseModel):
     total_grace_seconds: float = Field(default=60.0, ge=0.0, le=300.0)
 
     @model_validator(mode="after")
-    def validate_backoff_bounds(self) -> "VerifyRetrySpec":
+    def validate_backoff_bounds(self) -> "RetrySpec":
         if self.max_backoff_seconds < self.initial_backoff_seconds:
             raise ValueError(
                 "max_backoff_seconds must be greater than or equal to "
                 "initial_backoff_seconds"
             )
         return self
+
+
+# Preserve the PR #38 import surface while the policy becomes phase-generic.
+VerifyRetrySpec = RetrySpec
 
 
 class ReleaseManifest(BaseModel):
@@ -95,8 +99,9 @@ class ReleaseManifest(BaseModel):
     environment_service: str | None = Field(default=None, min_length=1)
     requires_service_env_file: bool = False
     migration: MigrationSpec | None = None
+    build_retry: RetrySpec = Field(default_factory=RetrySpec)
     post_start_verify: list[CommandSpec] = Field(min_length=1)
-    post_start_verify_retry: VerifyRetrySpec = Field(default_factory=VerifyRetrySpec)
+    post_start_verify_retry: RetrySpec = Field(default_factory=RetrySpec)
     recovery: RecoverySpec
 
     @classmethod
