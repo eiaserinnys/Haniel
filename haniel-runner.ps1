@@ -109,6 +109,7 @@ $PreparationResultPath = Join-Path $RootDir ".local/haniel_release_preparation.j
 $SelfUpdateExitMarker = Join-Path $RootDir ".local/self_update_exit_requested"
 $script:ActiveRepo = $RepoPath
 $script:ActivePython = $BootstrapPython
+$script:ActiveCommit = $null
 $script:PreparationResult = $null
 
 function Send-Webhook {
@@ -188,6 +189,7 @@ function Update-HanielRelease {
             switched = $false
             active_repo = $null
             active_python = $null
+            active_commit = $null
             steps = @()
             error = "atomic release helper did not write a result"
             error_code = $null
@@ -202,6 +204,7 @@ function Update-HanielRelease {
                 switched = $false
                 active_repo = $null
                 active_python = $null
+                active_commit = $null
                 steps = @()
                 error = "invalid atomic release helper result: $_"
                 error_code = $null
@@ -211,6 +214,7 @@ function Update-HanielRelease {
     }
     $script:ActiveRepo = $script:PreparationResult.active_repo
     $script:ActivePython = $script:PreparationResult.active_python
+    $script:ActiveCommit = $script:PreparationResult.active_commit
     if (@($script:PreparationResult.warnings).Count -gt 0) {
         $cleanupWarnings = @($script:PreparationResult.warnings) -join " | "
         Send-Webhook "Atomic release cleanup warning: $cleanupWarnings" "warning"
@@ -253,6 +257,7 @@ while ($true) {
         $writeSelfUpdateMarker = $false
 
         if (-not $script:ActiveRepo -or -not $script:ActivePython -or
+            -not $script:ActiveCommit -or
             -not (Test-Path $script:ActivePython -PathType Leaf)) {
             $message = "No previously validated Haniel release is available; refusing to launch."
             Write-Error $message
@@ -273,7 +278,12 @@ while ($true) {
     $skipUpdate = $false
 
     Write-Host "[haniel-runner] Launching haniel..."
-    & $script:ActivePython -m haniel.cli run $ConfigPath
+    $runArguments = @(
+        "-m", "haniel.cli", "run",
+        "--active-self-head", $script:ActiveCommit,
+        $ConfigPath
+    )
+    & $script:ActivePython @runArguments
     $exitCode = $LASTEXITCODE
 
     Write-Host "[haniel-runner] haniel exited with code: $exitCode"

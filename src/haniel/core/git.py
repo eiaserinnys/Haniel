@@ -490,7 +490,13 @@ def reset_repo_to(path: Path, revision: str) -> None:
         ) from exc
 
 
-def get_pending_changes(path: Path, branch: str, remote: str = "origin") -> dict:
+def get_pending_changes(
+    path: Path,
+    branch: str,
+    remote: str = "origin",
+    *,
+    local_ref: str = "HEAD",
+) -> dict:
     """Get details of pending changes between local and remote.
 
     Returns commits and file summary for changes that exist on the remote
@@ -500,6 +506,7 @@ def get_pending_changes(path: Path, branch: str, remote: str = "origin") -> dict
         path: Path to the git repository
         branch: Branch to check
         remote: Remote name (default: origin)
+        local_ref: Commit representing the deployed local state (default: HEAD)
 
     Returns:
         Dict with:
@@ -508,7 +515,7 @@ def get_pending_changes(path: Path, branch: str, remote: str = "origin") -> dict
     """
     try:
         log_result = _run_git(
-            ["log", "--oneline", f"HEAD..{remote}/{branch}"],
+            ["log", "--oneline", f"{local_ref}..{remote}/{branch}"],
             cwd=path,
             check=False,
         )
@@ -518,7 +525,7 @@ def get_pending_changes(path: Path, branch: str, remote: str = "origin") -> dict
             return {"commits": [], "stat": None}
 
         stat_result = _run_git(
-            ["diff", "--stat", f"HEAD..{remote}/{branch}"],
+            ["diff", "--stat", f"{local_ref}..{remote}/{branch}"],
             cwd=path,
             check=False,
         )

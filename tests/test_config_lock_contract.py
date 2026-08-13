@@ -374,6 +374,7 @@ def test_poll_git_future_network_and_callback_boundaries_run_unlocked(
         "git.get_pending_changes",
         "callback.websocket",
         "callback.slack",
+        "git.get_head",
         "git.capture_repo_snapshot",
         "future.network.notify_change",
         "future.network.notify_repo_reconciliation",

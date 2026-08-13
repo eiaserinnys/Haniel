@@ -612,6 +612,8 @@ class TestWrapperModeInstaller:
         assert "& $activeRunner" in script
         assert '"--retain-extra", "$HanielReleaseRetainExtra"' in script
         assert '"--min-free-mb", "$HanielReleaseMinFreeMB"' in script
+        assert '"--active-self-head", $script:ActiveCommit' in script
+        assert "& $script:ActivePython @runArguments" in script
         marker_write = script.index(
             "Write-SelfUpdateMarker -Ok ([bool]$script:PreparationResult.ok)"
         )

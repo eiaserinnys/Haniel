@@ -1033,6 +1033,42 @@ class TestCyclicDependencyError:
 
 
 class TestServiceRunnerPollCycle:
+    @patch(
+        "haniel.core.runner.get_head",
+        side_effect=AssertionError(
+            "source checkout must not define deployed self state"
+        ),
+    )
+    def test_self_repo_initializes_from_active_release(
+        self,
+        mock_head,
+        tmp_path: Path,
+    ) -> None:
+        repo_path = tmp_path / "haniel"
+        repo_path.mkdir()
+        config = HanielConfig.model_validate(
+            {
+                "repos": {
+                    "haniel": {
+                        "url": "git@github.com:test/haniel.git",
+                        "path": "./haniel",
+                    }
+                },
+                "services": {},
+                "self": {"repo": "haniel", "auto_update": False},
+            }
+        )
+        runner = ServiceRunner(
+            config,
+            config_dir=tmp_path,
+            active_self_head="active-head",
+        )
+
+        runner._init_repo_states()
+
+        assert runner._repo_states["haniel"].last_head == "active-head"
+        mock_head.assert_not_called()
+
     """Tests for ServiceRunner poll cycle."""
 
     @pytest.fixture
@@ -1318,6 +1354,93 @@ class TestServiceRunnerPollCycle:
         assert snapshot.in_sync is False
         assert runner._state.self_update_pending is True
         assert runner.self_update_requested is False
+
+    @patch("haniel.core.runner.get_pending_changes")
+    @patch("haniel.core.runner.get_remote_head", return_value="target-head")
+    @patch("haniel.core.runner.get_head", return_value="old-source-head")
+    @patch("haniel.core.runner.fetch_repo", return_value=True)
+    def test_active_self_release_prevents_stale_checkout_pending(
+        self,
+        mock_fetch,
+        mock_head,
+        mock_remote_head,
+        mock_pending,
+        tmp_path: Path,
+    ) -> None:
+        repo_path = tmp_path / "haniel"
+        repo_path.mkdir()
+        (repo_path / ".git").mkdir()
+        config = HanielConfig.model_validate(
+            {
+                "poll_interval": 1,
+                "repos": {
+                    "haniel": {
+                        "url": "git@github.com:test/haniel.git",
+                        "branch": "main",
+                        "path": "./haniel",
+                    }
+                },
+                "services": {},
+                "self": {"repo": "haniel", "auto_update": False},
+                "orchestrator_client": {
+                    "url": "ws://localhost/ws/node",
+                    "token": "test",
+                    "node_id": "node-a",
+                },
+            }
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        runner._active_self_head = "target-head"
+        runner._repo_states["haniel"].last_head = "target-head"
+        runner._orch_client = MagicMock()
+
+        assert runner._detect_changes() == []
+        assert runner._repo_states["haniel"].pending_changes is None
+        runner._orch_client.notify_change.assert_not_called()
+        mock_pending.assert_not_called()
+
+    @patch(
+        "haniel.core.runner.get_pending_changes",
+        return_value={"commits": ["remote-head Self update"], "stat": "1 file"},
+    )
+    @patch("haniel.core.runner.get_remote_head", return_value="remote-head")
+    @patch("haniel.core.runner.get_head", return_value="old-source-head")
+    @patch("haniel.core.runner.fetch_repo", return_value=True)
+    def test_self_pending_range_starts_from_active_release(
+        self,
+        mock_fetch,
+        mock_head,
+        mock_remote_head,
+        mock_pending,
+        tmp_path: Path,
+    ) -> None:
+        repo_path = tmp_path / "haniel"
+        repo_path.mkdir()
+        (repo_path / ".git").mkdir()
+        config = HanielConfig.model_validate(
+            {
+                "poll_interval": 1,
+                "repos": {
+                    "haniel": {
+                        "url": "git@github.com:test/haniel.git",
+                        "branch": "main",
+                        "path": "./haniel",
+                    }
+                },
+                "services": {},
+                "self": {"repo": "haniel", "auto_update": False},
+            }
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        runner._active_self_head = "active-head"
+        runner._repo_states["haniel"].last_head = "active-head"
+
+        assert runner._detect_changes() == ["haniel"]
+        mock_pending.assert_called_once_with(
+            path=repo_path,
+            branch="main",
+            local_ref="active-head",
+        )
 
     @patch(
         "haniel.core.runner.get_pending_changes",
@@ -2252,6 +2375,45 @@ class TestReloadConfig:
             runner.reload_config()
 
         assert runner._repo_states["main"].last_head == "current-head"
+
+    def test_initializes_new_self_repo_from_active_release(self, tmp_path: Path):
+        """Config reload must not replace deployed self truth with source HEAD."""
+        config_file = tmp_path / "haniel.yaml"
+        original = HanielConfig(poll_interval=5, repos={}, services={})
+        self._write_yaml(config_file, original)
+
+        repo_path = tmp_path / "haniel"
+        repo_path.mkdir()
+        runner = ServiceRunner(
+            original,
+            config_dir=tmp_path,
+            config_path=config_file,
+            active_self_head="active-head",
+        )
+        updated = HanielConfig.model_validate(
+            {
+                "poll_interval": 5,
+                "repos": {
+                    "haniel": {
+                        "url": "git@github.com:test/haniel.git",
+                        "path": "./haniel",
+                    }
+                },
+                "services": {},
+                "self": {"repo": "haniel", "auto_update": False},
+            }
+        )
+        self._write_yaml(config_file, updated)
+
+        with patch(
+            "haniel.core.runner.get_head",
+            side_effect=AssertionError(
+                "source checkout must not define deployed self state"
+            ),
+        ):
+            runner.reload_config()
+
+        assert runner._repo_states["haniel"].last_head == "active-head"
 
 
 class TestRemoteServiceCommandHandler:

@@ -321,6 +321,7 @@ class ServiceRunner:
         config_dir: Path,
         log_dir: Path | None = None,
         config_path: Path | None = None,
+        active_self_head: str | None = None,
     ):
         """Initialize the runner.
 
@@ -331,11 +332,14 @@ class ServiceRunner:
             config_path: Absolute path to the haniel.yaml file. When set, the
                 dashboard config API can read/write the file and reload_config()
                 is operational. When None, config API returns 501.
+            active_self_head: Commit of the validated atomic release executing
+                this process. The source checkout remains fetch-only.
         """
         self.config = config
         self.config_dir = config_dir
         self.log_dir = log_dir or config_dir / "logs"
         self.config_path = config_path
+        self._active_self_head = active_self_head
         self.lifecycle_control = LifecycleControl(
             config_path or (config_dir / "haniel.yaml")
         )
@@ -582,6 +586,9 @@ class ServiceRunner:
             ) from error
         shutdown_order = tuple(reversed(startup_order))
         resident_identity = self._snapshot_config_state().repo_identity
+        self_update_repo = (
+            prepared_config.self_update.repo if prepared_config.self_update else None
+        )
         prepared_identity_states: dict[str, RepoState] = {}
         prepared_new_locks: dict[str, threading.Lock] = {}
         for name, repo_cfg in prepared_config.repos.items():
@@ -597,15 +604,17 @@ class ServiceRunner:
             repo_path = self.config_dir / repo_cfg.path
             if repo_path.exists():
                 try:
-                    state.last_head = get_head(repo_path)
+                    state.last_head = (
+                        self._active_self_head
+                        if name == self_update_repo
+                        and self._active_self_head is not None
+                        else get_head(repo_path)
+                    )
                 except GitError as error:
                     state.fetch_error = bounded_redact_text(str(error))
             prepared_identity_states[name] = state
             if old_config is None:
                 prepared_new_locks[name] = threading.Lock()
-        self_update_repo = (
-            prepared_config.self_update.repo if prepared_config.self_update else None
-        )
         with self._config_reload_lock:
             if self._config_generation != expected_generation:
                 raise StableDeploymentError(
@@ -1597,6 +1606,11 @@ class ServiceRunner:
             repo_path=(self.config_dir / state.config.path).resolve(),
             manifest_path=state.config.release_manifest,
             journal_store=self._deployment_state_store(),
+            deployed_head=(
+                self._active_self_head
+                if repo == self._self_repo and self._active_self_head is not None
+                else None
+            ),
         )
 
     def _capture_orchestrator_repo_snapshot(
@@ -1616,9 +1630,19 @@ class ServiceRunner:
             branch=state.config.branch,
             path=self.config_dir / state.config.path,
             deploy_id=deploy_id,
+            local_head=self._effective_repo_head(
+                repo,
+                self.config_dir / state.config.path,
+            ),
         )
         self._require_config_generation(config_snapshot)
         return snapshot
+
+    def _effective_repo_head(self, repo: str, path: Path) -> str:
+        """Return deployed code truth; source HEAD remains the default."""
+        if repo == self._self_repo and self._active_self_head is not None:
+            return self._active_self_head
+        return get_head(path)
 
     def _begin_node_deploy_report(
         self,
@@ -2331,7 +2355,7 @@ class ServiceRunner:
         repo_path = self.config_dir / state.config.path
         if repo_path.exists():
             try:
-                head = get_head(repo_path)
+                head = self._effective_repo_head(name, repo_path)
                 self._commit_repo_observation(
                     RepoObservation(
                         generation=state.generation,
@@ -3028,8 +3052,13 @@ class ServiceRunner:
                     break
                 observed_at = datetime.now()
 
-                # Read current HEAD (may differ from last_head if externally pulled)
-                current_head = get_head(repo_path)
+                # Read deployed HEAD. For self-update releases this is the active
+                # atomic release, not the fetch-only source checkout.
+                current_head = self._effective_repo_head(name, repo_path)
+                self_uses_active_release = (
+                    name == config_snapshot.self_repo
+                    and self._active_self_head is not None
+                )
                 pending_changes = runtime.pending_changes
                 repo_changed = False
                 should_notify_pending = False
@@ -3038,7 +3067,11 @@ class ServiceRunner:
                     # External pull or other process advanced HEAD
                     previous_head = runtime.last_head
                     self_checkout_matches_remote = False
-                    if name == config_snapshot.self_repo and previous_head:
+                    if (
+                        name == config_snapshot.self_repo
+                        and not self_uses_active_release
+                        and previous_head
+                    ):
                         remote_head = get_remote_head(repo_path, runtime.config.branch)
                         self_checkout_matches_remote = current_head == remote_head
                     last_short = runtime.last_head[:8] if runtime.last_head else "None"
@@ -3061,6 +3094,11 @@ class ServiceRunner:
                         pending_changes = get_pending_changes(
                             path=repo_path,
                             branch=runtime.config.branch,
+                            **(
+                                {"local_ref": current_head}
+                                if self_uses_active_release
+                                else {}
+                            ),
                         )
                 else:
                     # current == last_head, check if remote has new commits
@@ -3076,6 +3114,11 @@ class ServiceRunner:
                         pending_changes = get_pending_changes(
                             path=repo_path,
                             branch=runtime.config.branch,
+                            **(
+                                {"local_ref": current_head}
+                                if self_uses_active_release
+                                else {}
+                            ),
                         )
                     else:
                         # A self checkout can already match origin while the running
@@ -3165,6 +3208,10 @@ class ServiceRunner:
             repo=name,
             branch=state.config.branch,
             path=self.config_dir / state.config.path,
+            local_head=self._effective_repo_head(
+                name,
+                self.config_dir / state.config.path,
+            ),
         )
         self_restart_required = name == config_snapshot.self_repo and (
             self._state.self_update_pending
