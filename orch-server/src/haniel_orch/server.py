@@ -9,6 +9,7 @@ import pathlib
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Literal
+from urllib.parse import unquote
 
 from pydantic import BaseModel
 from starlette.applications import Starlette
@@ -25,6 +26,34 @@ from .node_registry import NodeRegistry
 from .push import NullPushService, PushService, RelayPushService
 
 logger = logging.getLogger(__name__)
+
+_MAX_DASHBOARD_PATH_DECODE_PASSES = 8
+
+
+def _resolve_dashboard_path(
+    root: pathlib.Path, request_path: str
+) -> pathlib.Path | None:
+    """Resolve a dashboard path without allowing it to escape ``root``."""
+    decoded_path = request_path
+    for _ in range(_MAX_DASHBOARD_PATH_DECODE_PASSES):
+        next_path = unquote(decoded_path)
+        if next_path == decoded_path:
+            break
+        decoded_path = next_path
+    else:
+        return None
+
+    # pathlib only treats backslashes as separators on Windows. Reject them on
+    # every platform so the dashboard boundary has one cross-platform contract.
+    if "\\" in decoded_path:
+        return None
+
+    candidate = (root / decoded_path).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate
 
 
 class AuthMiddleware:
@@ -166,20 +195,26 @@ class OrchestratorServer:
             )
         dashboard_routes: list[Route | Mount] = []
         if dashboard_dir.exists():
+            dashboard_root = dashboard_dir.resolve()
 
             async def serve_dashboard(request: Request) -> Response:
                 """SPA fallback: serve static file if exists, else index.html."""
                 path = request.path_params.get("path", "")
-                file_path = dashboard_dir / path
+                file_path = _resolve_dashboard_path(dashboard_root, path)
+                if file_path is None:
+                    return Response(status_code=404)
                 if path and file_path.is_file():
                     return FileResponse(str(file_path))
-                return FileResponse(str(dashboard_dir / "index.html"))
+                index_path = _resolve_dashboard_path(dashboard_root, "index.html")
+                if index_path is None or not index_path.is_file():
+                    return Response(status_code=404)
+                return FileResponse(str(index_path))
 
             dashboard_routes = [
                 Route("/dashboard", serve_dashboard),
                 Route("/dashboard/{path:path}", serve_dashboard),
             ]
-            logger.info(f"Dashboard mounted from {dashboard_dir}")
+            logger.info(f"Dashboard mounted from {dashboard_root}")
 
         @asynccontextmanager
         async def lifespan(app: Starlette) -> AsyncGenerator[None, None]:
