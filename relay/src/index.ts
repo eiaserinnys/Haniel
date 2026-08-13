@@ -30,6 +30,8 @@ interface DeviceRecord {
   registered_at: string;
 }
 
+const APNS_CONCURRENCY_LIMIT = 10;
+
 // --- JWT cache (module-level, survives across requests within same isolate) ---
 
 let jwtCache: { token: string; expiresAt: number } | null = null;
@@ -94,6 +96,24 @@ export function resetJwtCache(): void {
   jwtCache = null;
 }
 
+async function forEachConcurrent<T>(
+  items: readonly T[],
+  concurrency: number,
+  callback: (item: T) => Promise<void>,
+): Promise<void> {
+  let nextIndex = 0;
+
+  async function worker(): Promise<void> {
+    while (nextIndex < items.length) {
+      const item = items[nextIndex++];
+      await callback(item);
+    }
+  }
+
+  const workerCount = Math.min(concurrency, items.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+}
+
 // --- Route handlers ---
 
 async function handlePush(request: Request, env: Env): Promise<Response> {
@@ -102,13 +122,6 @@ async function handlePush(request: Request, env: Env): Promise<Response> {
     return Response.json({ error: "title and body are required" }, { status: 400 });
   }
 
-  // List all device tokens from KV
-  const listed = await env.DEVICE_TOKENS.list();
-  if (listed.keys.length === 0) {
-    return Response.json({ sent: 0, failed: 0, errors: [] });
-  }
-
-  const jwt = await createApnsJwt(env);
   const apnsPayload = JSON.stringify({
     aps: { alert: { title: body.title, body: body.body }, sound: "default" },
     ...(body.data ?? {}),
@@ -117,42 +130,59 @@ async function handlePush(request: Request, env: Env): Promise<Response> {
   let sent = 0;
   let failed = 0;
   const errors: Array<{ token: string; status: number }> = [];
+  let cursor: string | undefined;
+  let jwt: string | undefined;
 
-  const results = await Promise.allSettled(
-    listed.keys.map(async (key) => {
-      const token = key.name;
-      try {
-        const resp = await fetch(
-          `https://api.push.apple.com/3/device/${token}`,
-          {
-            method: "POST",
-            headers: {
-              authorization: `bearer ${jwt}`,
-              "apns-topic": env.APNS_BUNDLE_ID,
-              "apns-push-type": "alert",
-              "content-type": "application/json",
-            },
-            body: apnsPayload,
-          },
-        );
+  do {
+    const listed = await env.DEVICE_TOKENS.list(
+      cursor === undefined ? undefined : { cursor },
+    );
 
-        if (resp.status === 410) {
-          // Gone — stale token, remove from KV
-          await env.DEVICE_TOKENS.delete(token);
-          failed++;
-          errors.push({ token, status: 410 });
-        } else if (!resp.ok) {
-          failed++;
-          errors.push({ token, status: resp.status });
-        } else {
-          sent++;
-        }
-      } catch {
-        failed++;
-        errors.push({ token, status: 0 });
-      }
-    }),
-  );
+    if (listed.keys.length > 0) {
+      const pageJwt = jwt ?? await createApnsJwt(env);
+      jwt = pageJwt;
+
+      await forEachConcurrent(
+        listed.keys,
+        APNS_CONCURRENCY_LIMIT,
+        async (key) => {
+          const token = key.name;
+          try {
+            const resp = await fetch(
+              `https://api.push.apple.com/3/device/${token}`,
+              {
+                method: "POST",
+                headers: {
+                  authorization: `bearer ${pageJwt}`,
+                  "apns-topic": env.APNS_BUNDLE_ID,
+                  "apns-push-type": "alert",
+                  "content-type": "application/json",
+                },
+                body: apnsPayload,
+              },
+            );
+
+            if (resp.status === 410) {
+              // Gone — stale token, remove from KV
+              await env.DEVICE_TOKENS.delete(token);
+              failed++;
+              errors.push({ token, status: 410 });
+            } else if (!resp.ok) {
+              failed++;
+              errors.push({ token, status: resp.status });
+            } else {
+              sent++;
+            }
+          } catch {
+            failed++;
+            errors.push({ token, status: 0 });
+          }
+        },
+      );
+    }
+
+    cursor = listed.list_complete ? undefined : listed.cursor;
+  } while (cursor !== undefined);
 
   return Response.json({ sent, failed, errors });
 }

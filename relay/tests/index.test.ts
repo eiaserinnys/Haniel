@@ -17,7 +17,10 @@ const TOKEN_STALE = "c".repeat(64);
 const TOKEN_OK = "d".repeat(64);
 const TOKEN_FAIL = "e".repeat(64);
 
-function createMockKV(store: Map<string, string> = new Map()): KVNamespace {
+function createMockKV(
+  store: Map<string, string> = new Map(),
+  listPageSize = Number.POSITIVE_INFINITY,
+): KVNamespace {
   return {
     get: vi.fn(async (key: string) => store.get(key) ?? null),
     put: vi.fn(async (key: string, value: string) => {
@@ -26,11 +29,19 @@ function createMockKV(store: Map<string, string> = new Map()): KVNamespace {
     delete: vi.fn(async (key: string) => {
       store.delete(key);
     }),
-    list: vi.fn(async () => ({
-      keys: Array.from(store.keys()).map((name) => ({ name })),
-      list_complete: true,
-      cacheStatus: null,
-    })),
+    list: vi.fn(async (options?: { cursor?: string }) => {
+      const start = Number(options?.cursor ?? 0);
+      const names = Array.from(store.keys());
+      const end = Math.min(start + listPageSize, names.length);
+      const page = {
+        keys: names.slice(start, end).map((name) => ({ name })),
+        list_complete: end >= names.length,
+        cacheStatus: null,
+      };
+      return page.list_complete
+        ? page
+        : { ...page, cursor: String(end) };
+    }),
     getWithMetadata: vi.fn(),
   } as unknown as KVNamespace;
 }
@@ -51,9 +62,10 @@ let testPem: string;
 
 function createMockEnv(
   kvStore: Map<string, string> = new Map(),
+  listPageSize = Number.POSITIVE_INFINITY,
 ): Env {
   return {
-    DEVICE_TOKENS: createMockKV(kvStore),
+    DEVICE_TOKENS: createMockKV(kvStore, listPageSize),
     INSTANCE_KEY: "test-instance-key",
     APNS_KEY_ID: "KEYID123",
     APNS_TEAM_ID: "TEAMID456",
@@ -255,6 +267,52 @@ describe("POST /v1/push", () => {
     const apnsBody = JSON.parse(init.body as string);
     expect(apnsBody.aps.alert.title).toBe("Deploy");
     expect(apnsBody.deploy_id).toBe("d1");
+  });
+
+  it("sends exactly once across every KV page with bounded concurrency", async () => {
+    const concurrencyLimit = 10;
+    const pageSize = concurrencyLimit + 3;
+    const deviceCount = concurrencyLimit * 2 + 3;
+    const tokens = Array.from({ length: deviceCount }, (_, index) =>
+      index.toString(16).padStart(64, "0"),
+    );
+    const store = new Map(
+      tokens.map((token) => [
+        token,
+        JSON.stringify({ device_name: token, registered_at: "" }),
+      ]),
+    );
+    const env = createMockEnv(store, pageSize);
+
+    let activeRequests = 0;
+    let maxActiveRequests = 0;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      activeRequests++;
+      maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+      await Promise.resolve();
+      activeRequests--;
+      return new Response("", { status: 200 });
+    });
+
+    const req = makeRequest("POST", "/v1/push", {
+      title: "Deploy",
+      body: "New deploy pending",
+    });
+
+    const resp = await worker.fetch(req, env, {} as ExecutionContext);
+    const data = await resp.json<{ sent: number; failed: number }>();
+
+    expect(data).toMatchObject({ sent: deviceCount, failed: 0 });
+    expect(env.DEVICE_TOKENS.list).toHaveBeenCalledTimes(
+      Math.ceil(deviceCount / pageSize),
+    );
+    expect(fetchSpy).toHaveBeenCalledTimes(deviceCount);
+
+    const deliveredTokens = fetchSpy.mock.calls.map(([input]) =>
+      String(input).split("/").at(-1),
+    );
+    expect(new Set(deliveredTokens)).toEqual(new Set(tokens));
+    expect(maxActiveRequests).toBeLessThanOrEqual(concurrencyLimit);
   });
 
   it("deletes stale tokens on APNs 410 Gone", async () => {
