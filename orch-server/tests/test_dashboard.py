@@ -52,6 +52,8 @@ def test_dashboard_rejects_single_encoded_traversal(
 @pytest.mark.parametrize(
     "traversal",
     [
+        # TestClient can normalize literal dot segments before Starlette routes
+        # them; encoded variants below are the effective handler coverage.
         "../secret.txt",
         "%252e%252e/secret.txt",
         "..%5Csecret.txt",
@@ -85,6 +87,20 @@ def test_dashboard_rejects_symlink_escape(
     (dashboard_dir / "outside-link").symlink_to(secret_path)
 
     response = client.get("/dashboard/outside-link")
+
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize("path", ["/dashboard", "/dashboard/missing-route"])
+def test_dashboard_rejects_symlinked_spa_fallback(
+    dashboard: tuple[TestClient, Path, Path], path: str
+) -> None:
+    client, dashboard_dir, secret_path = dashboard
+    index_path = dashboard_dir / "index.html"
+    index_path.unlink()
+    index_path.symlink_to(secret_path)
+
+    response = client.get(path)
 
     assert response.status_code == 404
 

@@ -205,7 +205,10 @@ class OrchestratorServer:
                     return Response(status_code=404)
                 if path and file_path.is_file():
                     return FileResponse(str(file_path))
-                return FileResponse(str(dashboard_root / "index.html"))
+                index_path = _resolve_dashboard_path(dashboard_root, "index.html")
+                if index_path is None or not index_path.is_file():
+                    return Response(status_code=404)
+                return FileResponse(str(index_path))
 
             dashboard_routes = [
                 Route("/dashboard", serve_dashboard),
