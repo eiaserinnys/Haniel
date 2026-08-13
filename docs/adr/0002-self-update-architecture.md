@@ -178,6 +178,13 @@ The source checkout itself is never reset by the new wrapper. If that baseline c
 pass the release gates, the wrapper fails closed instead of launching an unvalidated
 source checkout.
 
+**Runtime reconciliation follows the active release.**
+The release helper records the validated active commit and both wrappers pass it
+explicitly to the Haniel process. For the self repository, settled snapshots,
+polling baselines, and pending commit ranges use that active commit. The source
+checkout remains a fetch-only object store; its `HEAD` is not evidence of the code
+currently executing.
+
 **"Always update on start" vs "approval gate" is not contradictory.**
 The approval gate controls when haniel voluntarily exits (disrupting running services).
 The "always update" in the wrapper applies when services are already down (crash,

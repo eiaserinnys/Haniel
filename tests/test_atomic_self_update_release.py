@@ -178,7 +178,7 @@ if [[ "${{1:-}}" == "-m" && "${{2:-}}" == "haniel.cli" ]]; then
   code="$(head -n 1 "{state}")"
   tail -n +2 "{state}" > "{state}.next"
   mv "{state}.next" "{state}"
-  printf '%s|%s\\n' "$(readlink -f "$0")" "$code" >> "{launch_log}"
+  printf '%s|%s|%s\\n' "$(readlink -f "$0")" "$code" "$*" >> "{launch_log}"
   exit "$code"
 fi
 exec "{real_python}" "$@"
@@ -372,12 +372,16 @@ def test_success_switches_current_and_reexecs_release_wrapper(tmp_path: Path) ->
     assert current.name == run.target_commit
     assert source_head == run.previous_commit
     assert marker["ok"] is True
-    assert "Re-executing current release wrapper" in run.result.stdout
-    assert (
-        run.launch_log.read_text(encoding="utf-8")
-        .splitlines()[-1]
-        .startswith(str(current / ".venv" / "bin" / "python"))
+    preparation = json.loads(
+        (tmp_path / ".local" / "haniel_release_preparation.json").read_text(
+            encoding="utf-8"
+        )
     )
+    assert preparation["active_commit"] == run.target_commit
+    assert "Re-executing current release wrapper" in run.result.stdout
+    launch = run.launch_log.read_text(encoding="utf-8").splitlines()[-1]
+    assert launch.startswith(str(current / ".venv" / "bin" / "python"))
+    assert f"--active-self-head {run.target_commit}" in launch
 
 
 def test_new_wrapper_migrates_legacy_layout_before_target_switch(

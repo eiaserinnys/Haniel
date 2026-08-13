@@ -154,6 +154,7 @@ PREPARATION_ERROR_CODE=""
 PREPARATION_WARNINGS=""
 ACTIVE_REPO="$REPO_PATH"
 ACTIVE_PYTHON="$PYTHON_BIN"
+ACTIVE_COMMIT=""
 SELF_UPDATE_EXIT_MARKER="$ROOT_DIR/.local/self_update_exit_requested"
 FORCED_SELF_UPDATE_MARKER="$ROOT_DIR/.local/self_update_exit_forced"
 
@@ -167,6 +168,7 @@ load_preparation_result() {
     PREPARATION_WARNINGS=""
     ACTIVE_REPO=""
     ACTIVE_PYTHON=""
+    ACTIVE_COMMIT=""
     return 1
   fi
   mapfile -t fields < <("$PYTHON_BIN" - "$PREPARATION_RESULT_PATH" <<'PY'
@@ -179,17 +181,19 @@ print("true" if payload.get("ok") else "false")
 print("true" if payload.get("switched") else "false")
 print(payload.get("active_repo") or "")
 print(payload.get("active_python") or "")
+print(payload.get("active_commit") or "")
 print((payload.get("error") or "").replace("\n", " "))
 print(payload.get("error_code") or "")
 print(" | ".join(payload.get("warnings") or []).replace("\n", " "))
 PY
   )
-  if (( ${#fields[@]} != 7 )); then
+  if (( ${#fields[@]} != 8 )); then
     LAST_UPDATE_ERROR="invalid atomic release helper result"
     PREPARATION_OK="false"
     PREPARATION_SWITCHED="false"
     ACTIVE_REPO=""
     ACTIVE_PYTHON=""
+    ACTIVE_COMMIT=""
     PREPARATION_ERROR_CODE=""
     PREPARATION_WARNINGS=""
     return 1
@@ -198,9 +202,10 @@ PY
   PREPARATION_SWITCHED="${fields[1]}"
   ACTIVE_REPO="${fields[2]}"
   ACTIVE_PYTHON="${fields[3]}"
-  LAST_UPDATE_ERROR="${fields[4]}"
-  PREPARATION_ERROR_CODE="${fields[5]}"
-  PREPARATION_WARNINGS="${fields[6]}"
+  ACTIVE_COMMIT="${fields[4]}"
+  LAST_UPDATE_ERROR="${fields[5]}"
+  PREPARATION_ERROR_CODE="${fields[6]}"
+  PREPARATION_WARNINGS="${fields[7]}"
 }
 
 write_self_update_marker() {
@@ -342,7 +347,7 @@ while true; do
     fi
     write_self_update_marker=false
 
-    if [[ -z "$ACTIVE_REPO" || -z "$ACTIVE_PYTHON" || ! -x "$ACTIVE_PYTHON" ]]; then
+    if [[ -z "$ACTIVE_REPO" || -z "$ACTIVE_PYTHON" || -z "$ACTIVE_COMMIT" || ! -x "$ACTIVE_PYTHON" ]]; then
       message="No previously validated Haniel release is available; refusing to launch."
       echo "[haniel-runner] $message" >&2
       send_webhook "$message" "error"
@@ -363,7 +368,7 @@ while true; do
   echo "[haniel-runner] Launching haniel..."
   rm -f "$SELF_UPDATE_EXIT_MARKER" "$FORCED_SELF_UPDATE_MARKER"
   launch_started_at="$(date +%s)"
-  "$ACTIVE_PYTHON" -m haniel.cli run "$CONFIG_PATH" &
+  "$ACTIVE_PYTHON" -m haniel.cli run --active-self-head "$ACTIVE_COMMIT" "$CONFIG_PATH" &
   CHILD_PID=$!
   start_self_update_watchdog "$CHILD_PID"
   wait "$CHILD_PID"

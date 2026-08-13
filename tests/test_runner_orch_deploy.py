@@ -481,6 +481,22 @@ class TestHandleDeployApprovalSelfRepo:
         runner.approve_self_update.assert_not_called()
         assert not (tmp_path / MARKER_RELPATH).exists()
 
+    def test_retry_probe_uses_active_release_not_source_checkout(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        runner = _build_runner(tmp_path, with_self_repo=True)
+        runner._active_self_head = "target-head"
+        planner = runner._deploy_retry_planner("haniel")
+
+        with patch(
+            "haniel.core.deploy_retry_planner.get_head",
+            side_effect=AssertionError("source checkout must not be consulted"),
+        ):
+            plan = planner.plan({"repo": "haniel", "target_head": "target-head"})
+
+        assert plan.evidence["current_head"] == "target-head"
+
 
 class TestEnqueuePendingSelfDeployResult:
     def test_no_marker_skips(self, tmp_path: Path) -> None:
@@ -521,6 +537,41 @@ class TestEnqueuePendingSelfDeployResult:
         assert kwargs.get("status") == "success"
         assert kwargs.get("error") is None
         assert kwargs.get("duration_ms") == 90 * 1000
+
+    def test_self_update_settled_uses_active_release_not_source_checkout(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        runner = _build_runner(tmp_path, with_self_repo=True)
+        runner._active_self_head = "target-head"
+        runner._orch_client = MagicMock()
+        _write_pending(
+            tmp_path,
+            "node-a:haniel:main:target-head",
+            datetime(2026, 5, 5, 0, 0, 0, tzinfo=timezone.utc).isoformat(),
+        )
+        runner._last_self_update_result = SelfUpdateResult(
+            version=1,
+            started_at=datetime(2026, 5, 5, 0, 0, 0, tzinfo=timezone.utc).isoformat(),
+            finished_at=datetime(2026, 5, 5, 0, 1, 0, tzinfo=timezone.utc).isoformat(),
+            ok=True,
+            steps=[],
+        )
+
+        with (
+            patch("haniel.core.repo_reconciliation.get_head", return_value="old-head"),
+            patch(
+                "haniel.core.repo_reconciliation.get_remote_head",
+                return_value="target-head",
+            ),
+        ):
+            runner._enqueue_pending_self_deploy_result()
+
+        snapshot = runner._orch_client.enqueue_deploy_result.call_args.kwargs[
+            "settled_snapshot"
+        ]
+        assert snapshot.local_head == "target-head"
+        assert snapshot.remote_head == "target-head"
 
     def test_marker_with_failed_result(self, tmp_path: Path) -> None:
         runner = _build_runner(tmp_path)

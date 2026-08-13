@@ -44,6 +44,7 @@ class PreparationResult:
     warnings: list[str] = field(default_factory=list)
     active_repo: str | None = None
     active_python: str | None = None
+    active_commit: str | None = None
     target_commit: str | None = None
     switched: bool = False
     migrated: bool = False
@@ -63,6 +64,7 @@ class PreparationResult:
             "warnings": self.warnings,
             "active_repo": self.active_repo,
             "active_python": self.active_python,
+            "active_commit": self.active_commit,
             "target_commit": self.target_commit,
             "switched": self.switched,
             "migrated": self.migrated,
@@ -426,6 +428,7 @@ def prepare(args: argparse.Namespace) -> PreparationResult:
 
         result.active_repo = str(active)
         result.active_python = str(_release_python(active))
+        result.active_commit = active.name
         result.ok = True
         return result
     except Exception as exc:  # noqa: BLE001 - preserve the active release on any gate failure
@@ -438,6 +441,7 @@ def prepare(args: argparse.Namespace) -> PreparationResult:
         if active is not None:
             result.active_repo = str(active)
             result.active_python = str(_release_python(active))
+            result.active_commit = active.name
         return result
 
 

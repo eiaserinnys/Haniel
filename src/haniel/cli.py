@@ -11,6 +11,7 @@ Commands:
 import json
 import logging
 import os
+import re
 import signal
 import sys
 from pathlib import Path
@@ -25,6 +26,18 @@ from haniel.commands.install import install_command
 from haniel.commands.install import print_dry_run_install as print_dry_run_install
 from haniel.commands.lifecycle import lifecycle_group
 from haniel.config import HanielConfig
+
+
+def _validate_active_self_head(
+    _context: click.Context,
+    _parameter: click.Parameter,
+    value: str | None,
+) -> str | None:
+    if value is None:
+        return None
+    if re.fullmatch(r"[0-9a-fA-F]{40,64}", value) is None:
+        raise click.BadParameter("must be a full hexadecimal commit ID")
+    return value.lower()
 
 
 def _exit_immediately(exit_code: int) -> None:
@@ -107,12 +120,18 @@ main.add_command(lifecycle_group)
 @click.option(
     "--log-level", default="INFO", help="Log level (DEBUG, INFO, WARNING, ERROR)."
 )
+@click.option(
+    "--active-self-head",
+    hidden=True,
+    callback=_validate_active_self_head,
+)
 @click.option("--initial-request-id", hidden=True)
 def run(
     config: Path | None,
     foreground: bool,
     dry_run: bool,
     log_level: str,
+    active_self_head: str | None,
     initial_request_id: str | None,
 ) -> None:
     """Start services and begin the poll loop.
@@ -174,6 +193,7 @@ def run(
         config=haniel_config,
         config_dir=config_dir,
         config_path=config.resolve(),
+        active_self_head=active_self_head,
     )
     from haniel.core.lifecycle_control import LifecycleControl
     from haniel.core.lifecycle_request_server import LifecycleRequestServer

@@ -46,15 +46,16 @@ def capture_repo_snapshot(
     branch: str,
     path: Path,
     deploy_id: str | None = None,
+    local_head: str | None = None,
 ) -> RepoReconciliationSnapshot:
-    """Read settled Git truth and preserve an existing canonical ID when supplied."""
-    local_head = get_head(path)
+    """Read settled deployed truth and preserve an existing canonical ID."""
+    observed_local_head = local_head if local_head is not None else get_head(path)
     remote_head = get_remote_head(path, branch)
     return RepoReconciliationSnapshot(
         node_id=node_id,
         repo=repo,
         branch=branch,
-        local_head=local_head,
+        local_head=observed_local_head,
         remote_head=remote_head,
         deploy_id=deploy_id
         or deterministic_deploy_id(node_id, repo, branch, remote_head),

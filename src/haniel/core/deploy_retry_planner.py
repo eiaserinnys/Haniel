@@ -47,13 +47,15 @@ class DeployRetryPlanner:
         repo_path: Path,
         manifest_path: str | None,
         journal_store: DeploymentStateStore,
+        deployed_head: str | None = None,
     ) -> None:
         self.repo_path = repo_path
         self.manifest_path = manifest_path
         self.journal_store = journal_store
+        self.deployed_head = deployed_head
 
     def plan(self, probe: dict[str, Any]) -> RetryPlan:
-        current_head = get_head(self.repo_path)
+        current_head = self.deployed_head or get_head(self.repo_path)
         target = probe["target_head"]
         journal = self.journal_store.read(probe["repo"])
         identity, digest, manifest_error = self._manifest_snapshot(target)
