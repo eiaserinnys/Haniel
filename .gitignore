@@ -50,6 +50,7 @@ Thumbs.db
 # Node.js
 node_modules/
 package-lock.json
+!relay/package-lock.json
 
 # Project specific
 *.log
