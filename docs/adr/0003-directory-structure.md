@@ -39,6 +39,10 @@ repo is isolated in `.self/`, and managed services are cloned into `.services/`:
 {root}/                          # Clean working directory
 +-- haniel.yaml                  # Single config for all services
 +-- haniel-runner.conf           # Generated wrapper config
++-- .local/
+|   +-- haniel-releases/
+|       +-- current -> releases/{commit}
+|       +-- releases/{commit}/  # Release-local venv and built dashboard
 +-- {service-name}.exe           # WinSW service executable
 +-- {service-name}.xml           # WinSW service config
 +-- bin/
@@ -60,8 +64,13 @@ repo is isolated in `.self/`, and managed services are cloned into `.services/`:
 **One config to rule them all**: A single `haniel.yaml` at root defines all repos and
 services. Adding a service = edit YAML + restart haniel.
 
-**`.self/` for haniel itself**: The haniel git repo is cloned here. The `.venv/` for
-haniel lives inside. Self-update (ADR-0002) operates on this directory.
+**`.self/` for Haniel source discovery**: The Haniel git repo is cloned here and
+self-update fetches target commits from it without resetting its checkout. Running
+code comes from `.local/haniel-releases/current`.
+
+**Commit-specific runtime releases**: Every candidate gets an independent checkout,
+venv, import smoke, and dashboard build. Only a fully prepared release can become
+`current`.
 
 **`.services/{name}/` per managed repo**: Each repo from the `repos` section (except
 the `self` repo) is cloned here. Service logs go into `{repo}/logs/` to avoid cross-service

@@ -20,13 +20,12 @@ from haniel import EXIT_CLEAN, EXIT_SELF_UPDATE, SelfUpdateExit
 from haniel.config import (
     HanielConfig,
     RepoConfig,
-    ServiceConfig,
     SelfUpdateConfig,
+    ServiceConfig,
     WebhookConfig,
 )
-from haniel.integrations.webhook import EventType, EVENT_METADATA
 from haniel.core.deployment_errors import StableDeploymentError
-
+from haniel.integrations.webhook import EVENT_METADATA, EventType
 
 # --- Exit Code Tests ---
 
@@ -577,6 +576,7 @@ class TestWrapperModeInstaller:
 
             content = conf_path.read_text(encoding="utf-8")
             assert "HANIEL_REPO=./.projects/haniel" in content
+            assert "HANIEL_RELEASE_ROOT=.local/haniel-releases" in content
             assert "CONFIG=haniel.yaml" in content
             assert "WEBHOOK_URL=https://hooks.example.com/test" in content
             assert "MAX_GIT_FAILURES=3" in content
@@ -590,7 +590,9 @@ class TestWrapperModeInstaller:
         script_path = Path(__file__).resolve().parents[1] / "haniel-runner.ps1"
         script = script_path.read_text(encoding="utf-8-sig")
 
-        marker_write = script.index("Write-SelfUpdateMarker -Ok $updateOk")
+        marker_write = script.index(
+            "Write-SelfUpdateMarker -Ok ([bool]$script:PreparationResult.ok)"
+        )
         guard = script.rfind("if ($writeSelfUpdateMarker)", 0, marker_write)
         assert guard != -1
 
@@ -604,8 +606,10 @@ class TestWrapperModeInstaller:
         script_path = Path(__file__).resolve().parents[1] / "haniel-runner.ps1"
         script = script_path.read_text(encoding="utf-8-sig")
 
-        assert "Get-FileHash -Path $PSCommandPath" in script
-        assert "& $PSCommandPath" in script
-        marker_write = script.index("Write-SelfUpdateMarker -Ok $updateOk")
-        reload_wrapper = script.index("& $PSCommandPath")
+        assert "Re-executing current release wrapper" in script
+        assert "& $activeRunner" in script
+        marker_write = script.index(
+            "Write-SelfUpdateMarker -Ok ([bool]$script:PreparationResult.ok)"
+        )
+        reload_wrapper = script.index("& $activeRunner")
         assert marker_write < reload_wrapper

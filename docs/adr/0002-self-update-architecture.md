@@ -31,11 +31,12 @@ Introduce a thin PowerShell wrapper script (`haniel-runner.ps1`) between WinSW a
 the haniel process. WinSW registers the wrapper as the service, not haniel directly.
 
 ```
-WinSW Service
-  └─ haniel-runner.ps1 (outer loop, ~50 lines)
-       ├─ git fetch + reset --hard origin/main
-       ├─ pip install -e .
-       └─ python -m haniel.cli run haniel.yaml (inner process)
+WinSW/systemd/PM2 supervisor
+  └─ haniel-runner.ps1 or haniel-runner.sh (outer loop)
+       ├─ source checkout: git fetch + target commit resolution only
+       ├─ releases/{commit}: checkout + venv + install + import + UI build
+       ├─ current: atomic symlink replacement after every gate succeeds
+       └─ current/.venv/.../python -m haniel.cli run haniel.yaml
             ├─ starts managed services
             ├─ poll loop (including self-repo)
             └─ exit code signals intent to wrapper
@@ -72,11 +73,12 @@ This keeps haniel indifferent to the approval mechanism, consistent with its
 
 ### Wrapper Script Design
 
-The wrapper always runs `git reset --hard origin/main` + `pip install -e .` before
-launching haniel. This means:
+The wrapper always resolves the remote target and prepares it outside the active
+release before launching Haniel. This means:
 - First start after reboot gets latest code automatically
 - Crash-restart also gets latest code (services already disrupted, so no approval needed)
-- `git reset --hard` guarantees local = remote, preventing infinite change detection loops
+- Candidate install, import, or UI build failures leave `current` unchanged
+- The source checkout remains a fetch-only target catalog rather than the running code
 
 ### Configuration
 
@@ -98,6 +100,7 @@ self:
 ```
 WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../...
 HANIEL_REPO=./.projects/haniel
+HANIEL_RELEASE_ROOT=.local/haniel-releases
 CONFIG=haniel.yaml
 MAX_GIT_FAILURES=3
 ```
@@ -123,36 +126,35 @@ network issues.
 
 ### Lost
 
-- Atomic rollback — if an update breaks haniel, recovery requires manual
-  `git reset --hard {previous_commit}` + `sc start haniel`
-- Wrapper script is in-memory during execution, so wrapper-updating commits need
-  two restarts to fully take effect
+- Directory symlink creation must be permitted on Windows; the wrapper fails closed
+  and preserves the old `current` pointer when it is not
+- Each commit has its own venv and dashboard build, increasing disk use
 
 ### Accepted Limitations
 
-**No automatic rollback (v1).**
-If new code crashes haniel immediately, WinSW's `<onfailure>` stanza handles
-restart with escalating delays. After exhausting retries, the service stops and
-a webhook alerts the user. Manual rollback is:
-```
-git -C ./.projects/haniel reset --hard {previous_commit}
-sc start haniel
-```
-Automatic rollback (tracking previous commit, reverting if startup fails within N seconds)
-is deferred to a future version to avoid premature complexity.
+**Pre-activation failures preserve the previous release.**
+Checkout, venv creation, install, import smoke, dashboard install, and dashboard
+build all happen under `releases/{commit}`. A failure removes the incomplete
+candidate and launches the release still addressed by `current`.
 
-**Wrapper script in-memory limitation.**
-`git reset --hard` updates the wrapper file on disk, but the currently running
-PowerShell process uses its in-memory copy. If a haniel update includes wrapper
-changes, the new wrapper takes effect on the next restart. In the worst case
-(wrapper change is required for the update to work), two restarts are needed.
-This is an extremely rare scenario.
+**Activation is atomic, health rollback remains separate.**
+The helper creates a temporary directory symlink and replaces `current` with
+`os.replace`. It does not infer post-launch health. A candidate that passes import
+and build but later crashes remains subject to the existing supervisor backoff and
+operator rollout policy.
 
-**pip install failure is non-fatal.**
-If `pip install -e .` fails (network issue, broken dependency), the wrapper sends
-a webhook notification and attempts to launch haniel with the previously installed
-code. The old version may still work if the failure was an added (not changed)
-dependency.
+**Wrapper changes take effect before the candidate launches.**
+After a successful pointer switch, the running wrapper executes the wrapper under
+the new `current` release. The new invocation sees the ready current commit, reuses
+it, and launches its release-local Python.
+
+**Legacy migration is one-time and non-destructive.**
+When `current` is absent, the helper prepares a baseline release before preparing
+the remote target. If the legacy wrapper just reset the source checkout, `ORIG_HEAD`
+is preferred as the previous baseline; otherwise the source HEAD is the baseline.
+The source checkout itself is never reset by the new wrapper. If that baseline cannot
+pass the release gates, the wrapper fails closed instead of launching an unvalidated
+source checkout.
 
 **"Always update on start" vs "approval gate" is not contradictory.**
 The approval gate controls when haniel voluntarily exits (disrupting running services).

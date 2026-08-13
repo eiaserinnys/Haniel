@@ -2,7 +2,7 @@
 # See ADR-0002 for architecture details.
 #
 # This script is registered as the WinSW service, not haniel directly.
-# It handles: git fetch → git reset --hard → pip install → launch haniel.
+# It handles: prepare release → atomic current switch → launch haniel.
 # Exit code 10 from haniel means "self-update approved" → loop again.
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -36,7 +36,10 @@ Get-Content $ConfPath | ForEach-Object {
 
 $WebhookUrl = $Config["WEBHOOK_URL"]
 $HanielRepo = $Config["HANIEL_REPO"]
+$HanielReleaseRoot = $Config["HANIEL_RELEASE_ROOT"]
+if (-not $HanielReleaseRoot) { $HanielReleaseRoot = ".local/haniel-releases" }
 $ConfigFile = $Config["CONFIG"]
+$PythonBinConfig = $Config["PYTHON_BIN"]
 $MaxGitFailures = [int]($Config["MAX_GIT_FAILURES"])
 if (-not $MaxGitFailures) { $MaxGitFailures = 3 }
 
@@ -45,9 +48,48 @@ if (-not $HanielRepo -or -not $ConfigFile) {
     exit 1
 }
 
+function Resolve-RunnerPath {
+    param([string]$PathValue)
+    if ([System.IO.Path]::IsPathRooted($PathValue)) {
+        return [System.IO.Path]::GetFullPath($PathValue)
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path $RootDir $PathValue))
+}
+
 # Resolve paths relative to working directory
-$RepoPath = Join-Path $RootDir $HanielRepo
-$ConfigPath = Join-Path $RootDir $ConfigFile
+$RepoPath = Resolve-RunnerPath $HanielRepo
+$ReleaseRoot = Resolve-RunnerPath $HanielReleaseRoot
+$ConfigPath = Resolve-RunnerPath $ConfigFile
+$RunnerScriptPath = (Resolve-Path $PSCommandPath).Path
+$ReleaseHelper = Join-Path (Split-Path -Parent $RunnerScriptPath) "scripts/haniel_atomic_release.py"
+
+function Resolve-BootstrapPython {
+    if ($PythonBinConfig) {
+        return Resolve-RunnerPath $PythonBinConfig
+    }
+    $repoPython = Join-Path $RepoPath ".venv/Scripts/python.exe"
+    if (Test-Path $repoPython -PathType Leaf) {
+        return $repoPython
+    }
+    $command = Get-Command python -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    return $null
+}
+
+$BootstrapPython = Resolve-BootstrapPython
+if (-not $BootstrapPython -or -not (Test-Path $BootstrapPython -PathType Leaf)) {
+    Write-Error "Python executable not found. Set PYTHON_BIN in haniel-runner.conf."
+    exit 1
+}
+if (-not (Test-Path $ReleaseHelper -PathType Leaf)) {
+    Write-Error "Atomic release helper not found: $ReleaseHelper"
+    exit 1
+}
+$PreparationResultPath = Join-Path $RootDir ".local/haniel_release_preparation.json"
+$SelfUpdateExitMarker = Join-Path $RootDir ".local/self_update_exit_requested"
+$script:ActiveRepo = $RepoPath
+$script:ActivePython = $BootstrapPython
+$script:PreparationResult = $null
 
 function Send-Webhook {
     param([string]$Message, [string]$Level = "info")
@@ -72,26 +114,6 @@ function Send-Webhook {
     }
 }
 
-function Add-Step {
-    param(
-        [string]$Name,
-        [bool]$Ok,
-        [string]$ErrorMessage = $null
-    )
-    if ([string]::IsNullOrWhiteSpace($ErrorMessage) -and -not $Ok) {
-        $ErrorMessage = "$Name failed (no message)"
-    }
-    $step = [ordered]@{
-        name  = $Name
-        ok    = $Ok
-        error = $ErrorMessage
-    }
-    [void]$script:LastUpdateSteps.Add($step)
-    if (-not $Ok -and -not $script:LastUpdateError) {
-        $script:LastUpdateError = "$Name failed: $ErrorMessage"
-    }
-}
-
 function Write-SelfUpdateMarker {
     param([bool]$Ok)
     $markerDir  = Join-Path $RootDir ".local"
@@ -105,8 +127,8 @@ function Write-SelfUpdateMarker {
             started_at  = $script:LastUpdateStartedAt
             finished_at = $script:LastUpdateFinishedAt
             ok          = $Ok
-            steps       = @($script:LastUpdateSteps)
-            error       = $script:LastUpdateError
+            steps       = @($script:PreparationResult.steps)
+            error       = $script:PreparationResult.error
         }
         $json = $payload | ConvertTo-Json -Depth 5
         # UTF-8 without BOM (Python json.loads tolerates BOM but cleaner without)
@@ -120,112 +142,57 @@ function Write-SelfUpdateMarker {
     }
 }
 
-function Update-HanielRepo {
-    $gitFailures = 0
-
-    # ── git fetch ──────────────────────────────────────────
-    while ($gitFailures -lt $MaxGitFailures) {
+function Update-HanielRelease {
+    if (Test-Path $PreparationResultPath) {
+        Remove-Item $PreparationResultPath -Force
+    }
+    $arguments = @(
+        $ReleaseHelper,
+        "--source", $RepoPath,
+        "--release-root", $ReleaseRoot,
+        "--bootstrap-python", $BootstrapPython,
+        "--result-json", $PreparationResultPath,
+        "--max-git-failures", "$MaxGitFailures"
+    )
+    $currentPath = Join-Path $ReleaseRoot "current"
+    if (-not (Test-Path $currentPath) -and (Test-Path $SelfUpdateExitMarker)) {
+        $arguments += "--prefer-orig-head"
+    }
+    & $BootstrapPython @arguments
+    $helperExitCode = $LASTEXITCODE
+    if (-not (Test-Path $PreparationResultPath -PathType Leaf)) {
+        $script:PreparationResult = [pscustomobject]@{
+            ok = $false
+            switched = $false
+            active_repo = $null
+            active_python = $null
+            steps = @()
+            error = "atomic release helper did not write a result"
+        }
+    } else {
         try {
-            $fetchResult = & git -C $RepoPath fetch origin 2>&1
-            if ($LASTEXITCODE -eq 0) {
-                break
-            }
-            $gitFailures++
-            Write-Warning "git fetch failed (attempt $gitFailures/$MaxGitFailures): $fetchResult"
-            Start-Sleep -Seconds 5
+            $script:PreparationResult = Get-Content $PreparationResultPath -Raw | ConvertFrom-Json
         } catch {
-            $gitFailures++
-            Write-Warning "git fetch exception (attempt $gitFailures/$MaxGitFailures): $_"
-            Start-Sleep -Seconds 5
+            $script:PreparationResult = [pscustomobject]@{
+                ok = $false
+                switched = $false
+                active_repo = $null
+                active_python = $null
+                steps = @()
+                error = "invalid atomic release helper result: $_"
+            }
         }
     }
-
-    if ($gitFailures -ge $MaxGitFailures) {
-        Add-Step -Name "git_fetch" -Ok $false -ErrorMessage "git fetch failed $MaxGitFailures times"
-        Send-Webhook "git fetch failed $MaxGitFailures times. Launching with current code." "error"
-        return $false
-    }
-    Add-Step -Name "git_fetch" -Ok $true
-
-    # ── git reset --hard origin/<branch> ───────────────────
-    try {
-        $branch = & git -C $RepoPath rev-parse --abbrev-ref HEAD 2>&1
-        if ($LASTEXITCODE -ne 0) { $branch = "main" }
-        $resetOutput = & git -C $RepoPath reset --hard "origin/$branch" 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            $msg = ($resetOutput | Out-String).Trim()
-            if ([string]::IsNullOrWhiteSpace($msg)) {
-                $msg = "git reset exited with code $LASTEXITCODE"
-            }
-            Add-Step -Name "git_reset" -Ok $false -ErrorMessage $msg
-            Send-Webhook "git reset --hard failed. Launching with current code." "warning"
-            return $false
-        }
-        Add-Step -Name "git_reset" -Ok $true
-    } catch {
-        Add-Step -Name "git_reset" -Ok $false -ErrorMessage "$_"
-        Send-Webhook "git reset failed: $_" "warning"
-        return $false
-    }
-
-    # ── pip install -e . ───────────────────────────────────
-    try {
-        $pipOutput = & pip install -e $RepoPath 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            $msg = (($pipOutput | Select-Object -Last 20) -join "`n")
-            if ([string]::IsNullOrWhiteSpace($msg)) {
-                $msg = "pip install exited with code $LASTEXITCODE"
-            }
-            Add-Step -Name "pip_install" -Ok $false -ErrorMessage $msg
-            Send-Webhook "pip install failed. Attempting to launch with previous code." "warning"
+    $script:ActiveRepo = $script:PreparationResult.active_repo
+    $script:ActivePython = $script:PreparationResult.active_python
+    if ($helperExitCode -ne 0 -or -not $script:PreparationResult.ok) {
+        if ($script:ActiveRepo -and $script:ActivePython) {
+            Send-Webhook "Atomic release preparation failed: $($script:PreparationResult.error). Launching previous release." "error"
         } else {
-            Add-Step -Name "pip_install" -Ok $true
+            Send-Webhook "Atomic release preparation failed: $($script:PreparationResult.error). No validated release is available." "error"
         }
-    } catch {
-        Add-Step -Name "pip_install" -Ok $false -ErrorMessage "$_"
-        Send-Webhook "pip install exception: $_" "warning"
+        return $false
     }
-
-    # ── pnpm install + build dashboard (optional) ──────────
-    # 두 단계는 try/catch를 분리하여, 예외 시 정확한 단계 이름을 기록한다.
-    $DashboardPath = Join-Path $RepoPath "dashboard"
-    if (Test-Path $DashboardPath) {
-        Write-Host "[haniel-runner] Building dashboard..."
-        $installOk = $false
-        try {
-            $pnpmInstallOutput = & pnpm --dir $DashboardPath install 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                $msg = (($pnpmInstallOutput | Select-Object -Last 20) -join "`n")
-                if ([string]::IsNullOrWhiteSpace($msg)) { $msg = "pnpm install exited with code $LASTEXITCODE" }
-                Add-Step -Name "pnpm_install" -Ok $false -ErrorMessage $msg
-                Send-Webhook "Dashboard pnpm install failed. Launching with previous build." "warning"
-            } else {
-                Add-Step -Name "pnpm_install" -Ok $true
-                $installOk = $true
-            }
-        } catch {
-            Add-Step -Name "pnpm_install" -Ok $false -ErrorMessage "$_"
-            Send-Webhook "Dashboard pnpm install exception: $_" "warning"
-        }
-
-        if ($installOk) {
-            try {
-                $pnpmBuildOutput = & pnpm --dir $DashboardPath build 2>&1
-                if ($LASTEXITCODE -ne 0) {
-                    $msg = (($pnpmBuildOutput | Select-Object -Last 20) -join "`n")
-                    if ([string]::IsNullOrWhiteSpace($msg)) { $msg = "pnpm build exited with code $LASTEXITCODE" }
-                    Add-Step -Name "pnpm_build" -Ok $false -ErrorMessage $msg
-                    Send-Webhook "Dashboard build failed. Launching with previous build." "warning"
-                } else {
-                    Add-Step -Name "pnpm_build" -Ok $true
-                }
-            } catch {
-                Add-Step -Name "pnpm_build" -Ok $false -ErrorMessage "$_"
-                Send-Webhook "Dashboard build exception: $_" "warning"
-            }
-        }
-    }
-
     return $true
 }
 
@@ -244,31 +211,38 @@ $writeSelfUpdateMarker = $false
 
 while ($true) {
     if (-not $skipUpdate) {
-        $runnerHashBefore = (Get-FileHash -Path $PSCommandPath -Algorithm SHA256).Hash
-        Write-Host "[haniel-runner] Updating haniel repository..."
-        $script:LastUpdateSteps      = New-Object System.Collections.ArrayList
-        $script:LastUpdateError      = $null
+        Write-Host "[haniel-runner] Preparing atomic Haniel release..."
         $script:LastUpdateStartedAt  = (Get-Date).ToString('o')
         $script:LastUpdateFinishedAt = $null
-        Update-HanielRepo | Out-Null
+        Update-HanielRelease | Out-Null
         $script:LastUpdateFinishedAt = (Get-Date).ToString('o')
-        $updateOk = ($null -eq $script:LastUpdateError)
         if ($writeSelfUpdateMarker) {
-            Write-SelfUpdateMarker -Ok $updateOk
+            Write-SelfUpdateMarker -Ok ([bool]$script:PreparationResult.ok)
         }
         $writeSelfUpdateMarker = $false
 
-        $runnerHashAfter = (Get-FileHash -Path $PSCommandPath -Algorithm SHA256).Hash
-        if ($runnerHashBefore -ne $runnerHashAfter) {
-            Write-Host "[haniel-runner] Runner script updated; reloading new wrapper."
-            & $PSCommandPath
-            exit $LASTEXITCODE
+        if (-not $script:ActiveRepo -or -not $script:ActivePython -or
+            -not (Test-Path $script:ActivePython -PathType Leaf)) {
+            $message = "No previously validated Haniel release is available; refusing to launch."
+            Write-Error $message
+            Send-Webhook $message "error"
+            exit 1
+        }
+
+        $activeRunner = Join-Path $script:ActiveRepo "haniel-runner.ps1"
+        if ($script:PreparationResult.switched -and (Test-Path $activeRunner -PathType Leaf)) {
+            $activeRunnerPath = (Resolve-Path $activeRunner).Path
+            if ($RunnerScriptPath -ne $activeRunnerPath) {
+                Write-Host "[haniel-runner] Re-executing current release wrapper."
+                & $activeRunner
+                exit $LASTEXITCODE
+            }
         }
     }
     $skipUpdate = $false
 
     Write-Host "[haniel-runner] Launching haniel..."
-    & python -m haniel.cli run $ConfigPath
+    & $script:ActivePython -m haniel.cli run $ConfigPath
     $exitCode = $LASTEXITCODE
 
     Write-Host "[haniel-runner] haniel exited with code: $exitCode"
