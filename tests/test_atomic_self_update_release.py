@@ -48,7 +48,9 @@ def _write_executable(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
-def test_command_error_preserves_process_return_code(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_command_error_preserves_process_return_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.syspath_prepend(str(REPO_ROOT / "scripts"))
     atomic_release = importlib.import_module("haniel_atomic_release")
     completed = subprocess.CompletedProcess(
