@@ -76,6 +76,7 @@ def _command_error(completed: subprocess.CompletedProcess[str]) -> str:
     if not output:
         output = f"command exited with code {completed.returncode}"
     lines = output.splitlines()
+    lines.append(f"[exit={completed.returncode}]")
     return "\n".join(lines[-20:])[-4000:]
 
 

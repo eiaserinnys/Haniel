@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import shutil
@@ -45,6 +46,19 @@ def _run(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) ->
 def _write_executable(path: Path, body: str) -> None:
     path.write_text(body, encoding="utf-8")
     path.chmod(0o755)
+
+
+def test_command_error_preserves_process_return_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.syspath_prepend(str(REPO_ROOT / "scripts"))
+    atomic_release = importlib.import_module("haniel_atomic_release")
+    completed = subprocess.CompletedProcess(
+        args=["pnpm", "install"],
+        returncode=-6,
+        stdout="Done in 1.2s using pnpm v10.32.1\n",
+        stderr="",
+    )
+
+    assert atomic_release._command_error(completed).splitlines()[-1] == "[exit=-6]"
 
 
 def _copy_release_helpers(destination: Path) -> None:
