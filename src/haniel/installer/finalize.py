@@ -418,6 +418,8 @@ class Finalizer:
             f"WEBHOOK_URL={webhook_url}",
             f"HANIEL_REPO={repo_path}",
             "HANIEL_RELEASE_ROOT=.local/haniel-releases",
+            "HANIEL_RELEASE_RETAIN_EXTRA=3",
+            "HANIEL_RELEASE_MIN_FREE_MB=5120",
             f"CONFIG={self.config_filename}",
             "MAX_GIT_FAILURES=3",
             "SELF_UPDATE_EXIT_TIMEOUT=60",

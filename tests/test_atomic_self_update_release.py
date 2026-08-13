@@ -26,6 +26,7 @@ class AtomicRun:
     previous_commit: str
     target_commit: str
     launch_log: Path
+    webhook_log: Path
 
 
 def _run(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> str:
@@ -46,13 +47,15 @@ def _write_executable(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
+def _copy_release_helpers(destination: Path) -> None:
+    destination.mkdir(exist_ok=True)
+    for name in ("haniel_atomic_release.py", "haniel_release_policy.py"):
+        shutil.copy2(REPO_ROOT / "scripts" / name, destination / name)
+
+
 def _copy_release_sources(destination: Path) -> None:
     shutil.copy2(REPO_ROOT / "haniel-runner.sh", destination / "haniel-runner.sh")
-    helper = REPO_ROOT / "scripts" / "haniel_atomic_release.py"
-    if helper.exists():
-        scripts = destination / "scripts"
-        scripts.mkdir(exist_ok=True)
-        shutil.copy2(helper, scripts / helper.name)
+    _copy_release_helpers(destination / "scripts")
     dashboard = destination / "dashboard"
     dashboard.mkdir(exist_ok=True)
     (dashboard / "package.json").write_text(
@@ -101,6 +104,7 @@ def _make_fake_commands(
     source: Path,
     fetch_log: Path,
     launch_log: Path,
+    webhook_log: Path,
     state: Path,
 ) -> Path:
     assert REAL_GIT is not None
@@ -119,6 +123,10 @@ exec "{REAL_GIT}" "$@"
 """,
     )
     _write_executable(fake_bin / "sleep", "#!/usr/bin/env bash\nexit 0\n")
+    _write_executable(
+        fake_bin / "curl",
+        f'#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "{webhook_log}"\n',
+    )
     _write_executable(
         fake_bin / "python",
         f"""#!/usr/bin/env bash
@@ -182,10 +190,7 @@ def _prepare_previous_release(
     (previous / ".venv" / "bin").mkdir(parents=True)
     shutil.copy2(fake_python, previous / ".venv" / "bin" / "python")
     shutil.copy2(REPO_ROOT / "haniel-runner.sh", previous / "haniel-runner.sh")
-    helper = REPO_ROOT / "scripts" / "haniel_atomic_release.py"
-    if helper.exists():
-        (previous / "scripts").mkdir()
-        shutil.copy2(helper, previous / "scripts" / helper.name)
+    _copy_release_helpers(previous / "scripts")
     (previous / ".haniel-release-ready.json").write_text(
         json.dumps({"version": 1, "commit": previous_commit}), encoding="utf-8"
     )
@@ -196,38 +201,72 @@ def _prepare_previous_release(
     return previous
 
 
+def _prepare_ready_release(
+    release_root: Path,
+    commit: str,
+    *,
+    marker_commit: str | None = None,
+    modified_ns: int,
+) -> Path:
+    release = release_root / "releases" / commit
+    release.mkdir(parents=True)
+    marker = release / ".haniel-release-ready.json"
+    marker.write_text(
+        json.dumps({"version": 1, "commit": marker_commit or commit}),
+        encoding="utf-8",
+    )
+    os.utime(marker, ns=(modified_ns, modified_ns))
+    return release
+
+
 def _run_atomic_wrapper(
     tmp_path: Path,
     *,
     fail_stage: str | None,
     legacy_layout: bool = False,
+    min_free_mb: int = 1,
+    retain_extra: int = 3,
+    old_release_count: int = 0,
 ) -> AtomicRun:
     source, previous_commit, target_commit = _create_source_repo(tmp_path)
     fetch_log = tmp_path / "fetches"
     launch_log = tmp_path / "launches"
+    webhook_log = tmp_path / "webhooks"
     state = tmp_path / "exit-codes"
     state.write_text("10\n0\n", encoding="utf-8")
-    fake_bin = _make_fake_commands(tmp_path, source, fetch_log, launch_log, state)
+    fake_bin = _make_fake_commands(
+        tmp_path,
+        source,
+        fetch_log,
+        launch_log,
+        webhook_log,
+        state,
+    )
     release_root = tmp_path / ".local" / "haniel-releases"
     previous = None
     if not legacy_layout:
         previous = _prepare_previous_release(
             release_root, previous_commit, fake_bin / "python"
         )
+    for index in range(old_release_count):
+        _prepare_ready_release(
+            release_root,
+            f"{index + 1:040x}",
+            modified_ns=(index + 1) * 1_000_000_000,
+        )
 
     runner = tmp_path / "haniel-runner.sh"
     shutil.copy2(REPO_ROOT / "haniel-runner.sh", runner)
-    helper = REPO_ROOT / "scripts" / "haniel_atomic_release.py"
-    if helper.exists():
-        (tmp_path / "scripts").mkdir()
-        shutil.copy2(helper, tmp_path / "scripts" / helper.name)
+    _copy_release_helpers(tmp_path / "scripts")
     (tmp_path / "haniel.yaml").write_text("repos: {}\nservices: {}\n", encoding="utf-8")
     (tmp_path / "haniel-runner.conf").write_text(
         "\n".join(
             [
-                "WEBHOOK_URL=",
+                "WEBHOOK_URL=https://hooks.example.invalid/test",
                 "HANIEL_REPO=repo",
                 "HANIEL_RELEASE_ROOT=.local/haniel-releases",
+                f"HANIEL_RELEASE_RETAIN_EXTRA={retain_extra}",
+                f"HANIEL_RELEASE_MIN_FREE_MB={min_free_mb}",
                 "CONFIG=haniel.yaml",
                 "MAX_GIT_FAILURES=1",
                 "SELF_UPDATE_EXIT_TIMEOUT=0",
@@ -261,6 +300,7 @@ def _run_atomic_wrapper(
         previous_commit=previous_commit,
         target_commit=target_commit,
         launch_log=launch_log,
+        webhook_log=webhook_log,
     )
 
 
@@ -364,3 +404,114 @@ def test_legacy_migration_without_valid_baseline_fails_closed(tmp_path: Path) ->
     assert preparation["active_repo"] is None
     assert preparation["active_python"] is None
     assert "refusing to launch" in run.result.stderr
+
+
+def test_prune_after_switch_keeps_current_previous_and_three_newest_extras(
+    tmp_path: Path,
+) -> None:
+    run = _run_atomic_wrapper(
+        tmp_path,
+        fail_stage=None,
+        retain_extra=3,
+        old_release_count=5,
+    )
+    releases = run.release_root / "releases"
+    current = (run.release_root / "current").resolve()
+    retained = sorted(path.name for path in releases.iterdir() if path.is_dir())
+    print(
+        f"RETENTION current={current.name} previous={run.previous_commit} "
+        f"ready_count={len(retained)}"
+    )
+
+    assert run.result.returncode == 0, run.result.stderr
+    assert current.name == run.target_commit
+    assert run.previous_release is not None
+    assert run.previous_release.exists()
+    assert not (releases / f"{1:040x}").exists()
+    assert not (releases / f"{2:040x}").exists()
+    assert (releases / f"{3:040x}").exists()
+    assert (releases / f"{4:040x}").exists()
+    assert (releases / f"{5:040x}").exists()
+
+
+def test_failed_switch_does_not_prune_before_activation(tmp_path: Path) -> None:
+    run = _run_atomic_wrapper(
+        tmp_path,
+        fail_stage="install",
+        retain_extra=0,
+        old_release_count=2,
+    )
+    releases = run.release_root / "releases"
+
+    assert run.result.returncode == 0, run.result.stderr
+    assert (releases / f"{1:040x}").exists()
+    assert (releases / f"{2:040x}").exists()
+
+
+def test_prune_ignores_symlink_and_mismatched_ready_marker(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    release_root = run_root / ".local" / "haniel-releases"
+    releases = release_root / "releases"
+    releases.mkdir(parents=True)
+    symlink_commit = "a" * 40
+    mismatched_commit = "b" * 40
+    valid_commit = "c" * 40
+    (releases / symlink_commit).symlink_to(external, target_is_directory=True)
+    _prepare_ready_release(
+        release_root,
+        mismatched_commit,
+        marker_commit="d" * 40,
+        modified_ns=1_000_000_000,
+    )
+    _prepare_ready_release(
+        release_root,
+        valid_commit,
+        modified_ns=2_000_000_000,
+    )
+
+    run = _run_atomic_wrapper(
+        run_root,
+        fail_stage=None,
+        retain_extra=0,
+    )
+
+    assert run.result.returncode == 0, run.result.stderr
+    assert (releases / symlink_commit).is_symlink()
+    assert (releases / mismatched_commit).exists()
+    assert not (releases / valid_commit).exists()
+    assert external.exists()
+
+
+def test_low_disk_skips_candidate_and_launches_previous_release(tmp_path: Path) -> None:
+    run = _run_atomic_wrapper(
+        tmp_path,
+        fail_stage=None,
+        min_free_mb=1_000_000_000_000,
+    )
+    preparation = json.loads(
+        (tmp_path / ".local" / "haniel_release_preparation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    current = (run.release_root / "current").resolve()
+    print(
+        f"LOW_DISK current={current.name} target_exists="
+        f"{(run.release_root / 'releases' / run.target_commit).exists()} "
+        f"error={preparation['error']}"
+    )
+
+    assert run.result.returncode == 0, run.result.stderr
+    assert current == run.previous_release
+    assert not (run.release_root / "releases" / run.target_commit).exists()
+    assert preparation["error_code"] == "insufficient_disk_space"
+    assert (
+        run.launch_log.read_text(encoding="utf-8")
+        .splitlines()[-1]
+        .startswith(str(run.previous_release / ".venv" / "bin" / "python"))
+    )
+    webhook = run.webhook_log.read_text(encoding="utf-8").lower()
+    assert "insufficient" in webhook
+    assert ":warning:" in webhook

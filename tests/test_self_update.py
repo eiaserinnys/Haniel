@@ -577,6 +577,8 @@ class TestWrapperModeInstaller:
             content = conf_path.read_text(encoding="utf-8")
             assert "HANIEL_REPO=./.projects/haniel" in content
             assert "HANIEL_RELEASE_ROOT=.local/haniel-releases" in content
+            assert "HANIEL_RELEASE_RETAIN_EXTRA=3" in content
+            assert "HANIEL_RELEASE_MIN_FREE_MB=5120" in content
             assert "CONFIG=haniel.yaml" in content
             assert "WEBHOOK_URL=https://hooks.example.com/test" in content
             assert "MAX_GIT_FAILURES=3" in content
@@ -608,6 +610,8 @@ class TestWrapperModeInstaller:
 
         assert "Re-executing current release wrapper" in script
         assert "& $activeRunner" in script
+        assert '"--retain-extra", "$HanielReleaseRetainExtra"' in script
+        assert '"--min-free-mb", "$HanielReleaseMinFreeMB"' in script
         marker_write = script.index(
             "Write-SelfUpdateMarker -Ok ([bool]$script:PreparationResult.ok)"
         )

@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -19,8 +18,17 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-READY_MARKER = ".haniel-release-ready.json"
-COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40,64}$")
+from haniel_release_policy import (
+    COMMIT_PATTERN,
+    DEFAULT_MIN_FREE_MB,
+    DEFAULT_RETAIN_EXTRA,
+    READY_MARKER,
+    InsufficientDiskSpace,
+    ReleasePolicyError,
+    prune_ready_releases,
+    read_ready_commit,
+    require_disk_space,
+)
 
 
 class ReleasePreparationError(RuntimeError):
@@ -32,6 +40,8 @@ class PreparationResult:
     ok: bool = False
     steps: list[dict[str, object]] = field(default_factory=list)
     error: str | None = None
+    error_code: str | None = None
+    warnings: list[str] = field(default_factory=list)
     active_repo: str | None = None
     active_python: str | None = None
     target_commit: str | None = None
@@ -49,6 +59,8 @@ class PreparationResult:
             "ok": self.ok,
             "steps": self.steps,
             "error": self.error,
+            "error_code": self.error_code,
+            "warnings": self.warnings,
             "active_repo": self.active_repo,
             "active_python": self.active_python,
             "target_commit": self.target_commit,
@@ -124,18 +136,6 @@ def _release_python(release: Path) -> Path:
     return release / ".venv" / "bin" / "python"
 
 
-def _read_ready_commit(release: Path) -> str | None:
-    marker = release / READY_MARKER
-    try:
-        payload = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return None
-    commit = payload.get("commit")
-    if payload.get("version") != 1 or not isinstance(commit, str):
-        return None
-    return commit if COMMIT_PATTERN.fullmatch(commit) else None
-
-
 def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -162,10 +162,55 @@ def _active_release(release_root: Path) -> Path | None:
         raise ReleasePreparationError(
             f"current pointer escapes release inventory: {active}"
         )
-    ready_commit = _read_ready_commit(active)
+    ready_commit = read_ready_commit(active)
     if ready_commit != active.name or not _release_python(active).is_file():
         raise ReleasePreparationError(f"current release is incomplete: {active}")
     return active
+
+
+def _require_disk_space(
+    result: PreparationResult,
+    release_root: Path,
+    min_free_mb: int,
+) -> None:
+    try:
+        require_disk_space(release_root, min_free_mb)
+    except InsufficientDiskSpace as exc:
+        result.error_code = "insufficient_disk_space"
+        result.add_step("disk_space", False, str(exc))
+        raise ReleasePreparationError(result.error or str(exc)) from exc
+    except ReleasePolicyError as exc:
+        result.add_step("disk_space", False, str(exc))
+        raise ReleasePreparationError(result.error or str(exc)) from exc
+    result.add_step("disk_space", True)
+
+
+def _prune_releases(
+    result: PreparationResult,
+    release_root: Path,
+    *,
+    current: Path,
+    previous: Path | None,
+    retain_extra: int,
+) -> None:
+    try:
+        outcome = prune_ready_releases(
+            release_root,
+            current=current,
+            previous=previous,
+            retain_extra=retain_extra,
+        )
+    except (OSError, ReleasePolicyError) as exc:
+        warning = f"release cleanup failed: {exc}"
+        result.steps.append({"name": "release_prune", "ok": False, "error": warning})
+        result.warnings.append(warning)
+        return
+    if outcome.failures:
+        warning = "release cleanup failed: " + "; ".join(outcome.failures)
+        result.steps.append({"name": "release_prune", "ok": False, "error": warning})
+        result.warnings.append(warning)
+        return
+    result.add_step("release_prune", True)
 
 
 def _prepare_release(
@@ -175,13 +220,16 @@ def _prepare_release(
     releases: Path,
     commit: str,
     bootstrap_python: Path,
+    min_free_mb: int,
 ) -> Path:
     if not COMMIT_PATTERN.fullmatch(commit):
         raise ReleasePreparationError(f"unsafe release commit: {commit}")
     release = releases / commit
-    if _read_ready_commit(release) == commit and _release_python(release).is_file():
+    if read_ready_commit(release) == commit and _release_python(release).is_file():
         result.add_step("release_reuse", True)
         return release
+
+    _require_disk_space(result, releases.parent, min_free_mb)
 
     if release.exists() or release.is_symlink():
         if release.is_symlink() or not release.is_dir():
@@ -333,8 +381,16 @@ def prepare(args: argparse.Namespace) -> PreparationResult:
                 releases=releases,
                 commit=baseline,
                 bootstrap_python=bootstrap_python,
+                min_free_mb=args.min_free_mb,
             )
             _switch_current(result, release_root, baseline_release)
+            _prune_releases(
+                result,
+                release_root,
+                current=baseline_release,
+                previous=None,
+                retain_extra=args.retain_extra,
+            )
             active = baseline_release
             result.migrated = True
             print(
@@ -352,9 +408,18 @@ def prepare(args: argparse.Namespace) -> PreparationResult:
                 releases=releases,
                 commit=target,
                 bootstrap_python=bootstrap_python,
+                min_free_mb=args.min_free_mb,
             )
+            previous = active
             _switch_current(result, release_root, candidate)
             active = candidate
+            _prune_releases(
+                result,
+                release_root,
+                current=active,
+                previous=previous,
+                retain_extra=args.retain_extra,
+            )
         else:
             result.add_step("release_reuse", True)
 
@@ -382,6 +447,13 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be at least 0")
+    return parsed
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", required=True)
@@ -389,6 +461,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bootstrap-python", required=True)
     parser.add_argument("--result-json", required=True)
     parser.add_argument("--max-git-failures", type=_positive_int, default=3)
+    parser.add_argument(
+        "--retain-extra",
+        type=_non_negative_int,
+        default=DEFAULT_RETAIN_EXTRA,
+    )
+    parser.add_argument(
+        "--min-free-mb",
+        type=_positive_int,
+        default=DEFAULT_MIN_FREE_MB,
+    )
     parser.add_argument("--prefer-orig-head", action="store_true")
     return parser.parse_args()
 

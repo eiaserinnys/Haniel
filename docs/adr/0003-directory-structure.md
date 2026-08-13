@@ -70,7 +70,8 @@ code comes from `.local/haniel-releases/current`.
 
 **Commit-specific runtime releases**: Every candidate gets an independent checkout,
 venv, import smoke, and dashboard build. Only a fully prepared release can become
-`current`.
+`current`. After a successful switch, retention preserves `current`, its immediate
+predecessor, and the configured number of additional ready releases.
 
 **`.services/{name}/` per managed repo**: Each repo from the `repos` section (except
 the `self` repo) is cloned here. Service logs go into `{repo}/logs/` to avoid cross-service

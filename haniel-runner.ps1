@@ -38,6 +38,26 @@ $WebhookUrl = $Config["WEBHOOK_URL"]
 $HanielRepo = $Config["HANIEL_REPO"]
 $HanielReleaseRoot = $Config["HANIEL_RELEASE_ROOT"]
 if (-not $HanielReleaseRoot) { $HanielReleaseRoot = ".local/haniel-releases" }
+$HanielReleaseRetainExtra = 3
+$retainExtraRaw = $Config["HANIEL_RELEASE_RETAIN_EXTRA"]
+if ($retainExtraRaw) {
+    if (-not [int]::TryParse($retainExtraRaw, [ref]$HanielReleaseRetainExtra)) {
+        Write-Error "HANIEL_RELEASE_RETAIN_EXTRA must be a non-negative integer"
+        exit 1
+    }
+}
+$HanielReleaseMinFreeMB = 5120
+$minFreeRaw = $Config["HANIEL_RELEASE_MIN_FREE_MB"]
+if ($minFreeRaw) {
+    if (-not [int]::TryParse($minFreeRaw, [ref]$HanielReleaseMinFreeMB)) {
+        Write-Error "HANIEL_RELEASE_MIN_FREE_MB must be a positive integer"
+        exit 1
+    }
+}
+if ($HanielReleaseRetainExtra -lt 0 -or $HanielReleaseMinFreeMB -lt 1) {
+    Write-Error "Release retention must be non-negative and minimum free space must be positive"
+    exit 1
+}
 $ConfigFile = $Config["CONFIG"]
 $PythonBinConfig = $Config["PYTHON_BIN"]
 $MaxGitFailures = [int]($Config["MAX_GIT_FAILURES"])
@@ -152,7 +172,9 @@ function Update-HanielRelease {
         "--release-root", $ReleaseRoot,
         "--bootstrap-python", $BootstrapPython,
         "--result-json", $PreparationResultPath,
-        "--max-git-failures", "$MaxGitFailures"
+        "--max-git-failures", "$MaxGitFailures",
+        "--retain-extra", "$HanielReleaseRetainExtra",
+        "--min-free-mb", "$HanielReleaseMinFreeMB"
     )
     $currentPath = Join-Path $ReleaseRoot "current"
     if (-not (Test-Path $currentPath) -and (Test-Path $SelfUpdateExitMarker)) {
@@ -168,6 +190,8 @@ function Update-HanielRelease {
             active_python = $null
             steps = @()
             error = "atomic release helper did not write a result"
+            error_code = $null
+            warnings = @()
         }
     } else {
         try {
@@ -180,16 +204,23 @@ function Update-HanielRelease {
                 active_python = $null
                 steps = @()
                 error = "invalid atomic release helper result: $_"
+                error_code = $null
+                warnings = @()
             }
         }
     }
     $script:ActiveRepo = $script:PreparationResult.active_repo
     $script:ActivePython = $script:PreparationResult.active_python
+    if (@($script:PreparationResult.warnings).Count -gt 0) {
+        $cleanupWarnings = @($script:PreparationResult.warnings) -join " | "
+        Send-Webhook "Atomic release cleanup warning: $cleanupWarnings" "warning"
+    }
     if ($helperExitCode -ne 0 -or -not $script:PreparationResult.ok) {
+        $level = if ($script:PreparationResult.error_code -eq "insufficient_disk_space") { "warning" } else { "error" }
         if ($script:ActiveRepo -and $script:ActivePython) {
-            Send-Webhook "Atomic release preparation failed: $($script:PreparationResult.error). Launching previous release." "error"
+            Send-Webhook "Atomic release preparation failed: $($script:PreparationResult.error). Launching previous release." $level
         } else {
-            Send-Webhook "Atomic release preparation failed: $($script:PreparationResult.error). No validated release is available." "error"
+            Send-Webhook "Atomic release preparation failed: $($script:PreparationResult.error). No validated release is available." $level
         }
         return $false
     }

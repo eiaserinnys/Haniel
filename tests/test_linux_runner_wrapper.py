@@ -32,14 +32,13 @@ def _run_wrapper(
     fetch_log = tmp_path / "fetches"
     launch_log = tmp_path / "launches"
     source_script = Path(__file__).resolve().parents[1] / "haniel-runner.sh"
-    source_helper = (
-        Path(__file__).resolve().parents[1] / "scripts" / "haniel_atomic_release.py"
-    )
+    source_scripts = Path(__file__).resolve().parents[1] / "scripts"
     script = tmp_path / "haniel-runner.sh"
     shutil.copy2(source_script, script)
     helper_dir = tmp_path / "scripts"
     helper_dir.mkdir()
-    shutil.copy2(source_helper, helper_dir / source_helper.name)
+    for name in ("haniel_atomic_release.py", "haniel_release_policy.py"):
+        shutil.copy2(source_scripts / name, helper_dir / name)
     release_commit = "a" * 40
 
     _write_executable(

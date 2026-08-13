@@ -79,6 +79,8 @@ release before launching Haniel. This means:
 - Crash-restart also gets latest code (services already disrupted, so no approval needed)
 - Candidate install, import, or UI build failures leave `current` unchanged
 - The source checkout remains a fetch-only target catalog rather than the running code
+- Candidate creation is skipped when the release filesystem has less than the
+  configured free-space floor
 
 ### Configuration
 
@@ -101,6 +103,8 @@ self:
 WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../...
 HANIEL_REPO=./.projects/haniel
 HANIEL_RELEASE_ROOT=.local/haniel-releases
+HANIEL_RELEASE_RETAIN_EXTRA=3
+HANIEL_RELEASE_MIN_FREE_MB=5120
 CONFIG=haniel.yaml
 MAX_GIT_FAILURES=3
 ```
@@ -130,12 +134,30 @@ network issues.
   and preserves the old `current` pointer when it is not
 - Each commit has its own venv and dashboard build, increasing disk use
 
+The default retention policy bounds that cost to the active release, its immediate
+predecessor, and three additional ready releases. The default 5,120 MiB free-space
+floor remains reserved before any new checkout is created.
+
 ### Accepted Limitations
 
 **Pre-activation failures preserve the previous release.**
 Checkout, venv creation, install, import smoke, dashboard install, and dashboard
 build all happen under `releases/{commit}`. A failure removes the incomplete
 candidate and launches the release still addressed by `current`.
+
+**Release cleanup happens only after activation.**
+After `current` is replaced successfully, cleanup always protects the active release
+and the release that was active immediately before it. It also retains the newest
+`HANIEL_RELEASE_RETAIN_EXTRA` ready releases. A cleanup target must be a direct,
+non-symlink directory under `releases/` whose ready marker commit exactly matches its
+directory name. Cleanup failures are warnings and do not misreport a successful
+activation as a rollback.
+
+**Disk exhaustion fails before candidate creation.**
+Before clone, venv, install, or build begins, the helper checks the filesystem that
+owns the release root. If free space is below `HANIEL_RELEASE_MIN_FREE_MB`, it records
+`insufficient_disk_space`, sends a warning webhook, and launches the existing
+validated `current` release.
 
 **Activation is atomic, health rollback remains separate.**
 The helper creates a temporary directory symlink and replaces `current` with

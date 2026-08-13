@@ -30,6 +30,8 @@ done < "$CONF_PATH"
 WEBHOOK_URL="${CONFIG[WEBHOOK_URL]:-}"
 HANIEL_REPO="${CONFIG[HANIEL_REPO]:-}"
 HANIEL_RELEASE_ROOT="${CONFIG[HANIEL_RELEASE_ROOT]:-.local/haniel-releases}"
+HANIEL_RELEASE_RETAIN_EXTRA="${CONFIG[HANIEL_RELEASE_RETAIN_EXTRA]:-3}"
+HANIEL_RELEASE_MIN_FREE_MB="${CONFIG[HANIEL_RELEASE_MIN_FREE_MB]:-5120}"
 CONFIG_FILE="${CONFIG[CONFIG]:-}"
 MAX_GIT_FAILURES="${CONFIG[MAX_GIT_FAILURES]:-3}"
 PYTHON_BIN_CONFIG="${CONFIG[PYTHON_BIN]:-}"
@@ -55,6 +57,14 @@ for numeric_value in \
 done
 if (( CRASH_RESTART_BASE_SECONDS > CRASH_RESTART_MAX_SECONDS )); then
   echo "CRASH_RESTART_BASE_SECONDS must not exceed CRASH_RESTART_MAX_SECONDS" >&2
+  exit 1
+fi
+if [[ ! "$HANIEL_RELEASE_RETAIN_EXTRA" =~ ^[0-9]+$ ]]; then
+  echo "HANIEL_RELEASE_RETAIN_EXTRA must be a non-negative integer" >&2
+  exit 1
+fi
+if [[ ! "$HANIEL_RELEASE_MIN_FREE_MB" =~ ^[1-9][0-9]*$ ]]; then
+  echo "HANIEL_RELEASE_MIN_FREE_MB must be a positive integer" >&2
   exit 1
 fi
 
@@ -139,6 +149,8 @@ LAST_UPDATE_FINISHED_AT=""
 PREPARATION_RESULT_PATH="$ROOT_DIR/.local/haniel_release_preparation.json"
 PREPARATION_OK="false"
 PREPARATION_SWITCHED="false"
+PREPARATION_ERROR_CODE=""
+PREPARATION_WARNINGS=""
 ACTIVE_REPO="$REPO_PATH"
 ACTIVE_PYTHON="$PYTHON_BIN"
 SELF_UPDATE_EXIT_MARKER="$ROOT_DIR/.local/self_update_exit_requested"
@@ -150,6 +162,8 @@ load_preparation_result() {
     LAST_UPDATE_ERROR="atomic release helper did not write a result"
     PREPARATION_OK="false"
     PREPARATION_SWITCHED="false"
+    PREPARATION_ERROR_CODE=""
+    PREPARATION_WARNINGS=""
     ACTIVE_REPO=""
     ACTIVE_PYTHON=""
     return 1
@@ -165,14 +179,18 @@ print("true" if payload.get("switched") else "false")
 print(payload.get("active_repo") or "")
 print(payload.get("active_python") or "")
 print((payload.get("error") or "").replace("\n", " "))
+print(payload.get("error_code") or "")
+print(" | ".join(payload.get("warnings") or []).replace("\n", " "))
 PY
   )
-  if (( ${#fields[@]} != 5 )); then
+  if (( ${#fields[@]} != 7 )); then
     LAST_UPDATE_ERROR="invalid atomic release helper result"
     PREPARATION_OK="false"
     PREPARATION_SWITCHED="false"
     ACTIVE_REPO=""
     ACTIVE_PYTHON=""
+    PREPARATION_ERROR_CODE=""
+    PREPARATION_WARNINGS=""
     return 1
   fi
   PREPARATION_OK="${fields[0]}"
@@ -180,6 +198,8 @@ PY
   ACTIVE_REPO="${fields[2]}"
   ACTIVE_PYTHON="${fields[3]}"
   LAST_UPDATE_ERROR="${fields[4]}"
+  PREPARATION_ERROR_CODE="${fields[5]}"
+  PREPARATION_WARNINGS="${fields[6]}"
 }
 
 write_self_update_marker() {
@@ -221,6 +241,8 @@ update_haniel_release() {
     --bootstrap-python "$PYTHON_BIN"
     --result-json "$PREPARATION_RESULT_PATH"
     --max-git-failures "$MAX_GIT_FAILURES"
+    --retain-extra "$HANIEL_RELEASE_RETAIN_EXTRA"
+    --min-free-mb "$HANIEL_RELEASE_MIN_FREE_MB"
   )
   if [[ ! -e "$RELEASE_ROOT/current" && -f "$SELF_UPDATE_EXIT_MARKER" ]]; then
     arguments+=(--prefer-orig-head)
@@ -228,11 +250,18 @@ update_haniel_release() {
   rm -f "$PREPARATION_RESULT_PATH"
   "${arguments[@]}" || true
   load_preparation_result || true
+  if [[ -n "$PREPARATION_WARNINGS" ]]; then
+    send_webhook "Atomic release cleanup warning: $PREPARATION_WARNINGS" "warning"
+  fi
   if [[ "$PREPARATION_OK" != "true" ]]; then
+    local level="error"
+    if [[ "$PREPARATION_ERROR_CODE" == "insufficient_disk_space" ]]; then
+      level="warning"
+    fi
     if [[ -n "$ACTIVE_REPO" && -n "$ACTIVE_PYTHON" ]]; then
-      send_webhook "Atomic release preparation failed: $LAST_UPDATE_ERROR. Launching previous release." "error"
+      send_webhook "Atomic release preparation failed: $LAST_UPDATE_ERROR. Launching previous release." "$level"
     else
-      send_webhook "Atomic release preparation failed: $LAST_UPDATE_ERROR. No validated release is available." "error"
+      send_webhook "Atomic release preparation failed: $LAST_UPDATE_ERROR. No validated release is available." "$level"
     fi
     return 1
   fi
