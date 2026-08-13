@@ -15,7 +15,8 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
-from xml.sax.saxutils import escape as xml_escape, quoteattr as xml_quoteattr
+from xml.sax.saxutils import escape as xml_escape
+from xml.sax.saxutils import quoteattr as xml_quoteattr
 
 from ..config import HanielConfig
 from ..config.model import ServiceDefinitionConfig
@@ -367,10 +368,12 @@ class Finalizer:
             subprocess.run(
                 [str(service_exe), "stop", "--no-elevate"],
                 capture_output=True,
+                check=False,
             )
             subprocess.run(
                 [str(service_exe), "uninstall", "--no-elevate"],
                 capture_output=True,
+                check=False,
             )
 
             # Register the service
@@ -378,6 +381,7 @@ class Finalizer:
                 [str(service_exe), "install", "--no-elevate"],
                 capture_output=True,
                 text=True,
+                check=False,
             )
             if result.returncode != 0:
                 raise RuntimeError(f"WinSW install failed: {result.stderr}")
@@ -413,6 +417,9 @@ class Finalizer:
             "# Configuration for haniel-runner.ps1 wrapper script",
             f"WEBHOOK_URL={webhook_url}",
             f"HANIEL_REPO={repo_path}",
+            "HANIEL_RELEASE_ROOT=.local/haniel-releases",
+            "HANIEL_RELEASE_RETAIN_EXTRA=3",
+            "HANIEL_RELEASE_MIN_FREE_MB=5120",
             f"CONFIG={self.config_filename}",
             "MAX_GIT_FAILURES=3",
             "SELF_UPDATE_EXIT_TIMEOUT=60",

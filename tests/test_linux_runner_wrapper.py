@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="Linux wrapper contract")
 
 
@@ -23,7 +22,6 @@ def _run_wrapper(
     exit_codes: list[int],
     *,
     hang_first: bool = False,
-    update_wrapper_on_second_fetch: bool = False,
 ):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -34,17 +32,21 @@ def _run_wrapper(
     fetch_log = tmp_path / "fetches"
     launch_log = tmp_path / "launches"
     source_script = Path(__file__).resolve().parents[1] / "haniel-runner.sh"
+    source_scripts = Path(__file__).resolve().parents[1] / "scripts"
     script = tmp_path / "haniel-runner.sh"
     shutil.copy2(source_script, script)
+    helper_dir = tmp_path / "scripts"
+    helper_dir.mkdir()
+    for name in ("haniel_atomic_release.py", "haniel_release_policy.py"):
+        shutil.copy2(source_scripts / name, helper_dir / name)
+    release_commit = "a" * 40
 
     _write_executable(
         fake_bin / "git",
         f"""#!/usr/bin/env bash
 if [[ "$3" == "fetch" ]]; then printf 'fetch\\n' >> "{fetch_log}"; fi
-if [[ "$3" == "rev-parse" ]]; then printf 'main\\n'; fi
-if [[ "$3" == "reset" && "{1 if update_wrapper_on_second_fetch else 0}" == "1" && "$(wc -l < "{fetch_log}")" -ge 2 ]]; then
-  /usr/bin/sed -i 's/Launching haniel/Launching UPDATED haniel/' "{script}"
-fi
+if [[ "$3" == "rev-parse" ]]; then printf '{release_commit}\\n'; fi
+if [[ "$3" == "symbolic-ref" ]]; then printf 'main\\n'; fi
 exit 0
 """,
     )
@@ -52,9 +54,13 @@ exit 0
     _write_executable(
         fake_bin / "python",
         f"""#!/usr/bin/env bash
-if [[ "${{1:-}}" == "-c" ]]; then printf '2026-08-10T00:00:00+00:00\\n'; exit 0; fi
+if [[ "${{1:-}}" == *"haniel_atomic_release.py" ]]; then exec "{sys.executable}" "$@"; fi
 if [[ "${{1:-}}" == "-" ]]; then exec "{sys.executable}" "$@"; fi
-if [[ "${{1:-}}" == "-m" && "${{2:-}}" == "pip" ]]; then exit 0; fi
+if [[ "${{1:-}}" == "-c" ]]; then
+  if [[ "${{2:-}}" == *"haniel.cli"* ]]; then exit 0; fi
+  printf '2026-08-10T00:00:00+00:00\\n'
+  exit 0
+fi
 if [[ "${{1:-}}" == "-m" && "${{2:-}}" == "haniel.cli" ]]; then
   code="$(head -n 1 "{state}")"
   tail -n +2 "{state}" > "{state}.next"
@@ -71,11 +77,25 @@ exit 0
 """,
     )
 
+    release_root = tmp_path / ".local" / "haniel-releases"
+    release = release_root / "releases" / release_commit
+    (release / ".venv" / "bin").mkdir(parents=True)
+    shutil.copy2(fake_bin / "python", release / ".venv" / "bin" / "python")
+    shutil.copy2(script, release / "haniel-runner.sh")
+    (release / ".haniel-release-ready.json").write_text(
+        json.dumps({"version": 1, "commit": release_commit}), encoding="utf-8"
+    )
+    release_root.mkdir(parents=True, exist_ok=True)
+    (release_root / "current").symlink_to(
+        Path("releases") / release_commit, target_is_directory=True
+    )
+
     (tmp_path / "haniel-runner.conf").write_text(
         "\n".join(
             [
                 "WEBHOOK_URL=",
                 "HANIEL_REPO=repo",
+                "HANIEL_RELEASE_ROOT=.local/haniel-releases",
                 "CONFIG=haniel.yaml",
                 "MAX_GIT_FAILURES=1",
                 "SELF_UPDATE_EXIT_TIMEOUT=0",
@@ -133,20 +153,3 @@ def test_self_update_exit_watchdog_sigkills_and_recovers(tmp_path: Path) -> None
     assert "Forced self-update recovery" in result.stdout
     assert fetches == ["fetch", "fetch"]
     assert launches == ["99", "0"]
-
-
-def test_updated_wrapper_reexecs_before_self_update_relaunch(tmp_path: Path) -> None:
-    result, fetches, launches = _run_wrapper(
-        tmp_path,
-        [10, 0],
-        update_wrapper_on_second_fetch=True,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert "Launching UPDATED haniel" in result.stdout
-    assert fetches == ["fetch", "fetch", "fetch"]
-    assert launches == ["10", "0"]
-    marker = json.loads(
-        (tmp_path / ".local" / "self_update_result.json").read_text(encoding="utf-8")
-    )
-    assert marker["ok"] is True

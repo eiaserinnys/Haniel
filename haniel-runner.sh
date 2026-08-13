@@ -3,8 +3,8 @@
 #
 # Register this script as the systemd service ExecStart, not `python -m haniel`
 # directly. Exit code 10 from Haniel means "self-update approved"; this wrapper
-# then fetches, resets, reinstalls, writes the self-update result marker, and
-# launches Haniel again.
+# then prepares a commit-specific release, atomically switches `current`, writes
+# the self-update result marker, and launches Haniel again.
 
 set -u
 
@@ -29,6 +29,9 @@ done < "$CONF_PATH"
 
 WEBHOOK_URL="${CONFIG[WEBHOOK_URL]:-}"
 HANIEL_REPO="${CONFIG[HANIEL_REPO]:-}"
+HANIEL_RELEASE_ROOT="${CONFIG[HANIEL_RELEASE_ROOT]:-.local/haniel-releases}"
+HANIEL_RELEASE_RETAIN_EXTRA="${CONFIG[HANIEL_RELEASE_RETAIN_EXTRA]:-3}"
+HANIEL_RELEASE_MIN_FREE_MB="${CONFIG[HANIEL_RELEASE_MIN_FREE_MB]:-5120}"
 CONFIG_FILE="${CONFIG[CONFIG]:-}"
 MAX_GIT_FAILURES="${CONFIG[MAX_GIT_FAILURES]:-3}"
 PYTHON_BIN_CONFIG="${CONFIG[PYTHON_BIN]:-}"
@@ -56,6 +59,14 @@ if (( CRASH_RESTART_BASE_SECONDS > CRASH_RESTART_MAX_SECONDS )); then
   echo "CRASH_RESTART_BASE_SECONDS must not exceed CRASH_RESTART_MAX_SECONDS" >&2
   exit 1
 fi
+if [[ ! "$HANIEL_RELEASE_RETAIN_EXTRA" =~ ^[0-9]+$ ]]; then
+  echo "HANIEL_RELEASE_RETAIN_EXTRA must be a non-negative integer" >&2
+  exit 1
+fi
+if [[ ! "$HANIEL_RELEASE_MIN_FREE_MB" =~ ^[1-9][0-9]*$ ]]; then
+  echo "HANIEL_RELEASE_MIN_FREE_MB must be a positive integer" >&2
+  exit 1
+fi
 
 resolve_path() {
   local path="$1"
@@ -67,7 +78,9 @@ resolve_path() {
 }
 
 REPO_PATH="$(resolve_path "$HANIEL_REPO")"
+RELEASE_ROOT="$(resolve_path "$HANIEL_RELEASE_ROOT")"
 CONFIG_PATH="$(resolve_path "$CONFIG_FILE")"
+RELEASE_HELPER="$(dirname "$RUNNER_SCRIPT_PATH")/scripts/haniel_atomic_release.py"
 
 detect_python() {
   if [[ -n "$PYTHON_BIN_CONFIG" ]]; then
@@ -88,6 +101,10 @@ detect_python() {
 PYTHON_BIN="$(detect_python)"
 if [[ -z "$PYTHON_BIN" || ! -x "$PYTHON_BIN" ]]; then
   echo "Python executable not found. Set PYTHON_BIN in haniel-runner.conf." >&2
+  exit 1
+fi
+if [[ ! -f "$RELEASE_HELPER" ]]; then
+  echo "Atomic release helper not found: $RELEASE_HELPER" >&2
   exit 1
 fi
 
@@ -126,34 +143,63 @@ except Exception:
 PY
 }
 
-STEP_NAMES=()
-STEP_OKS=()
-STEP_ERRORS=()
 LAST_UPDATE_ERROR=""
 LAST_UPDATE_STARTED_AT=""
 LAST_UPDATE_FINISHED_AT=""
+PREPARATION_RESULT_PATH="$ROOT_DIR/.local/haniel_release_preparation.json"
+PREPARATION_OK="false"
+PREPARATION_SWITCHED="false"
+PREPARATION_ERROR_CODE=""
+PREPARATION_WARNINGS=""
+ACTIVE_REPO="$REPO_PATH"
+ACTIVE_PYTHON="$PYTHON_BIN"
+SELF_UPDATE_EXIT_MARKER="$ROOT_DIR/.local/self_update_exit_requested"
+FORCED_SELF_UPDATE_MARKER="$ROOT_DIR/.local/self_update_exit_forced"
 
-add_step() {
-  local name="$1"
-  local ok="$2"
-  local error_message="${3:-}"
-
-  if [[ -z "$error_message" && "$ok" != "true" ]]; then
-    error_message="$name failed (no message)"
+load_preparation_result() {
+  local fields=()
+  if [[ ! -f "$PREPARATION_RESULT_PATH" ]]; then
+    LAST_UPDATE_ERROR="atomic release helper did not write a result"
+    PREPARATION_OK="false"
+    PREPARATION_SWITCHED="false"
+    PREPARATION_ERROR_CODE=""
+    PREPARATION_WARNINGS=""
+    ACTIVE_REPO=""
+    ACTIVE_PYTHON=""
+    return 1
   fi
+  mapfile -t fields < <("$PYTHON_BIN" - "$PREPARATION_RESULT_PATH" <<'PY'
+import json
+import sys
 
-  STEP_NAMES+=("$name")
-  STEP_OKS+=("$ok")
-  STEP_ERRORS+=("$error_message")
-
-  if [[ "$ok" != "true" && -z "$LAST_UPDATE_ERROR" ]]; then
-    LAST_UPDATE_ERROR="$name failed: $error_message"
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+print("true" if payload.get("ok") else "false")
+print("true" if payload.get("switched") else "false")
+print(payload.get("active_repo") or "")
+print(payload.get("active_python") or "")
+print((payload.get("error") or "").replace("\n", " "))
+print(payload.get("error_code") or "")
+print(" | ".join(payload.get("warnings") or []).replace("\n", " "))
+PY
+  )
+  if (( ${#fields[@]} != 7 )); then
+    LAST_UPDATE_ERROR="invalid atomic release helper result"
+    PREPARATION_OK="false"
+    PREPARATION_SWITCHED="false"
+    ACTIVE_REPO=""
+    ACTIVE_PYTHON=""
+    PREPARATION_ERROR_CODE=""
+    PREPARATION_WARNINGS=""
+    return 1
   fi
-}
-
-join_unit_sep() {
-  local IFS=$'\x1f'
-  printf '%s' "$*"
+  PREPARATION_OK="${fields[0]}"
+  PREPARATION_SWITCHED="${fields[1]}"
+  ACTIVE_REPO="${fields[2]}"
+  ACTIVE_PYTHON="${fields[3]}"
+  LAST_UPDATE_ERROR="${fields[4]}"
+  PREPARATION_ERROR_CODE="${fields[5]}"
+  PREPARATION_WARNINGS="${fields[6]}"
 }
 
 write_self_update_marker() {
@@ -161,36 +207,24 @@ write_self_update_marker() {
   local marker_path="$ROOT_DIR/.local/self_update_result.json"
   mkdir -p "$ROOT_DIR/.local"
 
-  HANIEL_STEP_NAMES="$(join_unit_sep "${STEP_NAMES[@]}")" \
-  HANIEL_STEP_OKS="$(join_unit_sep "${STEP_OKS[@]}")" \
-  HANIEL_STEP_ERRORS="$(join_unit_sep "${STEP_ERRORS[@]}")" \
-  HANIEL_LAST_UPDATE_ERROR="$LAST_UPDATE_ERROR" \
-  "$PYTHON_BIN" - "$marker_path" "$LAST_UPDATE_STARTED_AT" "$LAST_UPDATE_FINISHED_AT" "$ok" <<'PY'
+  "$PYTHON_BIN" - "$PREPARATION_RESULT_PATH" "$marker_path" "$LAST_UPDATE_STARTED_AT" "$LAST_UPDATE_FINISHED_AT" "$ok" <<'PY'
 import json
-import os
 import sys
 
-marker_path, started_at, finished_at, ok_raw = sys.argv[1:5]
-sep = "\x1f"
-names = os.environ.get("HANIEL_STEP_NAMES", "").split(sep) if os.environ.get("HANIEL_STEP_NAMES") else []
-oks = os.environ.get("HANIEL_STEP_OKS", "").split(sep) if os.environ.get("HANIEL_STEP_OKS") else []
-errors = os.environ.get("HANIEL_STEP_ERRORS", "").split(sep) if os.environ.get("HANIEL_STEP_ERRORS") else []
-
-steps = []
-for index, name in enumerate(names):
-    steps.append({
-        "name": name,
-        "ok": index < len(oks) and oks[index] == "true",
-        "error": errors[index] if index < len(errors) and errors[index] else None,
-    })
+result_path, marker_path, started_at, finished_at, ok_raw = sys.argv[1:6]
+try:
+    with open(result_path, encoding="utf-8") as handle:
+        result = json.load(handle)
+except (OSError, ValueError, TypeError) as exc:
+    result = {"steps": [], "error": f"invalid release preparation result: {exc}"}
 
 payload = {
     "version": 1,
     "started_at": started_at,
     "finished_at": finished_at,
     "ok": ok_raw == "true",
-    "steps": steps,
-    "error": os.environ.get("HANIEL_LAST_UPDATE_ERROR") or None,
+    "steps": result.get("steps") or [],
+    "error": result.get("error"),
 }
 
 with open(marker_path, "w", encoding="utf-8") as handle:
@@ -198,75 +232,39 @@ with open(marker_path, "w", encoding="utf-8") as handle:
 PY
 }
 
-update_haniel_repo() {
-  local git_failures=0
-  local output=""
-
-  while (( git_failures < MAX_GIT_FAILURES )); do
-    output="$(git -C "$REPO_PATH" fetch origin 2>&1)"
-    if [[ $? -eq 0 ]]; then
-      break
+update_haniel_release() {
+  local arguments=(
+    "$PYTHON_BIN"
+    "$RELEASE_HELPER"
+    --source "$REPO_PATH"
+    --release-root "$RELEASE_ROOT"
+    --bootstrap-python "$PYTHON_BIN"
+    --result-json "$PREPARATION_RESULT_PATH"
+    --max-git-failures "$MAX_GIT_FAILURES"
+    --retain-extra "$HANIEL_RELEASE_RETAIN_EXTRA"
+    --min-free-mb "$HANIEL_RELEASE_MIN_FREE_MB"
+  )
+  if [[ ! -e "$RELEASE_ROOT/current" && -f "$SELF_UPDATE_EXIT_MARKER" ]]; then
+    arguments+=(--prefer-orig-head)
+  fi
+  rm -f "$PREPARATION_RESULT_PATH"
+  "${arguments[@]}" || true
+  load_preparation_result || true
+  if [[ -n "$PREPARATION_WARNINGS" ]]; then
+    send_webhook "Atomic release cleanup warning: $PREPARATION_WARNINGS" "warning"
+  fi
+  if [[ "$PREPARATION_OK" != "true" ]]; then
+    local level="error"
+    if [[ "$PREPARATION_ERROR_CODE" == "insufficient_disk_space" ]]; then
+      level="warning"
     fi
-    git_failures=$((git_failures + 1))
-    echo "git fetch failed (attempt $git_failures/$MAX_GIT_FAILURES): $output" >&2
-    sleep 5
-  done
-
-  if (( git_failures >= MAX_GIT_FAILURES )); then
-    add_step "git_fetch" "false" "git fetch failed $MAX_GIT_FAILURES times"
-    send_webhook "git fetch failed $MAX_GIT_FAILURES times. Launching with current code." "error"
-    return 1
-  fi
-  add_step "git_fetch" "true"
-
-  local branch
-  branch="$(git -C "$REPO_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-  if [[ -z "$branch" ]]; then
-    branch="main"
-  fi
-
-  output="$(git -C "$REPO_PATH" reset --hard "origin/$branch" 2>&1)"
-  if [[ $? -ne 0 ]]; then
-    add_step "git_reset" "false" "${output:-git reset failed}"
-    send_webhook "git reset --hard failed. Launching with current code." "warning"
-    return 1
-  fi
-  add_step "git_reset" "true"
-
-  output="$("$PYTHON_BIN" -m pip install -e "$REPO_PATH" 2>&1)"
-  if [[ $? -ne 0 ]]; then
-    add_step "pip_install" "false" "${output:-pip install failed}"
-    send_webhook "pip install failed. Attempting to launch with previous code." "warning"
-  else
-    add_step "pip_install" "true"
-  fi
-
-  local dashboard_path="$REPO_PATH/dashboard"
-  if [[ -d "$dashboard_path" ]]; then
-    echo "[haniel-runner] Building dashboard..."
-    if ! command -v pnpm >/dev/null 2>&1; then
-      add_step "pnpm_install" "false" "pnpm not found"
-      send_webhook "Dashboard pnpm install failed. pnpm not found." "warning"
-      return 0
-    fi
-
-    output="$(pnpm --dir "$dashboard_path" install 2>&1)"
-    if [[ $? -ne 0 ]]; then
-      add_step "pnpm_install" "false" "${output:-pnpm install failed}"
-      send_webhook "Dashboard pnpm install failed. Launching with previous build." "warning"
-      return 0
-    fi
-    add_step "pnpm_install" "true"
-
-    output="$(pnpm --dir "$dashboard_path" build 2>&1)"
-    if [[ $? -ne 0 ]]; then
-      add_step "pnpm_build" "false" "${output:-pnpm build failed}"
-      send_webhook "Dashboard build failed. Launching with previous build." "warning"
+    if [[ -n "$ACTIVE_REPO" && -n "$ACTIVE_PYTHON" ]]; then
+      send_webhook "Atomic release preparation failed: $LAST_UPDATE_ERROR. Launching previous release." "$level"
     else
-      add_step "pnpm_build" "true"
+      send_webhook "Atomic release preparation failed: $LAST_UPDATE_ERROR. No validated release is available." "$level"
     fi
+    return 1
   fi
-
   return 0
 }
 
@@ -281,8 +279,6 @@ EXIT_RESTART=11
 skip_update=false
 write_self_update_marker=false
 crash_restart_count=0
-SELF_UPDATE_EXIT_MARKER="$ROOT_DIR/.local/self_update_exit_requested"
-FORCED_SELF_UPDATE_MARKER="$ROOT_DIR/.local/self_update_exit_forced"
 CHILD_PID=""
 WATCHDOG_PID=""
 
@@ -334,29 +330,31 @@ next_crash_delay() {
 
 while true; do
   if [[ "$skip_update" != "true" ]]; then
-    runner_hash_before="$(sha256sum "$RUNNER_SCRIPT_PATH" | awk '{print $1}')"
-    echo "[haniel-runner] Updating haniel repository..."
-    STEP_NAMES=()
-    STEP_OKS=()
-    STEP_ERRORS=()
+    echo "[haniel-runner] Preparing atomic Haniel release..."
     LAST_UPDATE_ERROR=""
     LAST_UPDATE_STARTED_AT="$("$PYTHON_BIN" -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat())')"
     LAST_UPDATE_FINISHED_AT=""
-    update_haniel_repo || true
+    update_haniel_release || true
     LAST_UPDATE_FINISHED_AT="$("$PYTHON_BIN" -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat())')"
-    update_ok=true
-    if [[ -n "$LAST_UPDATE_ERROR" ]]; then
-      update_ok=false
-    fi
     if [[ "$write_self_update_marker" == "true" ]]; then
-      write_self_update_marker "$update_ok"
+      write_self_update_marker "$PREPARATION_OK"
     fi
     write_self_update_marker=false
 
-    runner_hash_after="$(sha256sum "$RUNNER_SCRIPT_PATH" | awk '{print $1}')"
-    if [[ "$runner_hash_before" != "$runner_hash_after" ]]; then
-      echo "[haniel-runner] Runner script updated; re-executing new wrapper."
-      exec "$0"
+    if [[ -z "$ACTIVE_REPO" || -z "$ACTIVE_PYTHON" || ! -x "$ACTIVE_PYTHON" ]]; then
+      message="No previously validated Haniel release is available; refusing to launch."
+      echo "[haniel-runner] $message" >&2
+      send_webhook "$message" "error"
+      exit 1
+    fi
+
+    active_runner="$ACTIVE_REPO/haniel-runner.sh"
+    if [[ "$PREPARATION_SWITCHED" == "true" && -f "$active_runner" ]]; then
+      active_runner_path="$(readlink -f "$active_runner")"
+      if [[ "$RUNNER_SCRIPT_PATH" != "$active_runner_path" ]]; then
+        echo "[haniel-runner] Re-executing current release wrapper."
+        exec "$active_runner"
+      fi
     fi
   fi
   skip_update=false
@@ -364,7 +362,7 @@ while true; do
   echo "[haniel-runner] Launching haniel..."
   rm -f "$SELF_UPDATE_EXIT_MARKER" "$FORCED_SELF_UPDATE_MARKER"
   launch_started_at="$(date +%s)"
-  "$PYTHON_BIN" -m haniel.cli run "$CONFIG_PATH" &
+  "$ACTIVE_PYTHON" -m haniel.cli run "$CONFIG_PATH" &
   CHILD_PID=$!
   start_self_update_watchdog "$CHILD_PID"
   wait "$CHILD_PID"
