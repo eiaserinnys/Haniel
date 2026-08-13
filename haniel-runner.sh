@@ -7,6 +7,7 @@
 # the self-update result marker, and launches Haniel again.
 
 set -u
+unset NODE_CHANNEL_FD
 
 ROOT_DIR="$(pwd)"
 CONF_PATH="$ROOT_DIR/haniel-runner.conf"

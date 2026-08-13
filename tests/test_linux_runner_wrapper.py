@@ -22,6 +22,7 @@ def _run_wrapper(
     exit_codes: list[int],
     *,
     hang_first: bool = False,
+    node_channel_fd: str | None = None,
 ):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -31,6 +32,7 @@ def _run_wrapper(
     state.write_text("\n".join(str(code) for code in exit_codes) + "\n")
     fetch_log = tmp_path / "fetches"
     launch_log = tmp_path / "launches"
+    release_env_log = tmp_path / "release-env"
     source_script = Path(__file__).resolve().parents[1] / "haniel-runner.sh"
     source_scripts = Path(__file__).resolve().parents[1] / "scripts"
     script = tmp_path / "haniel-runner.sh"
@@ -54,7 +56,10 @@ exit 0
     _write_executable(
         fake_bin / "python",
         f"""#!/usr/bin/env bash
-if [[ "${{1:-}}" == *"haniel_atomic_release.py" ]]; then exec "{sys.executable}" "$@"; fi
+if [[ "${{1:-}}" == *"haniel_atomic_release.py" ]]; then
+  printf '%s\n' "${{NODE_CHANNEL_FD:-unset}}" > "{release_env_log}"
+  exec "{sys.executable}" "$@"
+fi
 if [[ "${{1:-}}" == "-" ]]; then exec "{sys.executable}" "$@"; fi
 if [[ "${{1:-}}" == "-c" ]]; then
   if [[ "${{2:-}}" == *"haniel.cli"* ]]; then exit 0; fi
@@ -112,6 +117,8 @@ exit 0
 
     env = os.environ.copy()
     env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    if node_channel_fd is not None:
+        env["NODE_CHANNEL_FD"] = node_channel_fd
     result = subprocess.run(
         ["bash", str(script)],
         cwd=tmp_path,
@@ -124,6 +131,18 @@ exit 0
     fetches = fetch_log.read_text().splitlines() if fetch_log.exists() else []
     launches = launch_log.read_text().splitlines() if launch_log.exists() else []
     return result, fetches, launches
+
+
+def test_wrapper_removes_inherited_node_channel_before_release_preparation(
+    tmp_path: Path,
+) -> None:
+    release_env_log = tmp_path / "release-env"
+    result, fetches, launches = _run_wrapper(tmp_path, [0], node_channel_fd="3")
+
+    assert result.returncode == 0, result.stderr
+    assert release_env_log.read_text(encoding="utf-8") == "unset\n"
+    assert fetches == ["fetch"]
+    assert launches == ["0"]
 
 
 @pytest.mark.parametrize(
