@@ -33,7 +33,7 @@ from haniel_release_inventory import (
 )
 
 from haniel_release_policy import (
-    BROKEN_MARKER,
+    BROKEN_MARKER as BROKEN_MARKER,
     COMMIT_PATTERN,
     DEFAULT_MIN_FREE_MB,
     DEFAULT_RETAIN_EXTRA,

@@ -58,9 +58,7 @@ def _is_reparse_leaf(path: str) -> bool:
         attributes = getattr(os.lstat(path), "st_file_attributes", 0)
     except FileNotFoundError:
         return False
-    return bool(
-        attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-    )
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
 
 
 def is_reparse_leaf(path: str | os.PathLike[str]) -> bool:
@@ -129,7 +127,9 @@ def read_release_pointer(release_root: Path) -> str | None:
     if not os.path.lexists(normalized_os_path(pointer)):
         return None
     if pointer.is_symlink() or not pointer.is_file():
-        raise ReleaseFilesystemError(f"release pointer is not a regular file: {pointer}")
+        raise ReleaseFilesystemError(
+            f"release pointer is not a regular file: {pointer}"
+        )
     try:
         raw = pointer.read_text(encoding="utf-8")
     except OSError as exc:
@@ -148,7 +148,9 @@ def write_release_pointer(release_root: Path, release_name: str) -> None:
     if os.path.lexists(normalized_os_path(pointer)) and (
         pointer.is_symlink() or not pointer.is_file()
     ):
-        raise ReleaseFilesystemError(f"release pointer is not a regular file: {pointer}")
+        raise ReleaseFilesystemError(
+            f"release pointer is not a regular file: {pointer}"
+        )
     temporary = release_root / f".{CURRENT_POINTER}.{uuid.uuid4().hex}.tmp"
     try:
         with temporary.open("x", encoding="utf-8", newline="\n") as handle:

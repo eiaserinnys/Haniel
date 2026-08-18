@@ -164,14 +164,20 @@ def test_windows_paths_receive_extended_length_prefix_after_normalization(
 ) -> None:
     release_fs = _import_script(monkeypatch, "haniel_release_fs")
 
-    assert release_fs.normalized_os_path(
-        r"D:\haniel-root\releases\candidate",
-        platform="nt",
-    ) == r"\\?\D:\haniel-root\releases\candidate"
-    assert release_fs.normalized_os_path(
-        r"\\server\share\candidate",
-        platform="nt",
-    ) == r"\\?\UNC\server\share\candidate"
+    assert (
+        release_fs.normalized_os_path(
+            r"D:\haniel-root\releases\candidate",
+            platform="nt",
+        )
+        == r"\\?\D:\haniel-root\releases\candidate"
+    )
+    assert (
+        release_fs.normalized_os_path(
+            r"\\server\share\candidate",
+            platform="nt",
+        )
+        == r"\\?\UNC\server\share\candidate"
+    )
 
 
 def test_broken_candidate_uses_a_distinct_retry_directory(

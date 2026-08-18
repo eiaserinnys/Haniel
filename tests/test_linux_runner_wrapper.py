@@ -170,7 +170,9 @@ def test_exit_code_contract_recovers_and_relaunches(
     assert result.returncode == 0, result.stderr
     assert expected_message in result.stdout
     assert fetches == ["fetch", "fetch"]
-    suffix = f"|active-self-head={'a' * 40}|-m haniel.cli run {tmp_path / 'haniel.yaml'}"
+    suffix = (
+        f"|active-self-head={'a' * 40}|-m haniel.cli run {tmp_path / 'haniel.yaml'}"
+    )
     assert launches == [f"{first_exit}{suffix}", f"0{suffix}"]
 
 
@@ -181,5 +183,7 @@ def test_self_update_exit_watchdog_sigkills_and_recovers(tmp_path: Path) -> None
     assert "did not exit within 0s; sending SIGKILL" in result.stdout
     assert "Forced self-update recovery" in result.stdout
     assert fetches == ["fetch", "fetch"]
-    suffix = f"|active-self-head={'a' * 40}|-m haniel.cli run {tmp_path / 'haniel.yaml'}"
+    suffix = (
+        f"|active-self-head={'a' * 40}|-m haniel.cli run {tmp_path / 'haniel.yaml'}"
+    )
     assert launches == [f"99{suffix}", f"0{suffix}"]
