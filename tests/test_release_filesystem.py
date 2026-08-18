@@ -140,7 +140,7 @@ def test_broken_candidate_uses_a_distinct_retry_directory(
     atomic_release = _import_script(monkeypatch, "haniel_atomic_release")
     releases = tmp_path / "release-root" / "releases"
     commit = "c" * 40
-    poisoned = releases / commit
+    poisoned = releases / commit[:12]
     poisoned.mkdir(parents=True)
     (poisoned / atomic_release.BROKEN_MARKER).write_text("{}", encoding="utf-8")
     source = tmp_path / "source"
@@ -174,7 +174,7 @@ def test_broken_candidate_uses_a_distinct_retry_directory(
     )
 
     assert candidate != poisoned
-    assert candidate.name.startswith(f"{commit}.retry-")
+    assert candidate.name.startswith(f"{commit[:12]}.retry-")
     assert poisoned.is_dir()
     assert atomic_release.read_ready_commit(candidate) == commit
 
@@ -219,6 +219,32 @@ def test_failed_cleanup_records_broken_marker_for_next_attempt(
             min_free_mb=1,
         )
 
-    marker = releases / commit / atomic_release.BROKEN_MARKER
+    marker = releases / commit[:12] / atomic_release.BROKEN_MARKER
     assert marker.is_file()
     assert "injected cleanup failure" in marker.read_text(encoding="utf-8")
+
+
+def test_short_sha_collision_preserves_existing_ready_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    atomic_release = _import_script(monkeypatch, "haniel_atomic_release")
+    releases = tmp_path / "release-root" / "releases"
+    first_commit = "a" * 12 + "b" * 28
+    second_commit = "a" * 12 + "c" * 28
+    existing = releases / first_commit[:12]
+    python = existing / (
+        ".venv/Scripts/python.exe" if os.name == "nt" else ".venv/bin/python"
+    )
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    (existing / ".haniel-release-ready.json").write_text(
+        json.dumps({"version": 1, "commit": first_commit}),
+        encoding="utf-8",
+    )
+
+    candidate = atomic_release._select_release_path(releases, second_commit)
+
+    assert candidate != existing
+    assert candidate.name.startswith(f"{second_commit[:12]}.retry-")
+    assert atomic_release.read_ready_commit(existing) == first_commit

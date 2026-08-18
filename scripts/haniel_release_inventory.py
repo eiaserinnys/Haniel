@@ -94,7 +94,7 @@ def active_release(release_root: Path) -> Path | None:
 def ready_release_for_commit(releases: Path, commit: str) -> Path | None:
     if not releases.is_dir():
         return None
-    canonical = releases / commit
+    canonical = releases / commit[:12]
     candidates = [canonical]
     candidates.extend(
         sorted(
@@ -122,9 +122,12 @@ def select_release_path(releases: Path, commit: str) -> Path:
     ready = ready_release_for_commit(releases, commit)
     if ready is not None:
         return ready
-    canonical = releases / commit
-    if (canonical / BROKEN_MARKER).is_file():
-        return releases / f"{commit}.retry-{uuid.uuid4().hex[:8]}"
+    canonical = releases / commit[:12]
+    canonical_commit = read_ready_commit(canonical)
+    if (canonical / BROKEN_MARKER).is_file() or (
+        canonical_commit is not None and canonical_commit != commit
+    ):
+        return releases / f"{commit[:12]}.retry-{uuid.uuid4().hex[:8]}"
     return canonical
 
 

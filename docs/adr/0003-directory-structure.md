@@ -42,7 +42,7 @@ repo is isolated in `.self/`, and managed services are cloned into `.services/`:
 +-- .local/
 |   +-- haniel-releases/
 |       +-- current.txt          # active release directory name
-|       +-- releases/{commit}/  # Release-local venv and built dashboard
+|       +-- releases/{sha12}/   # Release-local venv and built dashboard
 +-- {service-name}.exe           # WinSW service executable
 +-- {service-name}.xml           # WinSW service config
 +-- bin/

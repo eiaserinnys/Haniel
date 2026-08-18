@@ -15,7 +15,7 @@ from pathlib import Path
 CURRENT_POINTER = "current.txt"
 LEGACY_CURRENT_POINTER = "current"
 RELEASE_DIRECTORY_PATTERN = re.compile(
-    r"^(?P<commit>[0-9a-f]{40,64})(?:\.retry-[0-9a-f]{8})?$"
+    r"^(?P<commit>[0-9a-f]{12,64})(?:\.retry-[0-9a-f]{8})?$"
 )
 
 
@@ -45,7 +45,7 @@ def normalized_os_path(
 def release_directory_matches_commit(name: str, commit: str) -> bool:
     """Return whether a canonical or retry directory belongs to a commit."""
     match = RELEASE_DIRECTORY_PATTERN.fullmatch(name)
-    return match is not None and match.group("commit") == commit
+    return match is not None and commit.startswith(match.group("commit"))
 
 
 def _is_reparse_leaf(path: str) -> bool:
