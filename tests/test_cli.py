@@ -7,10 +7,29 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import click
 from click.testing import CliRunner
 
 from haniel.cli import main
 from haniel.core.lifecycle_control import LifecycleConflict
+
+
+def test_active_self_head_comes_from_wrapper_environment(monkeypatch):
+    from haniel.cli import _resolve_active_self_head
+
+    commit = "a" * 40
+    monkeypatch.setenv("HANIEL_ACTIVE_SELF_HEAD", commit.upper())
+
+    assert _resolve_active_self_head(None) == commit
+
+
+def test_active_self_head_rejects_conflicting_option_and_environment(monkeypatch):
+    from haniel.cli import _resolve_active_self_head
+
+    monkeypatch.setenv("HANIEL_ACTIVE_SELF_HEAD", "a" * 40)
+
+    with pytest.raises(click.BadParameter, match="conflicts"):
+        _resolve_active_self_head("b" * 40)
 
 
 def test_self_update_exit_intent_is_atomic_and_immediate_exit_flushes(tmp_path):

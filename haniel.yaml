@@ -8,6 +8,7 @@
 # For a full multi-service example, see haniel.yaml.example.
 
 poll_interval: 300
+git_fetch_timeout: 300
 
 repos:
   haniel:

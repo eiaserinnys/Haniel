@@ -8,7 +8,15 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from haniel_release_fs import (
+    ReleaseFilesystemError,
+    read_release_pointer,
+    release_directory_matches_commit,
+    remove_tree,
+)
+
 READY_MARKER = ".haniel-release-ready.json"
+BROKEN_MARKER = ".haniel-release-broken.json"
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40,64}$")
 DEFAULT_RETAIN_EXTRA = 3
 DEFAULT_MIN_FREE_MB = 5120
@@ -77,10 +85,13 @@ def prune_ready_releases(
     retain_extra: int,
 ) -> PruneOutcome:
     releases = (release_root / "releases").resolve(strict=True)
-    current_pointer = release_root / "current"
-    if not current_pointer.is_symlink():
-        raise ReleasePolicyError("current pointer is not a symlink during cleanup")
-    active = current_pointer.resolve(strict=True)
+    try:
+        active_name = read_release_pointer(release_root)
+    except ReleaseFilesystemError as exc:
+        raise ReleasePolicyError(str(exc)) from exc
+    if active_name is None:
+        raise ReleasePolicyError("current pointer is missing during cleanup")
+    active = (releases / active_name).resolve(strict=True)
     expected_current = current.resolve(strict=True)
     if active != expected_current or active.parent != releases:
         raise ReleasePolicyError("current pointer changed or escaped during cleanup")
@@ -96,7 +107,10 @@ def prune_ready_releases(
         resolved = entry.resolve()
         if resolved.parent != releases or resolved in protected:
             continue
-        if read_ready_commit(entry) != entry.name:
+        ready_commit = read_ready_commit(entry)
+        if ready_commit is None or not release_directory_matches_commit(
+            entry.name, ready_commit
+        ):
             continue
         try:
             modified_ns = (entry / READY_MARKER).stat().st_mtime_ns
@@ -109,7 +123,7 @@ def prune_ready_releases(
     failures: list[str] = []
     for _, name, release in candidates[retain_extra:]:
         try:
-            shutil.rmtree(release)
+            remove_tree(release)
             deleted.append(name)
         except OSError as exc:
             failures.append(f"{name}: {exc}")

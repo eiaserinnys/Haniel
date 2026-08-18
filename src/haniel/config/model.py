@@ -11,6 +11,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from ..defaults import DEFAULT_GIT_TIMEOUT
+
 
 class ShutdownConfig(BaseModel):
     """Configuration for graceful shutdown behavior."""
@@ -360,6 +362,11 @@ class HanielConfig(BaseModel):
     )
     poll_interval: int = Field(
         default=60, description="Seconds between git fetch polls"
+    )
+    git_fetch_timeout: int = Field(
+        default=DEFAULT_GIT_TIMEOUT,
+        gt=0,
+        description="Seconds before a git fetch is treated as an operational failure",
     )
     shutdown: ShutdownConfig | None = Field(
         default=None, description="Global shutdown configuration"

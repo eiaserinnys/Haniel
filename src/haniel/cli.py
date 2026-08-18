@@ -28,6 +28,18 @@ from haniel.commands.lifecycle import lifecycle_group
 from haniel.config import HanielConfig
 
 
+ACTIVE_SELF_HEAD_ENV = "HANIEL_ACTIVE_SELF_HEAD"
+
+
+def _normalize_active_self_head(value: str, *, source: str) -> str:
+    if re.fullmatch(r"[0-9a-fA-F]{40,64}", value) is None:
+        raise click.BadParameter(
+            f"{source} must be a full hexadecimal commit ID",
+            param_hint="active self head",
+        )
+    return value.lower()
+
+
 def _validate_active_self_head(
     _context: click.Context,
     _parameter: click.Parameter,
@@ -35,9 +47,31 @@ def _validate_active_self_head(
 ) -> str | None:
     if value is None:
         return None
-    if re.fullmatch(r"[0-9a-fA-F]{40,64}", value) is None:
-        raise click.BadParameter("must be a full hexadecimal commit ID")
-    return value.lower()
+    return _normalize_active_self_head(value, source="--active-self-head")
+
+
+def _resolve_active_self_head(option_value: str | None) -> str | None:
+    environment_value = os.environ.get(ACTIVE_SELF_HEAD_ENV)
+    option_head = (
+        _normalize_active_self_head(option_value, source="--active-self-head")
+        if option_value is not None
+        else None
+    )
+    environment_head = (
+        _normalize_active_self_head(environment_value, source=ACTIVE_SELF_HEAD_ENV)
+        if environment_value is not None
+        else None
+    )
+    if (
+        option_head is not None
+        and environment_head is not None
+        and option_head != environment_head
+    ):
+        raise click.BadParameter(
+            f"--active-self-head conflicts with {ACTIVE_SELF_HEAD_ENV}",
+            param_hint="active self head",
+        )
+    return option_head or environment_head
 
 
 def _exit_immediately(exit_code: int) -> None:
@@ -193,7 +227,7 @@ def run(
         config=haniel_config,
         config_dir=config_dir,
         config_path=config.resolve(),
-        active_self_head=active_self_head,
+        active_self_head=_resolve_active_self_head(active_self_head),
     )
     from haniel.core.lifecycle_control import LifecycleControl
     from haniel.core.lifecycle_request_server import LifecycleRequestServer

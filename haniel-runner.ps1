@@ -2,7 +2,7 @@
 # See ADR-0002 for architecture details.
 #
 # This script is registered as the WinSW service, not haniel directly.
-# It handles: prepare release → atomic current switch → launch haniel.
+# It handles: prepare release → atomic current.txt switch → launch haniel.
 # Exit code 10 from haniel means "self-update approved" → loop again.
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -177,8 +177,11 @@ function Update-HanielRelease {
         "--retain-extra", "$HanielReleaseRetainExtra",
         "--min-free-mb", "$HanielReleaseMinFreeMB"
     )
-    $currentPath = Join-Path $ReleaseRoot "current"
-    if (-not (Test-Path $currentPath) -and (Test-Path $SelfUpdateExitMarker)) {
+    $currentPointerPath = Join-Path $ReleaseRoot "current.txt"
+    $legacyCurrentPath = Join-Path $ReleaseRoot "current"
+    if (-not (Test-Path $currentPointerPath -PathType Leaf) -and
+        -not (Test-Path $legacyCurrentPath) -and
+        (Test-Path $SelfUpdateExitMarker)) {
         $arguments += "--prefer-orig-head"
     }
     & $BootstrapPython @arguments
@@ -278,11 +281,8 @@ while ($true) {
     $skipUpdate = $false
 
     Write-Host "[haniel-runner] Launching haniel..."
-    $runArguments = @(
-        "-m", "haniel.cli", "run",
-        "--active-self-head", $script:ActiveCommit,
-        $ConfigPath
-    )
+    $env:HANIEL_ACTIVE_SELF_HEAD = $script:ActiveCommit
+    $runArguments = @("-m", "haniel.cli", "run", $ConfigPath)
     & $script:ActivePython @runArguments
     $exitCode = $LASTEXITCODE
 

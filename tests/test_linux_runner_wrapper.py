@@ -39,7 +39,12 @@ def _run_wrapper(
     shutil.copy2(source_script, script)
     helper_dir = tmp_path / "scripts"
     helper_dir.mkdir()
-    for name in ("haniel_atomic_release.py", "haniel_release_policy.py"):
+    for name in (
+        "haniel_atomic_release.py",
+        "haniel_release_fs.py",
+        "haniel_release_inventory.py",
+        "haniel_release_policy.py",
+    ):
         shutil.copy2(source_scripts / name, helper_dir / name)
     release_commit = "a" * 40
 
@@ -70,7 +75,7 @@ if [[ "${{1:-}}" == "-m" && "${{2:-}}" == "haniel.cli" ]]; then
   code="$(head -n 1 "{state}")"
   tail -n +2 "{state}" > "{state}.next"
   mv "{state}.next" "{state}"
-  printf '%s\\n' "$code" >> "{launch_log}"
+  printf '%s|active-self-head=%s|%s\\n' "$code" "${{HANIEL_ACTIVE_SELF_HEAD:-unset}}" "$*" >> "{launch_log}"
   if [[ "{1 if hang_first else 0}" == "1" && "$code" == "99" ]]; then
     mkdir -p "{tmp_path}/.local"
     : > "{tmp_path}/.local/self_update_exit_requested"
@@ -91,8 +96,9 @@ exit 0
         json.dumps({"version": 1, "commit": release_commit}), encoding="utf-8"
     )
     release_root.mkdir(parents=True, exist_ok=True)
-    (release_root / "current").symlink_to(
-        Path("releases") / release_commit, target_is_directory=True
+    (release_root / "current.txt").write_text(
+        f"{release_commit}\n",
+        encoding="utf-8",
     )
 
     (tmp_path / "haniel-runner.conf").write_text(
@@ -142,7 +148,10 @@ def test_wrapper_removes_inherited_node_channel_before_release_preparation(
     assert result.returncode == 0, result.stderr
     assert release_env_log.read_text(encoding="utf-8") == "unset\n"
     assert fetches == ["fetch"]
-    assert launches == ["0"]
+    expected = (
+        f"0|active-self-head={'a' * 40}|-m haniel.cli run {tmp_path / 'haniel.yaml'}"
+    )
+    assert launches == [expected]
 
 
 @pytest.mark.parametrize(
@@ -161,7 +170,10 @@ def test_exit_code_contract_recovers_and_relaunches(
     assert result.returncode == 0, result.stderr
     assert expected_message in result.stdout
     assert fetches == ["fetch", "fetch"]
-    assert launches == [str(first_exit), "0"]
+    suffix = (
+        f"|active-self-head={'a' * 40}|-m haniel.cli run {tmp_path / 'haniel.yaml'}"
+    )
+    assert launches == [f"{first_exit}{suffix}", f"0{suffix}"]
 
 
 def test_self_update_exit_watchdog_sigkills_and_recovers(tmp_path: Path) -> None:
@@ -171,4 +183,7 @@ def test_self_update_exit_watchdog_sigkills_and_recovers(tmp_path: Path) -> None
     assert "did not exit within 0s; sending SIGKILL" in result.stdout
     assert "Forced self-update recovery" in result.stdout
     assert fetches == ["fetch", "fetch"]
-    assert launches == ["99", "0"]
+    suffix = (
+        f"|active-self-head={'a' * 40}|-m haniel.cli run {tmp_path / 'haniel.yaml'}"
+    )
+    assert launches == [f"99{suffix}", f"0{suffix}"]

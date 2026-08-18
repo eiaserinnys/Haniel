@@ -3,7 +3,7 @@
 #
 # Register this script as the systemd service ExecStart, not `python -m haniel`
 # directly. Exit code 10 from Haniel means "self-update approved"; this wrapper
-# then prepares a commit-specific release, atomically switches `current`, writes
+# then prepares a commit-specific release, atomically switches `current.txt`, writes
 # the self-update result marker, and launches Haniel again.
 
 set -u
@@ -250,7 +250,7 @@ update_haniel_release() {
     --retain-extra "$HANIEL_RELEASE_RETAIN_EXTRA"
     --min-free-mb "$HANIEL_RELEASE_MIN_FREE_MB"
   )
-  if [[ ! -e "$RELEASE_ROOT/current" && -f "$SELF_UPDATE_EXIT_MARKER" ]]; then
+  if [[ ! -f "$RELEASE_ROOT/current.txt" && ! -e "$RELEASE_ROOT/current" && ! -L "$RELEASE_ROOT/current" && -f "$SELF_UPDATE_EXIT_MARKER" ]]; then
     arguments+=(--prefer-orig-head)
   fi
   rm -f "$PREPARATION_RESULT_PATH"
@@ -368,7 +368,8 @@ while true; do
   echo "[haniel-runner] Launching haniel..."
   rm -f "$SELF_UPDATE_EXIT_MARKER" "$FORCED_SELF_UPDATE_MARKER"
   launch_started_at="$(date +%s)"
-  "$ACTIVE_PYTHON" -m haniel.cli run --active-self-head "$ACTIVE_COMMIT" "$CONFIG_PATH" &
+  HANIEL_ACTIVE_SELF_HEAD="$ACTIVE_COMMIT" \
+    "$ACTIVE_PYTHON" -m haniel.cli run "$CONFIG_PATH" &
   CHILD_PID=$!
   start_self_update_watchdog "$CHILD_PID"
   wait "$CHILD_PID"

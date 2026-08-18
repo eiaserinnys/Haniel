@@ -63,9 +63,20 @@ def test_command_error_preserves_process_return_code(
     assert atomic_release._command_error(completed).splitlines()[-1] == "[exit=-6]"
 
 
+def test_dashboard_uses_hoisted_node_linker() -> None:
+    npmrc = (REPO_ROOT / "dashboard" / ".npmrc").read_text(encoding="utf-8")
+
+    assert npmrc.splitlines() == ["node-linker=hoisted"]
+
+
 def _copy_release_helpers(destination: Path) -> None:
     destination.mkdir(exist_ok=True)
-    for name in ("haniel_atomic_release.py", "haniel_release_policy.py"):
+    for name in (
+        "haniel_atomic_release.py",
+        "haniel_release_fs.py",
+        "haniel_release_inventory.py",
+        "haniel_release_policy.py",
+    ):
         shutil.copy2(REPO_ROOT / "scripts" / name, destination / name)
 
 
@@ -178,7 +189,7 @@ if [[ "${{1:-}}" == "-m" && "${{2:-}}" == "haniel.cli" ]]; then
   code="$(head -n 1 "{state}")"
   tail -n +2 "{state}" > "{state}.next"
   mv "{state}.next" "{state}"
-  printf '%s|%s|%s\\n' "$(readlink -f "$0")" "$code" "$*" >> "{launch_log}"
+  printf '%s|%s|active-self-head=%s|%s\\n' "$(readlink -f "$0")" "$code" "${{HANIEL_ACTIVE_SELF_HEAD:-unset}}" "$*" >> "{launch_log}"
   exit "$code"
 fi
 exec "{real_python}" "$@"
@@ -233,6 +244,11 @@ def _prepare_ready_release(
     )
     os.utime(marker, ns=(modified_ns, modified_ns))
     return release
+
+
+def _current_release(release_root: Path) -> Path:
+    name = (release_root / "current.txt").read_text(encoding="utf-8").strip()
+    return release_root / "releases" / name
 
 
 def _run_atomic_wrapper(
@@ -335,7 +351,7 @@ def test_failed_candidate_preserves_previous_current(
     marker = json.loads(
         (tmp_path / ".local" / "self_update_result.json").read_text(encoding="utf-8")
     )
-    current = (run.release_root / "current").resolve()
+    current = _current_release(run.release_root)
     source_head = _run([REAL_GIT, "rev-parse", "HEAD"], cwd=run.source)
     print(
         f"FAILURE_INJECTION stage={stage} current={current.name} "
@@ -361,7 +377,7 @@ def test_success_switches_current_and_reexecs_release_wrapper(tmp_path: Path) ->
     marker = json.loads(
         (tmp_path / ".local" / "self_update_result.json").read_text(encoding="utf-8")
     )
-    current = (run.release_root / "current").resolve()
+    current = _current_release(run.release_root)
     source_head = _run([REAL_GIT, "rev-parse", "HEAD"], cwd=run.source)
     print(
         f"SUCCESS_SWITCH current={current.name} marker_ok={marker['ok']} "
@@ -369,7 +385,7 @@ def test_success_switches_current_and_reexecs_release_wrapper(tmp_path: Path) ->
     )
 
     assert run.result.returncode == 0, run.result.stderr
-    assert current.name == run.target_commit
+    assert current.name == run.target_commit[:12]
     assert source_head == run.previous_commit
     assert marker["ok"] is True
     preparation = json.loads(
@@ -381,14 +397,15 @@ def test_success_switches_current_and_reexecs_release_wrapper(tmp_path: Path) ->
     assert "Re-executing current release wrapper" in run.result.stdout
     launch = run.launch_log.read_text(encoding="utf-8").splitlines()[-1]
     assert launch.startswith(str(current / ".venv" / "bin" / "python"))
-    assert f"--active-self-head {run.target_commit}" in launch
+    assert "--active-self-head" not in launch
+    assert f"active-self-head={run.target_commit}" in launch
 
 
 def test_new_wrapper_migrates_legacy_layout_before_target_switch(
     tmp_path: Path,
 ) -> None:
     run = _run_atomic_wrapper(tmp_path, fail_stage=None, legacy_layout=True)
-    current = (run.release_root / "current").resolve()
+    current = _current_release(run.release_root)
     source_head = _run([REAL_GIT, "rev-parse", "HEAD"], cwd=run.source)
     print(
         f"LEGACY_MIGRATION baseline={run.previous_commit[:7]} "
@@ -397,7 +414,7 @@ def test_new_wrapper_migrates_legacy_layout_before_target_switch(
 
     assert run.result.returncode == 0, run.result.stderr
     assert "Migrated legacy checkout into release baseline" in run.result.stdout
-    assert current.name == run.target_commit
+    assert current.name == run.target_commit[:12]
     assert source_head == run.previous_commit
 
 
@@ -412,7 +429,7 @@ def test_legacy_migration_without_valid_baseline_fails_closed(tmp_path: Path) ->
             encoding="utf-8"
         )
     )
-    current = run.release_root / "current"
+    current = run.release_root / "current.txt"
     print(
         f"LEGACY_BASELINE_FAILURE current_exists={current.exists()} "
         f"launched={run.launch_log.exists()} error={preparation['error']}"
@@ -436,7 +453,7 @@ def test_prune_after_switch_keeps_current_previous_and_three_newest_extras(
         old_release_count=5,
     )
     releases = run.release_root / "releases"
-    current = (run.release_root / "current").resolve()
+    current = _current_release(run.release_root)
     retained = sorted(path.name for path in releases.iterdir() if path.is_dir())
     print(
         f"RETENTION current={current.name} previous={run.previous_commit} "
@@ -444,7 +461,7 @@ def test_prune_after_switch_keeps_current_previous_and_three_newest_extras(
     )
 
     assert run.result.returncode == 0, run.result.stderr
-    assert current.name == run.target_commit
+    assert current.name == run.target_commit[:12]
     assert run.previous_release is not None
     assert run.previous_release.exists()
     assert not (releases / f"{1:040x}").exists()
@@ -516,16 +533,16 @@ def test_low_disk_skips_candidate_and_launches_previous_release(tmp_path: Path) 
             encoding="utf-8"
         )
     )
-    current = (run.release_root / "current").resolve()
+    current = _current_release(run.release_root)
     print(
         f"LOW_DISK current={current.name} target_exists="
-        f"{(run.release_root / 'releases' / run.target_commit).exists()} "
+        f"{(run.release_root / 'releases' / run.target_commit[:12]).exists()} "
         f"error={preparation['error']}"
     )
 
     assert run.result.returncode == 0, run.result.stderr
     assert current == run.previous_release
-    assert not (run.release_root / "releases" / run.target_commit).exists()
+    assert not (run.release_root / "releases" / run.target_commit[:12]).exists()
     assert preparation["error_code"] == "insufficient_disk_space"
     assert (
         run.launch_log.read_text(encoding="utf-8")

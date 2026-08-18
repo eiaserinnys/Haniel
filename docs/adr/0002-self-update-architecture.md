@@ -34,9 +34,9 @@ the haniel process. WinSW registers the wrapper as the service, not haniel direc
 WinSW/systemd/PM2 supervisor
   └─ haniel-runner.ps1 or haniel-runner.sh (outer loop)
        ├─ source checkout: git fetch + target commit resolution only
-       ├─ releases/{commit}: checkout + venv + install + import + UI build
-       ├─ current: atomic symlink replacement after every gate succeeds
-       └─ current/.venv/.../python -m haniel.cli run haniel.yaml
+       ├─ releases/{sha12}: checkout + venv + install + import + UI build
+       ├─ current.txt: atomic pointer-file replacement after every gate succeeds
+       └─ releases/{current.txt}/.venv/.../python -m haniel.cli run haniel.yaml
             ├─ starts managed services
             ├─ poll loop (including self-repo)
             └─ exit code signals intent to wrapper
@@ -77,7 +77,7 @@ The wrapper always resolves the remote target and prepares it outside the active
 release before launching Haniel. This means:
 - First start after reboot gets latest code automatically
 - Crash-restart also gets latest code (services already disrupted, so no approval needed)
-- Candidate install, import, or UI build failures leave `current` unchanged
+- Candidate install, import, or UI build failures leave `current.txt` unchanged
 - The source checkout remains a fetch-only target catalog rather than the running code
 - Candidate creation is skipped when the release filesystem has less than the
   configured free-space floor
@@ -130,8 +130,6 @@ network issues.
 
 ### Lost
 
-- Directory symlink creation must be permitted on Windows; the wrapper fails closed
-  and preserves the old `current` pointer when it is not
 - Each commit has its own venv and dashboard build, increasing disk use
 
 The default retention policy bounds that cost to the active release, its immediate
@@ -142,36 +140,40 @@ floor remains reserved before any new checkout is created.
 
 **Pre-activation failures preserve the previous release.**
 Checkout, venv creation, install, import smoke, dashboard install, and dashboard
-build all happen under `releases/{commit}`. A failure removes the incomplete
-candidate and launches the release still addressed by `current`.
+build all happen under `releases/{sha12}`. A failure removes the incomplete
+candidate and launches the release still addressed by `current.txt`. If cleanup
+itself fails, a broken marker preserves the evidence and the next attempt uses a
+distinct retry directory.
 
 **Release cleanup happens only after activation.**
-After `current` is replaced successfully, cleanup always protects the active release
+After `current.txt` is replaced successfully, cleanup always protects the active release
 and the release that was active immediately before it. It also retains the newest
 `HANIEL_RELEASE_RETAIN_EXTRA` ready releases. A cleanup target must be a direct,
-non-symlink directory under `releases/` whose ready marker commit exactly matches its
-directory name. Cleanup failures are warnings and do not misreport a successful
+non-symlink directory under `releases/` whose name is a 12-or-more-character prefix
+of its ready marker commit. Cleanup failures are warnings and do not misreport a successful
 activation as a rollback.
 
 **Disk exhaustion fails before candidate creation.**
 Before clone, venv, install, or build begins, the helper checks the filesystem that
 owns the release root. If free space is below `HANIEL_RELEASE_MIN_FREE_MB`, it records
 `insufficient_disk_space`, sends a warning webhook, and launches the existing
-validated `current` release.
+validated release named by `current.txt`.
 
 **Activation is atomic, health rollback remains separate.**
-The helper creates a temporary directory symlink and replaces `current` with
+The helper writes a temporary pointer file and replaces `current.txt` with
 `os.replace`. It does not infer post-launch health. A candidate that passes import
 and build but later crashes remains subject to the existing supervisor backoff and
 operator rollout policy.
 
 **Wrapper changes take effect before the candidate launches.**
 After a successful pointer switch, the running wrapper executes the wrapper under
-the new `current` release. The new invocation sees the ready current commit, reuses
+the new active release. The new invocation sees the ready current commit, reuses
 it, and launches its release-local Python.
 
 **Legacy migration is one-time and non-destructive.**
-When `current` is absent, the helper prepares a baseline release before preparing
+An existing `current` directory symlink is validated, recorded in `current.txt`, and
+removed on first launch. When both pointer forms are absent, the helper prepares a
+baseline release before preparing
 the remote target. If the legacy wrapper just reset the source checkout, `ORIG_HEAD`
 is preferred as the previous baseline; otherwise the source HEAD is the baseline.
 The source checkout itself is never reset by the new wrapper. If that baseline cannot
@@ -180,7 +182,7 @@ source checkout.
 
 **Runtime reconciliation follows the active release.**
 The release helper records the validated active commit and both wrappers pass it
-explicitly to the Haniel process. For the self repository, settled snapshots,
+through `HANIEL_ACTIVE_SELF_HEAD`, which older CLIs safely ignore. For the self repository, settled snapshots,
 polling baselines, and pending commit ranges use that active commit. The source
 checkout remains a fetch-only object store; its `HEAD` is not evidence of the code
 currently executing.
