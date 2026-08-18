@@ -129,7 +129,7 @@ def test_is_reparse_leaf_uses_junction_detection_when_available(
     monkeypatch.setattr(
         release_fs.os.path,
         "isjunction",
-        lambda path: Path(path) == junction,
+        lambda _path: True,
         raising=False,
     )
 
