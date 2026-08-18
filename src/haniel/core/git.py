@@ -219,6 +219,7 @@ def fetch_repo(
 
     Raises:
         GitFetchError: If fetch fails (network issue, no remote, etc.)
+        GitTimeoutError: If the configured fetch deadline expires
     """
     if not path.exists():
         raise GitFetchError(

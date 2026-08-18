@@ -118,6 +118,47 @@ def test_remove_tree_treats_directory_symlink_as_leaf(
     assert payload.read_text(encoding="utf-8") == "preserve"
 
 
+def test_is_reparse_leaf_uses_junction_detection_when_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release_fs = _import_script(monkeypatch, "haniel_release_fs")
+    junction = tmp_path / "junction"
+
+    monkeypatch.setattr(release_fs.os.path, "islink", lambda _path: False)
+    monkeypatch.setattr(
+        release_fs.os.path,
+        "isjunction",
+        lambda path: Path(path) == junction,
+        raising=False,
+    )
+
+    assert release_fs.is_reparse_leaf(junction) is True
+
+
+def test_readonly_delete_retries_after_making_entry_writable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release_fs = _import_script(monkeypatch, "haniel_release_fs")
+    payload = tmp_path / "readonly.txt"
+    payload.write_text("stale", encoding="utf-8")
+    calls: list[str] = []
+
+    def fail_once(path: str) -> None:
+        calls.append(path)
+        if len(calls) == 1:
+            raise PermissionError("read-only")
+
+    writable: list[str] = []
+    monkeypatch.setattr(release_fs, "_make_writable", writable.append)
+
+    release_fs._retry_readonly(fail_once, str(payload))
+
+    assert calls == [str(payload), str(payload)]
+    assert writable == [str(payload)]
+
+
 def test_windows_paths_receive_extended_length_prefix_after_normalization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
