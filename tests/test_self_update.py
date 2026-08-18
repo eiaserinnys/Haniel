@@ -620,3 +620,26 @@ class TestWrapperModeInstaller:
         )
         reload_wrapper = script.index("& $activeRunner")
         assert marker_write < reload_wrapper
+
+    def test_windows_runner_decodes_utf8_explicitly(self):
+        """Windows PowerShell 5.1 Get-Content defaults to ANSI (CP949 on ko-KR).
+
+        The helper writes its result JSON as UTF-8 without BOM, so every file
+        read in the wrapper must pass -Encoding UTF8 or non-ASCII error text
+        (e.g. localized WinError messages) turns into mojibake that survives
+        into self_update_result.json and haniel.log. Regression: 260818.
+        """
+        script_path = Path(__file__).resolve().parents[1] / "haniel-runner.ps1"
+        script = script_path.read_text(encoding="utf-8-sig")
+
+        assert "Get-Content $PreparationResultPath -Raw -Encoding UTF8" in script
+        assert "Get-Content $ConfPath -Encoding UTF8" in script
+        # Python children must emit UTF-8 stdio to match Console.OutputEncoding.
+        assert '$env:PYTHONIOENCODING = "utf-8"' in script
+        # No file read may rely on the platform-default encoding.
+        for line in script.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if "Get-Content" in stripped:
+                assert "-Encoding UTF8" in stripped, line

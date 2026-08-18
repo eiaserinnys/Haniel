@@ -8,6 +8,9 @@
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 chcp 65001 | Out-Null
+# Force UTF-8 stdio on Python children so their stderr matches the console
+# encoding above. Stdio only — does not change file I/O defaults (PEP 528/540).
+$env:PYTHONIOENCODING = "utf-8"
 
 $ErrorActionPreference = "Continue"
 
@@ -24,7 +27,7 @@ if (-not (Test-Path $ConfPath)) {
 
 # Parse key=value config file
 $Config = @{}
-Get-Content $ConfPath | ForEach-Object {
+Get-Content $ConfPath -Encoding UTF8 | ForEach-Object {
     $line = $_.Trim()
     if ($line -and -not $line.StartsWith("#")) {
         $parts = $line -split "=", 2
@@ -200,7 +203,10 @@ function Update-HanielRelease {
         }
     } else {
         try {
-            $script:PreparationResult = Get-Content $PreparationResultPath -Raw | ConvertFrom-Json
+            # -Encoding UTF8 is required: the helper writes UTF-8 without BOM,
+            # and Windows PowerShell 5.1 Get-Content defaults to ANSI (CP949 on
+            # ko-KR), which mangles non-ASCII error text into mojibake.
+            $script:PreparationResult = Get-Content $PreparationResultPath -Raw -Encoding UTF8 | ConvertFrom-Json
         } catch {
             $script:PreparationResult = [pscustomobject]@{
                 ok = $false
