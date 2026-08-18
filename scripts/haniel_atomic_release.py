@@ -8,17 +8,32 @@ wrappers can execute it before the candidate Haniel package is installed.
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import shutil
 import subprocess
 import sys
 import time
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from haniel_release_fs import (
+    LEGACY_CURRENT_POINTER,
+    ReleaseFilesystemError,
+    is_reparse_leaf,
+    remove_reparse_leaf,
+    remove_tree,
+    write_json_atomic as _write_json_atomic,
+    write_release_pointer,
+)
+from haniel_release_inventory import (
+    ReleaseInventoryError,
+    active_release as _inventory_active_release,
+    mark_broken_release as _mark_broken_release,
+    release_python as _release_python,
+    select_release_path as _select_release_path,
+)
+
 from haniel_release_policy import (
+    BROKEN_MARKER,
     COMMIT_PATTERN,
     DEFAULT_MIN_FREE_MB,
     DEFAULT_RETAIN_EXTRA,
@@ -133,42 +148,11 @@ def _detect_branch(source: Path) -> str:
     return branch if completed.returncode == 0 and branch else "main"
 
 
-def _release_python(release: Path) -> Path:
-    if os.name == "nt":
-        return release / ".venv" / "Scripts" / "python.exe"
-    return release / ".venv" / "bin" / "python"
-
-
-def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    os.replace(temporary, path)
-
-
 def _active_release(release_root: Path) -> Path | None:
-    current = release_root / "current"
-    if not current.exists() and not current.is_symlink():
-        return None
-    if not current.is_symlink():
-        raise ReleasePreparationError(
-            f"current pointer is not a symlink and will not be replaced: {current}"
-        )
     try:
-        active = current.resolve(strict=True)
-        releases = (release_root / "releases").resolve(strict=True)
-    except OSError as exc:
-        raise ReleasePreparationError(f"current pointer is broken: {exc}") from exc
-    if active.parent != releases:
-        raise ReleasePreparationError(
-            f"current pointer escapes release inventory: {active}"
-        )
-    ready_commit = read_ready_commit(active)
-    if ready_commit != active.name or not _release_python(active).is_file():
-        raise ReleasePreparationError(f"current release is incomplete: {active}")
-    return active
+        return _inventory_active_release(release_root)
+    except ReleaseInventoryError as exc:
+        raise ReleasePreparationError(str(exc)) from exc
 
 
 def _require_disk_space(
@@ -227,7 +211,7 @@ def _prepare_release(
 ) -> Path:
     if not COMMIT_PATTERN.fullmatch(commit):
         raise ReleasePreparationError(f"unsafe release commit: {commit}")
-    release = releases / commit
+    release = _select_release_path(releases, commit)
     if read_ready_commit(release) == commit and _release_python(release).is_file():
         result.add_step("release_reuse", True)
         return release
@@ -237,7 +221,13 @@ def _prepare_release(
     if release.exists() or release.is_symlink():
         if release.is_symlink() or not release.is_dir():
             raise ReleasePreparationError(f"unsafe release path: {release}")
-        shutil.rmtree(release)
+        try:
+            remove_tree(release)
+        except OSError as exc:
+            _mark_broken_release(release, commit, exc)
+            raise ReleasePreparationError(
+                f"failed to remove incomplete release {release}: {exc}"
+            ) from exc
 
     releases.mkdir(parents=True, exist_ok=True)
     try:
@@ -303,30 +293,36 @@ def _prepare_release(
         return release
     except Exception:
         if release.is_dir() and not release.is_symlink():
-            shutil.rmtree(release, ignore_errors=True)
+            try:
+                remove_tree(release)
+            except OSError as cleanup_error:
+                _mark_broken_release(release, commit, cleanup_error)
+                result.steps.append(
+                    {
+                        "name": "release_cleanup",
+                        "ok": False,
+                        "error": str(cleanup_error),
+                    }
+                )
         raise
 
 
 def _switch_current(
     result: PreparationResult, release_root: Path, release: Path
 ) -> None:
-    current = release_root / "current"
-    if current.exists() and not current.is_symlink():
-        result.add_step("current_switch", False, "current is not a symlink")
-        raise ReleasePreparationError(result.error or "current is not a symlink")
-    temporary = release_root / f".current-{uuid.uuid4().hex}"
-    relative_target = Path("releases") / release.name
     try:
-        os.symlink(relative_target, temporary, target_is_directory=True)
-        os.replace(temporary, current)
-    except OSError as exc:
-        try:
-            temporary.unlink()
-        except OSError:
-            pass
+        write_release_pointer(release_root, release.name)
+        legacy = release_root / LEGACY_CURRENT_POINTER
+        if legacy.exists() or legacy.is_symlink() or is_reparse_leaf(legacy):
+            if not is_reparse_leaf(legacy):
+                raise ReleaseFilesystemError(
+                    f"legacy current pointer is not a reparse leaf: {legacy}"
+                )
+            remove_reparse_leaf(legacy)
+    except (OSError, ReleaseFilesystemError) as exc:
         result.add_step("current_switch", False, str(exc))
         raise ReleasePreparationError(result.error or str(exc)) from exc
-    if current.resolve(strict=True) != release.resolve(strict=True):
+    if _active_release(release_root) != release.resolve(strict=True):
         result.add_step("current_switch", False, "post-switch target mismatch")
         raise ReleasePreparationError(result.error or "post-switch target mismatch")
     result.add_step("current_switch", True)
@@ -404,7 +400,9 @@ def prepare(args: argparse.Namespace) -> PreparationResult:
         branch = _detect_branch(source)
         target = _fetch_target(result, source, branch, args.max_git_failures)
         result.target_commit = target
-        if active.name != target:
+        active_commit = read_ready_commit(active)
+        assert active_commit is not None
+        if active_commit != target:
             candidate = _prepare_release(
                 result,
                 source=source,
@@ -428,7 +426,7 @@ def prepare(args: argparse.Namespace) -> PreparationResult:
 
         result.active_repo = str(active)
         result.active_python = str(_release_python(active))
-        result.active_commit = active.name
+        result.active_commit = read_ready_commit(active)
         result.ok = True
         return result
     except Exception as exc:  # noqa: BLE001 - preserve the active release on any gate failure
@@ -441,7 +439,7 @@ def prepare(args: argparse.Namespace) -> PreparationResult:
         if active is not None:
             result.active_repo = str(active)
             result.active_python = str(_release_python(active))
-            result.active_commit = active.name
+            result.active_commit = read_ready_commit(active)
         return result
 
 

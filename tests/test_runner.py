@@ -15,7 +15,7 @@ from haniel.config import (
     BackoffConfig,
     HooksConfig,
 )
-from haniel.core.git import GitError, get_head
+from haniel.core.git import GitError, GitTimeoutError, get_head
 from haniel.core.health import ServiceState
 from haniel.core.runner import (
     ServiceRunner,
@@ -1094,6 +1094,7 @@ class TestServiceRunnerPollCycle:
 
         config = HanielConfig(
             poll_interval=1,
+            git_fetch_timeout=17,
             repos={
                 "test-repo": RepoConfig(
                     url="git@github.com:test/test.git",
@@ -1126,6 +1127,11 @@ class TestServiceRunnerPollCycle:
         changed = runner_with_mock_repo._detect_changes()
 
         assert changed == []
+        mock_fetch.assert_called_once_with(
+            path=runner_with_mock_repo.config_dir / "test-repo",
+            branch="main",
+            timeout=17,
+        )
 
     @patch("haniel.core.runner.get_pending_changes", return_value=None)
     @patch("haniel.core.runner.get_remote_head")
@@ -2744,6 +2750,52 @@ class TestStartupUpdates:
         assert len(failed_repos) == 1
         failed_state = runner_with_repos._repo_states[failed_repos[0]]
         assert "Network error" in failed_state.fetch_error
+
+    @patch("haniel.core.runner.pull_repo")
+    @patch("haniel.core.runner.fetch_repo")
+    def test_fetch_timeout_does_not_block_later_repos(
+        self, mock_fetch, mock_pull, runner_with_repos
+    ):
+        """A timed-out repo is recorded and startup continues with the next repo."""
+        mock_fetch.side_effect = [
+            GitTimeoutError("Fetch timed out", timeout=17),
+            False,
+        ]
+
+        runner_with_repos._apply_startup_updates()
+
+        assert mock_fetch.call_count == 2
+        mock_pull.assert_not_called()
+        assert any(
+            state.fetch_error and "Fetch timed out" in state.fetch_error
+            for state in runner_with_repos._repo_states.values()
+        )
+
+    @patch("haniel.core.runner.fetch_repo", return_value=False)
+    def test_startup_fetch_uses_configured_timeout(self, mock_fetch, tmp_path: Path):
+        repo_path = tmp_path / "repo"
+        (repo_path / ".git").mkdir(parents=True)
+        runner = ServiceRunner(
+            HanielConfig(
+                git_fetch_timeout=17,
+                repos={
+                    "repo": RepoConfig(
+                        url="git@github.com:test/repo.git",
+                        path="./repo",
+                    )
+                },
+                services={},
+            ),
+            config_dir=tmp_path,
+        )
+
+        runner._apply_startup_updates()
+
+        mock_fetch.assert_called_once_with(
+            path=repo_path,
+            branch="main",
+            timeout=17,
+        )
 
     def test_skips_nonexistent_repo_path(self, tmp_path: Path):
         """Repos with non-existent paths should be skipped."""

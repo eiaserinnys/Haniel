@@ -34,6 +34,15 @@ class TestHanielConfigParsing:
         config = HanielConfig(repos={}, services={})
         assert config.poll_interval == 60
 
+    def test_git_fetch_timeout_default_and_override(self):
+        config = HanielConfig(repos={}, services={})
+        overridden = HanielConfig.model_validate(
+            {"git_fetch_timeout": 45, "repos": {}, "services": {}}
+        )
+
+        assert config.git_fetch_timeout == 300
+        assert overridden.git_fetch_timeout == 45
+
     def test_repos_parsing(self):
         """Should parse repos section correctly."""
         config = load_config(FIXTURES_DIR / "valid_config.yaml")

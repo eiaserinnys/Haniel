@@ -2425,7 +2425,8 @@ class ServiceRunner:
             lease.__exit__(None, None, None)
         self._startup_deployment_leases.clear()
 
-        startup_repo_names = tuple(self._snapshot_config_state().repo_identity)
+        startup_snapshot = self._snapshot_config_state()
+        startup_repo_names = tuple(startup_snapshot.repo_identity)
 
         for name in startup_repo_names:
             if name == self._snapshot_config_state().self_repo:
@@ -2459,6 +2460,7 @@ class ServiceRunner:
                 has_updates = fetch_repo(
                     path=repo_path,
                     branch=runtime.config.branch,
+                    timeout=startup_snapshot.config.git_fetch_timeout,
                 )
                 observed_at = datetime.now()
 
@@ -3047,6 +3049,7 @@ class ServiceRunner:
                 fetch_repo(
                     path=repo_path,
                     branch=runtime.config.branch,
+                    timeout=config_snapshot.config.git_fetch_timeout,
                 )
                 if self._stop_event.is_set():
                     break

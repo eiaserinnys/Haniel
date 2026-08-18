@@ -41,7 +41,7 @@ repo is isolated in `.self/`, and managed services are cloned into `.services/`:
 +-- haniel-runner.conf           # Generated wrapper config
 +-- .local/
 |   +-- haniel-releases/
-|       +-- current -> releases/{commit}
+|       +-- current.txt          # active release directory name
 |       +-- releases/{commit}/  # Release-local venv and built dashboard
 +-- {service-name}.exe           # WinSW service executable
 +-- {service-name}.xml           # WinSW service config
@@ -66,11 +66,12 @@ services. Adding a service = edit YAML + restart haniel.
 
 **`.self/` for Haniel source discovery**: The Haniel git repo is cloned here and
 self-update fetches target commits from it without resetting its checkout. Running
-code comes from `.local/haniel-releases/current`.
+code comes from the release directory named by
+`.local/haniel-releases/current.txt`.
 
 **Commit-specific runtime releases**: Every candidate gets an independent checkout,
 venv, import smoke, and dashboard build. Only a fully prepared release can become
-`current`. After a successful switch, retention preserves `current`, its immediate
+active. After a successful pointer switch, retention preserves the active release, its immediate
 predecessor, and the configured number of additional ready releases.
 
 **`.services/{name}/` per managed repo**: Each repo from the `repos` section (except

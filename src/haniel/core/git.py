@@ -12,116 +12,16 @@ import re
 import subprocess
 from pathlib import Path
 
-# Default timeout for git operations (5 minutes)
-DEFAULT_GIT_TIMEOUT = 300
+from ..defaults import DEFAULT_GIT_TIMEOUT
+from .git_errors import (
+    GitCloneError,
+    GitError,
+    GitFetchError,
+    GitPullError,
+    GitTimeoutError,
+)
 
 logger = logging.getLogger(__name__)
-
-
-class GitError(Exception):
-    """Base class for git-related errors."""
-
-    pass
-
-
-class GitCloneError(GitError):
-    """Error during git clone operation.
-
-    May indicate:
-    - Invalid URL
-    - SSH key not configured
-    - Network issues
-    - Permission denied
-    - Destination path already exists
-    """
-
-    def __init__(
-        self,
-        message: str,
-        url: str | None = None,
-        stderr: str | None = None,
-        returncode: int | None = None,
-    ):
-        self.url = url
-        self.stderr = stderr
-        self.returncode = returncode
-        super().__init__(message)
-
-    def __str__(self) -> str:
-        parts = [super().__str__()]
-        if self.url:
-            parts.append(f"URL: {self.url}")
-        if self.stderr:
-            parts.append(f"stderr: {self.stderr}")
-        return " | ".join(parts)
-
-
-class GitFetchError(GitError):
-    """Error during git fetch operation.
-
-    May indicate:
-    - Network issues
-    - Remote not configured
-    - Permission denied
-    """
-
-    def __init__(
-        self,
-        message: str,
-        path: Path | None = None,
-        stderr: str | None = None,
-        returncode: int | None = None,
-    ):
-        self.path = path
-        self.stderr = stderr
-        self.returncode = returncode
-        super().__init__(message)
-
-    def __str__(self) -> str:
-        parts = [super().__str__()]
-        if self.path:
-            parts.append(f"Path: {self.path}")
-        if self.stderr:
-            parts.append(f"stderr: {self.stderr}")
-        return " | ".join(parts)
-
-
-class GitPullError(GitError):
-    """Error during git pull operation.
-
-    May indicate:
-    - Network issues
-    - Merge conflicts
-    - Remote not configured
-    """
-
-    def __init__(
-        self,
-        message: str,
-        path: Path | None = None,
-        stderr: str | None = None,
-        returncode: int | None = None,
-    ):
-        self.path = path
-        self.stderr = stderr
-        self.returncode = returncode
-        super().__init__(message)
-
-    def __str__(self) -> str:
-        parts = [super().__str__()]
-        if self.path:
-            parts.append(f"Path: {self.path}")
-        if self.stderr:
-            parts.append(f"stderr: {self.stderr}")
-        return " | ".join(parts)
-
-
-class GitTimeoutError(GitError):
-    """Error when git operation times out."""
-
-    def __init__(self, message: str, timeout: int):
-        self.timeout = timeout
-        super().__init__(message)
 
 
 def _validate_git_url(url: str) -> None:
@@ -164,7 +64,7 @@ def _run_git(
         CompletedProcess with captured stdout and stderr
 
     Raises:
-        subprocess.TimeoutExpired: If command times out
+        GitTimeoutError: If command times out
     """
     cmd = ["git"] + args
 
@@ -172,16 +72,22 @@ def _run_git(
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
 
-    return subprocess.run(
-        cmd,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=check,
-        timeout=timeout,
-        env=env,
-    )
+    try:
+        return subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=check,
+            timeout=timeout,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GitTimeoutError(
+            f"Git operation timed out after {timeout}s: {' '.join(cmd)}",
+            timeout=timeout,
+        ) from exc
 
 
 def get_head(path: Path) -> str:
@@ -285,11 +191,6 @@ def clone_repo(
 
     try:
         _run_git(["clone", "--branch", branch, url, str(path)], timeout=timeout)
-    except subprocess.TimeoutExpired as e:
-        raise GitTimeoutError(
-            f"Clone operation timed out after {timeout}s",
-            timeout=timeout,
-        ) from e
     except subprocess.CalledProcessError as e:
         raise GitCloneError(
             "Failed to clone repository",
@@ -299,13 +200,19 @@ def clone_repo(
         ) from e
 
 
-def fetch_repo(path: Path, branch: str, remote: str = "origin") -> bool:
+def fetch_repo(
+    path: Path,
+    branch: str,
+    remote: str = "origin",
+    timeout: int = DEFAULT_GIT_TIMEOUT,
+) -> bool:
     """Fetch updates from remote and check if there are changes.
 
     Args:
         path: Path to the git repository
         branch: Branch to fetch
         remote: Remote name (default: origin)
+        timeout: Fetch timeout in seconds
 
     Returns:
         True if there are new commits to pull, False otherwise
@@ -336,7 +243,7 @@ def fetch_repo(path: Path, branch: str, remote: str = "origin") -> bool:
 
     # Fetch from remote
     try:
-        _run_git(["fetch", remote, branch], cwd=path)
+        _run_git(["fetch", remote, branch], cwd=path, timeout=timeout)
     except subprocess.CalledProcessError as e:
         raise GitFetchError(
             f"Failed to fetch from {remote}/{branch}",

@@ -22,6 +22,7 @@ from haniel.core.git import (
     pull_repo,
     reset_repo_to,
     has_changes,
+    _run_git,
     _validate_git_url,
 )
 
@@ -446,6 +447,40 @@ class TestGitErrorClasses:
         """GitTimeoutError should include timeout value."""
         error = GitTimeoutError("Operation timed out", timeout=300)
         assert error.timeout == 300
+
+    def test_run_git_wraps_subprocess_timeout_as_git_error(self, monkeypatch):
+        """Timeouts must enter the operational GitError failure path."""
+
+        def timeout(*_args, **_kwargs):
+            raise subprocess.TimeoutExpired(cmd=["git", "fetch"], timeout=17)
+
+        monkeypatch.setattr(subprocess, "run", timeout)
+
+        with pytest.raises(GitTimeoutError) as exc_info:
+            _run_git(["fetch", "origin", "main"], timeout=17)
+
+        assert exc_info.value.timeout == 17
+
+
+def test_fetch_repo_passes_configured_timeout_to_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from haniel.core import git as git_module
+
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    calls: list[tuple[list[str], int]] = []
+
+    def run_git(args, cwd=None, check=True, timeout=300):
+        calls.append((args, timeout))
+        output = "local" if args == ["rev-parse", "HEAD"] else "remote"
+        return subprocess.CompletedProcess(args, 0, stdout=output, stderr="")
+
+    monkeypatch.setattr(git_module, "_run_git", run_git)
+
+    assert fetch_repo(repo, "main", timeout=17) is True
+    assert (["fetch", "origin", "main"], 17) in calls
 
 
 class TestValidateGitUrl:

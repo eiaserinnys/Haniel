@@ -2,6 +2,7 @@
 # This file demonstrates the basic structure of a haniel.yaml
 
 poll_interval: 60  # seconds between git fetch checks
+git_fetch_timeout: 300  # seconds before a fetch is isolated as a repo failure
 
 # Global shutdown settings
 shutdown:
