@@ -632,9 +632,7 @@ class TestWrapperModeInstaller:
         script_path = Path(__file__).resolve().parents[1] / "haniel-runner.ps1"
         script = script_path.read_text(encoding="utf-8-sig")
 
-        assert (
-            "Get-Content $PreparationResultPath -Raw -Encoding UTF8" in script
-        )
+        assert "Get-Content $PreparationResultPath -Raw -Encoding UTF8" in script
         assert "Get-Content $ConfPath -Encoding UTF8" in script
         # Python children must emit UTF-8 stdio to match Console.OutputEncoding.
         assert '$env:PYTHONIOENCODING = "utf-8"' in script
