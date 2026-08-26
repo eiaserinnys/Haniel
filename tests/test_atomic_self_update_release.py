@@ -375,14 +375,31 @@ def test_no_switch_without_active_release_fails_closed(tmp_path: Path) -> None:
     assert "active release" in payload["error"].lower()
 
 
-def test_exact_target_activation_reuses_prepared_release_without_fetch_or_build(
+def test_exact_target_activation_ignores_origin_advance_and_reuses_prepared_release(
     tmp_path: Path,
 ) -> None:
     completed, payload, release_root, _previous, target = _run_no_switch_helper(
         tmp_path
     )
     assert completed.returncode == 0, completed.stderr
+    assert REAL_GIT is not None
     source = tmp_path / "repo"
+    seed = tmp_path / "seed"
+    git_env = os.environ.copy()
+    git_env.update(
+        {
+            "GIT_AUTHOR_NAME": "Haniel Test",
+            "GIT_AUTHOR_EMAIL": "haniel-test@example.com",
+            "GIT_COMMITTER_NAME": "Haniel Test",
+            "GIT_COMMITTER_EMAIL": "haniel-test@example.com",
+        }
+    )
+    (seed / "version.txt").write_text("third\n", encoding="utf-8")
+    _run([REAL_GIT, "add", "version.txt"], cwd=seed, env=git_env)
+    _run([REAL_GIT, "commit", "-m", "third"], cwd=seed, env=git_env)
+    _run([REAL_GIT, "push", "origin", "main"], cwd=seed, env=git_env)
+    origin_head = _run([REAL_GIT, "rev-parse", "HEAD"], cwd=seed, env=git_env)
+    assert origin_head != target
     result_path = tmp_path / ".local" / "activation.json"
 
     activated = subprocess.run(
