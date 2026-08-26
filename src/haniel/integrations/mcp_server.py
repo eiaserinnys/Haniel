@@ -801,12 +801,6 @@ class HanielMcpServer:
         with self.runner._state_lock:
             self.runner._state.self_update_pending = True
         result = await loop.run_in_executor(None, self.runner.approve_self_update)
-
-        async def _deferred_stop():
-            await asyncio.sleep(0.5)
-            await loop.run_in_executor(None, self.runner.stop)
-
-        asyncio.ensure_future(_deferred_stop())
         return result
 
     async def _check_updates(self) -> str:

@@ -695,7 +695,7 @@ services: {}
     assert "haniel" not in runner._last_pending_hash
 
 
-def test_trigger_pull_self_repo_signals_restart(tmp_path: Path):
+def test_trigger_pull_self_repo_uses_canonical_deferred_transition(tmp_path: Path):
     """Generic self-repo pull uses the canonical prestager without checkout pull."""
     from haniel.config.model import load_config
     from haniel.core.runner import ServiceRunner
@@ -740,4 +740,4 @@ services: {}
     pull.assert_not_called()
     runner._self_update_prestager.freeze_target.assert_called_once()
     runner._self_update_prestager.prepare.assert_called_once()
-    mock_stop.assert_called_once()
+    mock_stop.assert_not_called()

@@ -153,6 +153,7 @@ class TestRunnerSelfUpdate:
         runner.config_dir = Path(".")
         runner._self_repo = config.self_update.repo if config.self_update else None
         runner._state = MagicMock()
+        runner._state.running = False
         runner._state.self_update_pending = False
         runner._ws_handler = None
         runner._state_lock = threading.Lock()
@@ -258,12 +259,7 @@ class TestRunnerSelfUpdate:
         assert runner.self_update_requested is False
 
     def test_approve_self_update_signals_event(self):
-        """Approving a pending update should signal self_update_requested.
-
-        Note: approve_self_update() no longer calls stop() directly.
-        The caller (API/MCP handler) is responsible for scheduling stop()
-        after sending the response (see ADR comment in runner.py).
-        """
+        """A non-running test runner commits exit intent synchronously."""
         config = self._make_config()
         runner = self._make_runner(config)
         runner._state.self_update_pending = True
@@ -309,6 +305,58 @@ class TestRunnerSelfUpdate:
         assert runner.self_update_requested is False
         runner._prepare_self_update_shutdown.assert_not_called()
         runner._self_update_prestager.discard_result.assert_called_once_with()
+
+    def test_prepare_failure_can_be_reapproved_through_same_canonical_path(self):
+        config = self._make_config()
+        runner = self._make_runner(config)
+        runner._state.self_update_pending = True
+        runner._self_update_prestager.prepare.side_effect = [
+            RuntimeError("release_ready failed"),
+            SimpleNamespace(target_commit="a" * 40, prepared_release=Path("ready")),
+        ]
+
+        with pytest.raises(RuntimeError, match="release_ready failed"):
+            runner.approve_self_update(target_commit="a" * 40)
+        result = runner.approve_self_update(target_commit="a" * 40)
+
+        assert "approved" in result.lower()
+        assert runner._self_update_prestager.prepare.call_count == 2
+        assert runner.self_update_requested is True
+
+    def test_running_approval_owns_deferred_exit_transition(self):
+        config = self._make_config()
+        runner = self._make_runner(config)
+        runner._state.running = True
+        runner._state.self_update_pending = True
+        runner.stop = MagicMock()
+
+        with patch("haniel.core.runner.time.sleep", return_value=None):
+            runner.approve_self_update(target_commit="a" * 40)
+            deadline = __import__("time").monotonic() + 1
+            while (
+                not runner.self_update_requested
+                and __import__("time").monotonic() < deadline
+            ):
+                __import__("time").sleep(0.01)
+
+        assert runner.self_update_requested is True
+        runner.stop.assert_called_once_with()
+
+    def test_notification_failures_cannot_abort_committed_transition(self):
+        config = self._make_config()
+        runner = self._make_runner(config)
+        runner._state.self_update_pending = True
+        runner._slack_bot = MagicMock()
+        runner._slack_bot.notify_pulling.side_effect = RuntimeError("slack malformed")
+        runner._ws_handler = MagicMock()
+        runner._ws_handler.broadcast_self_update_started.side_effect = RuntimeError(
+            "ws closed"
+        )
+
+        result = runner.approve_self_update(target_commit="a" * 40)
+
+        assert "approved" in result.lower()
+        assert runner.self_update_requested is True
 
     def test_approve_uses_supported_progress_stages(self):
         config = self._make_config()

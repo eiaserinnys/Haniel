@@ -24,7 +24,10 @@ from haniel.core.orchestrated_deploy_execution import (
     _execute_retry,
     execute_approved_plan,
 )
-from haniel.integrations.deploy_reporting import ApprovalRevalidationError
+from haniel.integrations.deploy_reporting import (
+    ApprovalRevalidationError,
+    DeployReporter,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -493,6 +496,36 @@ class TestHandleDeployApprovalSelfRepo:
             runner._expected_deployment_budget_sec("node-a:haniel:main:" + "a" * 40)
             == 3600
         )
+
+    async def test_self_repo_reporter_declares_prepare_budget_once(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _build_runner(tmp_path, with_self_repo=True)
+        sent: list[dict] = []
+
+        def approve(**kwargs):
+            kwargs["on_prepared"](MagicMock())
+            return "ok"
+
+        async def send_json(message: dict) -> None:
+            sent.append(message)
+
+        runner.approve_self_update = MagicMock(side_effect=approve)  # type: ignore[assignment]
+        reporter = DeployReporter(
+            node_id="node-a",
+            approval_handler=runner._handle_deploy_approval,
+            snapshot_handler=None,
+            expected_budget_handler=runner._expected_deployment_budget_sec,
+            send_json=send_json,
+            progress_interval_sec=1,
+        )
+
+        await reporter.handle_approval(_approval("haniel"))
+
+        progress = [message for message in sent if message["type"] == "deploy_progress"]
+        assert progress[0]["stage"] == "preparing"
+        assert progress[0]["expected_budget_sec"] == 3600
+        assert all("expected_budget_sec" not in message for message in progress[1:])
 
     def test_recovery_approval_never_starts_self_update(self, tmp_path: Path) -> None:
         runner = _build_runner(tmp_path, with_self_repo=True)

@@ -195,6 +195,88 @@ def test_cancel_is_idempotent_without_active_process(tmp_path: Path) -> None:
     prestager.cancel()
 
 
+def test_cancel_during_spawn_waits_for_publication_reap_and_cleanup(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "haniel-runner.conf").write_text(
+        "HANIEL_RELEASE_ROOT=releases-root\n", encoding="utf-8"
+    )
+    entered_spawn = threading.Event()
+    publish_process = threading.Event()
+    terminated = threading.Event()
+
+    class PublishedProcess(_FinishedProcess):
+        def wait(self, timeout: float | None = None) -> int:
+            assert terminated.wait(2)
+            self.returncode = -15
+            return self.returncode
+
+    process = PublishedProcess()
+
+    def popen(*_args, **_kwargs):
+        entered_spawn.set()
+        assert publish_process.wait(2)
+        return process
+
+    prestager = SelfUpdatePrestager(
+        tmp_path,
+        popen_factory=popen,
+        terminate_process_tree=lambda active: (
+            active.pid == process.pid and terminated.set()
+        ),
+    )
+    prepare_errors: list[BaseException] = []
+
+    def prepare() -> None:
+        try:
+            prestager.prepare(_repo(), target_commit=TARGET, timeout=30)
+        except BaseException as exc:  # noqa: BLE001 - thread assertion capture
+            prepare_errors.append(exc)
+
+    prepare_thread = threading.Thread(target=prepare)
+    prepare_thread.start()
+    assert entered_spawn.wait(1)
+
+    cancel_thread = threading.Thread(target=prestager.cancel)
+    cancel_thread.start()
+    cancel_thread.join(0.05)
+    assert cancel_thread.is_alive(), "cancel must wait for spawn publication"
+
+    publish_process.set()
+    cancel_thread.join(2)
+    prepare_thread.join(2)
+
+    assert not cancel_thread.is_alive()
+    assert not prepare_thread.is_alive()
+    assert terminated.is_set()
+    assert prepare_errors and isinstance(prepare_errors[0], SelfUpdatePrestageError)
+    assert not prestager.result_path.exists()
+
+
+def test_prepare_snapshots_release_root_for_command_validation_and_cleanup(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "haniel-runner.conf").write_text(
+        "HANIEL_RELEASE_ROOT=release-a\n", encoding="utf-8"
+    )
+    release_a = tmp_path / "release-a"
+
+    def popen(*_args, **_kwargs):
+        _ready_result(tmp_path, release_a)
+        (tmp_path / "haniel-runner.conf").write_text(
+            "HANIEL_RELEASE_ROOT=release-b\n", encoding="utf-8"
+        )
+        return _FinishedProcess()
+
+    prestager = SelfUpdatePrestager(tmp_path, popen_factory=popen)
+
+    result = prestager.prepare(_repo(), target_commit=TARGET, timeout=30)
+
+    assert result.prepared_release.parent == release_a / "releases"
+
+
 def test_timeout_terminates_process_and_removes_unready_candidate(
     tmp_path: Path,
 ) -> None:

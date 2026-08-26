@@ -64,7 +64,6 @@ class AppHomeController(Protocol):
     def enable_service(self, name: str) -> str: ...
     def trigger_pull(self, repo: str) -> None: ...
     def approve_self_update(self) -> str: ...
-    def schedule_self_update_stop(self) -> None: ...
     def request_restart(self) -> str: ...
 
 
@@ -684,8 +683,11 @@ class SlackBot:
             user_id = body["user"]["id"]
             try:
                 if command == "update":
-                    controller.approve_self_update()
-                    controller.schedule_self_update_stop()
+                    threading.Thread(
+                        target=controller.approve_self_update,
+                        daemon=True,
+                        name="app-home-self-update",
+                    ).start()
                 else:
                     threading.Thread(
                         target=controller.trigger_pull,
