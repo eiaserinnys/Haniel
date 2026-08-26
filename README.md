@@ -58,8 +58,10 @@ services:
     run: python -m uvicorn app:main --port 8000
     cwd: ./.services/backend
     repo: backend
+    ready_timeout: 120
     hooks:
       post_pull: pip install -r requirements.txt
+      timeout: 900
 ```
 
 Haniel watches the repo, pulls changes, runs the build hook, and restarts the service. Repositories with migrations can add a [versioned release manifest](docs/configuration.md#migration-aware-release-manifests) so one approval covers preflight, backup, migration, readiness, verification, and automatic recovery.

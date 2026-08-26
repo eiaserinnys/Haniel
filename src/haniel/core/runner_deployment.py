@@ -39,6 +39,11 @@ from .release_manifest import (
 from .service_environment import ServiceEnvironmentFile
 from .safety_redaction import bounded_redact_text
 from .deployment_errors import StableDeploymentError
+from .deployment_budget import (
+    effective_ready_timeout,
+    expected_deployment_budget,
+    repo_owned_services,
+)
 from .runner_config_snapshot import (
     RepoObservation,
     RepoRuntimeSnapshot,
@@ -188,7 +193,11 @@ class RunnerDeploymentAdapter:
         self.require_current_config()
         failed = [
             service
-            for service in self.affected
+            for service in repo_owned_services(
+                self.repo_name,
+                self.affected,
+                self.config_snapshot.enabled_services,
+            )
             if not self.runner.execute_hook(service, "post_pull")
         ]
         if failed:
@@ -265,7 +274,13 @@ class RunnerDeploymentAdapter:
             if not started:
                 raise RuntimeError(f"failed to start {service}")
             self.require_current_config()
-            if not self.runner.process_manager.wait_for_ready(service):
+            ready_timeout = effective_ready_timeout(
+                self.config_snapshot.enabled_services[service],
+                self.runner.process_manager.DEFAULT_READY_TIMEOUT,
+            )
+            if not self.runner.process_manager.wait_for_ready(
+                service, timeout=ready_timeout
+            ):
                 raise RuntimeError(f"readiness timeout for {service}")
             if not self.runner.process_manager.is_running(service):
                 raise RuntimeError(f"{service} exited before readiness verification")
@@ -326,13 +341,22 @@ class RunnerDeploymentAdapter:
         selected = set(runtime.affected_services)
         if self.desired_running is not None:
             selected.intersection_update(self.desired_running)
+        hook_services = set(
+            repo_owned_services(
+                self.repo_name,
+                runtime.affected_services,
+                config_snapshot.enabled_services,
+            )
+        )
         for service in config_snapshot.startup_order:
             if service not in selected:
                 continue
             self.runner._require_config_generation(config_snapshot)
             if self.runner.process_manager.is_running(service):
                 continue
-            if not self.runner.execute_hook(service, "post_pull"):
+            if service in hook_services and not self.runner.execute_hook(
+                service, "post_pull"
+            ):
                 raise StableDeploymentError(
                     "RECOVERY_FAILED",
                     f"current-generation post_pull failed for {service}",
@@ -344,7 +368,13 @@ class RunnerDeploymentAdapter:
                     f"current-generation service failed to start: {service}",
                 )
             self.runner._require_config_generation(config_snapshot)
-            if not self.runner.process_manager.wait_for_ready(service):
+            ready_timeout = effective_ready_timeout(
+                config_snapshot.enabled_services[service],
+                self.runner.process_manager.DEFAULT_READY_TIMEOUT,
+            )
+            if not self.runner.process_manager.wait_for_ready(
+                service, timeout=ready_timeout
+            ):
                 raise StableDeploymentError(
                     "RECOVERY_FAILED",
                     f"current-generation readiness timeout: {service}",
@@ -592,6 +622,22 @@ def run_manifest_deployment(
             "CONFIG_DIGEST_REQUIRED: manifest service environment requires "
             "the one-shot config identity boundary"
         )
+
+    budget = expected_deployment_budget(
+        repo_name=repo_name,
+        affected=affected,
+        services=config_snapshot.enabled_services,
+        manifest=manifest,
+    )
+    logger.info(
+        "Expected deployment budget for %s: %ss "
+        "(build hooks=%ss, readiness=%ss, verification=%ss)",
+        repo_name,
+        budget.total_sec,
+        budget.build_hooks_sec,
+        budget.readiness_sec,
+        budget.verification_sec,
+    )
 
     contract_mode = bool(manifest.migration and manifest.migration.operation)
     resolved_operation = expected_operation or ("upgrade" if contract_mode else None)

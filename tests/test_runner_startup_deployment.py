@@ -146,7 +146,7 @@ def test_startup_failure_keeps_availability_without_duplicate_legacy_start(
         running[name] = False
         return True
 
-    def ready(name: str) -> bool:
+    def ready(name: str, timeout: float | None = None) -> bool:
         events.append(f"ready:{name}")
         return not fail_once("readiness")
 

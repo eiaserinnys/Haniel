@@ -240,12 +240,14 @@ services:
     cwd: ./.services/my-app
     repo: my-app
     ready: port:3104
+    ready_timeout: 120
     restart_delay: 3
     enabled: true
     reflect: false
     hooks:
       post_pull: ./venv/Scripts/pip.exe install -r requirements.txt
       pre_start: echo "starting..."
+      timeout: 900
 
   bot:
     run: ./venv/Scripts/python.exe -m myapp.bot
@@ -257,6 +259,7 @@ services:
       timeout: 15
     hooks:
       post_pull: ./venv/Scripts/pip.exe install -r requirements.txt
+      timeout: 900
 ```
 
 | Field | Type | Default | Description |
@@ -267,6 +270,7 @@ services:
 | `restart_delay` | int | — | Fixed delay before crash-restart. If omitted, backoff strategy is used |
 | `after` | string or list | `[]` | Service(s) to wait for before starting |
 | `ready` | string | — | Ready condition (see below) |
+| `ready_timeout` | int | `60` | Maximum seconds to wait for the ready condition |
 | `shutdown` | object | — | Per-service shutdown override (same fields as global `shutdown`) |
 | `enabled` | bool | `true` | If `false`, service is skipped |
 | `hooks` | object | — | Lifecycle hooks |
@@ -303,12 +307,18 @@ Services without `after` start immediately in YAML order.
 hooks:
   post_pull: pip install -r requirements.txt   # After git pull
   pre_start: ./scripts/check-prerequisites.sh  # Before service start
+  timeout: 900                                 # Per-hook timeout in seconds
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `post_pull` | string | Command to run after `git pull` (dependency installs, builds, etc.) |
-| `pre_start` | string | Command to run before service start |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `post_pull` | string | — | Command to run after `git pull` (dependency installs, builds, etc.) |
+| `pre_start` | string | — | Command to run before service start |
+| `timeout` | int | `900` | Maximum seconds allowed for each lifecycle hook |
+
+After a repository changes, `post_pull` runs only for affected services whose
+`repo` points to that repository. Dependency-only services still participate in
+stop/start and readiness ordering, but their unchanged repositories are not rebuilt.
 
 Non-zero exit codes trigger a webhook notification. Service startup continues regardless.
 

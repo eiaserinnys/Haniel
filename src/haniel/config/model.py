@@ -93,6 +93,13 @@ class McpConfig(BaseModel):
 class HooksConfig(BaseModel):
     """Configuration for lifecycle hooks."""
 
+    timeout: int = Field(
+        default=900,
+        ge=1,
+        le=3600,
+        description="Maximum seconds allowed for each lifecycle hook",
+    )
+
     post_pull: str | None = Field(
         default=None, description="Command to run after git pull"
     )
@@ -169,6 +176,12 @@ class ServiceConfig(BaseModel):
     ready: str | None = Field(
         default=None,
         description="Ready condition: port:N, delay:N, log:pattern, http:url",
+    )
+    ready_timeout: int = Field(
+        default=60,
+        ge=1,
+        le=3600,
+        description="Maximum seconds allowed for the ready condition",
     )
     shutdown: ServiceShutdownConfig | None = Field(
         default=None, description="Shutdown configuration"

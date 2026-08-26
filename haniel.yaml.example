@@ -62,9 +62,11 @@ services:
     cwd: ./.services/my-app
     repo: my-app
     ready: port:3104
+    ready_timeout: 120
     restart_delay: 3
     hooks:
       post_pull: ./runtime/venv/Scripts/pip.exe install -r ./.services/my-app/requirements.txt
+      timeout: 900
 
   # Main service (depends on MCP)
   bot:
@@ -77,6 +79,7 @@ services:
       timeout: 15
     hooks:
       post_pull: ./runtime/venv/Scripts/pip.exe install -r ./.services/my-app/requirements.txt
+      timeout: 900
 
 install:
   requirements:
