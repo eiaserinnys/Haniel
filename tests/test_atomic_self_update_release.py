@@ -154,7 +154,7 @@ exec "{REAL_GIT}" "$@"
     _write_executable(
         fake_bin / "sleep",
         "#!/usr/bin/env bash\n"
-        "if [[ \"${1:-}\" == 0.* ]]; then exec /bin/sleep \"$@\"; fi\n"
+        'if [[ "${1:-}" == 0.* ]]; then exec /bin/sleep "$@"; fi\n'
         "exit 0\n",
     )
     _write_executable(
@@ -414,8 +414,7 @@ def test_success_switches_current_and_reexecs_release_wrapper(tmp_path: Path) ->
     assert preparation["active_commit"] == run.target_commit
     assert preparation["steps"]
     assert all(
-        isinstance(step.get("duration_sec"), (int, float))
-        and step["duration_sec"] >= 0
+        isinstance(step.get("duration_sec"), (int, float)) and step["duration_sec"] >= 0
         for step in preparation["steps"]
     )
     for step in preparation["steps"]:
@@ -497,20 +496,14 @@ def test_prune_after_switch_keeps_current_previous_and_three_newest_extras(
     assert (releases / f"{4:040x}").exists()
     assert (releases / f"{5:040x}").exists()
     prune_result = json.loads(
-        (tmp_path / ".local" / "haniel_release_prune.json").read_text(
-            encoding="utf-8"
-        )
+        (tmp_path / ".local" / "haniel_release_prune.json").read_text(encoding="utf-8")
     )
     self_update_result = json.loads(
-        (tmp_path / ".local" / "self_update_result.json").read_text(
-            encoding="utf-8"
-        )
+        (tmp_path / ".local" / "self_update_result.json").read_text(encoding="utf-8")
     )
     assert prune_result["steps"][-1]["name"] == "release_prune"
     assert prune_result["steps"][-1]["duration_sec"] >= 0
-    assert all(
-        step["name"] != "release_prune" for step in self_update_result["steps"]
-    )
+    assert all(step["name"] != "release_prune" for step in self_update_result["steps"])
     assert not (run.release_root / ".haniel-release-prune-request.json").exists()
 
 

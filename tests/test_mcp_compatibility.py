@@ -75,9 +75,7 @@ def test_probe_registers_all_handlers_and_builds_session_manager() -> None:
         "list_tools",
         "call_tool",
     ]
-    assert manager_calls == [
-        {"app": server, "json_response": True, "stateless": False}
-    ]
+    assert manager_calls == [{"app": server, "json_response": True, "stateless": False}]
 
 
 def test_probe_rejects_removed_decorator_api() -> None:

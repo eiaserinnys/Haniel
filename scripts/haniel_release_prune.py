@@ -89,9 +89,7 @@ def _record_prune(
         )
         result.warnings.append(warning)
         return
-    result.add_step(
-        "release_prune", True, duration_sec=elapsed_since(started_at)
-    )
+    result.add_step("release_prune", True, duration_sec=elapsed_since(started_at))
 
 
 def prune(release_root_value: str) -> PreparationResult:

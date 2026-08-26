@@ -46,8 +46,7 @@ class PreparationResult:
         )
         status = "ok" if ok else "failed"
         print(
-            f"[haniel-release] step={name} status={status} "
-            f"duration_sec={duration:.3f}",
+            f"[haniel-release] step={name} status={status} duration_sec={duration:.3f}",
             file=sys.stderr,
         )
         if not ok and self.error is None:

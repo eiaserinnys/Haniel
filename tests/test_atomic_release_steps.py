@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +28,12 @@ def _ready_release(release_root: Path, commit: str) -> Path:
         encoding="utf-8",
     )
     return release
+
+
+def _release_python(release: Path) -> Path:
+    if os.name == "nt":
+        return release / ".venv" / "Scripts" / "python.exe"
+    return release / ".venv" / "bin" / "python"
 
 
 def test_step_recorder_persists_duration_and_emits_canonical_log(
@@ -56,9 +63,7 @@ def test_prune_only_consumes_durable_request_and_preserves_previous(
     _ready_release(release_root, current_commit)
     _ready_release(release_root, previous_commit)
     stale = _ready_release(release_root, stale_commit)
-    (release_root / "current.txt").write_text(
-        f"{current_commit}\n", encoding="utf-8"
-    )
+    (release_root / "current.txt").write_text(f"{current_commit}\n", encoding="utf-8")
     request = release_root / ".haniel-release-prune-request.json"
     request.write_text(
         json.dumps(
@@ -111,9 +116,7 @@ def test_prune_failure_is_warning_and_does_not_fail_launch_path(
     previous_commit = "e" * 40
     _ready_release(release_root, current_commit)
     _ready_release(release_root, previous_commit)
-    (release_root / "current.txt").write_text(
-        f"{current_commit}\n", encoding="utf-8"
-    )
+    (release_root / "current.txt").write_text(f"{current_commit}\n", encoding="utf-8")
     request = release_root / ".haniel-release-prune-request.json"
     request.write_text(
         json.dumps(
@@ -139,3 +142,38 @@ def test_prune_failure_is_warning_and_does_not_fail_launch_path(
     assert result.steps[-1]["name"] == "release_prune"
     assert result.steps[-1]["ok"] is False
     assert not request.exists()
+
+
+def test_prune_invalidates_ready_marker_before_recursive_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.syspath_prepend(str(REPO_ROOT / "scripts"))
+    inventory = importlib.import_module("haniel_release_inventory")
+    policy = importlib.import_module("haniel_release_policy")
+    release_root = tmp_path / "releases-root"
+    current = _ready_release(release_root, "1" * 40)
+    previous = _ready_release(release_root, "2" * 40)
+    candidate = _ready_release(release_root, "3" * 40)
+    python = _release_python(candidate)
+    python.parent.mkdir(parents=True)
+    python.write_text("partial", encoding="utf-8")
+    (release_root / "current.txt").write_text(f"{current.name}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        policy,
+        "remove_tree",
+        lambda _path: (_ for _ in ()).throw(OSError("interrupted")),
+    )
+
+    outcome = policy.prune_ready_releases(
+        release_root,
+        current=current,
+        previous=previous,
+        retain_extra=0,
+    )
+
+    assert outcome.failures == (f"{candidate.name}: interrupted",)
+    assert policy.read_ready_commit(candidate) is None
+    assert (
+        inventory.ready_release_for_commit(release_root / "releases", "3" * 40) is None
+    )

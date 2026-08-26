@@ -290,8 +290,15 @@ start_release_prune() {
 }
 
 report_release_prune_result() {
-  if [[ -f "$PRUNE_RESULT_PATH" ]]; then
-    prune_warnings="$($ACTIVE_PYTHON - "$PRUNE_RESULT_PATH" <<'PY'
+  local exit_code="${1:-0}"
+  if [[ ! -f "$PRUNE_RESULT_PATH" ]]; then
+    send_webhook "Atomic release cleanup exited with code $exit_code without a result." "warning"
+    return
+  fi
+  if [[ "$exit_code" -ne 0 ]]; then
+    send_webhook "Atomic release cleanup process exited with code $exit_code." "warning"
+  fi
+  if ! prune_warnings="$($ACTIVE_PYTHON - "$PRUNE_RESULT_PATH" 2>/dev/null <<'PY'
 import json
 import sys
 
@@ -299,10 +306,12 @@ with open(sys.argv[1], encoding="utf-8") as handle:
     result = json.load(handle)
 print(" | ".join(result.get("warnings") or []).replace("\n", " "))
 PY
-    )"
-    if [[ -n "$prune_warnings" ]]; then
-      send_webhook "Atomic release cleanup warning: $prune_warnings" "warning"
-    fi
+  )"; then
+    send_webhook "Atomic release cleanup result is invalid." "warning"
+    return
+  fi
+  if [[ -n "$prune_warnings" ]]; then
+    send_webhook "Atomic release cleanup warning: $prune_warnings" "warning"
   fi
 }
 
@@ -310,9 +319,10 @@ complete_release_prune() {
   if [[ -z "$PRUNE_PID" ]]; then
     return
   fi
-  wait "$PRUNE_PID" 2>/dev/null || true
+  local exit_code=0
+  wait "$PRUNE_PID" 2>/dev/null || exit_code=$?
   PRUNE_PID=""
-  report_release_prune_result
+  report_release_prune_result "$exit_code"
 }
 
 stop_release_prune() {

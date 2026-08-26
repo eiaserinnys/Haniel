@@ -77,9 +77,7 @@ def read_and_consume(config_dir: Path) -> SelfUpdateResult | None:
                 continue
             duration_raw = step.get("duration_sec")
             duration = (
-                float(duration_raw)
-                if isinstance(duration_raw, (int, float))
-                else None
+                float(duration_raw) if isinstance(duration_raw, (int, float)) else None
             )
             steps.append(
                 SelfUpdateStep(

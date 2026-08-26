@@ -123,6 +123,11 @@ def prune_ready_releases(
     failures: list[str] = []
     for _, name, release in candidates[retain_extra:]:
         try:
+            (release / READY_MARKER).unlink()
+        except OSError as exc:
+            failures.append(f"{name}: failed to invalidate ready marker: {exc}")
+            continue
+        try:
             remove_tree(release)
             deleted.append(name)
         except OSError as exc:

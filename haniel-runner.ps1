@@ -292,14 +292,25 @@ function Start-ReleasePrune {
         "--release-root", $ReleaseRoot,
         "--result-json", $PruneResultPath
     )
-    return Start-InheritedProcess -FilePath $script:ActivePython -Arguments $arguments
+    try {
+        return Start-InheritedProcess -FilePath $script:ActivePython -Arguments $arguments
+    } catch {
+        Write-Warning "Failed to start atomic release cleanup: $_"
+        Send-Webhook "Failed to start atomic release cleanup: $_" "warning"
+        return $null
+    }
 }
 
 function Complete-ReleasePrune {
     param([System.Diagnostics.Process]$Process)
     $Process.WaitForExit()
+    $exitCode = $Process.ExitCode
     if (-not (Test-Path $PruneResultPath -PathType Leaf)) {
+        Send-Webhook "Atomic release cleanup exited with code $exitCode without a result." "warning"
         return
+    }
+    if ($exitCode -ne 0) {
+        Send-Webhook "Atomic release cleanup process exited with code $exitCode." "warning"
     }
     try {
         $result = Get-Content $PruneResultPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -317,7 +328,7 @@ function Stop-ReleasePrune {
     if (-not $Process.HasExited -and -not $Process.WaitForExit(1000)) {
         $Process.Kill()
     }
-    $Process.WaitForExit()
+    Complete-ReleasePrune -Process $Process
     $Process.Dispose()
 }
 

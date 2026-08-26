@@ -151,6 +151,9 @@ def test_release_prune_starts_after_haniel_and_before_wait() -> None:
     wait = script.index('wait "$CHILD_PID"', prune)
 
     assert launch < prune < wait
+    report_start = script.index("report_release_prune_result()")
+    report_end = script.index("complete_release_prune()", report_start)
+    assert "without a result" in script[report_start:report_end]
 
 
 def test_wrapper_removes_inherited_node_channel_before_release_preparation(

@@ -287,9 +287,7 @@ def _switch_current(
         )
     except OSError as exc:
         result.warnings.append(f"release cleanup request failed: {exc}")
-    result.add_step(
-        "current_switch", True, duration_sec=elapsed_since(started_at)
-    )
+    result.add_step("current_switch", True, duration_sec=elapsed_since(started_at))
 
 
 def _fetch_target(
@@ -305,9 +303,7 @@ def _fetch_target(
             check=False,
         )
         if completed.returncode == 0:
-            result.add_step(
-                "git_fetch", True, duration_sec=elapsed_since(started_at)
-            )
+            result.add_step("git_fetch", True, duration_sec=elapsed_since(started_at))
             return _resolve_commit(source, f"origin/{branch}")
         last_error = _command_error(completed)
         print(
@@ -455,9 +451,7 @@ def parse_args() -> argparse.Namespace:
         if args.source is None:
             parser.error("--source is required unless --prune-only is used")
         if args.bootstrap_python is None:
-            parser.error(
-                "--bootstrap-python is required unless --prune-only is used"
-            )
+            parser.error("--bootstrap-python is required unless --prune-only is used")
     return args
 
 

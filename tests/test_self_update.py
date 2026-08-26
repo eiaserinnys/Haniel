@@ -624,6 +624,21 @@ class TestWrapperModeInstaller:
         assert "UseShellExecute = $false" in script
         assert "RedirectStandardOutput = $false" in script
         assert "RedirectStandardError = $false" in script
+        prune_function = script[
+            script.index("function Start-ReleasePrune") : script.index(
+                "function Complete-ReleasePrune"
+            )
+        ]
+        assert "try {" in prune_function
+        assert "catch {" in prune_function
+        assert "Send-Webhook" in prune_function
+        assert "return $null" in prune_function
+        complete_function = script[
+            script.index("function Complete-ReleasePrune") : script.index(
+                "function Stop-ReleasePrune"
+            )
+        ]
+        assert "without a result" in complete_function
         marker_write = script.index(
             "Write-SelfUpdateMarker -Ok ([bool]$script:PreparationResult.ok)"
         )
