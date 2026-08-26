@@ -178,6 +178,13 @@ if [[ "${{1:-}}" == "-m" && "${{2:-}}" == "pip" ]]; then
   fi
   exit 0
 fi
+if [[ "${{1:-}}" == "-m" && "${{2:-}}" == "haniel.integrations.mcp_compatibility" ]]; then
+  if [[ "${{HANIEL_TEST_FAIL_STAGE:-}}" =~ ^(import|mcp_wiring)$ && "$fetch_count" -ge 2 ]]; then
+    printf 'injected import smoke failure\n' >&2
+    exit 42
+  fi
+  exit 0
+fi
 if [[ "${{1:-}}" == "-c" && "${{2:-}}" == *"haniel.cli"* ]]; then
   if [[ "${{HANIEL_TEST_FAIL_STAGE:-}}" == "import" && "$fetch_count" -ge 2 ]]; then
     printf 'injected import failure\\n' >&2
@@ -341,6 +348,7 @@ def _run_atomic_wrapper(
     [
         ("install", "pip_install"),
         ("import", "import_smoke"),
+        ("mcp_wiring", "import_smoke"),
         ("ui_build", "pnpm_build"),
     ],
 )

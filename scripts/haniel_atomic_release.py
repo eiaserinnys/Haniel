@@ -265,8 +265,8 @@ def _prepare_release(
             "import_smoke",
             [
                 str(release_python),
-                "-c",
-                "from haniel.cli import main; assert callable(main)",
+                "-m",
+                "haniel.integrations.mcp_compatibility",
             ],
         )
         dashboard = release / "dashboard"
