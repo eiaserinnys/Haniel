@@ -148,6 +148,8 @@ LAST_UPDATE_ERROR=""
 LAST_UPDATE_STARTED_AT=""
 LAST_UPDATE_FINISHED_AT=""
 PREPARATION_RESULT_PATH="$ROOT_DIR/.local/haniel_release_preparation.json"
+PRUNE_REQUEST_PATH="$RELEASE_ROOT/.haniel-release-prune-request.json"
+PRUNE_RESULT_PATH="$ROOT_DIR/.local/haniel_release_prune.json"
 PREPARATION_OK="false"
 PREPARATION_SWITCHED="false"
 PREPARATION_ERROR_CODE=""
@@ -274,6 +276,57 @@ update_haniel_release() {
   return 0
 }
 
+start_release_prune() {
+  PRUNE_PID=""
+  if [[ ! -f "$PRUNE_REQUEST_PATH" ]]; then
+    return
+  fi
+  rm -f "$PRUNE_RESULT_PATH"
+  "$ACTIVE_PYTHON" "$RELEASE_HELPER" \
+    --prune-only \
+    --release-root "$RELEASE_ROOT" \
+    --result-json "$PRUNE_RESULT_PATH" &
+  PRUNE_PID=$!
+}
+
+report_release_prune_result() {
+  if [[ -f "$PRUNE_RESULT_PATH" ]]; then
+    prune_warnings="$($ACTIVE_PYTHON - "$PRUNE_RESULT_PATH" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    result = json.load(handle)
+print(" | ".join(result.get("warnings") or []).replace("\n", " "))
+PY
+    )"
+    if [[ -n "$prune_warnings" ]]; then
+      send_webhook "Atomic release cleanup warning: $prune_warnings" "warning"
+    fi
+  fi
+}
+
+complete_release_prune() {
+  if [[ -z "$PRUNE_PID" ]]; then
+    return
+  fi
+  wait "$PRUNE_PID" 2>/dev/null || true
+  PRUNE_PID=""
+  report_release_prune_result
+}
+
+stop_release_prune() {
+  local attempt=0
+  while [[ -n "$PRUNE_PID" ]] && kill -0 "$PRUNE_PID" 2>/dev/null && (( attempt < 10 )); do
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  if [[ -n "$PRUNE_PID" ]] && kill -0 "$PRUNE_PID" 2>/dev/null; then
+    kill "$PRUNE_PID" 2>/dev/null || true
+  fi
+  complete_release_prune
+}
+
 if [[ ! -d "$REPO_PATH" ]]; then
   send_webhook "Haniel repo not found at $REPO_PATH" "error"
   echo "Repo not found: $REPO_PATH" >&2
@@ -287,8 +340,10 @@ write_self_update_marker=false
 crash_restart_count=0
 CHILD_PID=""
 WATCHDOG_PID=""
+PRUNE_PID=""
 
 stop_wrapper() {
+  stop_release_prune
   if [[ -n "$WATCHDOG_PID" ]] && kill -0 "$WATCHDOG_PID" 2>/dev/null; then
     kill "$WATCHDOG_PID" 2>/dev/null || true
   fi
@@ -371,7 +426,14 @@ while true; do
   HANIEL_ACTIVE_SELF_HEAD="$ACTIVE_COMMIT" \
     "$ACTIVE_PYTHON" -m haniel.cli run "$CONFIG_PATH" &
   CHILD_PID=$!
+  start_release_prune
   start_self_update_watchdog "$CHILD_PID"
+  while kill -0 "$CHILD_PID" 2>/dev/null; do
+    if [[ -n "$PRUNE_PID" ]] && ! kill -0 "$PRUNE_PID" 2>/dev/null; then
+      complete_release_prune
+    fi
+    sleep 0.2
+  done
   wait "$CHILD_PID"
   exit_code=$?
   CHILD_PID=""
@@ -380,6 +442,7 @@ while true; do
   fi
   wait "$WATCHDOG_PID" 2>/dev/null || true
   WATCHDOG_PID=""
+  stop_release_prune
   echo "[haniel-runner] haniel exited with code: $exit_code"
 
   launch_runtime=$(( $(date +%s) - launch_started_at ))

@@ -109,6 +109,8 @@ if (-not (Test-Path $ReleaseHelper -PathType Leaf)) {
     exit 1
 }
 $PreparationResultPath = Join-Path $RootDir ".local/haniel_release_preparation.json"
+$PruneRequestPath = Join-Path $ReleaseRoot ".haniel-release-prune-request.json"
+$PruneResultPath = Join-Path $RootDir ".local/haniel_release_prune.json"
 $SelfUpdateExitMarker = Join-Path $RootDir ".local/self_update_exit_requested"
 $script:ActiveRepo = $RepoPath
 $script:ActivePython = $BootstrapPython
@@ -240,6 +242,85 @@ function Update-HanielRelease {
     return $true
 }
 
+function ConvertTo-WindowsCommandLineArgument {
+    param([AllowEmptyString()][string]$Argument)
+    if ($Argument.Length -gt 0 -and $Argument -notmatch '[\s"]') {
+        return $Argument
+    }
+    $escaped = $Argument -replace '(\\*)"', '$1$1\"'
+    $escaped = $escaped -replace '(\\+)$', '$1$1'
+    return '"' + $escaped + '"'
+}
+
+function Start-InheritedProcess {
+    param([string]$FilePath, [object[]]$Arguments)
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = (@(
+        $Arguments | ForEach-Object {
+            ConvertTo-WindowsCommandLineArgument ([string]$_)
+        }
+    ) -join " ")
+    $startInfo.WorkingDirectory = $RootDir
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $false
+    $startInfo.RedirectStandardError = $false
+    $startInfo.CreateNoWindow = $false
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) {
+        throw "Failed to start process: $FilePath"
+    }
+    return $process
+}
+
+function Start-RunnerProcess {
+    param([object[]]$Arguments)
+    return Start-InheritedProcess -FilePath $script:ActivePython -Arguments $Arguments
+}
+
+function Start-ReleasePrune {
+    if (-not (Test-Path $PruneRequestPath -PathType Leaf)) {
+        return $null
+    }
+    if (Test-Path $PruneResultPath -PathType Leaf) {
+        Remove-Item $PruneResultPath -Force
+    }
+    $arguments = @(
+        $ReleaseHelper,
+        "--prune-only",
+        "--release-root", $ReleaseRoot,
+        "--result-json", $PruneResultPath
+    )
+    return Start-InheritedProcess -FilePath $script:ActivePython -Arguments $arguments
+}
+
+function Complete-ReleasePrune {
+    param([System.Diagnostics.Process]$Process)
+    $Process.WaitForExit()
+    if (-not (Test-Path $PruneResultPath -PathType Leaf)) {
+        return
+    }
+    try {
+        $result = Get-Content $PruneResultPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (@($result.warnings).Count -gt 0) {
+            $warnings = @($result.warnings) -join " | "
+            Send-Webhook "Atomic release cleanup warning: $warnings" "warning"
+        }
+    } catch {
+        Send-Webhook "Atomic release cleanup result is invalid: $_" "warning"
+    }
+}
+
+function Stop-ReleasePrune {
+    param([System.Diagnostics.Process]$Process)
+    if (-not $Process.HasExited -and -not $Process.WaitForExit(1000)) {
+        $Process.Kill()
+    }
+    $Process.WaitForExit()
+    $Process.Dispose()
+}
+
 # Validate repo path exists
 if (-not (Test-Path $RepoPath)) {
     Send-Webhook "Haniel repo not found at $RepoPath" "error"
@@ -289,8 +370,34 @@ while ($true) {
     Write-Host "[haniel-runner] Launching haniel..."
     $env:HANIEL_ACTIVE_SELF_HEAD = $script:ActiveCommit
     $runArguments = @("-m", "haniel.cli", "run", $ConfigPath)
-    & $script:ActivePython @runArguments
-    $exitCode = $LASTEXITCODE
+    try {
+        $hanielProcess = Start-RunnerProcess -Arguments $runArguments
+    } catch {
+        Write-Error "Failed to launch Haniel: $_"
+        Send-Webhook "Failed to launch Haniel: $_" "error"
+        exit 1
+    }
+    $pruneProcess = Start-ReleasePrune
+    while (-not $hanielProcess.HasExited) {
+        if ($pruneProcess -and $pruneProcess.HasExited) {
+            Complete-ReleasePrune -Process $pruneProcess
+            $pruneProcess.Dispose()
+            $pruneProcess = $null
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    $hanielProcess.WaitForExit()
+    $exitCode = $hanielProcess.ExitCode
+    $hanielProcess.Dispose()
+    if ($pruneProcess) {
+        if ($pruneProcess.HasExited) {
+            Complete-ReleasePrune -Process $pruneProcess
+            $pruneProcess.Dispose()
+        } else {
+            Stop-ReleasePrune -Process $pruneProcess
+        }
+        $pruneProcess = $null
+    }
 
     Write-Host "[haniel-runner] haniel exited with code: $exitCode"
 

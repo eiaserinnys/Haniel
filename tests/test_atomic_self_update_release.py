@@ -76,6 +76,8 @@ def _copy_release_helpers(destination: Path) -> None:
         "haniel_release_fs.py",
         "haniel_release_inventory.py",
         "haniel_release_policy.py",
+        "haniel_release_prune.py",
+        "haniel_release_steps.py",
     ):
         shutil.copy2(REPO_ROOT / "scripts" / name, destination / name)
 
@@ -149,7 +151,12 @@ fi
 exec "{REAL_GIT}" "$@"
 """,
     )
-    _write_executable(fake_bin / "sleep", "#!/usr/bin/env bash\nexit 0\n")
+    _write_executable(
+        fake_bin / "sleep",
+        "#!/usr/bin/env bash\n"
+        "if [[ \"${1:-}\" == 0.* ]]; then exec /bin/sleep \"$@\"; fi\n"
+        "exit 0\n",
+    )
     _write_executable(
         fake_bin / "curl",
         f'#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "{webhook_log}"\n',
@@ -197,6 +204,7 @@ if [[ "${{1:-}}" == "-m" && "${{2:-}}" == "haniel.cli" ]]; then
   tail -n +2 "{state}" > "{state}.next"
   mv "{state}.next" "{state}"
   printf '%s|%s|active-self-head=%s|%s\\n' "$(readlink -f "$0")" "$code" "${{HANIEL_ACTIVE_SELF_HEAD:-unset}}" "$*" >> "{launch_log}"
+  /bin/sleep "${{HANIEL_TEST_CHILD_DELAY:-0}}"
   exit "$code"
 fi
 exec "{real_python}" "$@"
@@ -266,6 +274,7 @@ def _run_atomic_wrapper(
     min_free_mb: int = 1,
     retain_extra: int = 3,
     old_release_count: int = 0,
+    child_delay: float = 0.0,
 ) -> AtomicRun:
     source, previous_commit, target_commit = _create_source_repo(tmp_path)
     fetch_log = tmp_path / "fetches"
@@ -322,6 +331,7 @@ def _run_atomic_wrapper(
     env["PATH"] = f"{fake_bin}:{env['PATH']}"
     if fail_stage:
         env["HANIEL_TEST_FAIL_STAGE"] = fail_stage
+    env["HANIEL_TEST_CHILD_DELAY"] = str(child_delay)
     result = subprocess.run(
         ["bash", str(runner)],
         cwd=tmp_path,
@@ -402,6 +412,14 @@ def test_success_switches_current_and_reexecs_release_wrapper(tmp_path: Path) ->
         )
     )
     assert preparation["active_commit"] == run.target_commit
+    assert preparation["steps"]
+    assert all(
+        isinstance(step.get("duration_sec"), (int, float))
+        and step["duration_sec"] >= 0
+        for step in preparation["steps"]
+    )
+    for step in preparation["steps"]:
+        assert f"step={step['name']} status=" in run.result.stderr
     assert "Re-executing current release wrapper" in run.result.stdout
     launch = run.launch_log.read_text(encoding="utf-8").splitlines()[-1]
     assert launch.startswith(str(current / ".venv" / "bin" / "python"))
@@ -459,6 +477,7 @@ def test_prune_after_switch_keeps_current_previous_and_three_newest_extras(
         fail_stage=None,
         retain_extra=3,
         old_release_count=5,
+        child_delay=0.2,
     )
     releases = run.release_root / "releases"
     current = _current_release(run.release_root)
@@ -477,6 +496,22 @@ def test_prune_after_switch_keeps_current_previous_and_three_newest_extras(
     assert (releases / f"{3:040x}").exists()
     assert (releases / f"{4:040x}").exists()
     assert (releases / f"{5:040x}").exists()
+    prune_result = json.loads(
+        (tmp_path / ".local" / "haniel_release_prune.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    self_update_result = json.loads(
+        (tmp_path / ".local" / "self_update_result.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert prune_result["steps"][-1]["name"] == "release_prune"
+    assert prune_result["steps"][-1]["duration_sec"] >= 0
+    assert all(
+        step["name"] != "release_prune" for step in self_update_result["steps"]
+    )
+    assert not (run.release_root / ".haniel-release-prune-request.json").exists()
 
 
 def test_failed_switch_does_not_prune_before_activation(tmp_path: Path) -> None:
@@ -521,6 +556,7 @@ def test_prune_ignores_symlink_and_mismatched_ready_marker(tmp_path: Path) -> No
         run_root,
         fail_stage=None,
         retain_extra=0,
+        child_delay=0.2,
     )
 
     assert run.result.returncode == 0, run.result.stderr

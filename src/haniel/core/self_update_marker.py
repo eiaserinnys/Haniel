@@ -24,6 +24,7 @@ class SelfUpdateStep:
     name: str
     ok: bool
     error: str | None = None
+    duration_sec: float | None = None
 
 
 @dataclass
@@ -70,11 +71,24 @@ def read_and_consume(config_dir: Path) -> SelfUpdateResult | None:
         steps_raw = data.get("steps", [])
         if not isinstance(steps_raw, list):
             raise ValueError("steps must be a list")
-        steps = [
-            SelfUpdateStep(name=str(s["name"]), ok=bool(s["ok"]), error=s.get("error"))
-            for s in steps_raw
-            if isinstance(s, dict) and "name" in s and "ok" in s
-        ]
+        steps = []
+        for step in steps_raw:
+            if not isinstance(step, dict) or "name" not in step or "ok" not in step:
+                continue
+            duration_raw = step.get("duration_sec")
+            duration = (
+                float(duration_raw)
+                if isinstance(duration_raw, (int, float))
+                else None
+            )
+            steps.append(
+                SelfUpdateStep(
+                    name=str(step["name"]),
+                    ok=bool(step["ok"]),
+                    error=step.get("error"),
+                    duration_sec=duration,
+                )
+            )
         result = SelfUpdateResult(
             version=version,
             started_at=str(data["started_at"]),
