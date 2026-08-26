@@ -77,6 +77,7 @@ class FakeAppHomeController:
         self.enable_calls = []
         self.pull_calls = []
         self.self_update_calls = []
+        self.self_update_stop_calls = []
         self.restart_result = "restarted"
 
     def get_status(self) -> dict:
@@ -102,6 +103,9 @@ class FakeAppHomeController:
     def approve_self_update(self) -> str:
         self.self_update_calls.append(True)
         return "Self-update approved."
+
+    def schedule_self_update_stop(self) -> None:
+        self.self_update_stop_calls.append(True)
 
     def request_restart(self) -> str:
         return "Restart initiated."
@@ -489,6 +493,7 @@ class TestUpdateRepoAction:
         }
         handler(ack=ack, body=body, client=MagicMock(), logger=MagicMock())
         assert len(controller.self_update_calls) == 1
+        assert len(controller.self_update_stop_calls) == 1
 
 
 class TestActionErrorHandling:

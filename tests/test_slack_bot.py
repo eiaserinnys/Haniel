@@ -696,7 +696,7 @@ services: {}
 
 
 def test_trigger_pull_self_repo_signals_restart(tmp_path: Path):
-    """trigger_pull for self-repo signals self-update restart after pull."""
+    """Generic self-repo pull uses the canonical prestager without checkout pull."""
     from haniel.config.model import load_config
     from haniel.core.runner import ServiceRunner
 
@@ -727,13 +727,17 @@ services: {}
     slack_bot = MagicMock()
     runner._slack_bot = slack_bot
     runner._repo_states["haniel"].pending_changes = {"commits": ["a"], "stat": ""}
+    runner._self_update_prestager.freeze_target = MagicMock(return_value="a" * 40)
+    runner._self_update_prestager.prepare = MagicMock(return_value=MagicMock())
 
     with (
-        patch.object(runner, "_pull_repo", return_value=(True, [])),
+        patch.object(runner, "_pull_repo", return_value=(True, [])) as pull,
         patch.object(runner, "stop") as mock_stop,
     ):
         runner.trigger_pull("haniel", auto=False)
 
-    # After self-repo pull, restart should be signalled
     assert runner._self_update_requested.is_set()
+    pull.assert_not_called()
+    runner._self_update_prestager.freeze_target.assert_called_once()
+    runner._self_update_prestager.prepare.assert_called_once()
     mock_stop.assert_called_once()

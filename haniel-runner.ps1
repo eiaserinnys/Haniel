@@ -116,6 +116,7 @@ $script:ActiveRepo = $RepoPath
 $script:ActivePython = $BootstrapPython
 $script:ActiveCommit = $null
 $script:PreparationResult = $null
+$script:UsePreparedUpdate = $false
 
 function Send-Webhook {
     param([string]$Message, [string]$Level = "info")
@@ -168,7 +169,46 @@ function Write-SelfUpdateMarker {
     }
 }
 
+function Get-PreparedTarget {
+    if (-not (Test-Path $PreparationResultPath -PathType Leaf)) {
+        return $null
+    }
+    try {
+        $result = Get-Content $PreparationResultPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (-not $result.ok -or -not $result.pre_staged -or $result.switched -or
+            -not ($result.target_commit -match '^[0-9a-f]{40}$') -or
+            -not $result.prepared_release) {
+            return $null
+        }
+        $prepared = [System.IO.Path]::GetFullPath([string]$result.prepared_release)
+        $releases = [System.IO.Path]::GetFullPath((Join-Path $ReleaseRoot "releases"))
+        $prefix = $releases.TrimEnd([System.IO.Path]::DirectorySeparatorChar) +
+            [System.IO.Path]::DirectorySeparatorChar
+        if (-not $prepared.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $null
+        }
+        $readyPath = Join-Path $prepared ".haniel-release-ready.json"
+        $ready = Get-Content $readyPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($ready.commit -ne $result.target_commit) {
+            return $null
+        }
+        return [string]$result.target_commit
+    } catch {
+        return $null
+    }
+}
+
 function Update-HanielRelease {
+    $preparedTarget = $null
+    if ($script:UsePreparedUpdate) {
+        $preparedTarget = Get-PreparedTarget
+        if ($preparedTarget) {
+            Write-Host "[haniel-runner] Reusing pre-staged release $($preparedTarget.Substring(0, 12))."
+        } else {
+            Write-Host "[haniel-runner] Pre-stage handoff unavailable; using full preparation fallback."
+        }
+    }
+    $script:UsePreparedUpdate = $false
     if (Test-Path $PreparationResultPath) {
         Remove-Item $PreparationResultPath -Force
     }
@@ -182,6 +222,9 @@ function Update-HanielRelease {
         "--retain-extra", "$HanielReleaseRetainExtra",
         "--min-free-mb", "$HanielReleaseMinFreeMB"
     )
+    if ($preparedTarget) {
+        $arguments += @("--target-commit", $preparedTarget)
+    }
     $currentPointerPath = Join-Path $ReleaseRoot "current.txt"
     $legacyCurrentPath = Join-Path $ReleaseRoot "current"
     if (-not (Test-Path $currentPointerPath -PathType Leaf) -and
@@ -422,6 +465,7 @@ while ($true) {
         Write-Host "[haniel-runner] Self-update requested. Looping..."
         Send-Webhook "Self-update initiated. Updating and restarting..." "info"
         $writeSelfUpdateMarker = $true
+        $script:UsePreparedUpdate = $true
         Start-Sleep -Seconds 5
     }
     elseif ($exitCode -eq $EXIT_RESTART) {
