@@ -507,7 +507,11 @@ def test_manifest_handover_waits_for_readiness_and_post_verify(
         "starting",
         "verifying",
     ]
-    assert "Expected deployment budget for app: 120s" in caplog.text
+    assert (
+        "Expected deployment budget for app: 180s "
+        "(build=0s + pre_start=0s + readiness=60s + "
+        "verification=60s + recovery=60s)"
+    ) in caplog.text
 
 
 def test_manifest_requiring_service_env_rejects_legacy_runtime_without_digest(

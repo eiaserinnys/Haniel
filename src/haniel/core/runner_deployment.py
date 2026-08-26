@@ -630,13 +630,10 @@ def run_manifest_deployment(
         manifest=manifest,
     )
     logger.info(
-        "Expected deployment budget for %s: %ss "
-        "(build hooks=%ss, readiness=%ss, verification=%ss)",
+        "Expected deployment budget for %s: %ss (%s)",
         repo_name,
         budget.total_sec,
-        budget.build_hooks_sec,
-        budget.readiness_sec,
-        budget.verification_sec,
+        budget.breakdown(),
     )
 
     contract_mode = bool(manifest.migration and manifest.migration.operation)

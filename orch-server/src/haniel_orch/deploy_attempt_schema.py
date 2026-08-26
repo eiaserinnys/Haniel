@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS deploy_attempts (
     diff_stat TEXT,
     detected_at TEXT NOT NULL,
     started_at TEXT NOT NULL,
+    expected_budget_sec INTEGER,
     deadline_at TEXT NOT NULL,
     completed_at TEXT
 );
@@ -124,6 +125,7 @@ CANONICAL_COLUMNS = {
 }
 
 ATTEMPT_COLUMNS = {
+    "expected_budget_sec": "INTEGER",
     "terminal_stage": "TEXT",
     "terminal_reason": "TEXT",
 }

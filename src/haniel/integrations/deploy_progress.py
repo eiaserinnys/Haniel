@@ -36,6 +36,7 @@ class DeployProgressEmitter:
         orchestrator_attempt_id: str,
         connection_generation: str,
         emit: Emit,
+        expected_budget_sec: int | None = None,
         interval_sec: float = 30.0,
     ) -> None:
         if interval_sec <= 0:
@@ -47,6 +48,7 @@ class DeployProgressEmitter:
             "orchestrator_attempt_id": orchestrator_attempt_id,
             "connection_generation": connection_generation,
         }
+        self._expected_budget_sec = expected_budget_sec
         self._emit = emit
         self._interval_sec = interval_sec
         self._stage = "preparing"
@@ -57,7 +59,9 @@ class DeployProgressEmitter:
     def start(self) -> None:
         if self._thread is not None:
             return
-        self._safe_emit("preparing")
+        # Declare the optional extension once. Later legacy-shaped heartbeats
+        # still renew an older hub even if it rejects this first new field.
+        self._safe_emit("preparing", declare_budget=True)
         self._thread = threading.Thread(
             target=self._heartbeat_loop,
             name="haniel-deploy-progress",
@@ -83,8 +87,11 @@ class DeployProgressEmitter:
                 stage = self._stage
             self._safe_emit(stage)
 
-    def _safe_emit(self, stage: str) -> None:
+    def _safe_emit(self, stage: str, *, declare_budget: bool = False) -> None:
         try:
-            self._emit({**self._payload, "stage": stage})
+            message = {**self._payload, "stage": stage}
+            if declare_budget and self._expected_budget_sec is not None:
+                message["expected_budget_sec"] = self._expected_budget_sec
+            self._emit(message)
         except Exception as exc:
             logger.warning("Failed to queue deploy progress: %s", exc)
