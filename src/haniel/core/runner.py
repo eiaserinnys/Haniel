@@ -1377,8 +1377,9 @@ class ServiceRunner:
 
         logger.info("Stopping ServiceRunner")
         self._stop_event.set()
-        self._self_update_prestager.cancel()
         try:
+            self._self_update_prestager.cancel()
+
             # Stop Slack bot
             if self._slack_bot:
                 self._slack_bot.notify_shutdown()  # best-effort, internally handled
