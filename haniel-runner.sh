@@ -210,6 +210,41 @@ PY
   PREPARATION_WARNINGS="${fields[7]}"
 }
 
+load_prepared_target() {
+  if [[ ! -f "$PREPARATION_RESULT_PATH" ]]; then
+    return 1
+  fi
+  "$PYTHON_BIN" - "$PREPARATION_RESULT_PATH" "$RELEASE_ROOT" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+result_path = pathlib.Path(sys.argv[1])
+release_root = pathlib.Path(sys.argv[2]).resolve()
+try:
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    target = payload.get("target_commit")
+    prepared = pathlib.Path(payload.get("prepared_release") or "").resolve(strict=True)
+    prepared.relative_to((release_root / "releases").resolve())
+    ready = json.loads(
+        (prepared / ".haniel-release-ready.json").read_text(encoding="utf-8")
+    )
+except (OSError, ValueError, TypeError):
+    raise SystemExit(1)
+if (
+    payload.get("ok") is not True
+    or payload.get("pre_staged") is not True
+    or payload.get("switched") is not False
+    or not isinstance(target, str)
+    or re.fullmatch(r"[0-9a-f]{40}", target) is None
+    or ready.get("commit") != target
+):
+    raise SystemExit(1)
+print(target)
+PY
+}
+
 write_self_update_marker() {
   local ok="$1"
   local marker_path="$ROOT_DIR/.local/self_update_result.json"
@@ -241,6 +276,16 @@ PY
 }
 
 update_haniel_release() {
+  local prepared_target=""
+  if [[ "$use_prepared_update" == "true" ]]; then
+    if prepared_target="$(load_prepared_target)"; then
+      echo "[haniel-runner] Reusing pre-staged release ${prepared_target:0:12}."
+    else
+      echo "[haniel-runner] Pre-stage handoff unavailable; using full preparation fallback."
+      prepared_target=""
+    fi
+  fi
+  use_prepared_update=false
   local arguments=(
     "$PYTHON_BIN"
     "$RELEASE_HELPER"
@@ -252,6 +297,9 @@ update_haniel_release() {
     --retain-extra "$HANIEL_RELEASE_RETAIN_EXTRA"
     --min-free-mb "$HANIEL_RELEASE_MIN_FREE_MB"
   )
+  if [[ -n "$prepared_target" ]]; then
+    arguments+=(--target-commit "$prepared_target")
+  fi
   if [[ ! -f "$RELEASE_ROOT/current.txt" && ! -e "$RELEASE_ROOT/current" && ! -L "$RELEASE_ROOT/current" && -f "$SELF_UPDATE_EXIT_MARKER" ]]; then
     arguments+=(--prefer-orig-head)
   fi
@@ -347,6 +395,7 @@ EXIT_SELF_UPDATE=10
 EXIT_RESTART=11
 skip_update=false
 write_self_update_marker=false
+use_prepared_update=false
 crash_restart_count=0
 CHILD_PID=""
 WATCHDOG_PID=""
@@ -468,6 +517,7 @@ while true; do
     echo "[haniel-runner] Self-update requested. Looping..."
     send_webhook "Self-update initiated. Updating and restarting..." "info"
     write_self_update_marker=true
+    use_prepared_update=true
     sleep 5
   elif [[ "$exit_code" -eq "$EXIT_RESTART" ]]; then
     crash_restart_count=0

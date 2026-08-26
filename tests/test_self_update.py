@@ -12,6 +12,7 @@ Tests cover:
 
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -65,6 +66,12 @@ class TestSelfUpdateConfig:
         cfg = SelfUpdateConfig(repo="haniel")
         assert cfg.repo == "haniel"
         assert cfg.auto_update is False
+        assert cfg.prepare_timeout == 3600
+
+    def test_self_update_config_prepare_timeout_must_be_positive(self):
+        assert SelfUpdateConfig(repo="haniel", prepare_timeout=45).prepare_timeout == 45
+        with pytest.raises(ValueError):
+            SelfUpdateConfig(repo="haniel", prepare_timeout=0)
 
     def test_self_update_config_auto_update(self):
         cfg = SelfUpdateConfig(repo="haniel", auto_update=True)
@@ -158,6 +165,12 @@ class TestRunnerSelfUpdate:
         runner._stop_owner_thread_id = None
         runner._stop_error = None
         runner._self_update_requested = threading.Event()
+        runner._self_update_prestager = MagicMock()
+        runner._self_update_prestager.freeze_target.return_value = "a" * 40
+        runner._self_update_prestager.prepare.return_value = SimpleNamespace(
+            target_commit="a" * 40,
+            prepared_release=Path("prepared"),
+        )
         runner._last_self_update_result = None
         runner._last_pending_hash = {}
         runner._pending_restarts = {}
@@ -260,6 +273,55 @@ class TestRunnerSelfUpdate:
         assert runner.self_update_requested is True
         runner.process_manager.is_running.assert_called_with("web")
         assert "approved" in result.lower()
+
+    def test_approve_prepares_before_stopping_services(self):
+        config = self._make_config()
+        runner = self._make_runner(config)
+        runner._state.self_update_pending = True
+        order: list[str] = []
+        runner._self_update_prestager.freeze_target.side_effect = (
+            lambda *_args, **_kwargs: order.append("fetch-freeze") or "a" * 40
+        )
+        runner._self_update_prestager.prepare.side_effect = lambda *_args, **_kwargs: (
+            order.append("prepare") or SimpleNamespace(target_commit="a" * 40)
+        )
+        runner._prepare_self_update_shutdown = MagicMock(
+            side_effect=lambda: order.append("stop-services")
+        )
+
+        runner.approve_self_update()
+
+        assert order == ["fetch-freeze", "prepare", "stop-services"]
+
+    def test_prepare_failure_keeps_pending_and_does_not_stop_services(self):
+        config = self._make_config()
+        runner = self._make_runner(config)
+        runner._state.self_update_pending = True
+        runner._self_update_prestager.prepare.side_effect = RuntimeError(
+            "release_ready failed"
+        )
+        runner._prepare_self_update_shutdown = MagicMock()
+
+        with pytest.raises(RuntimeError, match="release_ready failed"):
+            runner.approve_self_update(target_commit="a" * 40)
+
+        assert runner._state.self_update_pending is True
+        assert runner.self_update_requested is False
+        runner._prepare_self_update_shutdown.assert_not_called()
+        runner._self_update_prestager.discard_result.assert_called_once_with()
+
+    def test_approve_uses_supported_progress_stages(self):
+        config = self._make_config()
+        runner = self._make_runner(config)
+        runner._state.self_update_pending = True
+        progress: list[str] = []
+
+        runner.approve_self_update(
+            target_commit="a" * 40,
+            progress_callback=progress.append,
+        )
+
+        assert progress == ["preparing", "starting"]
 
     def test_approve_self_update_clears_pending_state_before_restart(self):
         """Approval should clear visible pending state before wrapper restart."""

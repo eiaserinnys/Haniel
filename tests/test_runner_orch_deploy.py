@@ -453,14 +453,46 @@ class TestHandleDeployApprovalSelfRepo:
         tmp_path: Path,
     ) -> None:
         runner = _build_runner(tmp_path, with_self_repo=True)
-        runner.approve_self_update = MagicMock(return_value="ok")  # type: ignore[assignment]
+
+        def approve(**kwargs):
+            kwargs["on_prepared"](MagicMock())
+            return "ok"
+
+        runner.approve_self_update = MagicMock(side_effect=approve)  # type: ignore[assignment]
         runner._deferred_stop_for_self_update = MagicMock()  # type: ignore[assignment]
         result = runner._handle_deploy_approval(_approval("haniel"))
         assert result == "deferred"
         # Pending file written so next runner can correlate self-update result
         assert (tmp_path / MARKER_RELPATH).exists()
         # approve_self_update gate (state.self_update_pending=True) bypassed
-        runner.approve_self_update.assert_called_once()
+        runner.approve_self_update.assert_called_once_with(
+            target_commit="abc1234",
+            on_prepared=ANY,
+            on_abort=ANY,
+            progress_callback=None,
+        )
+
+    def test_prepare_failure_does_not_leave_pending_marker(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _build_runner(tmp_path, with_self_repo=True)
+        runner.approve_self_update = MagicMock(  # type: ignore[assignment]
+            side_effect=RuntimeError("release_ready failed")
+        )
+
+        with pytest.raises(RuntimeError, match="release_ready failed"):
+            runner._handle_deploy_approval(_approval("haniel"))
+
+        assert not (tmp_path / MARKER_RELPATH).exists()
+        assert runner._state.self_update_pending is True
+
+    def test_self_repo_budget_uses_prepare_timeout(self, tmp_path: Path) -> None:
+        runner = _build_runner(tmp_path, with_self_repo=True)
+
+        assert (
+            runner._expected_deployment_budget_sec("node-a:haniel:main:" + "a" * 40)
+            == 3600
+        )
 
     def test_recovery_approval_never_starts_self_update(self, tmp_path: Path) -> None:
         runner = _build_runner(tmp_path, with_self_repo=True)

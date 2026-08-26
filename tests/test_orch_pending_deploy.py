@@ -9,6 +9,7 @@ from haniel.core.orch_pending_deploy import (
     MARKER_RELPATH,
     SCHEMA_VERSION,
     OrchPendingDeploy,
+    discard,
     read_and_consume,
     write,
 )
@@ -45,6 +46,13 @@ class TestWriteAndRead:
     def test_read_consumes_file(self, tmp_path: Path) -> None:
         self._write(tmp_path, "a:b:c:d", "t")
         read_and_consume(tmp_path)
+        assert not (tmp_path / MARKER_RELPATH).exists()
+
+    def test_discard_only_removes_matching_deploy(self, tmp_path: Path) -> None:
+        self._write(tmp_path, "node:repo:main:approved", "t")
+        assert discard(tmp_path, expected_deploy_id="different") is False
+        assert (tmp_path / MARKER_RELPATH).exists()
+        assert discard(tmp_path, expected_deploy_id="node:repo:main:approved") is True
         assert not (tmp_path / MARKER_RELPATH).exists()
 
     def test_read_missing_returns_none(self, tmp_path: Path) -> None:
