@@ -248,6 +248,20 @@ def test_expected_deployment_budget_uses_owned_hooks_and_all_readiness() -> None
     from haniel.core.deployment_budget import expected_deployment_budget
 
     services = _runner(Path("/tmp/unused-haniel-budget")).config.services
+    services["owner"] = services["owner"].model_copy(
+        update={
+            "hooks": HooksConfig(
+                post_pull="build-owner", pre_start="prepare-owner", timeout=100
+            )
+        }
+    )
+    services["other-repo-dependent"] = services["other-repo-dependent"].model_copy(
+        update={
+            "hooks": HooksConfig(
+                post_pull="build-other", pre_start="prepare-other", timeout=500
+            )
+        }
+    )
 
     budget = expected_deployment_budget(
         repo_name="app",
@@ -257,6 +271,29 @@ def test_expected_deployment_budget_uses_owned_hooks_and_all_readiness() -> None
     )
 
     assert budget.build_hooks_sec == 900
+    assert budget.pre_start_hooks_sec == 600
     assert budget.readiness_sec == 60
     assert budget.verification_sec == 18
-    assert budget.total_sec == 978
+    assert budget.recovery_sec == 360
+    assert budget.total_sec == 1938
+    assert budget.breakdown() == (
+        "build=900s + pre_start=600s + readiness=60s + verification=18s + recovery=360s"
+    )
+
+
+@patch("haniel.core.runner.read_file_at_commit")
+def test_runner_declares_budget_from_target_commit_manifest(
+    read_target: MagicMock, tmp_path: Path
+) -> None:
+    runner = _runner(tmp_path)
+    runner._repo_states["app"].config = runner._repo_states["app"].config.model_copy(
+        update={"release_manifest": "haniel.release.json"}
+    )
+    read_target.return_value = _manifest().model_dump_json().encode("utf-8")
+
+    declared = runner._expected_deployment_budget_sec("node-a:app:main:target-commit")
+
+    assert declared == 1338
+    read_target.assert_called_once_with(
+        tmp_path / "app", "target-commit", "haniel.release.json"
+    )

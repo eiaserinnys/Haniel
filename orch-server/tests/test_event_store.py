@@ -183,6 +183,26 @@ class TestCreateDeployEvent:
         finally:
             await reopened.close()
 
+    async def test_schema_restores_missing_expected_budget_column(self, tmp_path):
+        db_path = tmp_path / "legacy-attempt.sqlite"
+        initial = EventStore(str(db_path))
+        await initial.initialize()
+        await initial.close()
+
+        db = await aiosqlite.connect(db_path)
+        await db.execute("ALTER TABLE deploy_attempts DROP COLUMN expected_budget_sec")
+        await db.commit()
+        await db.close()
+
+        migrated = EventStore(str(db_path))
+        await migrated.initialize()
+        try:
+            cursor = await migrated._db.execute("PRAGMA table_info(deploy_attempts)")
+            columns = {row[1] for row in await cursor.fetchall()}
+            assert "expected_budget_sec" in columns
+        finally:
+            await migrated.close()
+
 
 class TestMutationBoundary:
     PUBLIC_MUTATIONS = {

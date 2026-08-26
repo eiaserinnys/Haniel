@@ -256,6 +256,18 @@ class TestDeployProgress:
         msg = parse_node_message(raw)
         assert isinstance(msg, DeployProgress)
         assert msg.stage == "build"
+        assert msg.expected_budget_sec is None
+
+    def test_parse_optional_expected_budget(self):
+        raw = (
+            '{"type":"deploy_progress","deploy_id":"n:r:main:h",'
+            '"node_id":"n","orchestrator_attempt_id":"a1",'
+            '"connection_generation":"g1","stage":"preparing",'
+            '"expected_budget_sec":6300}'
+        )
+        msg = parse_node_message(raw)
+        assert isinstance(msg, DeployProgress)
+        assert msg.expected_budget_sec == 6300
 
     def test_stage_inventory_is_closed(self):
         with pytest.raises(ValidationError):

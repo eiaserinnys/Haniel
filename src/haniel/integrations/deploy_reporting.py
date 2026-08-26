@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 ApprovalHandler = Callable[[dict, ProgressCallback], str | dict | None]
 SnapshotHandler = Callable[[str, str, str], "RepoReconciliationSnapshot"]
+ExpectedBudgetHandler = Callable[[str], int | None]
 SendJson = Callable[[dict], Awaitable[None]]
 
 
@@ -58,12 +59,14 @@ class DeployReporter:
         node_id: str,
         approval_handler: ApprovalHandler | None,
         snapshot_handler: SnapshotHandler | None,
+        expected_budget_handler: ExpectedBudgetHandler | None = None,
         send_json: SendJson,
         progress_interval_sec: float = 30.0,
     ) -> None:
         self._node_id = node_id
         self._approval_handler = approval_handler
         self._snapshot_handler = snapshot_handler
+        self._expected_budget_handler = expected_budget_handler
         self._send_json = send_json
         self._progress_interval_sec = progress_interval_sec
 
@@ -112,12 +115,26 @@ class DeployReporter:
 
             loop.call_soon_threadsafe(spawn)
 
+        expected_budget_sec = None
+        if self._expected_budget_handler is not None:
+            try:
+                expected_budget_sec = await asyncio.to_thread(
+                    self._expected_budget_handler, deploy_id
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to calculate expected budget for %s: %s",
+                    deploy_id,
+                    exc,
+                )
+
         emitter = DeployProgressEmitter(
             node_id=self._node_id,
             deploy_id=deploy_id,
             orchestrator_attempt_id=orchestrator_attempt_id,
             connection_generation=connection_generation,
             emit=emit_progress,
+            expected_budget_sec=expected_budget_sec,
             interval_sec=self._progress_interval_sec,
         )
         emitter.start()

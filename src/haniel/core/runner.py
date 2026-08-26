@@ -52,6 +52,7 @@ from .git import (
     get_head,
     get_pending_changes,
     get_remote_head,
+    read_file_at_commit,
     reset_repo_to,
     pull_repo,
     sha256_file_at_commit,
@@ -64,7 +65,11 @@ from .deployment_errors import (
     StableDeploymentError,
     stable_deployment_error_code,
 )
-from .deployment_budget import effective_ready_timeout, repo_owned_services
+from .deployment_budget import (
+    effective_ready_timeout,
+    expected_deployment_budget,
+    repo_owned_services,
+)
 from .runner_config_snapshot import (
     RepoObservation,
     RepoRuntimeSnapshot,
@@ -82,6 +87,7 @@ from .node_deploy_reporting import (
 from .runner_deployment import run_manifest_deployment
 from .one_shot_handover import probe_manifest_target
 from .release_staging import ReleaseStagingError
+from .release_manifest import ReleaseManifest
 from .handover_config import (
     HandoverConfigError,
     require_handover_config_digest,
@@ -1467,6 +1473,7 @@ class ServiceRunner:
                 deploy_approval_handler=self._handle_deploy_approval,
                 deploy_plan_probe_handler=self._handle_deploy_plan_probe,
                 repo_snapshot_handler=self._capture_orchestrator_repo_snapshot,
+                expected_budget_handler=self._expected_deployment_budget_sec,
             )
             # Map any self-update result from the previous wrapper iteration
             # into a buffered DeployResult before the client connects. The
@@ -1617,6 +1624,35 @@ class ServiceRunner:
                 else None
             ),
         )
+
+    def _expected_deployment_budget_sec(self, deploy_id: str) -> int | None:
+        """Calculate the target manifest budget without mutating the checkout."""
+
+        parts = deploy_id.split(":", 3)
+        if len(parts) != 4:
+            raise ValueError(f"invalid deploy_id format: {deploy_id!r}")
+        _node_id, repo, _branch, target_head = parts
+        config_snapshot, runtime = self._snapshot_repo_and_config(repo)
+        manifest_path = runtime.config.release_manifest
+        if manifest_path is None:
+            return None
+        repo_path = (self.config_dir / runtime.config.path).resolve()
+        payload = read_file_at_commit(repo_path, target_head, manifest_path)
+        manifest = ReleaseManifest.model_validate_json(payload)
+        budget = expected_deployment_budget(
+            repo_name=repo,
+            affected=runtime.affected_services,
+            services=config_snapshot.enabled_services,
+            manifest=manifest,
+        )
+        self._require_config_generation(config_snapshot)
+        logger.info(
+            "Declaring expected deployment budget for %s: %ss (%s)",
+            deploy_id,
+            budget.total_sec,
+            budget.breakdown(),
+        )
+        return budget.total_sec
 
     def _capture_orchestrator_repo_snapshot(
         self,

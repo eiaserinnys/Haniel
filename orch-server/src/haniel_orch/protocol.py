@@ -157,6 +157,7 @@ class DeployProgress(StrictMessage):
     node_id: str
     orchestrator_attempt_id: str
     connection_generation: str
+    expected_budget_sec: int | None = Field(default=None, ge=1)
     stage: Literal[
         "preparing",
         "build",

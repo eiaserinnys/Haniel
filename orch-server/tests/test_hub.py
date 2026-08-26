@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import json
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from starlette.websockets import WebSocketDisconnect
@@ -1483,6 +1483,58 @@ class TestDeployTimeout:
         started = datetime.fromisoformat(attempt["started_at"])
         deadline_at = datetime.fromisoformat(attempt["deadline_at"])
         assert deadline_at <= started + timedelta(seconds=40)
+
+    def test_declared_budget_extends_hard_limit_without_changing_legacy_fallback(self):
+        from haniel_orch.deploy_attempt_progress import attempt_hard_budget_seconds
+
+        assert attempt_hard_budget_seconds(300, None) == 1200
+        assert attempt_hard_budget_seconds(300, 1800) == 2700
+        assert attempt_hard_budget_seconds(300, 60) == 1200
+
+    def test_declared_budget_extension_is_capped_at_two_hours(self):
+        from haniel_orch.deploy_attempt_progress import attempt_hard_budget_seconds
+
+        assert attempt_hard_budget_seconds(300, 20_000) == 7200
+
+    async def test_declared_budget_and_deadline_survive_restore(self, registry, store):
+        hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
+        await self._seed_deploying(store, "d1")
+        bind_generation(hub)
+        await hub.deploy_coordinator.handle_progress(
+            DeployProgress(
+                deploy_id="d1",
+                node_id="n1",
+                orchestrator_attempt_id="attempt-d1",
+                connection_generation="g1",
+                stage="preparing",
+                expected_budget_sec=100,
+            )
+        )
+        attempt = await store.attempts.get_attempt("attempt-d1")
+        assert attempt["expected_budget_sec"] == 100
+
+        await hub.deploy_coordinator.handle_progress(
+            DeployProgress(
+                deploy_id="d1",
+                node_id="n1",
+                orchestrator_attempt_id="attempt-d1",
+                connection_generation="g1",
+                stage="build",
+                expected_budget_sec=200,
+            )
+        )
+        attempt = await store.attempts.get_attempt("attempt-d1")
+        persisted_deadline = attempt["deadline_at"]
+        assert attempt["expected_budget_sec"] == 100
+
+        await hub.deploy_coordinator.shutdown()
+        restored = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
+        restored.deploy_coordinator._schedule_attempt = MagicMock()
+        await restored.deploy_coordinator.restore_deadlines()
+
+        restored.deploy_coordinator._schedule_attempt.assert_called_once_with(
+            "attempt-d1", persisted_deadline
+        )
 
     async def test_progress_requires_current_node_generation(self, registry, store):
         hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)

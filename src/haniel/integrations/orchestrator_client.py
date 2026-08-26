@@ -76,6 +76,7 @@ class OrchestratorClient:
         repo_snapshot_handler: (
             "Callable[[str, str, str], RepoReconciliationSnapshot] | None"
         ) = None,
+        expected_budget_handler: "Callable[[str], int | None] | None" = None,
     ) -> None:
         self._config = config
         self._haniel_version = haniel_version
@@ -90,6 +91,7 @@ class OrchestratorClient:
         self._deploy_approval_handler = deploy_approval_handler
         self._deploy_plan_probe_handler = deploy_plan_probe_handler
         self._repo_snapshot_handler = repo_snapshot_handler
+        self._expected_budget_handler = expected_budget_handler
         self._ws = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -107,6 +109,7 @@ class OrchestratorClient:
             node_id=config.node_id,
             approval_handler=deploy_approval_handler,
             snapshot_handler=repo_snapshot_handler,
+            expected_budget_handler=expected_budget_handler,
             send_json=lambda message: self._send_json(message),
         )
 
@@ -228,12 +231,24 @@ class OrchestratorClient:
                 lambda message=message: self._send_json(message), wait=False
             )
 
+        expected_budget_sec = None
+        if self._expected_budget_handler is not None:
+            try:
+                expected_budget_sec = self._expected_budget_handler(permit["deploy_id"])
+            except Exception as exc:
+                logger.warning(
+                    "Failed to calculate expected budget for %s: %s",
+                    permit["deploy_id"],
+                    exc,
+                )
+
         emitter = DeployProgressEmitter(
             node_id=self._config.node_id,
             deploy_id=permit["deploy_id"],
             orchestrator_attempt_id=permit["begun_orchestrator_attempt_id"],
             connection_generation=permit["connection_generation"],
             emit=emit,
+            expected_budget_sec=expected_budget_sec,
         )
         emitter.start()
         return emitter

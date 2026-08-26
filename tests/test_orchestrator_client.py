@@ -64,6 +64,29 @@ class TestOrchestratorClientInit:
 
         assert hello["hostname"] == "AD02028236"
 
+    def test_auto_progress_declares_budget_only_on_first_payload(self, config):
+        sent: list[dict] = []
+        client = OrchestratorClient(
+            config,
+            haniel_version="0.1.0",
+            expected_budget_handler=lambda deploy_id: 6300,
+        )
+        client._schedule_report = lambda factory, wait: asyncio.run(factory())
+        client._send_json = AsyncMock(side_effect=lambda message: sent.append(message))
+
+        emitter = client.start_deploy_progress(
+            {
+                "deploy_id": "test-node-1:repo:main:target",
+                "begun_orchestrator_attempt_id": "attempt-1",
+                "connection_generation": "generation-1",
+            }
+        )
+        emitter.transition("build")
+        emitter.stop()
+
+        assert sent[0]["expected_budget_sec"] == 6300
+        assert "expected_budget_sec" not in sent[1]
+
 
 class TestNotifyChange:
     def test_noop_when_not_connected(self, config):

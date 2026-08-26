@@ -68,6 +68,7 @@ async def test_manual_success_return_with_mismatch_sends_failed_then_settled() -
         node_id="node-a",
         approval_handler=handler,
         snapshot_handler=lambda repo, branch, deploy_id: snapshot(in_sync=False),
+        expected_budget_handler=lambda deploy_id: 1938,
         send_json=send_json,
         progress_interval_sec=0.01,
     )
@@ -89,6 +90,8 @@ async def test_manual_success_return_with_mismatch_sends_failed_then_settled() -
     ]
     progress = [message for message in sent if message["type"] == "deploy_progress"]
     assert progress[0]["stage"] == "preparing"
+    assert progress[0]["expected_budget_sec"] == 1938
+    assert all("expected_budget_sec" not in message for message in progress[1:])
     assert any(message["stage"] == "build" for message in progress)
     assert sum(message["stage"] == "build" for message in progress) >= 2
     # Raw operation success and settled HEAD are independent evidence. The
@@ -118,6 +121,7 @@ async def test_progress_emitter_stops_when_handler_finishes() -> None:
         node_id="node-a",
         approval_handler=handler,
         snapshot_handler=None,
+        expected_budget_handler=lambda deploy_id: 6300,
         send_json=send_json,
         progress_interval_sec=0.01,
     )
@@ -129,6 +133,9 @@ async def test_progress_emitter_stops_when_handler_finishes() -> None:
         }
     )
     assert finished.is_set()
+    progress = [message for message in sent if message["type"] == "deploy_progress"]
+    assert progress[0]["expected_budget_sec"] == 6300
+    assert all("expected_budget_sec" not in message for message in progress[1:])
     count = len(sent)
     await __import__("asyncio").sleep(0.03)
     assert len(sent) == count

@@ -15,6 +15,7 @@ class DeployAttemptProgressStore:
         deploy_id: str,
         orchestrator_attempt_id: str,
         connection_generation: str,
+        expected_budget_sec: int | None,
         deadline_at: str,
     ) -> dict[str, Any]:
         async with self._mutation_lock:
@@ -24,13 +25,21 @@ class DeployAttemptProgressStore:
                 )
                 if attempt is None:
                     return {"status": "ignored"}
+                declared_budget_sec = attempt["expected_budget_sec"]
+                if declared_budget_sec is None:
+                    declared_budget_sec = expected_budget_sec
                 await self._db.execute(
-                    "UPDATE deploy_attempts SET deadline_at = ? "
+                    "UPDATE deploy_attempts SET deadline_at = ?, "
+                    "expected_budget_sec = ? "
                     "WHERE orchestrator_attempt_id = ? AND outcome = 'active'",
-                    (deadline_at, orchestrator_attempt_id),
+                    (deadline_at, declared_budget_sec, orchestrator_attempt_id),
                 )
                 await self._db.commit()
-                return {"status": "renewed", "deadline_at": deadline_at}
+                return {
+                    "status": "renewed",
+                    "deadline_at": deadline_at,
+                    "expected_budget_sec": declared_budget_sec,
+                }
             except Exception:
                 await self._db.rollback()
                 raise
