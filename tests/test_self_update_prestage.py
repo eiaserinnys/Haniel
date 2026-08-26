@@ -420,6 +420,51 @@ def test_timeout_terminates_process_and_removes_unready_candidate(
     assert not prestager.result_path.exists()
 
 
+def test_timeout_termination_failure_kills_and_cleans_before_reset(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "repo").mkdir()
+    release_root = tmp_path / "releases-root"
+    candidate = release_root / "releases" / TARGET[:12]
+    candidate.mkdir(parents=True)
+    (candidate / "partial").write_text("unfinished", encoding="utf-8")
+    (tmp_path / "haniel-runner.conf").write_text(
+        "HANIEL_RELEASE_ROOT=releases-root\n", encoding="utf-8"
+    )
+
+    class TimedOutProcess(_FinishedProcess):
+        def __init__(self) -> None:
+            super().__init__()
+            self.killed = False
+
+        def wait(self, timeout: float | None = None) -> int:
+            if not self.killed:
+                raise subprocess.TimeoutExpired(["helper"], timeout)
+            self.returncode = -9
+            return self.returncode
+
+        def kill(self) -> None:
+            self.killed = True
+
+    process = TimedOutProcess()
+    prestager = SelfUpdatePrestager(
+        tmp_path,
+        popen_factory=lambda *_args, **_kwargs: process,
+        terminate_process_tree=MagicMock(side_effect=OSError("taskkill failed")),
+    )
+
+    with pytest.raises(
+        SelfUpdatePrestageError,
+        match="timed out after 1s; could not terminate helper process tree",
+    ):
+        prestager.prepare(_repo(), target_commit=TARGET, timeout=1)
+
+    assert process.killed
+    assert not candidate.exists()
+    assert not prestager.result_path.exists()
+    prestager.cancel()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
 def test_cancel_reaps_real_helper_process_group(tmp_path: Path) -> None:
     (tmp_path / "repo").mkdir()
