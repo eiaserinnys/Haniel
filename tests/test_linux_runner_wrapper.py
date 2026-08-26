@@ -44,6 +44,8 @@ def _run_wrapper(
         "haniel_release_fs.py",
         "haniel_release_inventory.py",
         "haniel_release_policy.py",
+        "haniel_release_prune.py",
+        "haniel_release_steps.py",
     ):
         shutil.copy2(source_scripts / name, helper_dir / name)
     release_commit = "a" * 40
@@ -137,6 +139,21 @@ exit 0
     fetches = fetch_log.read_text().splitlines() if fetch_log.exists() else []
     launches = launch_log.read_text().splitlines() if launch_log.exists() else []
     return result, fetches, launches
+
+
+def test_release_prune_starts_after_haniel_and_before_wait() -> None:
+    script = (Path(__file__).resolve().parents[1] / "haniel-runner.sh").read_text(
+        encoding="utf-8"
+    )
+
+    launch = script.index('"$ACTIVE_PYTHON" -m haniel.cli run "$CONFIG_PATH" &')
+    prune = script.index("start_release_prune", launch)
+    wait = script.index('wait "$CHILD_PID"', prune)
+
+    assert launch < prune < wait
+    report_start = script.index("report_release_prune_result()")
+    report_end = script.index("complete_release_prune()", report_start)
+    assert "without a result" in script[report_start:report_end]
 
 
 def test_wrapper_removes_inherited_node_channel_before_release_preparation(

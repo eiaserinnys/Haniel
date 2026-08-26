@@ -614,7 +614,31 @@ class TestWrapperModeInstaller:
         assert '"--min-free-mb", "$HanielReleaseMinFreeMB"' in script
         assert "$env:HANIEL_ACTIVE_SELF_HEAD = $script:ActiveCommit" in script
         assert '"--active-self-head", $script:ActiveCommit' not in script
-        assert "& $script:ActivePython @runArguments" in script
+        launch = script.index(
+            "$hanielProcess = Start-RunnerProcess -Arguments $runArguments"
+        )
+        prune = script.index("$pruneProcess = Start-ReleasePrune", launch)
+        wait = script.index("$hanielProcess.WaitForExit()", prune)
+        assert launch < prune < wait
+        assert "ConvertTo-WindowsCommandLineArgument" in script
+        assert "UseShellExecute = $false" in script
+        assert "RedirectStandardOutput = $false" in script
+        assert "RedirectStandardError = $false" in script
+        prune_function = script[
+            script.index("function Start-ReleasePrune") : script.index(
+                "function Complete-ReleasePrune"
+            )
+        ]
+        assert "try {" in prune_function
+        assert "catch {" in prune_function
+        assert "Send-Webhook" in prune_function
+        assert "return $null" in prune_function
+        complete_function = script[
+            script.index("function Complete-ReleasePrune") : script.index(
+                "function Stop-ReleasePrune"
+            )
+        ]
+        assert "without a result" in complete_function
         marker_write = script.index(
             "Write-SelfUpdateMarker -Ok ([bool]$script:PreparationResult.ok)"
         )

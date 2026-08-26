@@ -75,7 +75,13 @@ def test_switch_uses_atomic_file_replace_not_directory_reparse_replace(
     monkeypatch.setattr(release_fs.os, "replace", windows_replace)
     result = atomic_release.PreparationResult()
 
-    atomic_release._switch_current(result, release_root, second)
+    atomic_release._switch_current(
+        result,
+        release_root,
+        second,
+        previous=first,
+        retain_extra=3,
+    )
 
     assert result.switched is True
     assert (release_root / "current.txt").read_text(encoding="utf-8") == (
@@ -207,7 +213,7 @@ def test_broken_candidate_uses_a_distinct_retry_directory(
             )
             candidate_python.parent.mkdir(parents=True)
             candidate_python.write_text("", encoding="utf-8")
-        step_result.add_step(name, True)
+        step_result.add_step(name, True, duration_sec=0)
 
     monkeypatch.setattr(atomic_release, "_run_step", run_step)
 
@@ -244,9 +250,14 @@ def test_failed_cleanup_records_broken_marker_for_next_attempt(
     def fail_after_checkout(step_result, name, command, **_kwargs):
         if name == "release_checkout":
             Path(command[-1]).mkdir(parents=True)
-            step_result.add_step(name, True)
+            step_result.add_step(name, True, duration_sec=0)
             return
-        step_result.add_step(name, False, "injected build failure")
+        step_result.add_step(
+            name,
+            False,
+            "injected build failure",
+            duration_sec=0,
+        )
         raise atomic_release.ReleasePreparationError(step_result.error)
 
     monkeypatch.setattr(atomic_release, "_run_step", fail_after_checkout)

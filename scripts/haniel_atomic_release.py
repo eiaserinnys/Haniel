@@ -12,7 +12,6 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from haniel_release_fs import (
@@ -40,82 +39,18 @@ from haniel_release_policy import (
     READY_MARKER,
     InsufficientDiskSpace,
     ReleasePolicyError,
-    prune_ready_releases,
     read_ready_commit,
     require_disk_space,
 )
-
-
-class ReleasePreparationError(RuntimeError):
-    """A candidate failed before activation."""
-
-
-@dataclass
-class PreparationResult:
-    ok: bool = False
-    steps: list[dict[str, object]] = field(default_factory=list)
-    error: str | None = None
-    error_code: str | None = None
-    warnings: list[str] = field(default_factory=list)
-    active_repo: str | None = None
-    active_python: str | None = None
-    active_commit: str | None = None
-    target_commit: str | None = None
-    switched: bool = False
-    migrated: bool = False
-
-    def add_step(self, name: str, ok: bool, error: str | None = None) -> None:
-        self.steps.append({"name": name, "ok": ok, "error": error})
-        if not ok and self.error is None:
-            self.error = f"{name} failed: {error or 'no message'}"
-
-    def as_dict(self) -> dict[str, object]:
-        return {
-            "version": 1,
-            "ok": self.ok,
-            "steps": self.steps,
-            "error": self.error,
-            "error_code": self.error_code,
-            "warnings": self.warnings,
-            "active_repo": self.active_repo,
-            "active_python": self.active_python,
-            "active_commit": self.active_commit,
-            "target_commit": self.target_commit,
-            "switched": self.switched,
-            "migrated": self.migrated,
-        }
-
-
-def _command_error(completed: subprocess.CompletedProcess[str]) -> str:
-    output = "\n".join(
-        part.strip() for part in (completed.stdout, completed.stderr) if part.strip()
-    )
-    if not output:
-        output = f"command exited with code {completed.returncode}"
-    lines = output.splitlines()
-    lines.append(f"[exit={completed.returncode}]")
-    return "\n".join(lines[-20:])[-4000:]
-
-
-def _run_step(
-    result: PreparationResult,
-    name: str,
-    command: list[str],
-    *,
-    cwd: Path | None = None,
-) -> None:
-    completed = subprocess.run(
-        command,
-        cwd=cwd,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if completed.returncode != 0:
-        error = _command_error(completed)
-        result.add_step(name, False, error)
-        raise ReleasePreparationError(result.error or error)
-    result.add_step(name, True)
+from haniel_release_prune import prune, queue_prune_request
+from haniel_release_steps import (
+    PreparationResult,
+    ReleasePreparationError,
+    command_error as _command_error,
+    elapsed_since,
+    monotonic_time,
+    run_step as _run_step,
+)
 
 
 def _git_output(source: Path, *arguments: str) -> str:
@@ -160,44 +95,21 @@ def _require_disk_space(
     release_root: Path,
     min_free_mb: int,
 ) -> None:
+    started_at = monotonic_time()
     try:
         require_disk_space(release_root, min_free_mb)
     except InsufficientDiskSpace as exc:
         result.error_code = "insufficient_disk_space"
-        result.add_step("disk_space", False, str(exc))
+        result.add_step(
+            "disk_space", False, str(exc), duration_sec=elapsed_since(started_at)
+        )
         raise ReleasePreparationError(result.error or str(exc)) from exc
     except ReleasePolicyError as exc:
-        result.add_step("disk_space", False, str(exc))
-        raise ReleasePreparationError(result.error or str(exc)) from exc
-    result.add_step("disk_space", True)
-
-
-def _prune_releases(
-    result: PreparationResult,
-    release_root: Path,
-    *,
-    current: Path,
-    previous: Path | None,
-    retain_extra: int,
-) -> None:
-    try:
-        outcome = prune_ready_releases(
-            release_root,
-            current=current,
-            previous=previous,
-            retain_extra=retain_extra,
+        result.add_step(
+            "disk_space", False, str(exc), duration_sec=elapsed_since(started_at)
         )
-    except (OSError, ReleasePolicyError) as exc:
-        warning = f"release cleanup failed: {exc}"
-        result.steps.append({"name": "release_prune", "ok": False, "error": warning})
-        result.warnings.append(warning)
-        return
-    if outcome.failures:
-        warning = "release cleanup failed: " + "; ".join(outcome.failures)
-        result.steps.append({"name": "release_prune", "ok": False, "error": warning})
-        result.warnings.append(warning)
-        return
-    result.add_step("release_prune", True)
+        raise ReleasePreparationError(result.error or str(exc)) from exc
+    result.add_step("disk_space", True, duration_sec=elapsed_since(started_at))
 
 
 def _prepare_release(
@@ -209,11 +121,14 @@ def _prepare_release(
     bootstrap_python: Path,
     min_free_mb: int,
 ) -> Path:
+    release_started_at = monotonic_time()
     if not COMMIT_PATTERN.fullmatch(commit):
         raise ReleasePreparationError(f"unsafe release commit: {commit}")
     release = _select_release_path(releases, commit)
     if read_ready_commit(release) == commit and _release_python(release).is_file():
-        result.add_step("release_reuse", True)
+        result.add_step(
+            "release_reuse", True, duration_sec=elapsed_since(release_started_at)
+        )
         return release
 
     _require_disk_space(result, releases.parent, min_free_mb)
@@ -265,15 +180,21 @@ def _prepare_release(
             "import_smoke",
             [
                 str(release_python),
-                "-c",
-                "from haniel.cli import main; assert callable(main)",
+                "-m",
+                "haniel.integrations.mcp_compatibility",
             ],
         )
         dashboard = release / "dashboard"
         if dashboard.is_dir():
+            pnpm_started_at = monotonic_time()
             pnpm = shutil.which("pnpm")
             if pnpm is None:
-                result.add_step("pnpm_install", False, "pnpm not found")
+                result.add_step(
+                    "pnpm_install",
+                    False,
+                    "pnpm not found",
+                    duration_sec=elapsed_since(pnpm_started_at),
+                )
                 raise ReleasePreparationError(result.error or "pnpm not found")
             _run_step(
                 result,
@@ -285,31 +206,55 @@ def _prepare_release(
                 "pnpm_build",
                 [pnpm, "--dir", str(dashboard), "build"],
             )
-        _write_json_atomic(
-            release / READY_MARKER,
-            {"version": 1, "commit": commit},
+        ready_started_at = monotonic_time()
+        try:
+            _write_json_atomic(
+                release / READY_MARKER,
+                {"version": 1, "commit": commit},
+            )
+        except OSError as exc:
+            result.add_step(
+                "release_ready",
+                False,
+                str(exc),
+                duration_sec=elapsed_since(ready_started_at),
+            )
+            raise
+        result.add_step(
+            "release_ready", True, duration_sec=elapsed_since(ready_started_at)
         )
-        result.add_step("release_ready", True)
         return release
     except Exception:
         if release.is_dir() and not release.is_symlink():
+            cleanup_started_at = monotonic_time()
             try:
                 remove_tree(release)
             except OSError as cleanup_error:
                 _mark_broken_release(release, commit, cleanup_error)
-                result.steps.append(
-                    {
-                        "name": "release_cleanup",
-                        "ok": False,
-                        "error": str(cleanup_error),
-                    }
+                result.add_step(
+                    "release_cleanup",
+                    False,
+                    str(cleanup_error),
+                    duration_sec=elapsed_since(cleanup_started_at),
+                )
+            else:
+                result.add_step(
+                    "release_cleanup",
+                    True,
+                    duration_sec=elapsed_since(cleanup_started_at),
                 )
         raise
 
 
 def _switch_current(
-    result: PreparationResult, release_root: Path, release: Path
+    result: PreparationResult,
+    release_root: Path,
+    release: Path,
+    *,
+    previous: Path | None,
+    retain_extra: int,
 ) -> None:
+    started_at = monotonic_time()
     try:
         write_release_pointer(release_root, release.name)
         legacy = release_root / LEGACY_CURRENT_POINTER
@@ -320,18 +265,35 @@ def _switch_current(
                 )
             remove_reparse_leaf(legacy)
     except (OSError, ReleaseFilesystemError) as exc:
-        result.add_step("current_switch", False, str(exc))
+        result.add_step(
+            "current_switch", False, str(exc), duration_sec=elapsed_since(started_at)
+        )
         raise ReleasePreparationError(result.error or str(exc)) from exc
     if _active_release(release_root) != release.resolve(strict=True):
-        result.add_step("current_switch", False, "post-switch target mismatch")
+        result.add_step(
+            "current_switch",
+            False,
+            "post-switch target mismatch",
+            duration_sec=elapsed_since(started_at),
+        )
         raise ReleasePreparationError(result.error or "post-switch target mismatch")
-    result.add_step("current_switch", True)
     result.switched = True
+    try:
+        queue_prune_request(
+            release_root,
+            current=release,
+            previous=previous,
+            retain_extra=retain_extra,
+        )
+    except OSError as exc:
+        result.warnings.append(f"release cleanup request failed: {exc}")
+    result.add_step("current_switch", True, duration_sec=elapsed_since(started_at))
 
 
 def _fetch_target(
     result: PreparationResult, source: Path, branch: str, max_failures: int
 ) -> str:
+    started_at = monotonic_time()
     last_error = ""
     for attempt in range(1, max_failures + 1):
         completed = subprocess.run(
@@ -341,7 +303,7 @@ def _fetch_target(
             check=False,
         )
         if completed.returncode == 0:
-            result.add_step("git_fetch", True)
+            result.add_step("git_fetch", True, duration_sec=elapsed_since(started_at))
             return _resolve_commit(source, f"origin/{branch}")
         last_error = _command_error(completed)
         print(
@@ -351,7 +313,12 @@ def _fetch_target(
         )
         if attempt < max_failures:
             time.sleep(5)
-    result.add_step("git_fetch", False, last_error or "git fetch failed")
+    result.add_step(
+        "git_fetch",
+        False,
+        last_error or "git fetch failed",
+        duration_sec=elapsed_since(started_at),
+    )
     raise ReleasePreparationError(result.error or "git fetch failed")
 
 
@@ -382,11 +349,10 @@ def prepare(args: argparse.Namespace) -> PreparationResult:
                 bootstrap_python=bootstrap_python,
                 min_free_mb=args.min_free_mb,
             )
-            _switch_current(result, release_root, baseline_release)
-            _prune_releases(
+            _switch_current(
                 result,
                 release_root,
-                current=baseline_release,
+                baseline_release,
                 previous=None,
                 retain_extra=args.retain_extra,
             )
@@ -412,24 +378,28 @@ def prepare(args: argparse.Namespace) -> PreparationResult:
                 min_free_mb=args.min_free_mb,
             )
             previous = active
-            _switch_current(result, release_root, candidate)
-            active = candidate
-            _prune_releases(
+            _switch_current(
                 result,
                 release_root,
-                current=active,
+                candidate,
                 previous=previous,
                 retain_extra=args.retain_extra,
             )
+            active = candidate
         else:
-            result.add_step("release_reuse", True)
+            reuse_started_at = monotonic_time()
+            result.add_step(
+                "release_reuse",
+                True,
+                duration_sec=elapsed_since(reuse_started_at),
+            )
 
         result.active_repo = str(active)
         result.active_python = str(_release_python(active))
         result.active_commit = read_ready_commit(active)
         result.ok = True
         return result
-    except Exception as exc:  # noqa: BLE001 - preserve the active release on any gate failure
+    except Exception as exc:  # noqa: BLE001 - preserve active release on gate failure
         if result.error is None:
             result.error = str(exc)
         try:
@@ -459,10 +429,11 @@ def _non_negative_int(value: str) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", required=True)
+    parser.add_argument("--source")
     parser.add_argument("--release-root", required=True)
-    parser.add_argument("--bootstrap-python", required=True)
+    parser.add_argument("--bootstrap-python")
     parser.add_argument("--result-json", required=True)
+    parser.add_argument("--prune-only", action="store_true")
     parser.add_argument("--max-git-failures", type=_positive_int, default=3)
     parser.add_argument(
         "--retain-extra",
@@ -475,14 +446,20 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_MIN_FREE_MB,
     )
     parser.add_argument("--prefer-orig-head", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not args.prune_only:
+        if args.source is None:
+            parser.error("--source is required unless --prune-only is used")
+        if args.bootstrap_python is None:
+            parser.error("--bootstrap-python is required unless --prune-only is used")
+    return args
 
 
 def main() -> int:
     args = parse_args()
     result_path = Path(args.result_json)
     try:
-        result = prepare(args)
+        result = prune(args.release_root) if args.prune_only else prepare(args)
     except Exception as exc:  # noqa: BLE001 - always emit a machine-readable failure result
         result = PreparationResult(error=f"release helper crashed: {exc}")
     try:

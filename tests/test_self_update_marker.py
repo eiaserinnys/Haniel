@@ -25,11 +25,12 @@ def _make_result(ok: bool = True) -> SelfUpdateResult:
         finished_at="2026-05-05T12:01:30.000+09:00",
         ok=ok,
         steps=[
-            SelfUpdateStep(name="git_fetch", ok=True),
+            SelfUpdateStep(name="git_fetch", ok=True, duration_sec=1.25),
             SelfUpdateStep(
                 name="git_reset",
                 ok=ok,
                 error=None if ok else "fatal: bad ref",
+                duration_sec=2.5,
             ),
         ],
         error=None if ok else "git_reset failed: fatal: bad ref",
@@ -58,6 +59,7 @@ def test_read_and_consume_parses_valid_marker_and_deletes_file(tmp_path: Path) -
     assert actual.error == "git_reset failed: fatal: bad ref"
     assert len(actual.steps) == 2
     assert actual.steps[0].name == "git_fetch"
+    assert actual.steps[0].duration_sec == 1.25
     assert actual.steps[1].ok is False
     # Marker is consumed (deleted)
     assert not marker.exists()
