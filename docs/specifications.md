@@ -135,11 +135,13 @@ services:
     cwd: ./.services/my-app
     repo: my-app
     ready: port:3104
+    ready_timeout: 120
     restart_delay: 3
     reflect: true              # Expose /reflect endpoint for introspection
     hooks:
       post_pull: ./runtime/venv/Scripts/pip.exe install -r requirements.txt
       pre_start: echo "checking prerequisites..."
+      timeout: 900
 
   bot:
     run: ./runtime/venv/Scripts/python.exe -m myapp.bot
@@ -151,6 +153,7 @@ services:
       timeout: 15
     hooks:
       post_pull: ./runtime/venv/Scripts/pip.exe install -r requirements.txt
+      timeout: 900
 
 self:
   repo: haniel
@@ -448,6 +451,7 @@ services:
     restart_delay: {seconds}       # Optional. Delay before crash restart (default: backoff)
     after: {service name}          # Optional. Wait for this service to be ready
     ready: {condition}             # Optional. "Ready" judgment condition
+    ready_timeout: {seconds}       # Optional. Ready deadline (default: 60)
     shutdown:                      # Optional. Shutdown method
       signal: SIGTERM              #   Default: SIGTERM
       timeout: 15                  #   Graceful wait (default: global shutdown.timeout)
@@ -458,6 +462,7 @@ services:
     hooks:                         # Optional. Lifecycle hooks
       post_pull: {command}         #   Run after git pull
       pre_start: {command}         #   Run before service start
+      timeout: 900                 #   Per-hook timeout in seconds (default: 900)
 ```
 
 haniel just executes the `run` command.
@@ -495,10 +500,13 @@ Services without `after` start immediately in YAML order.
 hooks:
   post_pull: {command}            # Run after git pull (builds, dependency installs, etc.)
   pre_start: {command}            # Run before service start
+  timeout: 900                    # Maximum seconds for each hook
 ```
 
 haniel doesn't care what hooks do.
 Non-zero exit codes trigger a webhook notification; service startup continues regardless.
+For repository deploys, dependency-only services are restarted in order but do not
+run `post_pull` unless their own `repo` is the repository being changed.
 
 ## Service health states
 

@@ -214,7 +214,7 @@ def configure_processes(runner: ServiceRunner, events: list[str]) -> dict[str, b
     )
     runner.process_manager.stop_service = MagicMock(side_effect=stop)
     runner.process_manager.wait_for_ready = MagicMock(
-        side_effect=lambda name: events.append(f"ready:{name}") or True
+        side_effect=lambda name, timeout=None: events.append(f"ready:{name}") or True
     )
     runner._start_service = MagicMock(side_effect=start)
     runner.process_manager.platform.is_port_owned_by_process_tree = MagicMock(
@@ -457,6 +457,7 @@ def test_explicit_environment_service_keeps_strict_validation(
 
 def test_manifest_handover_waits_for_readiness_and_post_verify(
     manifest_runner: tuple[ServiceRunner, Path, str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     runner, _repo, previous_head = manifest_runner
     events: list[str] = []
@@ -471,9 +472,12 @@ def test_manifest_handover_waits_for_readiness_and_post_verify(
         assert env["HANIEL_SERVICE_CWD"] == str(runner.config_dir.resolve())
         events.append(spec.name)
 
-    with patch(
-        "haniel.core.runner_deployment.subprocess_command_runner",
-        return_value=run_command,
+    with (
+        patch(
+            "haniel.core.runner_deployment.subprocess_command_runner",
+            return_value=run_command,
+        ),
+        caplog.at_level("INFO", logger="haniel.core.runner_deployment"),
     ):
         run_manifest_deployment(
             runner,
@@ -503,6 +507,7 @@ def test_manifest_handover_waits_for_readiness_and_post_verify(
         "starting",
         "verifying",
     ]
+    assert "Expected deployment budget for app: 120s" in caplog.text
 
 
 def test_manifest_requiring_service_env_rejects_legacy_runtime_without_digest(
@@ -915,7 +920,9 @@ def test_fresh_failure_stops_every_partial_target_without_repo_or_database_resto
 
     runner._start_service = MagicMock(side_effect=start)
     runner.process_manager.wait_for_ready = MagicMock(
-        side_effect=lambda name: not (failure == "readiness" and name == "second")
+        side_effect=lambda name, timeout=None: (
+            not (failure == "readiness" and name == "second")
+        )
     )
     runner.execute_hook = MagicMock(return_value=True)
 
@@ -1141,7 +1148,9 @@ def test_runtime_terminal_prioritizes_recovery_failure_code(
     configure_processes(runner, events)
     ready_results = iter([False, True])
     runner.process_manager.wait_for_ready = MagicMock(
-        side_effect=lambda name: events.append(f"ready:{name}") or next(ready_results)
+        side_effect=lambda name, timeout=None: (
+            events.append(f"ready:{name}") or next(ready_results)
+        )
     )
     runner.execute_hook = MagicMock(return_value=True)
 
@@ -1198,7 +1207,9 @@ def test_readiness_failure_runs_roll_forward_and_recovers_availability(
     running = configure_processes(runner, events)
     ready_results = iter([False, True])
     runner.process_manager.wait_for_ready = MagicMock(
-        side_effect=lambda name: events.append(f"ready:{name}") or next(ready_results)
+        side_effect=lambda name, timeout=None: (
+            events.append(f"ready:{name}") or next(ready_results)
+        )
     )
     runner.execute_hook = MagicMock(
         side_effect=lambda name, hook: events.append(f"{hook}:{name}") or True
@@ -1240,7 +1251,9 @@ def test_rollback_without_restarted_service_is_reported_as_availability_down(
     runner._start_service = MagicMock(side_effect=start)
     ready_results = iter([False, True])
     runner.process_manager.wait_for_ready = MagicMock(
-        side_effect=lambda name: events.append(f"ready:{name}") or next(ready_results)
+        side_effect=lambda name, timeout=None: (
+            events.append(f"ready:{name}") or next(ready_results)
+        )
     )
     runner.execute_hook = MagicMock(
         side_effect=lambda name, hook: events.append(f"{hook}:{name}") or True
@@ -1282,7 +1295,7 @@ def test_rollback_process_without_ready_port_is_reported_as_availability_down(
     )
     ready_results = iter([False, True, True])
     runner.process_manager.wait_for_ready = MagicMock(
-        side_effect=lambda _name: next(ready_results)
+        side_effect=lambda _name, timeout=None: next(ready_results)
     )
     runner.execute_hook = MagicMock(return_value=True)
 

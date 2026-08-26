@@ -64,6 +64,7 @@ from .deployment_errors import (
     StableDeploymentError,
     stable_deployment_error_code,
 )
+from .deployment_budget import effective_ready_timeout, repo_owned_services
 from .runner_config_snapshot import (
     RepoObservation,
     RepoRuntimeSnapshot,
@@ -772,7 +773,7 @@ class ServiceRunner:
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=300,  # 5 minute timeout for hooks
+                timeout=config.hooks.timeout,
                 shell=shell,
                 env=sanitized_child_env(),
             )
@@ -1065,6 +1066,10 @@ class ServiceRunner:
             self.process_manager.start_service(
                 name=name,
                 config=config,
+                ready_timeout=effective_ready_timeout(
+                    config,
+                    self.process_manager.DEFAULT_READY_TIMEOUT,
+                ),
                 on_ready=lambda n=name: self._on_service_ready(n),
                 on_crash=lambda exit_code, n=name: self._on_service_crash(n, exit_code),
                 expected_env_path=expected_env_path,
@@ -2261,9 +2266,15 @@ class ServiceRunner:
     def _restart_after_pull_legacy(self, repo_name: str, affected: list[str]) -> None:
         """Preserve the pre-manifest restart contract for unrelated repositories."""
 
+        snapshot = self._snapshot_config_state()
+        hook_services = repo_owned_services(
+            repo_name,
+            affected,
+            snapshot.enabled_services,
+        )
         failed_hooks = [
             service
-            for service in affected
+            for service in hook_services
             if not self.execute_hook(service, "post_pull")
         ]
         if failed_hooks:
