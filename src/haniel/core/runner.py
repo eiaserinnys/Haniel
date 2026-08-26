@@ -1607,7 +1607,6 @@ class ServiceRunner:
                 on_abort=discard_prepared,
                 progress_callback=progress_callback,
             )
-            self.schedule_self_update_stop()
             return "deferred"
         return execute_approved_plan(
             self,
@@ -1807,24 +1806,34 @@ class ServiceRunner:
                 bounded_redact_text(str(report_error)),
             )
 
-    def _deferred_stop_for_self_update(self) -> None:
-        """Helper: small delay then stop. Allows the orch_client coroutine
-        that returned 'deferred' to finish before orch_client.stop() joins
-        the orch_client thread. Runs on a daemon thread.
-        """
+    def _deferred_stop_for_self_update(
+        self, ready: threading.Event, aborted: threading.Event
+    ) -> None:
+        """Commit exit 10 independently of the originating request lifetime."""
+        ready.wait()
+        if aborted.is_set():
+            return
         time.sleep(0.5)
+        self._self_update_requested.set()
         try:
             self.stop()
         except Exception as e:
             logger.warning("Deferred stop for self-update failed: %s", e)
 
-    def schedule_self_update_stop(self) -> None:
-        """Stop the runner after the current approval response can finish."""
-        threading.Thread(
+    def _arm_self_update_transition(
+        self,
+    ) -> tuple[threading.Event, threading.Event, threading.Thread]:
+        """Start a gated transition worker before managed services stop."""
+        ready = threading.Event()
+        aborted = threading.Event()
+        worker = threading.Thread(
             target=self._deferred_stop_for_self_update,
+            args=(ready, aborted),
             name="haniel-deferred-stop",
             daemon=False,
-        ).start()
+        )
+        worker.start()
+        return ready, aborted, worker
 
     def _enqueue_pending_self_deploy_result(self) -> None:
         """Map a consumed self-update marker to a buffered DeployResult.
@@ -2003,7 +2012,6 @@ class ServiceRunner:
             with self._state_lock:
                 self._state.self_update_pending = True
             self.approve_self_update(progress_callback=progress_callback)
-            self.stop()
             return
         pull_lock = runtime.pull_lock
         if (
@@ -3526,10 +3534,9 @@ class ServiceRunner:
     ) -> str:
         """Approve a pending self-update.
 
-        Sets the self_update_requested signal but does NOT call stop().
-        The caller (API handler / MCP handler) is responsible for scheduling
-        stop() after sending the HTTP response, to avoid the race condition
-        where stop() kills the connection before the response reaches the client.
+        Owns the deferred runner stop so request cancellation cannot strand
+        managed services after preparation succeeds. The worker is armed before
+        service shutdown, then released only after the handoff is committed.
 
         Returns:
             Status message
@@ -3553,6 +3560,9 @@ class ServiceRunner:
                     progress_error,
                 )
         handoff_started = False
+        transition: tuple[threading.Event, threading.Event, threading.Thread] | None = (
+            None
+        )
         try:
             if target_commit is None:
                 target_commit = self._self_update_prestager.freeze_target(
@@ -3565,16 +3575,40 @@ class ServiceRunner:
                 target_commit=target_commit,
                 timeout=self_update.prepare_timeout,
             )
+            if self._stop_event.is_set():
+                raise RuntimeError("runner stopped during self-update preparation")
+            if self.is_running:
+                transition = self._arm_self_update_transition()
             if on_prepared is not None:
                 handoff_started = True
                 on_prepared(prepared)
+            if self._stop_event.is_set():
+                raise RuntimeError("runner stopped before self-update handoff")
             self._prepare_self_update_shutdown()
+            if self._stop_event.is_set():
+                raise RuntimeError("runner stopped during self-update handoff")
         except Exception:
+            if transition is not None:
+                ready, aborted, worker = transition
+                aborted.set()
+                ready.set()
+                worker.join()
             self._self_update_prestager.discard_result()
             if handoff_started and on_abort is not None:
-                on_abort()
+                try:
+                    on_abort()
+                except Exception as abort_error:
+                    logger.error(
+                        "Failed to discard self-update handoff: %s", abort_error
+                    )
             logger.exception("Self-update approval aborted before exit 10")
             raise
+
+        if transition is None:
+            self._self_update_requested.set()
+        else:
+            ready, _aborted, _worker = transition
+            ready.set()
 
         if progress_callback is not None:
             try:
@@ -3585,18 +3619,26 @@ class ServiceRunner:
                     progress_error,
                 )
 
+        try:
+            self._clear_self_update_pending_state()
+        except Exception as state_error:
+            logger.warning("Failed to clear self-update pending state: %s", state_error)
         slack_bot = getattr(self, "_slack_bot", None)
         if slack_bot is not None and self_repo:
-            slack_bot.notify_pulling(self_repo, auto=False)
+            try:
+                slack_bot.notify_pulling(self_repo, auto=False)
+            except Exception as slack_error:
+                logger.warning("Failed to notify Slack of self-update: %s", slack_error)
         self._notify_self_update_approved()
-        self._self_update_requested.set()
-        self._clear_self_update_pending_state()
         # Notify dashboard that the update work is now starting (server about
         # to shut down). This is the canonical signal for the dashboard's
         # 'Updating…' overlay — the API response alone is insufficient.
         # ws_handler가 None이면(대시보드 비활성) broadcast 스킵 — 의도된 동작.
         if self._ws_handler is not None and self_repo:
-            self._ws_handler.broadcast_self_update_started(self_repo)
+            try:
+                self._ws_handler.broadcast_self_update_started(self_repo)
+            except Exception as ws_error:
+                logger.warning("Failed to broadcast self-update start: %s", ws_error)
         return "Self-update approved. Shutting down for update."
 
     @property

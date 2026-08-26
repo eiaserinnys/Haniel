@@ -124,8 +124,10 @@ class SelfUpdatePrestager:
         self.result_path = self.config_dir / _RESULT_RELPATH
         self._popen_factory = popen_factory
         self._terminate_process_tree = terminate_process_tree
-        self._attempt_lock = threading.Lock()
-        self._process_lock = threading.Lock()
+        self._attempt_condition = threading.Condition()
+        self._attempt_active = False
+        self._cancel_requested = False
+        self._termination_claimed = False
         self._active_process: subprocess.Popen[str] | None = None
 
     def release_root(self) -> Path:
@@ -184,7 +186,13 @@ class SelfUpdatePrestager:
             raise SelfUpdatePrestageError(
                 "target_commit must be a 40-character lowercase commit SHA"
             )
-        if not self._attempt_lock.acquire(blocking=False):
+        with self._attempt_condition:
+            duplicate = self._attempt_active
+            if not duplicate:
+                self._attempt_active = True
+                self._cancel_requested = False
+                self._termination_claimed = False
+        if duplicate:
             self.cancel()
             raise SelfUpdatePrestageError(
                 "self-update pre-stage is already active; cancelled duplicate approval"
@@ -192,9 +200,17 @@ class SelfUpdatePrestager:
 
         process: subprocess.Popen[str] | None = None
         stderr_thread: threading.Thread | None = None
+        release_root: Path | None = None
+        cleanup_done = False
         try:
             self.discard_result()
-            command = self._helper_command(repo, target_commit)
+            release_root = self.release_root()
+            command = self._helper_command(repo, target_commit, release_root)
+            with self._attempt_condition:
+                if self._cancel_requested:
+                    raise SelfUpdatePrestageError(
+                        "self-update pre-stage cancelled before helper spawn"
+                    )
             creationflags = (
                 subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
             )
@@ -209,8 +225,14 @@ class SelfUpdatePrestager:
                 start_new_session=os.name != "nt",
                 creationflags=creationflags,
             )
-            with self._process_lock:
+            terminate_after_publication = False
+            with self._attempt_condition:
                 self._active_process = process
+                if self._cancel_requested and not self._termination_claimed:
+                    self._termination_claimed = True
+                    terminate_after_publication = True
+            if terminate_after_publication:
+                self._terminate_process_tree(process)
             stderr_thread = threading.Thread(
                 target=self._forward_steps,
                 args=(process.stderr,),
@@ -222,7 +244,8 @@ class SelfUpdatePrestager:
                 return_code = process.wait(timeout=timeout)
             except subprocess.TimeoutExpired as exc:
                 self._terminate_process_tree(process)
-                self._cleanup_failed_attempt(target_commit)
+                self._cleanup_failed_attempt(target_commit, release_root)
+                cleanup_done = True
                 raise SelfUpdatePrestageError(
                     f"self-update pre-stage timed out after {timeout}s"
                 ) from exc
@@ -230,26 +253,49 @@ class SelfUpdatePrestager:
                 stderr_thread.join(timeout=2)
             if return_code != 0:
                 error = self._result_error() or f"helper exited with code {return_code}"
-                self._cleanup_failed_attempt(target_commit)
+                self._cleanup_failed_attempt(target_commit, release_root)
+                cleanup_done = True
                 raise SelfUpdatePrestageError(error)
+            with self._attempt_condition:
+                cancelled = self._cancel_requested
+            if cancelled:
+                self._cleanup_failed_attempt(target_commit, release_root)
+                cleanup_done = True
+                raise SelfUpdatePrestageError("self-update pre-stage cancelled")
             try:
-                return self._validate_result(target_commit)
+                return self._validate_result(target_commit, release_root)
             except SelfUpdatePrestageError:
-                self._cleanup_failed_attempt(target_commit)
+                self._cleanup_failed_attempt(target_commit, release_root)
+                cleanup_done = True
                 raise
         finally:
-            with self._process_lock:
+            with self._attempt_condition:
+                cancelled = self._cancel_requested
+            if cancelled and release_root is not None and not cleanup_done:
+                self._cleanup_failed_attempt(target_commit, release_root)
+            with self._attempt_condition:
                 if self._active_process is process:
                     self._active_process = None
-            self._attempt_lock.release()
+                self._attempt_active = False
+                self._cancel_requested = False
+                self._termination_claimed = False
+                self._attempt_condition.notify_all()
 
     def cancel(self) -> None:
-        """Cancel and reap the current helper process, if any."""
-        with self._process_lock:
-            process = self._active_process
-        if process is None:
-            return
-        self._terminate_process_tree(process)
+        """Cancel and wait until the active helper and cleanup are complete."""
+        process: subprocess.Popen[str] | None = None
+        with self._attempt_condition:
+            if not self._attempt_active:
+                return
+            self._cancel_requested = True
+            if self._active_process is not None and not self._termination_claimed:
+                self._termination_claimed = True
+                process = self._active_process
+        if process is not None:
+            self._terminate_process_tree(process)
+        with self._attempt_condition:
+            while self._attempt_active:
+                self._attempt_condition.wait()
 
     def discard_result(self) -> None:
         try:
@@ -257,7 +303,9 @@ class SelfUpdatePrestager:
         except FileNotFoundError:
             pass
 
-    def _helper_command(self, repo: RepoConfig, target_commit: str) -> list[str]:
+    def _helper_command(
+        self, repo: RepoConfig, target_commit: str, release_root: Path
+    ) -> list[str]:
         source = _resolve_config_path(self.config_dir, repo.path)
         return [
             str(self.base_python),
@@ -269,7 +317,7 @@ class SelfUpdatePrestager:
             "--source",
             str(source),
             "--release-root",
-            str(self.release_root()),
+            str(release_root),
             "--bootstrap-python",
             str(self.base_python),
             "--result-json",
@@ -295,7 +343,9 @@ class SelfUpdatePrestager:
         error = payload.get("error")
         return str(error) if error else None
 
-    def _validate_result(self, target_commit: str) -> SelfUpdatePrestageResult:
+    def _validate_result(
+        self, target_commit: str, release_root: Path
+    ) -> SelfUpdatePrestageResult:
         try:
             payload = json.loads(self.result_path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError) as exc:
@@ -315,7 +365,7 @@ class SelfUpdatePrestager:
             )
         try:
             prepared = Path(prepared_raw).resolve(strict=True)
-            prepared.relative_to((self.release_root() / "releases").resolve())
+            prepared.relative_to((release_root / "releases").resolve())
             marker = json.loads((prepared / _READY_MARKER).read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError) as exc:
             raise SelfUpdatePrestageError(
@@ -327,9 +377,9 @@ class SelfUpdatePrestager:
             )
         return SelfUpdatePrestageResult(target_commit, prepared, payload)
 
-    def _cleanup_failed_attempt(self, target_commit: str) -> None:
+    def _cleanup_failed_attempt(self, target_commit: str, release_root: Path) -> None:
         self.discard_result()
-        releases = self.release_root() / "releases"
+        releases = release_root / "releases"
         if not releases.is_dir():
             return
         for candidate in releases.glob(f"{target_commit[:12]}*"):
