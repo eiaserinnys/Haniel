@@ -234,7 +234,11 @@ class SelfUpdatePrestager:
                     self._termination_claimed = True
                     terminate_after_publication = True
             if terminate_after_publication:
-                self._terminate_process_tree(process)
+                termination_error = self._terminate_helper_process(process)
+                if termination_error is not None:
+                    raise SelfUpdatePrestageError(
+                        "could not terminate helper process tree"
+                    ) from termination_error
             stderr_thread = threading.Thread(
                 target=self._forward_steps,
                 args=(process.stderr,),
@@ -245,9 +249,25 @@ class SelfUpdatePrestager:
             try:
                 return_code = process.wait(timeout=timeout)
             except subprocess.TimeoutExpired as exc:
-                self._terminate_process_tree(process)
+                with self._attempt_condition:
+                    terminate_after_timeout = not self._termination_claimed
+                    if terminate_after_timeout:
+                        self._termination_claimed = True
+                if terminate_after_timeout:
+                    termination_error = self._terminate_helper_process(process)
+                else:
+                    try:
+                        process.wait(timeout=_CANCEL_FINALIZE_TIMEOUT_SECONDS)
+                        termination_error = None
+                    except BaseException as termination_exc:
+                        termination_error = termination_exc
                 cleanup_attempted = True
                 self._cleanup_failed_attempt(target_commit, release_root)
+                if termination_error is not None:
+                    raise SelfUpdatePrestageError(
+                        f"self-update pre-stage timed out after {timeout}s; "
+                        "could not terminate helper process tree"
+                    ) from termination_error
                 raise SelfUpdatePrestageError(
                     f"self-update pre-stage timed out after {timeout}s"
                 ) from exc
@@ -298,21 +318,7 @@ class SelfUpdatePrestager:
                 process = self._active_process
         termination_error: BaseException | None = None
         if process is not None:
-            try:
-                self._terminate_process_tree(process)
-            except BaseException as exc:
-                termination_error = exc
-                logger.exception(
-                    "Could not terminate self-update helper process tree; "
-                    "attempting direct kill"
-                )
-                try:
-                    process.kill()
-                    process.wait(timeout=3)
-                except BaseException:
-                    logger.exception(
-                        "Direct self-update helper kill did not complete cleanly"
-                    )
+            termination_error = self._terminate_helper_process(process)
         with self._attempt_condition:
             if termination_error is None:
                 while self._attempt_active:
@@ -330,6 +336,26 @@ class SelfUpdatePrestager:
             raise SelfUpdatePrestageError(
                 f"could not terminate helper process tree{detail}"
             ) from termination_error
+
+    def _terminate_helper_process(
+        self, process: subprocess.Popen[str]
+    ) -> BaseException | None:
+        try:
+            self._terminate_process_tree(process)
+        except BaseException as exc:
+            logger.exception(
+                "Could not terminate self-update helper process tree; "
+                "attempting direct kill"
+            )
+            try:
+                process.kill()
+                process.wait(timeout=3)
+            except BaseException:
+                logger.exception(
+                    "Direct self-update helper kill did not complete cleanly"
+                )
+            return exc
+        return None
 
     def discard_result(self) -> None:
         try:
