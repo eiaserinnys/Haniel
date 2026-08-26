@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -252,6 +253,116 @@ def test_cancel_during_spawn_waits_for_publication_reap_and_cleanup(
     assert terminated.is_set()
     assert prepare_errors and isinstance(prepare_errors[0], SelfUpdatePrestageError)
     assert not prestager.result_path.exists()
+
+
+def test_cancel_cleanup_failure_unblocks_waiter_and_resets_attempt(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "haniel-runner.conf").write_text(
+        "HANIEL_RELEASE_ROOT=releases-root\n", encoding="utf-8"
+    )
+    started = threading.Event()
+    released = threading.Event()
+
+    class BlockingProcess(_FinishedProcess):
+        def wait(self, timeout: float | None = None) -> int:
+            started.set()
+            assert released.wait(2)
+            self.returncode = -15
+            return self.returncode
+
+    prestager = SelfUpdatePrestager(
+        tmp_path,
+        popen_factory=lambda *_args, **_kwargs: BlockingProcess(),
+        terminate_process_tree=lambda _process: released.set(),
+    )
+    prestager._cleanup_failed_attempt = MagicMock(  # type: ignore[method-assign]
+        side_effect=OSError("candidate is locked")
+    )
+    prepare_errors: list[BaseException] = []
+    cancel_errors: list[BaseException] = []
+
+    def prepare() -> None:
+        try:
+            prestager.prepare(_repo(), target_commit=TARGET, timeout=30)
+        except BaseException as exc:  # noqa: BLE001 - thread assertion capture
+            prepare_errors.append(exc)
+
+    prepare_thread = threading.Thread(target=prepare)
+    prepare_thread.start()
+    assert started.wait(1)
+
+    def cancel() -> None:
+        try:
+            prestager.cancel()
+        except BaseException as exc:  # noqa: BLE001 - thread assertion capture
+            cancel_errors.append(exc)
+
+    cancel_thread = threading.Thread(target=cancel, daemon=True)
+    cancel_thread.start()
+    cancel_thread.join(2)
+    prepare_thread.join(2)
+    stuck = cancel_thread.is_alive()
+    if stuck:
+        # Keep the RED test process bounded on the broken implementation.
+        with prestager._attempt_condition:
+            prestager._attempt_active = False
+            prestager._attempt_condition.notify_all()
+        cancel_thread.join(1)
+
+    assert not stuck
+    assert not prepare_thread.is_alive()
+    assert prepare_errors and isinstance(prepare_errors[0], OSError)
+    assert not cancel_errors
+    prestager.cancel()
+
+
+def test_cancel_termination_failure_kills_process_waits_for_reset_and_reports_error(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "haniel-runner.conf").write_text(
+        "HANIEL_RELEASE_ROOT=releases-root\n", encoding="utf-8"
+    )
+    started = threading.Event()
+    released = threading.Event()
+
+    class BlockingProcess(_FinishedProcess):
+        def wait(self, timeout: float | None = None) -> int:
+            started.set()
+            assert released.wait(2)
+            self.returncode = -9
+            return self.returncode
+
+        def kill(self) -> None:
+            released.set()
+
+    process = BlockingProcess()
+    prestager = SelfUpdatePrestager(
+        tmp_path,
+        popen_factory=lambda *_args, **_kwargs: process,
+        terminate_process_tree=MagicMock(side_effect=OSError("taskkill failed")),
+    )
+    prepare_errors: list[BaseException] = []
+
+    def prepare() -> None:
+        try:
+            prestager.prepare(_repo(), target_commit=TARGET, timeout=30)
+        except BaseException as exc:  # noqa: BLE001 - thread assertion capture
+            prepare_errors.append(exc)
+
+    prepare_thread = threading.Thread(target=prepare)
+    prepare_thread.start()
+    assert started.wait(1)
+
+    with pytest.raises(SelfUpdatePrestageError, match="could not terminate helper"):
+        prestager.cancel()
+    prepare_thread.join(2)
+
+    assert not prepare_thread.is_alive()
+    assert prepare_errors and isinstance(prepare_errors[0], SelfUpdatePrestageError)
+    prestager.cancel()
 
 
 def test_prepare_snapshots_release_root_for_command_validation_and_cleanup(

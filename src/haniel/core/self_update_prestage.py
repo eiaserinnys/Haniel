@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, TextIO
@@ -24,6 +25,7 @@ _COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 _READY_MARKER = ".haniel-release-ready.json"
 _RESULT_RELPATH = Path(".local") / "haniel_release_preparation.json"
 _DEFAULT_RELEASE_ROOT = Path(".local") / "haniel-releases"
+_CANCEL_FINALIZE_TIMEOUT_SECONDS = 5.0
 
 
 class SelfUpdatePrestageError(RuntimeError):
@@ -201,7 +203,7 @@ class SelfUpdatePrestager:
         process: subprocess.Popen[str] | None = None
         stderr_thread: threading.Thread | None = None
         release_root: Path | None = None
-        cleanup_done = False
+        cleanup_attempted = False
         try:
             self.discard_result()
             release_root = self.release_root()
@@ -244,8 +246,8 @@ class SelfUpdatePrestager:
                 return_code = process.wait(timeout=timeout)
             except subprocess.TimeoutExpired as exc:
                 self._terminate_process_tree(process)
+                cleanup_attempted = True
                 self._cleanup_failed_attempt(target_commit, release_root)
-                cleanup_done = True
                 raise SelfUpdatePrestageError(
                     f"self-update pre-stage timed out after {timeout}s"
                 ) from exc
@@ -253,33 +255,36 @@ class SelfUpdatePrestager:
                 stderr_thread.join(timeout=2)
             if return_code != 0:
                 error = self._result_error() or f"helper exited with code {return_code}"
+                cleanup_attempted = True
                 self._cleanup_failed_attempt(target_commit, release_root)
-                cleanup_done = True
                 raise SelfUpdatePrestageError(error)
             with self._attempt_condition:
                 cancelled = self._cancel_requested
             if cancelled:
+                cleanup_attempted = True
                 self._cleanup_failed_attempt(target_commit, release_root)
-                cleanup_done = True
                 raise SelfUpdatePrestageError("self-update pre-stage cancelled")
             try:
                 return self._validate_result(target_commit, release_root)
             except SelfUpdatePrestageError:
+                cleanup_attempted = True
                 self._cleanup_failed_attempt(target_commit, release_root)
-                cleanup_done = True
                 raise
         finally:
-            with self._attempt_condition:
-                cancelled = self._cancel_requested
-            if cancelled and release_root is not None and not cleanup_done:
-                self._cleanup_failed_attempt(target_commit, release_root)
-            with self._attempt_condition:
-                if self._active_process is process:
-                    self._active_process = None
-                self._attempt_active = False
-                self._cancel_requested = False
-                self._termination_claimed = False
-                self._attempt_condition.notify_all()
+            try:
+                with self._attempt_condition:
+                    cancelled = self._cancel_requested
+                if cancelled and release_root is not None and not cleanup_attempted:
+                    cleanup_attempted = True
+                    self._cleanup_failed_attempt(target_commit, release_root)
+            finally:
+                with self._attempt_condition:
+                    if self._active_process is process:
+                        self._active_process = None
+                    self._attempt_active = False
+                    self._cancel_requested = False
+                    self._termination_claimed = False
+                    self._attempt_condition.notify_all()
 
     def cancel(self) -> None:
         """Cancel and wait until the active helper and cleanup are complete."""
@@ -291,11 +296,40 @@ class SelfUpdatePrestager:
             if self._active_process is not None and not self._termination_claimed:
                 self._termination_claimed = True
                 process = self._active_process
+        termination_error: BaseException | None = None
         if process is not None:
-            self._terminate_process_tree(process)
+            try:
+                self._terminate_process_tree(process)
+            except BaseException as exc:
+                termination_error = exc
+                logger.exception(
+                    "Could not terminate self-update helper process tree; "
+                    "attempting direct kill"
+                )
+                try:
+                    process.kill()
+                    process.wait(timeout=3)
+                except BaseException:
+                    logger.exception(
+                        "Direct self-update helper kill did not complete cleanly"
+                    )
         with self._attempt_condition:
-            while self._attempt_active:
-                self._attempt_condition.wait()
+            if termination_error is None:
+                while self._attempt_active:
+                    self._attempt_condition.wait()
+            else:
+                deadline = time.monotonic() + _CANCEL_FINALIZE_TIMEOUT_SECONDS
+                while self._attempt_active:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._attempt_condition.wait(timeout=remaining)
+                attempt_active = self._attempt_active
+        if termination_error is not None:
+            detail = " and helper did not finalize" if attempt_active else ""
+            raise SelfUpdatePrestageError(
+                f"could not terminate helper process tree{detail}"
+            ) from termination_error
 
     def discard_result(self) -> None:
         try:
