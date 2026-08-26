@@ -123,6 +123,17 @@ def test_untyped_message_does_not_create_journal_error_code(tmp_path: Path) -> N
     assert "HANDOVER_FAILED" in KNOWN_DEPLOYMENT_ERROR_CODES
 
 
+def test_journal_records_unique_dependent_readiness_failures(tmp_path: Path) -> None:
+    store = DeploymentStateStore(tmp_path / "state")
+    store.begin("app", "old", "new", "release")
+
+    store.record_dependent_readiness_failure("app", "bot")
+    store.record_dependent_readiness_failure("app", "bot")
+    store.record_dependent_readiness_failure("app", "keke")
+
+    assert store.read("app")["dependent_readiness_failures"] == ["bot", "keke"]
+
+
 def test_untyped_exception_uses_a_distinct_stable_fallback_code() -> None:
     assert stable_deployment_error_code(RuntimeError("plain failure")) == (
         "UNCLASSIFIED_DEPLOYMENT_ERROR"
