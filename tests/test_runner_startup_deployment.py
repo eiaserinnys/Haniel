@@ -105,8 +105,6 @@ def startup_runner(tmp_path: Path) -> tuple[ServiceRunner, Path, str]:
     [
         "build",
         "preflight",
-        "backup",
-        "verify-backup",
         "migrate",
         "start",
         "readiness",
@@ -222,7 +220,7 @@ def test_startup_failure_keeps_availability_without_duplicate_legacy_start(
     assert exc_info.value.recovered is True
     assert journal["state"] == "failed"
     assert journal["recovered"] is True
-    if failed_stage in {"build", "preflight", "backup", "verify-backup"}:
+    if failed_stage in {"build", "preflight"}:
         assert get_head(repo) == previous_head
     else:
         assert "recover" in events

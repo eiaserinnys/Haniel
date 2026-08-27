@@ -468,7 +468,6 @@ def test_manifest_handover_waits_for_readiness_and_post_verify(
     )
 
     def run_command(spec, env):
-        assert env["HANIEL_BACKUP_DIR"]
         assert env["HANIEL_SERVICE_CWD"] == str(runner.config_dir.resolve())
         events.append(spec.name)
 
@@ -491,8 +490,6 @@ def test_manifest_handover_waits_for_readiness_and_post_verify(
         "post_pull:app",
         "preflight",
         "stop:app",
-        "backup",
-        "verify-backup",
         "migrate",
         "start:app",
         "ready:app",
@@ -502,7 +499,6 @@ def test_manifest_handover_waits_for_readiness_and_post_verify(
     assert progress == [
         "build",
         "preflight",
-        "backing_up",
         "migrating",
         "starting",
         "verifying",
@@ -616,10 +612,16 @@ def test_build_failure_does_not_probe_service_already_down_before_deployment(
     assert get_head(repo) == previous_head
 
 
-def test_backup_verification_failure_restarts_previous_release(
+def test_apply_failure_restores_database_then_restarts_previous_release(
     manifest_runner: tuple[ServiceRunner, Path, str],
 ) -> None:
     runner, repo, previous_head = manifest_runner
+    payload = release_manifest()
+    payload["recovery"] = {
+        "strategy": "rollback",
+        "command": {"name": "restore", "command": "run-restore"},
+    }
+    (repo / "deploy" / "release.json").write_text(json.dumps(payload), encoding="utf-8")
     events: list[str] = []
     running = configure_processes(runner, events)
     runner.execute_hook = MagicMock(
@@ -628,8 +630,8 @@ def test_backup_verification_failure_restarts_previous_release(
 
     def run_command(spec, _env):
         events.append(spec.name)
-        if spec.name == "verify-backup":
-            raise RuntimeError("backup verification failed")
+        if spec.name == "migrate":
+            raise RuntimeError("migration apply failed")
 
     with patch(
         "haniel.core.runner_deployment.subprocess_command_runner",
@@ -639,14 +641,15 @@ def test_backup_verification_failure_restarts_previous_release(
             run_manifest_deployment(runner, "app", ["app"], previous_head)
 
     assert exc_info.value.recovered is True
+    assert stable_deployment_error_code(exc_info.value) == "APPLY_FAILED"
     assert running["app"] is True
     assert get_head(repo) == previous_head
     assert events == [
         "post_pull:app",
         "preflight",
         "stop:app",
-        "backup",
-        "verify-backup",
+        "migrate",
+        "restore",
         "post_pull:app",
         "start:app",
         "ready:app",
