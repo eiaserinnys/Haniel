@@ -118,6 +118,7 @@ class DeploymentStateStore:
             existing["release_id"] = release_id
             existing["state"] = "build"
             existing["recovered"] = False
+            existing.setdefault("dependent_readiness_failures", [])
             existing.setdefault("history", []).append(
                 self._entry("build", "deployment intent activated")
             )
@@ -152,6 +153,7 @@ class DeploymentStateStore:
             "target_head": target_head,
             "state": "build",
             "recovered": False,
+            "dependent_readiness_failures": [],
             "history": [self._entry("build")],
             "started_at": datetime.now(timezone.utc).isoformat(),
             "manifest_identity": manifest_identity,
@@ -165,6 +167,19 @@ class DeploymentStateStore:
             current["previous_attempts"] = previous_attempts
         self._write(repo_name, current)
         return current["journal_attempt_id"]
+
+    def record_dependent_readiness_failure(
+        self, repo_name: str, service_name: str
+    ) -> None:
+        """Persist a dependency-only readiness warning without changing state."""
+
+        current = self.read(repo_name)
+        if current is None:
+            raise ValueError(f"deployment journal does not exist for {repo_name}")
+        failures = current.setdefault("dependent_readiness_failures", [])
+        if service_name not in failures:
+            failures.append(service_name)
+            self._write(repo_name, current)
 
     def begin_handover(
         self,

@@ -77,6 +77,7 @@ class RunnerDeploymentAdapter:
         ) = None,
         config_snapshot: RunnerConfigSnapshot | None = None,
         repo_runtime_snapshot: RepoRuntimeSnapshot | None = None,
+        dependent_readiness_failure_callback: Callable[[str], None] | None = None,
     ) -> None:
         self.runner = runner
         self.repo_name = repo_name
@@ -100,6 +101,10 @@ class RunnerDeploymentAdapter:
         self.repo_runtime_snapshot = repo_runtime_snapshot
         self.handover_started = False
         self.quiescence_nonce = uuid4().hex
+        self.dependent_readiness_failures: list[str] = []
+        self._dependent_readiness_failure_callback = (
+            dependent_readiness_failure_callback
+        )
 
     def require_current_config(self) -> None:
         """Reject forward lifecycle effects from an obsolete config generation."""
@@ -229,6 +234,13 @@ class RunnerDeploymentAdapter:
 
     def start_and_wait(self, selected: set[str]) -> None:
         self.require_current_config()
+        owned_services = set(
+            repo_owned_services(
+                self.repo_name,
+                selected,
+                self.config_snapshot.enabled_services,
+            )
+        )
         startup_order = [
             service
             for service in self.config_snapshot.startup_order
@@ -239,12 +251,18 @@ class RunnerDeploymentAdapter:
             self.runner._cancel_pending_restart(service)
             blockers = self.runner._blocked_start_dependencies(service)
             if blockers:
-                raise RuntimeError(
-                    f"{service} blocked by dependencies: {', '.join(blockers)}"
-                )
+                reason = f"blocked by dependencies: {', '.join(blockers)}"
+                if service in owned_services:
+                    raise RuntimeError(f"{service} {reason}")
+                self._record_dependent_readiness_failure(service, reason)
+                continue
             if self.runner.process_manager.is_running(service):
                 if not self.runner.process_manager.stop_service(service):
-                    raise RuntimeError(f"failed to stop already-running {service}")
+                    reason = "failed to stop already-running service"
+                    if service in owned_services:
+                        raise RuntimeError(f"{reason} {service}")
+                    self._record_dependent_readiness_failure(service, reason)
+                    continue
                 self.runner._cancel_pending_restart(service)
             binding = (
                 self.service_environment_bindings.get(service)
@@ -272,7 +290,11 @@ class RunnerDeploymentAdapter:
                 )
             )
             if not started:
-                raise RuntimeError(f"failed to start {service}")
+                reason = "failed to start"
+                if service in owned_services:
+                    raise RuntimeError(f"{reason} {service}")
+                self._record_dependent_readiness_failure(service, reason)
+                continue
             self.require_current_config()
             ready_timeout = effective_ready_timeout(
                 self.config_snapshot.enabled_services[service],
@@ -281,9 +303,16 @@ class RunnerDeploymentAdapter:
             if not self.runner.process_manager.wait_for_ready(
                 service, timeout=ready_timeout
             ):
-                raise RuntimeError(f"readiness timeout for {service}")
+                reason = "readiness timeout"
+                if service in owned_services:
+                    raise RuntimeError(f"{reason} for {service}")
+                self._record_dependent_readiness_failure(service, reason)
+                continue
             if not self.runner.process_manager.is_running(service):
-                raise RuntimeError(f"{service} exited before readiness verification")
+                reason = "exited before readiness verification"
+                if service in owned_services:
+                    raise RuntimeError(f"{service} {reason}")
+                self._record_dependent_readiness_failure(service, reason)
 
     def rollback(self) -> None:
         generation_current = True
@@ -348,6 +377,7 @@ class RunnerDeploymentAdapter:
                 config_snapshot.enabled_services,
             )
         )
+        owned_services = set(hook_services)
         for service in config_snapshot.startup_order:
             if service not in selected:
                 continue
@@ -363,10 +393,13 @@ class RunnerDeploymentAdapter:
                 )
             self.runner._require_config_generation(config_snapshot)
             if not self.runner._start_service(service):
-                raise StableDeploymentError(
-                    "RECOVERY_FAILED",
-                    f"current-generation service failed to start: {service}",
-                )
+                reason = "current-generation service failed to start"
+                if service in owned_services:
+                    raise StableDeploymentError(
+                        "RECOVERY_FAILED", f"{reason}: {service}"
+                    )
+                self._record_dependent_readiness_failure(service, reason)
+                continue
             self.runner._require_config_generation(config_snapshot)
             ready_timeout = effective_ready_timeout(
                 config_snapshot.enabled_services[service],
@@ -375,15 +408,20 @@ class RunnerDeploymentAdapter:
             if not self.runner.process_manager.wait_for_ready(
                 service, timeout=ready_timeout
             ):
-                raise StableDeploymentError(
-                    "RECOVERY_FAILED",
-                    f"current-generation readiness timeout: {service}",
-                )
+                reason = "current-generation readiness timeout"
+                if service in owned_services:
+                    raise StableDeploymentError(
+                        "RECOVERY_FAILED", f"{reason}: {service}"
+                    )
+                self._record_dependent_readiness_failure(service, reason)
+                continue
             if not self.runner.process_manager.is_running(service):
-                raise StableDeploymentError(
-                    "RECOVERY_FAILED",
-                    f"current-generation service exited before readiness: {service}",
-                )
+                reason = "current-generation service exited before readiness"
+                if service in owned_services:
+                    raise StableDeploymentError(
+                        "RECOVERY_FAILED", f"{reason}: {service}"
+                    )
+                self._record_dependent_readiness_failure(service, reason)
 
     def prepare_roll_forward(self) -> None:
         self.require_current_config()
@@ -433,25 +471,63 @@ class RunnerDeploymentAdapter:
 
     def _assert_recovery_availability(self, services: set[str]) -> None:
         self.require_current_config()
+        owned_services = set(
+            repo_owned_services(
+                self.repo_name,
+                services,
+                self.config_snapshot.enabled_services,
+            )
+        )
         down: list[str] = []
         for name in sorted(services):
+            reason: str | None = None
             pid = self.runner.process_manager.get_pid(name)
             if pid is None:
-                down.append(f"{name} (process not running)")
-                continue
-            service = self.config_snapshot.enabled_services[name]
-            if service.ready and service.ready.startswith("port:"):
+                reason = "process not running"
+            else:
+                service = self.config_snapshot.enabled_services[name]
+            if reason is None and service.ready and service.ready.startswith("port:"):
                 try:
                     port = int(service.ready.removeprefix("port:"))
                 except ValueError:
-                    down.append(f"{name} (invalid ready port: {service.ready})")
-                    continue
-                if not self.runner.process_manager.platform.is_port_owned_by_process_tree(
-                    port, pid
+                    reason = f"invalid ready port: {service.ready}"
+                if (
+                    reason is None
+                    and not self.runner.process_manager.platform.is_port_owned_by_process_tree(
+                        port, pid
+                    )
                 ):
-                    down.append(f"{name} (port {port} not owned by process {pid})")
+                    reason = f"port {port} not owned by process {pid}"
+            if reason is None:
+                continue
+            if name in owned_services:
+                down.append(f"{name} ({reason})")
+            else:
+                self._record_dependent_readiness_failure(name, reason)
         if down:
             raise RuntimeError("availability down after rollback: " + ", ".join(down))
+
+    def _record_dependent_readiness_failure(
+        self, service_name: str, reason: str
+    ) -> None:
+        if service_name not in self.dependent_readiness_failures:
+            self.dependent_readiness_failures.append(service_name)
+            if self._dependent_readiness_failure_callback is not None:
+                try:
+                    self._dependent_readiness_failure_callback(service_name)
+                except Exception as error:
+                    logger.warning(
+                        "Failed to persist dependent readiness observation for %s: %s",
+                        service_name,
+                        error,
+                    )
+        logger.warning(
+            "Dependent service %s for repo %s did not become ready (%s); "
+            "deployment verdict is unchanged",
+            service_name,
+            self.repo_name,
+            reason,
+        )
 
 
 def run_manifest_deployment(
@@ -473,7 +549,7 @@ def run_manifest_deployment(
     config_digest: str | None = None,
     service_environment_bindings: dict[str, BoundServiceEnvironment] | None = None,
     config_snapshot: RunnerConfigSnapshot | None = None,
-) -> None:
+) -> list[str]:
     """Load the pulled release manifest and run the auditable handover."""
 
     captured_config, captured_runtime = runner._snapshot_repo_and_config(repo_name)
@@ -539,6 +615,11 @@ def run_manifest_deployment(
         service_environment_bindings=service_environment_bindings,
         config_snapshot=config_snapshot,
         repo_runtime_snapshot=repo_runtime,
+        dependent_readiness_failure_callback=(
+            lambda service: state_store.record_dependent_readiness_failure(
+                repo_name, service
+            )
+        ),
     )
     lifecycle = getattr(runner, "lifecycle_control", None)
     owner_instance = getattr(runner, "lifecycle_instance_id", None)
@@ -771,3 +852,4 @@ def run_manifest_deployment(
     finally:
         if lease is not None:
             lease.__exit__(None, None, None)
+    return list(adapter.dependent_readiness_failures)

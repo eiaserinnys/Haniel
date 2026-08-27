@@ -10,6 +10,8 @@ import pytest
 from pydantic import ValidationError
 
 from haniel.config import HanielConfig, HooksConfig, RepoConfig, ServiceConfig
+from haniel.core.deployment import DeploymentStateStore
+from haniel.core.deployment_errors import StableDeploymentError
 from haniel.core.release_manifest import ReleaseManifest
 from haniel.core.runner import ServiceRunner
 from haniel.core.runner_deployment import RunnerDeploymentAdapter
@@ -157,6 +159,75 @@ def test_manifest_start_and_wait_uses_each_service_ready_timeout(
     ]
 
 
+def test_manifest_dependent_readiness_failure_is_observed_without_failing(
+    tmp_path: Path,
+) -> None:
+    runner = _runner(tmp_path)
+    journal = DeploymentStateStore(tmp_path / ".haniel" / "deployments")
+    journal.begin("app", "old", "new", "release")
+    adapter = RunnerDeploymentAdapter(
+        runner=runner,
+        repo_name="app",
+        affected=["owner", "same-repo-dependent", "other-repo-dependent"],
+        repo_path=tmp_path / "app",
+        previous_head="previous",
+        dependent_readiness_failure_callback=(
+            lambda service: journal.record_dependent_readiness_failure("app", service)
+        ),
+    )
+    running = {
+        "owner": False,
+        "same-repo-dependent": False,
+        "other-repo-dependent": False,
+    }
+    runner.process_manager.is_running = MagicMock(
+        side_effect=lambda service: running[service]
+    )
+    runner._blocked_start_dependencies = MagicMock(return_value=[])
+    runner._start_service = MagicMock(
+        side_effect=lambda service: running.__setitem__(service, True) or True
+    )
+    runner.process_manager.wait_for_ready = MagicMock(
+        side_effect=lambda service, timeout: service != "other-repo-dependent"
+    )
+
+    adapter.start_and_wait(set(running))
+
+    assert adapter.dependent_readiness_failures == ["other-repo-dependent"]
+    assert journal.read("app")["dependent_readiness_failures"] == [
+        "other-repo-dependent"
+    ]
+    assert runner._start_service.call_count == 3
+
+
+def test_manifest_owned_readiness_failure_still_fails_verdict(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    adapter = _adapter(runner, tmp_path)
+    runner.process_manager.is_running = MagicMock(return_value=False)
+    runner._blocked_start_dependencies = MagicMock(return_value=[])
+    runner._start_service = MagicMock(return_value=True)
+    runner.process_manager.wait_for_ready = MagicMock(return_value=False)
+
+    with pytest.raises(RuntimeError, match="readiness timeout for owner"):
+        adapter.start_and_wait({"owner"})
+
+    assert adapter.dependent_readiness_failures == []
+
+
+def test_recovery_availability_observes_only_dependent_outage(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    adapter = _adapter(runner, tmp_path)
+    runner.process_manager.get_pid = MagicMock(
+        side_effect=lambda service: None if service == "other-repo-dependent" else 1000
+    )
+
+    adapter._assert_recovery_availability(
+        {"owner", "same-repo-dependent", "other-repo-dependent"}
+    )
+
+    assert adapter.dependent_readiness_failures == ["other-repo-dependent"]
+
+
 def test_manifest_build_runs_post_pull_only_for_services_owned_by_repo(
     tmp_path: Path,
 ) -> None:
@@ -224,6 +295,32 @@ def test_current_generation_restore_skips_dependent_repo_post_pull(
     ]
 
 
+def test_current_generation_restore_observes_dependent_readiness_failure(
+    tmp_path: Path,
+) -> None:
+    runner = _runner(tmp_path)
+    adapter = _adapter(runner, tmp_path)
+    running = {
+        "owner": False,
+        "same-repo-dependent": False,
+        "other-repo-dependent": False,
+    }
+    runner.process_manager.is_running = MagicMock(
+        side_effect=lambda service: running[service]
+    )
+    runner._start_service = MagicMock(
+        side_effect=lambda service: running.__setitem__(service, True) or True
+    )
+    runner.process_manager.wait_for_ready = MagicMock(
+        side_effect=lambda service, timeout: service != "other-repo-dependent"
+    )
+    runner.execute_hook = MagicMock(return_value=True)
+
+    adapter._restore_current_generation_services()
+
+    assert adapter.dependent_readiness_failures == ["other-repo-dependent"]
+
+
 def test_legacy_pull_runs_post_pull_only_for_services_owned_by_repo(
     tmp_path: Path,
 ) -> None:
@@ -242,6 +339,35 @@ def test_legacy_pull_runs_post_pull_only_for_services_owned_by_repo(
         (("same-repo-dependent", "post_pull"), {}),
     ]
     assert runner._start_service.call_count == 3
+
+
+def test_legacy_pull_observes_dependent_start_failure_without_failing(
+    tmp_path: Path,
+) -> None:
+    runner = _runner(tmp_path)
+    runner.execute_hook = MagicMock(return_value=True)
+    runner.process_manager.is_running = MagicMock(return_value=False)
+    runner._blocked_start_dependencies = MagicMock(return_value=[])
+    runner._start_service = MagicMock(
+        side_effect=lambda service: service != "other-repo-dependent"
+    )
+
+    failures = runner._restart_after_pull_legacy(
+        "app", ["owner", "same-repo-dependent", "other-repo-dependent"]
+    )
+
+    assert failures == ["other-repo-dependent"]
+
+
+def test_legacy_pull_owned_start_failure_still_fails_verdict(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    runner.execute_hook = MagicMock(return_value=True)
+    runner.process_manager.is_running = MagicMock(return_value=False)
+    runner._blocked_start_dependencies = MagicMock(return_value=[])
+    runner._start_service = MagicMock(return_value=False)
+
+    with pytest.raises(StableDeploymentError, match="failed: owner"):
+        runner._restart_after_pull_legacy("app", ["owner"])
 
 
 def test_expected_deployment_budget_uses_owned_hooks_and_all_readiness() -> None:

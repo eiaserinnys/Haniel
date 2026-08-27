@@ -110,6 +110,7 @@ class DeployResult(StrictMessage):
     status: Literal["success", "failed"]
     error: str | None = None
     duration_ms: int | None = None
+    dependent_readiness_failures: list[str] = Field(default_factory=list)
     orchestrator_attempt_id: str
     connection_generation: str
 

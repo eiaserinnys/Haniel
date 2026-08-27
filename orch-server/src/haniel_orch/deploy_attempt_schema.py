@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS deploy_attempts (
     result_status TEXT,
     result_error TEXT,
     duration_ms INTEGER,
+    dependent_readiness_failures_json TEXT NOT NULL DEFAULT '[]',
     settled_local_head TEXT,
     settled_remote_head TEXT,
     settled_at TEXT,
@@ -128,6 +129,7 @@ ATTEMPT_COLUMNS = {
     "expected_budget_sec": "INTEGER",
     "terminal_stage": "TEXT",
     "terminal_reason": "TEXT",
+    "dependent_readiness_failures_json": "TEXT NOT NULL DEFAULT '[]'",
 }
 
 

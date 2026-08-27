@@ -104,6 +104,34 @@ async def test_manual_success_return_with_mismatch_sends_failed_then_settled() -
     assert reconciliation["deploy_id"] == "node-a:repo-a:main:remote-head"
 
 
+async def test_dependent_readiness_failures_are_reported_with_success() -> None:
+    sent: list[dict] = []
+
+    async def send_json(message: dict) -> None:
+        sent.append(message)
+
+    reporter = DeployReporter(
+        node_id="node-a",
+        approval_handler=lambda _approval, _progress: {
+            "dependent_readiness_failures": ["bot", "keke"]
+        },
+        snapshot_handler=lambda repo, branch, deploy_id: snapshot(in_sync=True),
+        send_json=send_json,
+    )
+
+    await reporter.handle_approval(
+        {
+            "deploy_id": "node-a:repo-a:main:remote-head",
+            "orchestrator_attempt_id": "orch-1",
+            "connection_generation": "generation-1",
+        }
+    )
+
+    result = next(message for message in sent if message["type"] == "deploy_result")
+    assert result["status"] == "success"
+    assert result["dependent_readiness_failures"] == ["bot", "keke"]
+
+
 async def test_progress_emitter_stops_when_handler_finishes() -> None:
     sent: list[dict] = []
 

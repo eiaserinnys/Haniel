@@ -1947,7 +1947,7 @@ class ServiceRunner:
         branch: str | None = None,
         target_head: str | None = None,
         progress_callback: Callable[[str], None] | None = None,
-    ) -> None:
+    ) -> dict[str, list[str]]:
         """Pull changes for a repository and restart affected services.
 
         This is the single code path used by all three triggers:
@@ -1981,9 +1981,10 @@ class ServiceRunner:
                     "DEPLOYMENT_LEASE_CONFLICT", f"already pulling {repo_name}"
                 )
             logger.info("Already pulling %s, ignoring duplicate request", repo_name)
-            return
+            return {"dependent_readiness_failures": []}
 
         captured_changes: dict | None = None
+        dependent_readiness_failures: list[str] = []
         deployment_lease: DeploymentLease | None = None
         node_report_context: NodeDeployReportContext | None = None
         lifecycle_request_id = orchestrator_attempt_id or f"runtime-{uuid4()}"
@@ -2001,7 +2002,7 @@ class ServiceRunner:
             # Guard: skip if no pending changes (e.g. pull just completed, re-entry)
             if not runtime.pending_changes:
                 logger.info("No pending changes for %s, skipping", repo_name)
-                return
+                return {"dependent_readiness_failures": []}
 
             # _pull_repo() clears state.pending_changes → capture before any ops
             captured_changes = runtime.pending_changes
@@ -2189,7 +2190,7 @@ class ServiceRunner:
                         if progress_callback is not None
                         else {}
                     )
-                    run_manifest_deployment(
+                    dependent_readiness_failures = run_manifest_deployment(
                         self,
                         repo_name,
                         affected,
@@ -2215,7 +2216,9 @@ class ServiceRunner:
                         **progress_kwargs,
                     )
                 else:
-                    self._restart_after_pull_legacy(repo_name, affected)
+                    dependent_readiness_failures = self._restart_after_pull_legacy(
+                        repo_name, affected
+                    )
             finally:
                 self._release_restart_suppression(quiesce_services)
 
@@ -2237,7 +2240,7 @@ class ServiceRunner:
                 self._self_update_requested.set()
                 self._clear_self_update_pending_state()
                 self.stop()
-                return
+                return {"dependent_readiness_failures": dependent_readiness_failures}
 
             if self._slack_bot:
                 self._slack_bot.notify_done(
@@ -2246,6 +2249,7 @@ class ServiceRunner:
                     pending_changes=captured_changes,
                     discarded_changes=discarded,
                 )
+            return {"dependent_readiness_failures": dependent_readiness_failures}
 
         except Exception as e:
             code = stable_deployment_error_code(e)
@@ -2299,7 +2303,9 @@ class ServiceRunner:
                 deployment_lease.__exit__(None, None, None)
             pull_lock.release()
 
-    def _restart_after_pull_legacy(self, repo_name: str, affected: list[str]) -> None:
+    def _restart_after_pull_legacy(
+        self, repo_name: str, affected: list[str]
+    ) -> list[str]:
         """Preserve the pre-manifest restart contract for unrelated repositories."""
 
         snapshot = self._snapshot_config_state()
@@ -2308,6 +2314,7 @@ class ServiceRunner:
             affected,
             snapshot.enabled_services,
         )
+        owned_services = set(hook_services)
         failed_hooks = [
             service
             for service in hook_services
@@ -2325,12 +2332,30 @@ class ServiceRunner:
                 "APPLY_FAILED", f"post_pull hook failed for: {failed}"
             )
 
+        dependent_readiness_failures: list[str] = []
+
+        def observe_dependent_failure(service: str, reason: str) -> None:
+            if service not in dependent_readiness_failures:
+                dependent_readiness_failures.append(service)
+            logger.warning(
+                "Dependent service %s for repo %s did not become ready (%s); "
+                "deployment verdict is unchanged",
+                service,
+                repo_name,
+                reason,
+            )
+
         shutdown_order = [s for s in self.get_shutdown_order() if s in affected]
         for service in shutdown_order:
             self._cancel_pending_restart(service)
             if self.process_manager.is_running(service):
                 logger.info("Stopping %s for post-pull restart", service)
                 if not self.process_manager.stop_service(service):
+                    if service not in owned_services:
+                        observe_dependent_failure(
+                            service, "failed to stop for post-pull restart"
+                        )
+                        continue
                     raise StableDeploymentError(
                         "QUIESCENCE_REQUIRED",
                         f"failed to stop {service} after pull",
@@ -2344,6 +2369,13 @@ class ServiceRunner:
             self._cancel_pending_restart(service)
             blockers = self._blocked_start_dependencies(service)
             if blockers:
+                if service not in owned_services:
+                    observe_dependent_failure(
+                        service,
+                        f"blocked by dependencies: {', '.join(blockers)}",
+                    )
+                    self._schedule_restart_after_dependency_block(service, blockers)
+                    continue
                 logger.error(
                     "Skipping restart of %s after pull because dependencies "
                     "are not running: %s",
@@ -2361,6 +2393,11 @@ class ServiceRunner:
                     service,
                 )
                 if not self.process_manager.stop_service(service):
+                    if service not in owned_services:
+                        observe_dependent_failure(
+                            service, "failed to stop already-running service"
+                        )
+                        continue
                     raise StableDeploymentError(
                         "QUIESCENCE_REQUIRED",
                         f"failed to stop already-running {service} after pull",
@@ -2369,7 +2406,10 @@ class ServiceRunner:
 
             logger.info("Restarting %s after pull", service)
             if not self._start_service(service):
-                failed_starts.append(service)
+                if service in owned_services:
+                    failed_starts.append(service)
+                else:
+                    observe_dependent_failure(service, "failed to start")
 
         if failed_starts or skipped_starts:
             details = []
@@ -2386,6 +2426,7 @@ class ServiceRunner:
                 "failed to restart services after pull for "
                 f"{repo_name}: {'; '.join(details)}",
             )
+        return dependent_readiness_failures
 
     @staticmethod
     def _hash_pending(pending: dict) -> str:

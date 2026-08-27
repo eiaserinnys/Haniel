@@ -46,6 +46,9 @@ class DeployAttemptStoreSupport:
                     "approved_by": attempt["approved_by"],
                     "error": attempt["terminal_error"] or attempt["result_error"],
                     "duration_ms": attempt["duration_ms"],
+                    "dependent_readiness_failures": json.loads(
+                        attempt["dependent_readiness_failures_json"]
+                    ),
                     "created_at": attempt["started_at"],
                     "updated_at": attempt["completed_at"],
                     "attempt_outcome": attempt["outcome"],
@@ -100,6 +103,9 @@ class DeployAttemptStoreSupport:
                     "execution_mode": attempt["execution_mode"],
                     "attempt_outcome": attempt["outcome"],
                     "journal_attempt_id": attempt["journal_attempt_id"],
+                    "dependent_readiness_failures": json.loads(
+                        attempt["dependent_readiness_failures_json"]
+                    ),
                 },
             )
         return metadata

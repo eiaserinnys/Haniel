@@ -136,6 +136,7 @@ class TestNormalFinalization:
             status="success",
             error=None,
             duration_ms=321,
+            dependent_readiness_failures=["bot", "keke"],
         )
         assert raw["status"] == "recorded"
         assert (await store.get_deploy_event("n:r:main:target"))[
@@ -153,6 +154,11 @@ class TestNormalFinalization:
         event = await store.get_deploy_event("n:r:main:target")
         assert event["status"] == "success"
         assert event["duration_ms"] == 321
+        history = await store.get_deploy_history()
+        canonical_row = next(
+            row for row in history if row["deploy_id"] == "n:r:main:target"
+        )
+        assert canonical_row["dependent_readiness_failures"] == ["bot", "keke"]
 
     async def test_failure_equal_reopens_retryable_pending(self, store: EventStore):
         await canonical(store)
@@ -761,7 +767,11 @@ class TestSchemaMigration:
         try:
             cursor = await reopened._db.execute("PRAGMA table_info(deploy_attempts)")
             columns = {row[1] for row in await cursor.fetchall()}
-            assert {"terminal_stage", "terminal_reason"} <= columns
+            assert {
+                "terminal_stage",
+                "terminal_reason",
+                "dependent_readiness_failures_json",
+            } <= columns
         finally:
             await reopened.close()
 
