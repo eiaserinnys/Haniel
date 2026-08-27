@@ -384,25 +384,31 @@ def test_new_begin_does_not_inherit_terminal_orchestrator_link(
     assert current["branch"] is None
 
 
-def test_destructive_manifest_requires_backup_verify_and_recovery() -> None:
-    with pytest.raises(ValidationError, match="verify_backup"):
-        ReleaseManifest.model_validate(
-            {
-                "schema_version": "haniel.release.v1",
-                "release_id": "unsafe",
-                "migration": {
-                    "destructive": True,
-                    "preflight": command("preflight"),
-                    "backup": command("backup"),
-                    "apply": command("migrate"),
-                },
-                "post_start_verify": [command("verify")],
-                "recovery": {
-                    "strategy": "roll_forward",
-                    "command": command("recover"),
-                },
-            }
-        )
+def test_destructive_manifest_preserves_apply_verify_and_recovery_without_backup() -> (
+    None
+):
+    release = ReleaseManifest.model_validate(
+        {
+            "schema_version": "haniel.release.v1",
+            "release_id": "destructive-with-external-backup",
+            "migration": {
+                "destructive": True,
+                "preflight": command("preflight"),
+                "apply": command("migrate"),
+            },
+            "post_start_verify": [command("verify")],
+            "recovery": {
+                "strategy": "rollback",
+                "command": command("restore"),
+            },
+        }
+    )
+
+    assert release.migration is not None
+    assert release.migration.preflight.name == "preflight"
+    assert release.migration.apply.name == "migrate"
+    assert release.post_start_verify[0].name == "verify"
+    assert release.recovery.command.name == "restore"
 
 
 def test_roll_forward_manifest_requires_previous_release_fallback() -> None:
@@ -501,8 +507,6 @@ def test_success_waits_for_build_preflight_migration_readiness_and_verify(
         "build",
         "preflight",
         "stop",
-        "backup",
-        "verify-backup",
         "migrate",
         "start-and-wait",
         "verify-http",
@@ -512,7 +516,6 @@ def test_success_waits_for_build_preflight_migration_readiness_and_verify(
     assert [entry["state"] for entry in journal["history"]] == [
         "build",
         "preflight",
-        "backing_up",
         "migrating",
         "starting",
         "verifying",
@@ -525,10 +528,6 @@ def test_success_waits_for_build_preflight_migration_readiness_and_verify(
     [
         ("build", ["build", "build", "build", "build"]),
         ("preflight", ["build", "preflight"]),
-        (
-            "verify-backup",
-            ["build", "preflight", "stop", "backup", "verify-backup"],
-        ),
     ],
 )
 def test_failure_before_migration_commit_restores_previous_release(
@@ -606,8 +605,6 @@ def test_build_failure_retries_before_recovery_and_then_succeeds(
         "build",
         "preflight",
         "stop",
-        "backup",
-        "verify-backup",
         "migrate",
         "start-and-wait",
         "verify-http",
@@ -771,8 +768,6 @@ def test_migration_failure_enters_declared_recovery_and_rolls_forward(
         "build",
         "preflight",
         "stop",
-        "backup",
-        "verify-backup",
         "migrate",
         "prepare-roll-forward",
         "recover",
@@ -799,8 +794,6 @@ def test_post_start_failures_retry_in_place_until_success(tmp_path: Path) -> Non
         "build",
         "preflight",
         "stop",
-        "backup",
-        "verify-backup",
         "migrate",
         "start-and-wait",
         "verify-http",
@@ -887,16 +880,14 @@ def test_persistent_post_verify_failure_preserves_ready_target(
 
     assert exc_info.value.recovered is False
     assert getattr(exc_info.value, "target_preserved", False) is True
-    assert events[:7] == [
+    assert events[:5] == [
         "build",
         "preflight",
         "stop",
-        "backup",
-        "verify-backup",
         "migrate",
         "start-and-wait",
     ]
-    assert events[7:] == ["verify-http"] * 4
+    assert events[5:] == ["verify-http"] * 4
     assert "prepare-roll-forward" not in events
     assert "recover" not in events
     assert "restore-backup" not in events

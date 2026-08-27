@@ -38,14 +38,6 @@ class MigrationSpec(BaseModel):
     verify_backup: CommandSpec | None = None
     apply: CommandSpec
 
-    @model_validator(mode="after")
-    def validate_destructive_gate(self) -> "MigrationSpec":
-        if self.destructive and (self.backup is None or self.verify_backup is None):
-            raise ValueError(
-                "destructive migration requires both backup and verify_backup"
-            )
-        return self
-
 
 class RecoverySpec(BaseModel):
     """Automatic compensation after a failed process handover."""

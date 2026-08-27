@@ -1266,7 +1266,6 @@ def test_upgrade_recovery_uses_approved_env_after_apply_source_drift(
     deploy = repo / "deploy"
     deploy.mkdir(parents=True)
     database = tmp_path / "release.sqlite"
-    backup = tmp_path / "release.backup.sqlite"
     env_file = tmp_path / "service.env"
     runtime_database = tmp_path / "runtime-database.txt"
     apply_started = tmp_path / "apply-started"
@@ -1288,7 +1287,6 @@ def test_upgrade_recovery_uses_approved_env_after_apply_source_drift(
         f"""
 import json
 import os
-import shutil
 import sqlite3
 import sys
 import time
@@ -1296,7 +1294,6 @@ from pathlib import Path
 
 env_file = Path(os.environ["HANIEL_SERVICE_ENV_FILE"])
 database = Path(env_file.read_text(encoding="utf-8").split("=", 1)[1].strip())
-backup = Path({str(backup)!r})
 apply_started = Path({str(apply_started)!r})
 continue_apply = Path({str(continue_apply)!r})
 phase = sys.argv[1]
@@ -1307,12 +1304,6 @@ if phase == "preflight":
         "operation": "upgrade",
         "journal_path": str(database.with_name("database-release.json")),
     }}))
-elif phase == "backup":
-    shutil.copy2(database, backup)
-    print(json.dumps({{"ok": True, "phase": "backup_created"}}))
-elif phase == "verify-backup":
-    assert backup.is_file()
-    print(json.dumps({{"ok": True, "phase": "backup_verified"}}))
 elif phase == "apply":
     with sqlite3.connect(database) as connection:
         connection.execute("update release_ledger set value = 'new'")
@@ -1321,7 +1312,8 @@ elif phase == "apply":
         time.sleep(0.01)
     print(json.dumps({{"ok": True, "phase": "applied"}}))
 elif phase == "restore":
-    shutil.copy2(backup, database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("update release_ledger set value = 'old'")
     print(json.dumps({{"ok": True, "phase": "recovered"}}))
 elif phase == "health":
     print(json.dumps({{"ok": True, "phase": "verified"}}))
@@ -1343,8 +1335,6 @@ elif phase == "health":
             "operation": "discover",
             "result_contract": "soulstream.database-release.v1",
             "preflight": command("preflight"),
-            "backup": command("backup"),
-            "verify_backup": command("verify-backup"),
             "apply": command("apply"),
         },
         "post_start_verify": [command("health")],

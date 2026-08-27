@@ -255,8 +255,6 @@ def test_upgrade_failure_restores_database_then_repo_symmetrically(
         "build",
         "preflight",
         "stop",
-        "backup",
-        "verify-backup",
         "apply",
         "restore",
         "repo-rollback",
@@ -266,8 +264,6 @@ def test_upgrade_failure_restores_database_then_repo_symmetrically(
 @pytest.mark.parametrize(
     ("failed_phase", "error_code"),
     [
-        ("backup", "BACKUP_CREATE_FAILED"),
-        ("verify-backup", "BACKUP_VERIFY_FAILED"),
         ("apply", "APPLY_FAILED"),
         ("health", "POST_VERIFY_RETRIES_EXHAUSTED"),
     ],
