@@ -216,27 +216,6 @@ class DeploymentCoordinator:
                     quiescence_receipt=quiescence_receipt,
                 )
 
-            if (
-                manifest.migration
-                and operation != "fresh_install"
-                and (manifest.migration.backup or manifest.migration.verify_backup)
-            ):
-                self.state_store.transition(repo_name, "backing_up")
-                if manifest.migration.backup:
-                    self._run_database(
-                        repo_name,
-                        "backup",
-                        manifest.migration.backup,
-                        environment,
-                    )
-                if manifest.migration.verify_backup:
-                    self._run_database(
-                        repo_name,
-                        "verify_backup",
-                        manifest.migration.verify_backup,
-                        environment,
-                    )
-
             self.state_store.transition(repo_name, "migrating")
             if manifest.migration:
                 migration_started = True
