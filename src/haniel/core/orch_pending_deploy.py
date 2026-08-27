@@ -1,7 +1,7 @@
 """Pending orch deploy_id marker (read/write/consume) for self_repo deploys.
 
-Written by OrchestratorClient.deploy_approval handler before triggering
-self-update, consumed by the new runner on start() and used to send
+Written by OrchestratorClient.deploy_approval only after pre-stage succeeds,
+consumed by the new runner on start() and used to send
 DeployResult to orch-server after self-update completes.
 
 Pairs with self_update_marker.py: self_update_marker is written by the
@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any
@@ -93,7 +95,7 @@ def write(
     probe_id: str | None,
     preflight_fingerprint: str | None,
 ) -> None:
-    """Write marker (called by deploy_approval handler before self-update).
+    """Atomically write a pre-staged deploy correlation marker.
 
     Args:
         config_dir: Haniel config directory (the marker is placed under .local/).
@@ -112,7 +114,40 @@ def write(
         probe_id=probe_id,
         preflight_fingerprint=preflight_fingerprint,
     ).to_dict()
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temp_path = Path(handle.name)
+        os.replace(temp_path, path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
+
+
+def discard(config_dir: Path, *, expected_deploy_id: str) -> bool:
+    """Delete a pending marker only when it belongs to the expected deploy."""
+    path = _marker_path(config_dir)
+    if not path.exists():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    if not isinstance(payload, dict) or payload.get("deploy_id") != expected_deploy_id:
+        return False
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    return True

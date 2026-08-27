@@ -683,7 +683,11 @@ class SlackBot:
             user_id = body["user"]["id"]
             try:
                 if command == "update":
-                    controller.approve_self_update()
+                    threading.Thread(
+                        target=controller.approve_self_update,
+                        daemon=True,
+                        name="app-home-self-update",
+                    ).start()
                 else:
                     threading.Thread(
                         target=controller.trigger_pull,

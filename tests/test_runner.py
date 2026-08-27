@@ -950,6 +950,45 @@ class TestServiceRunnerExtended:
         assert not waiter.is_alive()
         assert waiter_returned.is_set()
 
+    def test_stop_cancels_self_update_prestage_before_orchestrator(
+        self, tmp_path: Path
+    ):
+        runner = ServiceRunner(
+            HanielConfig(poll_interval=5, repos={}, services={}),
+            config_dir=tmp_path,
+        )
+        runner._state.running = True
+        order: list[str] = []
+        runner._self_update_prestager.cancel = MagicMock(
+            side_effect=lambda: order.append("prestage")
+        )
+        runner._orch_client = MagicMock()
+        runner._orch_client.stop.side_effect = lambda: order.append("orchestrator")
+        runner.stop_services = MagicMock(return_value=True)
+
+        runner.stop()
+
+        assert order == ["prestage", "orchestrator"]
+
+    def test_stop_records_prestage_cancel_failure_and_unblocks_waiters(
+        self, tmp_path: Path
+    ) -> None:
+        runner = ServiceRunner(
+            HanielConfig(poll_interval=5, repos={}, services={}),
+            config_dir=tmp_path,
+        )
+        runner._state.running = True
+        cancel_error = OSError("taskkill failed")
+        runner._self_update_prestager.cancel = MagicMock(side_effect=cancel_error)
+
+        with pytest.raises(OSError, match="taskkill failed"):
+            runner.stop()
+
+        assert runner._stop_complete.is_set()
+        assert runner._stop_error is cancel_error
+        with pytest.raises(RuntimeError, match="ServiceRunner stop failed"):
+            runner.stop()
+
     def test_stop_does_not_join_current_poll_thread(self, tmp_path: Path):
         """The poll thread may initiate shutdown without trying to join itself."""
         runner = ServiceRunner(

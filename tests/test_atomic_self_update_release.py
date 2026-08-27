@@ -266,6 +266,190 @@ def _current_release(release_root: Path) -> Path:
     return release_root / "releases" / name
 
 
+def _run_no_switch_helper(
+    tmp_path: Path,
+    *,
+    with_active: bool = True,
+) -> tuple[subprocess.CompletedProcess[str], dict, Path, str, str]:
+    source, previous_commit, target_commit = _create_source_repo(tmp_path)
+    fetch_log = tmp_path / "fetches"
+    launch_log = tmp_path / "launches"
+    webhook_log = tmp_path / "webhooks"
+    state = tmp_path / "exit-codes"
+    state.write_text("0\n", encoding="utf-8")
+    fake_bin = _make_fake_commands(
+        tmp_path,
+        source,
+        fetch_log,
+        launch_log,
+        webhook_log,
+        state,
+    )
+    release_root = tmp_path / ".local" / "haniel-releases"
+    if with_active:
+        _prepare_previous_release(release_root, previous_commit, fake_bin / "python")
+    _run([REAL_GIT, "fetch", "origin", "main"], cwd=source)
+    current_before = (
+        (release_root / "current.txt").read_bytes()
+        if (release_root / "current.txt").exists()
+        else b""
+    )
+    legacy_before = (
+        os.readlink(release_root / "current")
+        if (release_root / "current").is_symlink()
+        else None
+    )
+    prune = release_root / ".haniel-release-prune-request.json"
+    prune.parent.mkdir(parents=True, exist_ok=True)
+    prune.write_bytes(b'{"sentinel":"unchanged"}')
+    result_path = tmp_path / ".local" / "haniel_release_preparation.json"
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    completed = subprocess.run(
+        [
+            str(fake_bin / "python"),
+            str(REPO_ROOT / "scripts" / "haniel_atomic_release.py"),
+            "prepare",
+            "--no-switch",
+            "--target-commit",
+            target_commit,
+            "--source",
+            str(source),
+            "--release-root",
+            str(release_root),
+            "--bootstrap-python",
+            str(fake_bin / "python"),
+            "--result-json",
+            str(result_path),
+            "--min-free-mb",
+            "1",
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert prune.read_bytes() == b'{"sentinel":"unchanged"}'
+    if with_active:
+        current_path = release_root / "current.txt"
+        assert (
+            current_path.read_bytes() if current_path.exists() else b""
+        ) == current_before
+        assert os.readlink(release_root / "current") == legacy_before
+    else:
+        assert not (release_root / "current.txt").exists()
+    return completed, payload, release_root, previous_commit, target_commit
+
+
+def test_no_switch_prepares_exact_target_without_current_or_prune_mutation(
+    tmp_path: Path,
+) -> None:
+    completed, payload, release_root, previous_commit, target_commit = (
+        _run_no_switch_helper(tmp_path)
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["ok"] is True
+    assert payload["pre_staged"] is True
+    assert payload["switched"] is False
+    assert payload["target_commit"] == target_commit
+    assert payload["active_commit"] == previous_commit
+    prepared = Path(payload["prepared_release"])
+    assert prepared.parent == release_root / "releases"
+    marker = json.loads(
+        (prepared / ".haniel-release-ready.json").read_text(encoding="utf-8")
+    )
+    assert marker["commit"] == target_commit
+    assert all(step["name"] != "git_fetch" for step in payload["steps"])
+
+
+def test_no_switch_without_active_release_fails_closed(tmp_path: Path) -> None:
+    completed, payload, _release_root, _previous, _target = _run_no_switch_helper(
+        tmp_path, with_active=False
+    )
+
+    assert completed.returncode == 1
+    assert payload["ok"] is False
+    assert "active release" in payload["error"].lower()
+
+
+def test_exact_target_activation_ignores_origin_advance_and_reuses_prepared_release(
+    tmp_path: Path,
+) -> None:
+    completed, payload, release_root, _previous, target = _run_no_switch_helper(
+        tmp_path
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert REAL_GIT is not None
+    source = tmp_path / "repo"
+    seed = tmp_path / "seed"
+    git_env = os.environ.copy()
+    git_env.update(
+        {
+            "GIT_AUTHOR_NAME": "Haniel Test",
+            "GIT_AUTHOR_EMAIL": "haniel-test@example.com",
+            "GIT_COMMITTER_NAME": "Haniel Test",
+            "GIT_COMMITTER_EMAIL": "haniel-test@example.com",
+        }
+    )
+    (seed / "version.txt").write_text("third\n", encoding="utf-8")
+    _run([REAL_GIT, "add", "version.txt"], cwd=seed, env=git_env)
+    _run([REAL_GIT, "commit", "-m", "third"], cwd=seed, env=git_env)
+    _run([REAL_GIT, "push", "origin", "main"], cwd=seed, env=git_env)
+    origin_head = _run([REAL_GIT, "rev-parse", "HEAD"], cwd=seed, env=git_env)
+    assert origin_head != target
+    result_path = tmp_path / ".local" / "activation.json"
+
+    activated = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "haniel_atomic_release.py"),
+            "prepare",
+            "--target-commit",
+            target,
+            "--source",
+            str(source),
+            "--release-root",
+            str(release_root),
+            "--bootstrap-python",
+            sys.executable,
+            "--result-json",
+            str(result_path),
+            "--min-free-mb",
+            "1",
+        ],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    activation = json.loads(result_path.read_text(encoding="utf-8"))
+
+    assert activated.returncode == 0, activated.stderr
+    assert activation["active_commit"] == target
+    assert activation["switched"] is True
+    assert [step["name"] for step in activation["steps"]] == [
+        "release_reuse",
+        "current_switch",
+    ]
+    assert (
+        _current_release(release_root).resolve()
+        == Path(payload["prepared_release"]).resolve()
+    )
+
+
+def test_powershell_wrapper_validates_pre_staged_target_and_keeps_fallback() -> None:
+    script = (REPO_ROOT / "haniel-runner.ps1").read_text(encoding="utf-8-sig")
+
+    assert "function Get-PreparedTarget" in script
+    assert "-not $result.pre_staged" in script
+    assert '"--target-commit", $preparedTarget' in script
+    assert "full preparation fallback" in script
+    assert "$script:UsePreparedUpdate = $true" in script
+
+
 def _run_atomic_wrapper(
     tmp_path: Path,
     *,

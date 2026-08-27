@@ -23,6 +23,7 @@ def _run_wrapper(
     *,
     hang_first: bool = False,
     node_channel_fd: str | None = None,
+    prestage_target: str | None = None,
 ):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -50,11 +51,20 @@ def _run_wrapper(
         shutil.copy2(source_scripts / name, helper_dir / name)
     release_commit = "a" * 40
 
+    prestage_commit = prestage_target or ""
     _write_executable(
         fake_bin / "git",
         f"""#!/usr/bin/env bash
 if [[ "$3" == "fetch" ]]; then printf 'fetch\\n' >> "{fetch_log}"; fi
-if [[ "$3" == "rev-parse" ]]; then printf '{release_commit}\\n'; fi
+if [[ "$3" == "rev-parse" ]]; then
+  ref="${{@: -1}}"
+  candidate="${{ref:0:40}}"
+  if [[ "$candidate" =~ ^[0-9a-f]{{40}}$ ]]; then
+    printf '%s\\n' "$candidate"
+  else
+    printf '{release_commit}\\n'
+  fi
+fi
 if [[ "$3" == "symbolic-ref" ]]; then printf 'main\\n'; fi
 exit 0
 """,
@@ -78,6 +88,13 @@ if [[ "${{1:-}}" == "-m" && "${{2:-}}" == "haniel.cli" ]]; then
   tail -n +2 "{state}" > "{state}.next"
   mv "{state}.next" "{state}"
   printf '%s|active-self-head=%s|%s\\n' "$code" "${{HANIEL_ACTIVE_SELF_HEAD:-unset}}" "$*" >> "{launch_log}"
+  if [[ "$code" == "10" && -n "{prestage_commit}" ]]; then
+    prepared="{tmp_path}/.local/haniel-releases/releases/{prestage_commit[:12]}"
+    mkdir -p "$prepared/.venv/bin" "{tmp_path}/.local"
+    cp "$0" "$prepared/.venv/bin/python"
+    printf '{{"version":1,"commit":"{prestage_commit}"}}' > "$prepared/.haniel-release-ready.json"
+    printf '{{"version":1,"ok":true,"pre_staged":true,"switched":false,"target_commit":"{prestage_commit}","prepared_release":"%s","active_repo":"{tmp_path}/.local/haniel-releases/releases/{release_commit}","active_python":"{tmp_path}/.local/haniel-releases/releases/{release_commit}/.venv/bin/python","active_commit":"{release_commit}","steps":[],"warnings":[],"error":null}}' "$prepared" > "{tmp_path}/.local/haniel_release_preparation.json"
+  fi
   if [[ "{1 if hang_first else 0}" == "1" && "$code" == "99" ]]; then
     mkdir -p "{tmp_path}/.local"
     : > "{tmp_path}/.local/self_update_exit_requested"
@@ -191,6 +208,26 @@ def test_exit_code_contract_recovers_and_relaunches(
         f"|active-self-head={'a' * 40}|-m haniel.cli run {tmp_path / 'haniel.yaml'}"
     )
     assert launches == [f"{first_exit}{suffix}", f"0{suffix}"]
+
+
+def test_self_update_exit_reuses_prestaged_exact_target_without_fetch(
+    tmp_path: Path,
+) -> None:
+    target = "b" * 40
+    result, fetches, launches = _run_wrapper(
+        tmp_path,
+        [10, 0],
+        prestage_target=target,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert fetches == ["fetch"]
+    assert "Reusing pre-staged release bbbbbbbbbbbb" in result.stdout
+    config_path = tmp_path / "haniel.yaml"
+    assert launches == [
+        f"10|active-self-head={'a' * 40}|-m haniel.cli run {config_path}",
+        f"0|active-self-head={target}|-m haniel.cli run {config_path}",
+    ]
 
 
 def test_self_update_exit_watchdog_sigkills_and_recovers(tmp_path: Path) -> None:

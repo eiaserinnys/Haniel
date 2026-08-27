@@ -49,6 +49,7 @@ repos:
 self:
   repo: haniel
   auto_update: false
+  prepare_timeout: 3600
 
 services:
   # MCP servers (no `after`, start in parallel)

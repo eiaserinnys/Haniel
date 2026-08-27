@@ -286,7 +286,7 @@ def run(
         click.echo()
 
         # Keep main thread alive
-        while runner.is_running:
+        while runner.is_running and not runner.self_update_requested:
             try:
                 # Sleep in small intervals to allow signal handling
                 import time

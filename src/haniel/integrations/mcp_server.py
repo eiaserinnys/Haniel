@@ -792,27 +792,16 @@ class HanielMcpServer:
         return await self._restart_service(service)
 
     async def _self_update(self) -> str:
-        """Self-update: pull haniel repo, then deferred exit(10)."""
+        """Pre-stage Haniel's exact remote target, then defer exit(10)."""
         loop = asyncio.get_running_loop()
 
-        # Pull haniel's own repo first
         self_repo = getattr(self.runner, "_self_repo", None)
         if not self_repo:
             return "Error: No self repo configured"
-
-        pull_ok = await loop.run_in_executor(None, self.runner._pull_repo, self_repo)
-        if not pull_ok:
-            return f"Error: Pull failed for haniel repo '{self_repo}'"
-
-        # Signal self-update and deferred stop
-        self.runner._self_update_requested.set()
-
-        async def _deferred_stop():
-            await asyncio.sleep(0.5)
-            await loop.run_in_executor(None, self.runner.stop)
-
-        asyncio.ensure_future(_deferred_stop())
-        return "Self-update: pull succeeded, restarting haniel..."
+        with self.runner._state_lock:
+            self.runner._state.self_update_pending = True
+        result = await loop.run_in_executor(None, self.runner.approve_self_update)
+        return result
 
     async def _check_updates(self) -> str:
         """Check all repos for pending changes."""

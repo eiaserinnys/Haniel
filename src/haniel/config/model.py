@@ -322,6 +322,11 @@ class SelfUpdateConfig(BaseModel):
     auto_update: bool = Field(
         default=False, description="If true, update immediately without approval"
     )
+    prepare_timeout: int = Field(
+        default=3600,
+        ge=1,
+        description="Maximum seconds allowed for pre-staging an approved update",
+    )
 
 
 class SlackBotConfig(BaseModel):

@@ -24,6 +24,8 @@ class PreparationResult:
     active_python: str | None = None
     active_commit: str | None = None
     target_commit: str | None = None
+    prepared_release: str | None = None
+    pre_staged: bool = False
     switched: bool = False
     migrated: bool = False
 
@@ -64,6 +66,8 @@ class PreparationResult:
             "active_python": self.active_python,
             "active_commit": self.active_commit,
             "target_commit": self.target_commit,
+            "prepared_release": self.prepared_release,
+            "pre_staged": self.pre_staged,
             "switched": self.switched,
             "migrated": self.migrated,
         }

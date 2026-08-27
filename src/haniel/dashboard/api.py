@@ -225,13 +225,6 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
         try:
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(None, runner.approve_self_update)
-            if runner.self_update_requested:
-
-                async def _deferred_stop():
-                    await asyncio.sleep(0.5)
-                    await loop.run_in_executor(None, runner.stop)
-
-                asyncio.ensure_future(_deferred_stop())
             return JSONResponse({"ok": True, "message": result})
         except Exception as e:
             return _error(str(e))
