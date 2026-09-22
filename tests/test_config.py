@@ -70,6 +70,40 @@ class TestHanielConfigParsing:
         )
         assert config.repos["manual"].auto_apply is False
 
+    def test_repo_staging_checkout_timeout_is_isolated_and_bounded(self):
+        config = HanielConfig.model_validate(
+            {
+                "repos": {
+                    "slow-checkout": {
+                        "url": "git@github.com:example/slow.git",
+                        "path": "./slow",
+                        "staging_checkout_timeout": 1800,
+                    },
+                    "default-checkout": {
+                        "url": "git@github.com:example/default.git",
+                        "path": "./default",
+                    },
+                },
+                "services": {},
+            }
+        )
+
+        assert config.repos["slow-checkout"].staging_checkout_timeout == 1800
+        assert config.repos["default-checkout"].staging_checkout_timeout == 300
+
+        with pytest.raises(ValidationError):
+            RepoConfig(
+                url="git@github.com:example/invalid.git",
+                path="./invalid",
+                staging_checkout_timeout=0,
+            )
+        with pytest.raises(ValidationError):
+            RepoConfig(
+                url="git@github.com:example/invalid.git",
+                path="./invalid",
+                staging_checkout_timeout=7201,
+            )
+
     def test_repo_release_manifest_is_repo_relative(self):
         repo = RepoConfig(
             url="git@github.com:example/app.git",

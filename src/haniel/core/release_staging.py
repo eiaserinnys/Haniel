@@ -10,8 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator, Literal
 
+from ..defaults import DEFAULT_GIT_TIMEOUT
 from .deployment import ReleaseManifest
 from .deployment_command_runner import CommandRunner
+from .deployment_command_runner import run_bounded_process_tree
 from .deployment_command_runner import subprocess_command_runner
 from .deployment_errors import StableDeploymentError
 from .safety_redaction import redact_text
@@ -63,6 +65,7 @@ def stage_release(
         Callable[[ReleaseManifest], dict[str, str]] | None
     ) = None,
     target_ref: str | None = None,
+    staging_checkout_timeout: int = DEFAULT_GIT_TIMEOUT,
 ) -> Iterator[StagedRelease]:
     """Fetch, inspect, and probe a target without changing the live HEAD."""
     live_head = _git(repo_path, "rev-parse", "HEAD")
@@ -75,7 +78,16 @@ def stage_release(
     stage_path.parent.mkdir(parents=True, exist_ok=True)
     added = False
     try:
-        _git(repo_path, "worktree", "add", "--detach", str(stage_path), target_head)
+        _git(
+            repo_path,
+            "worktree",
+            "add",
+            "--detach",
+            str(stage_path),
+            target_head,
+            timeout=staging_checkout_timeout,
+            use_process_tree=True,
+        )
         added = True
         resolved_manifest = (stage_path / manifest_path).resolve()
         if not resolved_manifest.is_relative_to(stage_path.resolve()):
@@ -160,20 +172,30 @@ def _validate_probe(
     return operation
 
 
-def _git(path: Path, *args: str) -> str:
+def _git(
+    path: Path,
+    *args: str,
+    timeout: int = DEFAULT_GIT_TIMEOUT,
+    use_process_tree: bool = False,
+) -> str:
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
     try:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=path,
-            env=env,
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=300,
-        )
+        if use_process_tree:
+            result = run_bounded_process_tree(
+                ["git", *args], cwd=path, env=env, timeout=timeout, encoding="utf-8"
+            )
+        else:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=path,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=timeout,
+            )
     except subprocess.CalledProcessError as error:
         detail = redact_text((error.stderr or error.stdout or "").strip())
         raise ReleaseStagingError(
@@ -181,8 +203,10 @@ def _git(path: Path, *args: str) -> str:
             code="PULL_FAILED",
         ) from error
     except subprocess.TimeoutExpired as error:
+        cleanup_detail = getattr(error, "cleanup_detail", None)
+        cleanup = f"; cleanup: {cleanup_detail}" if cleanup_detail else ""
         raise ReleaseStagingError(
-            f"git {' '.join(args)} timed out for {path}",
+            f"git {' '.join(args)} timed out after {timeout}s for {path}{cleanup}",
             code="PULL_TIMEOUT",
         ) from error
     return result.stdout.strip()

@@ -11,7 +11,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from ..defaults import DEFAULT_GIT_TIMEOUT
+from ..defaults import DEFAULT_GIT_TIMEOUT, MAX_STAGING_CHECKOUT_TIMEOUT
 
 
 class ShutdownConfig(BaseModel):
@@ -126,6 +126,12 @@ class RepoConfig(BaseModel):
     release_manifest: str | None = Field(
         default=None,
         description="Repository-relative haniel.release.v1 manifest path",
+    )
+    staging_checkout_timeout: int = Field(
+        default=DEFAULT_GIT_TIMEOUT,
+        ge=1,
+        le=MAX_STAGING_CHECKOUT_TIMEOUT,
+        description="Maximum seconds allowed for detached release staging checkout",
     )
 
     @field_validator("release_manifest")

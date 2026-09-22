@@ -284,12 +284,26 @@ def _execute_subprocess(
     )
 
 
+def run_bounded_process_tree(
+    argv: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: int,
+    encoding: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a bounded child command in an isolated process group."""
+
+    return _run_process_tree(argv, cwd=cwd, env=env, timeout=timeout, encoding=encoding)
+
+
 def _run_process_tree(
     argv: list[str],
     *,
     cwd: Path,
     env: dict[str, str],
     timeout: int,
+    encoding: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one command in an isolated process group and reap its descendants."""
 
@@ -298,6 +312,8 @@ def _run_process_tree(
         process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         process_kwargs["start_new_session"] = True
+    if encoding is not None:
+        process_kwargs["encoding"] = encoding
     process = subprocess.Popen(
         argv,
         cwd=cwd,
