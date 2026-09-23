@@ -22,7 +22,11 @@ from haniel.core.git import (
     get_head,
     get_remote_head,
 )
-from haniel.core.release_staging import ReleaseIdentityError, stage_release
+from haniel.core.release_staging import (
+    ReleaseIdentityError,
+    ReleaseStagingError,
+    stage_release,
+)
 from haniel.core.one_shot_handover import probe_manifest_target
 from haniel.core.runner import ServiceRunner
 
@@ -231,6 +235,96 @@ def test_legacy_manifest_without_probe_stages_without_command_execution(
     assert get_head(live) == previous
     assert calls == []
     assert not (tmp_path / "staging" / "request-1" / "app").exists()
+
+
+def test_repo_checkout_timeout_reaches_only_detached_checkout(tmp_path: Path) -> None:
+    live, remote, previous = make_remote(tmp_path, base_manifest(with_probe=False))
+    runner = ServiceRunner(
+        HanielConfig(
+            repos={
+                "app": RepoConfig(
+                    url=str(remote),
+                    path=str(live),
+                    release_manifest="deploy/release.json",
+                    staging_checkout_timeout=1800,
+                )
+            },
+            services={},
+        ),
+        config_dir=tmp_path,
+    )
+
+    from haniel.core.deployment_command_runner import run_bounded_process_tree
+
+    original_run = subprocess.run
+    with (
+        patch(
+            "haniel.core.one_shot_handover.stage_release",
+            wraps=stage_release,
+        ) as staged,
+        patch(
+            "haniel.core.release_staging.run_bounded_process_tree",
+            wraps=run_bounded_process_tree,
+        ) as checkout,
+        patch(
+            "haniel.core.release_staging.subprocess.run",
+            wraps=original_run,
+        ) as regular_git,
+    ):
+        probe_manifest_target(
+            runner,
+            "app",
+            target_ref="origin/main",
+            expected_operation="upgrade",
+            request_id="repo-checkout-timeout",
+        )
+
+    assert staged.call_args.kwargs["staging_checkout_timeout"] == 1800
+    checkout.assert_called_once()
+    assert checkout.call_args.args[0][:4] == ["git", "worktree", "add", "--detach"]
+    assert checkout.call_args.kwargs["timeout"] == 1800
+    assert regular_git.call_args_list
+    assert all(call.kwargs["timeout"] == 300 for call in regular_git.call_args_list)
+    assert get_head(live) == previous
+
+
+def test_checkout_timeout_reports_tree_cleanup_and_preserves_partial_stage(
+    tmp_path: Path,
+) -> None:
+    live, _remote, previous = make_remote(tmp_path, base_manifest(with_probe=False))
+    stage_path = tmp_path / "staging" / "checkout-timeout" / "app"
+    timeout = subprocess.TimeoutExpired(["git", "worktree", "add"], 17)
+    timeout.cleanup_detail = "PROCESS_TREE_TERMINATE_ATTEMPTED"
+
+    def timed_out_checkout(*_args, **_kwargs):
+        stage_path.mkdir(parents=True)
+        raise timeout
+
+    with (
+        patch(
+            "haniel.core.release_staging.run_bounded_process_tree",
+            side_effect=timed_out_checkout,
+        ) as checkout,
+        pytest.raises(ReleaseStagingError) as raised,
+    ):
+        with stage_release(
+            repo_path=live,
+            staging_root=tmp_path / "staging",
+            repo_name="app",
+            branch="main",
+            manifest_path="deploy/release.json",
+            request_id="checkout-timeout",
+            expected_operation="upgrade",
+            staging_checkout_timeout=17,
+        ):
+            pass
+
+    assert raised.value.code == "PULL_TIMEOUT"
+    assert "PROCESS_TREE_TERMINATE_ATTEMPTED" in str(raised.value)
+    checkout.assert_called_once()
+    assert checkout.call_args.kwargs["timeout"] == 17
+    assert stage_path.exists()
+    assert get_head(live) == previous
 
 
 def test_required_manifest_without_config_identity_fails_before_live_activation(

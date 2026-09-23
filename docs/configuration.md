@@ -144,6 +144,8 @@ repos:
     branch: main
     path: ./.services/my-app
     release_manifest: deploy/release-manifest.json
+    # Optional for a slow detached checkout, for example on Windows:
+    staging_checkout_timeout: 1800
 ```
 
 | Field | Type | Default | Description |
@@ -152,10 +154,13 @@ repos:
 | `branch` | string | `main` | Branch to track |
 | `path` | string | *required* | Local path, relative to `haniel.yaml` location |
 | `release_manifest` | string | — | Repository-relative path to a `haniel.release.v1` deployment contract |
+| `staging_checkout_timeout` | integer (1–7200) | `300` | Limit for this repository's detached release checkout only |
 
 **Poll behavior**: Every `poll_interval` seconds, haniel runs `git fetch` and compares local HEAD with remote. If they differ, changes are detected.
 
 **Auto-clone**: During `haniel install` or first `haniel run`, missing repos are cloned automatically.
+
+`staging_checkout_timeout` applies only to `git worktree add --detach` while a manifest release target is staged. It does not alter `git_fetch_timeout` or the timeouts for other Git operations. A slow Windows checkout can therefore set `1800` for its one repository without widening the rest of the node.
 
 ### Migration-aware release manifests
 
@@ -228,6 +233,10 @@ python -m haniel.config.release_activation apply --config /path/to/haniel.yaml -
 ```
 
 The same state machine is used by an approved pull and by Haniel startup updates. Startup does not rerun legacy `post_pull` or start calls for manifest-owned services; the handover starts and verifies those services exactly once, then the remaining services continue in dependency order. The journal under `.haniel/deployments/` records `build`, `preflight`, `backing_up`, `migrating`, `starting`, `verifying`, `recovering`, and the terminal state. A repeated approval of the same successful target commit and release ID is a no-op. Haniel reports success only after every affected service is ready and every post-start verification succeeds. A recovered deployment still reports failure, preserving the distinction between release success and restored availability.
+
+### Handover wait note
+
+Pass `haniel handover --wait` explicitly for the caller's receipt window. It does not change the detached checkout timeout. `REQUEST_IN_PROGRESS` means the resident accepted the request but the caller stopped waiting before a terminal receipt; inspect the request's terminal journal/receipt rather than treating that message as the staging result. A terminal `PULL_TIMEOUT` is the actual checkout failure.
 
 ## `services`
 

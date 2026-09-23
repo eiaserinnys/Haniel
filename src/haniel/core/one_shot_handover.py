@@ -235,6 +235,7 @@ def probe_manifest_target(
         request_id=request_id,
         expected_operation=expected_operation,
         target_ref=target_ref,
+        staging_checkout_timeout=runtime.config.staging_checkout_timeout,
         service_environment_resolver=lambda manifest: (
             _resolve_bound_manifest_environment(
                 runner,
