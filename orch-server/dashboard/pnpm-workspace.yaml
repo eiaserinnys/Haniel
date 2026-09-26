@@ -1,0 +1,2 @@
+# msw is an indirect vitest dependency whose install script is unnecessary; pnpm 11 strict mode broke hub deploys on 260927.
+strictDepBuilds: false
