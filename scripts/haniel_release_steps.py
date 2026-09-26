@@ -36,19 +36,23 @@ class PreparationResult:
         error: str | None = None,
         *,
         duration_sec: float,
+        detail: str | None = None,
     ) -> None:
         duration = max(0.0, float(duration_sec))
-        self.steps.append(
-            {
-                "name": name,
-                "ok": ok,
-                "error": error,
-                "duration_sec": duration,
-            }
-        )
+        step: dict[str, object] = {
+            "name": name,
+            "ok": ok,
+            "error": error,
+            "duration_sec": duration,
+        }
+        if detail is not None:
+            step["detail"] = detail
+        self.steps.append(step)
         status = "ok" if ok else "failed"
+        detail_text = f" detail={detail}" if detail is not None else ""
         print(
-            f"[haniel-release] step={name} status={status} duration_sec={duration:.3f}",
+            f"[haniel-release] step={name} status={status} "
+            f"duration_sec={duration:.3f}{detail_text}",
             file=sys.stderr,
         )
         if not ok and self.error is None:
