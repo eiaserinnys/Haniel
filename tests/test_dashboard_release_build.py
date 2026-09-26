@@ -110,8 +110,7 @@ def test_unchanged_dashboard_reuses_dist_without_pnpm_and_seeds_node_modules(
         f"dashboard unchanged, reused dist from {active}"
     )
     assert all(
-        step["name"] not in {"pnpm_install", "pnpm_build"}
-        for step in result.steps
+        step["name"] not in {"pnpm_install", "pnpm_build"} for step in result.steps
     )
 
 
