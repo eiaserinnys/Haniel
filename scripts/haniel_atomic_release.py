@@ -83,9 +83,9 @@ def _detect_branch(source: Path) -> str:
     return branch if completed.returncode == 0 and branch else "main"
 
 
-def _active_release(release_root: Path) -> Path | None:
+def _active_release(release_root: Path, *, migrate_legacy: bool = True) -> Path | None:
     try:
-        return _inventory_active_release(release_root)
+        return _inventory_active_release(release_root, migrate_legacy=migrate_legacy)
     except ReleaseInventoryError as exc:
         raise ReleasePreparationError(str(exc)) from exc
 
@@ -327,11 +327,16 @@ def prepare(args: argparse.Namespace) -> PreparationResult:
     release_root = Path(args.release_root).resolve()
     bootstrap_python = Path(args.bootstrap_python).resolve(strict=True)
     result = PreparationResult()
+    result.pre_staged = args.no_switch
     releases = release_root / "releases"
 
     try:
         source_head = _resolve_commit(source, "HEAD")
-        active = _active_release(release_root)
+        active = _active_release(release_root, migrate_legacy=not args.no_switch)
+        if args.no_switch and active is None:
+            raise ReleasePreparationError(
+                "--no-switch requires an existing active release"
+            )
         if active is None:
             baseline = source_head
             if args.prefer_orig_head:
@@ -363,8 +368,19 @@ def prepare(args: argparse.Namespace) -> PreparationResult:
                 f"{baseline[:12]}."
             )
 
-        branch = _detect_branch(source)
-        target = _fetch_target(result, source, branch, args.max_git_failures)
+        if args.target_commit is not None:
+            if not COMMIT_PATTERN.fullmatch(args.target_commit):
+                raise ReleasePreparationError(
+                    "--target-commit must be a 40-character lowercase commit SHA"
+                )
+            target = _resolve_commit(source, args.target_commit)
+            if target != args.target_commit:
+                raise ReleasePreparationError(
+                    f"target commit resolved unexpectedly: {target}"
+                )
+        else:
+            branch = _detect_branch(source)
+            target = _fetch_target(result, source, branch, args.max_git_failures)
         result.target_commit = target
         active_commit = read_ready_commit(active)
         assert active_commit is not None
@@ -377,15 +393,17 @@ def prepare(args: argparse.Namespace) -> PreparationResult:
                 bootstrap_python=bootstrap_python,
                 min_free_mb=args.min_free_mb,
             )
-            previous = active
-            _switch_current(
-                result,
-                release_root,
-                candidate,
-                previous=previous,
-                retain_extra=args.retain_extra,
-            )
-            active = candidate
+            result.prepared_release = str(candidate)
+            if not args.no_switch:
+                previous = active
+                _switch_current(
+                    result,
+                    release_root,
+                    candidate,
+                    previous=previous,
+                    retain_extra=args.retain_extra,
+                )
+                active = candidate
         else:
             reuse_started_at = monotonic_time()
             result.add_step(
@@ -393,6 +411,7 @@ def prepare(args: argparse.Namespace) -> PreparationResult:
                 True,
                 duration_sec=elapsed_since(reuse_started_at),
             )
+            result.prepared_release = str(active)
 
         result.active_repo = str(active)
         result.active_python = str(_release_python(active))
@@ -403,7 +422,7 @@ def prepare(args: argparse.Namespace) -> PreparationResult:
         if result.error is None:
             result.error = str(exc)
         try:
-            active = _active_release(release_root)
+            active = _active_release(release_root, migrate_legacy=not args.no_switch)
         except ReleasePreparationError:
             active = None
         if active is not None:
@@ -429,11 +448,14 @@ def _non_negative_int(value: str) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("command", nargs="?", choices=("prepare",), default="prepare")
     parser.add_argument("--source")
     parser.add_argument("--release-root", required=True)
     parser.add_argument("--bootstrap-python")
     parser.add_argument("--result-json", required=True)
     parser.add_argument("--prune-only", action="store_true")
+    parser.add_argument("--no-switch", action="store_true")
+    parser.add_argument("--target-commit")
     parser.add_argument("--max-git-failures", type=_positive_int, default=3)
     parser.add_argument(
         "--retain-extra",
@@ -447,6 +469,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--prefer-orig-head", action="store_true")
     args = parser.parse_args()
+    if args.no_switch and args.prune_only:
+        parser.error("--no-switch cannot be combined with --prune-only")
     if not args.prune_only:
         if args.source is None:
             parser.error("--source is required unless --prune-only is used")

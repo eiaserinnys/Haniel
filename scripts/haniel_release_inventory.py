@@ -49,8 +49,8 @@ def _validate_active_release(release_root: Path, active: Path) -> Path:
     return active
 
 
-def active_release(release_root: Path) -> Path | None:
-    """Read current.txt, migrating and removing a validated legacy link."""
+def active_release(release_root: Path, *, migrate_legacy: bool = True) -> Path | None:
+    """Read the active release, optionally migrating the legacy link."""
     legacy = release_root / LEGACY_CURRENT_POINTER
     try:
         active_name = read_release_pointer(release_root)
@@ -62,7 +62,9 @@ def active_release(release_root: Path) -> Path | None:
             release_root,
             release_root / "releases" / active_name,
         )
-        if legacy.exists() or legacy.is_symlink() or is_reparse_leaf(legacy):
+        if migrate_legacy and (
+            legacy.exists() or legacy.is_symlink() or is_reparse_leaf(legacy)
+        ):
             if not is_reparse_leaf(legacy):
                 raise ReleaseInventoryError(
                     f"legacy current pointer is not a reparse leaf: {legacy}"
@@ -81,6 +83,8 @@ def active_release(release_root: Path) -> Path | None:
     except OSError as exc:
         raise ReleaseInventoryError(f"current pointer is broken: {exc}") from exc
     active = _validate_active_release(release_root, active)
+    if not migrate_legacy:
+        return active
     try:
         write_release_pointer(release_root, active.name)
         remove_reparse_leaf(legacy)

@@ -487,8 +487,15 @@ class TestUpdateRepoAction:
             "actions": [{"value": "update:haniel"}],
             "user": {"id": "U12345"},
         }
-        handler(ack=ack, body=body, client=MagicMock(), logger=MagicMock())
-        assert len(controller.self_update_calls) == 1
+        with patch("haniel.integrations.slack_bot.threading.Thread") as thread_class:
+            handler(ack=ack, body=body, client=MagicMock(), logger=MagicMock())
+
+        assert thread_class.call_args.kwargs == {
+            "target": controller.approve_self_update,
+            "daemon": True,
+            "name": "app-home-self-update",
+        }
+        thread_class.return_value.start.assert_called_once_with()
 
 
 class TestActionErrorHandling:
