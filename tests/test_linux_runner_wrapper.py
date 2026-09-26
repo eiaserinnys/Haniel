@@ -42,6 +42,7 @@ def _run_wrapper(
     helper_dir.mkdir()
     for name in (
         "haniel_atomic_release.py",
+        "haniel_dashboard_build.py",
         "haniel_release_fs.py",
         "haniel_release_inventory.py",
         "haniel_release_policy.py",

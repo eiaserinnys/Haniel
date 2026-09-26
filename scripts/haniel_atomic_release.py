@@ -8,12 +8,12 @@ wrappers can execute it before the candidate Haniel package is installed.
 from __future__ import annotations
 
 import argparse
-import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+from haniel_dashboard_build import prepare_dashboard
 from haniel_release_fs import (
     LEGACY_CURRENT_POINTER,
     ReleaseFilesystemError,
@@ -120,6 +120,8 @@ def _prepare_release(
     commit: str,
     bootstrap_python: Path,
     min_free_mb: int,
+    active_release: Path | None = None,
+    active_commit: str | None = None,
 ) -> Path:
     release_started_at = monotonic_time()
     if not COMMIT_PATTERN.fullmatch(commit):
@@ -184,28 +186,15 @@ def _prepare_release(
                 "haniel.integrations.mcp_compatibility",
             ],
         )
-        dashboard = release / "dashboard"
-        if dashboard.is_dir():
-            pnpm_started_at = monotonic_time()
-            pnpm = shutil.which("pnpm")
-            if pnpm is None:
-                result.add_step(
-                    "pnpm_install",
-                    False,
-                    "pnpm not found",
-                    duration_sec=elapsed_since(pnpm_started_at),
-                )
-                raise ReleasePreparationError(result.error or "pnpm not found")
-            _run_step(
-                result,
-                "pnpm_install",
-                [pnpm, "--dir", str(dashboard), "install"],
-            )
-            _run_step(
-                result,
-                "pnpm_build",
-                [pnpm, "--dir", str(dashboard), "build"],
-            )
+        prepare_dashboard(
+            result,
+            source=source,
+            release_root=releases.parent,
+            release=release,
+            commit=commit,
+            active_release=active_release,
+            active_commit=active_commit,
+        )
         ready_started_at = monotonic_time()
         try:
             _write_json_atomic(
@@ -392,6 +381,8 @@ def prepare(args: argparse.Namespace) -> PreparationResult:
                 commit=target,
                 bootstrap_python=bootstrap_python,
                 min_free_mb=args.min_free_mb,
+                active_release=active,
+                active_commit=active_commit,
             )
             result.prepared_release = str(candidate)
             if not args.no_switch:

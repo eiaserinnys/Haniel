@@ -73,6 +73,7 @@ def _copy_release_helpers(destination: Path) -> None:
     destination.mkdir(exist_ok=True)
     for name in (
         "haniel_atomic_release.py",
+        "haniel_dashboard_build.py",
         "haniel_release_fs.py",
         "haniel_release_inventory.py",
         "haniel_release_policy.py",
@@ -93,7 +94,9 @@ def _copy_release_sources(destination: Path) -> None:
     )
 
 
-def _create_source_repo(tmp_path: Path) -> tuple[Path, str, str]:
+def _create_source_repo(
+    tmp_path: Path, *, dashboard_changed: bool = False
+) -> tuple[Path, str, str]:
     assert REAL_GIT is not None
     git_env = os.environ.copy()
     git_env.update(
@@ -121,6 +124,17 @@ def _create_source_repo(tmp_path: Path) -> tuple[Path, str, str]:
 
     (seed / "version.txt").write_text("target\n", encoding="utf-8")
     _copy_release_sources(seed)
+    if dashboard_changed:
+        (seed / "dashboard" / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "haniel-dashboard-test",
+                    "private": True,
+                    "version": "changed",
+                }
+            ),
+            encoding="utf-8",
+        )
     _run([REAL_GIT, "add", "."], cwd=seed, env=git_env)
     _run([REAL_GIT, "commit", "-m", "target"], cwd=seed, env=git_env)
     _run([REAL_GIT, "push", "origin", "main"], cwd=seed, env=git_env)
@@ -219,6 +233,16 @@ if [[ "$*" == *" build"* && "${{HANIEL_TEST_FAIL_STAGE:-}}" == "ui_build" && "$f
   printf 'injected UI build failure\\n' >&2
   exit 43
 fi
+dashboard_dir=""
+previous=""
+for argument in "$@"; do
+  if [[ "$previous" == "--dir" ]]; then dashboard_dir="$argument"; fi
+  previous="$argument"
+done
+if [[ "$*" == *" build"* ]]; then
+  mkdir -p "$dashboard_dir/dist"
+  printf 'dashboard\\n' > "$dashboard_dir/dist/index.html"
+fi
 exit 0
 """,
     )
@@ -233,6 +257,10 @@ def _prepare_previous_release(
     shutil.copy2(fake_python, previous / ".venv" / "bin" / "python")
     shutil.copy2(REPO_ROOT / "haniel-runner.sh", previous / "haniel-runner.sh")
     _copy_release_helpers(previous / "scripts")
+    (previous / "dashboard" / "dist").mkdir(parents=True)
+    (previous / "dashboard" / "dist" / "index.html").write_text(
+        "dashboard\n", encoding="utf-8"
+    )
     (previous / ".haniel-release-ready.json").write_text(
         json.dumps({"version": 1, "commit": previous_commit}), encoding="utf-8"
     )
@@ -460,7 +488,9 @@ def _run_atomic_wrapper(
     old_release_count: int = 0,
     child_delay: float = 0.0,
 ) -> AtomicRun:
-    source, previous_commit, target_commit = _create_source_repo(tmp_path)
+    source, previous_commit, target_commit = _create_source_repo(
+        tmp_path, dashboard_changed=fail_stage == "ui_build"
+    )
     fetch_log = tmp_path / "fetches"
     launch_log = tmp_path / "launches"
     webhook_log = tmp_path / "webhooks"
