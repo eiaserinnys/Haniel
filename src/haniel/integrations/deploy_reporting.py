@@ -184,6 +184,11 @@ class DeployReporter:
         ):
             await self._send_json(result)
             return
+        dependent_readiness_failures = (
+            list(dict.fromkeys(result.get("dependent_readiness_failures", [])))
+            if isinstance(result, dict)
+            else []
+        )
 
         if self._snapshot_handler is None:
             await self.send_result(
@@ -221,6 +226,7 @@ class DeployReporter:
             duration_ms,
             orchestrator_attempt_id,
             connection_generation,
+            dependent_readiness_failures,
         )
 
     async def send_settled_result(
@@ -230,6 +236,7 @@ class DeployReporter:
         duration_ms: int,
         orchestrator_attempt_id: str,
         connection_generation: str,
+        dependent_readiness_failures: list[str] | None = None,
     ) -> None:
         status = "failed" if operation_error else "success"
         error = operation_error
@@ -240,6 +247,7 @@ class DeployReporter:
             status,
             error=error,
             duration_ms=duration_ms,
+            dependent_readiness_failures=dependent_readiness_failures,
         )
         await self.send_reconciliation(
             snapshot,
@@ -257,19 +265,23 @@ class DeployReporter:
         *,
         error: str | None = None,
         duration_ms: int | None = None,
+        dependent_readiness_failures: list[str] | None = None,
     ) -> None:
-        await self._send_json(
-            {
-                "type": "deploy_result",
-                "deploy_id": deploy_id,
-                "node_id": self._node_id,
-                "status": status,
-                "error": error,
-                "duration_ms": duration_ms,
-                "orchestrator_attempt_id": orchestrator_attempt_id,
-                "connection_generation": connection_generation,
-            }
-        )
+        payload = {
+            "type": "deploy_result",
+            "deploy_id": deploy_id,
+            "node_id": self._node_id,
+            "status": status,
+            "error": error,
+            "duration_ms": duration_ms,
+            "orchestrator_attempt_id": orchestrator_attempt_id,
+            "connection_generation": connection_generation,
+        }
+        if dependent_readiness_failures:
+            payload["dependent_readiness_failures"] = list(
+                dict.fromkeys(dependent_readiness_failures)
+            )
+        await self._send_json(payload)
 
     async def send_reconciliation(
         self,

@@ -332,6 +332,7 @@ class DeployAttemptCoordinator(
             status=msg.status,
             error=msg.error,
             duration_ms=msg.duration_ms,
+            dependent_readiness_failures=msg.dependent_readiness_failures,
         )
         if result.get("status") == "ignored":
             await self._handle_ignored_report(
@@ -342,7 +343,8 @@ class DeployAttemptCoordinator(
                 report_type="deploy_result",
                 summary=(
                     f"status={msg.status} duration_ms={msg.duration_ms} "
-                    f"error={msg.error!r}"
+                    f"dependent_readiness_failures="
+                    f"{msg.dependent_readiness_failures!r} error={msg.error!r}"
                 ),
             )
             return

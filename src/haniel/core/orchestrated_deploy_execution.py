@@ -56,7 +56,7 @@ def execute_approved_plan(
             raise ApprovalRevalidationError(
                 "approval without a probe must use execute mode"
             )
-        _execute_normal(
+        return _execute_normal(
             runner,
             approval,
             repo,
@@ -64,11 +64,10 @@ def execute_approved_plan(
             _target,
             progress_callback=progress_callback,
         )
-        return None
     plan = validate_approved_plan(planner, probe, approval)
     if plan.mode == "evidence_recovery":
         return build_recovery_evidence(approval, probe, plan)
-    _execute_retry(
+    return _execute_retry(
         runner,
         approval,
         probe,
@@ -77,7 +76,6 @@ def execute_approved_plan(
         branch,
         progress_callback=progress_callback,
     )
-    return None
 
 
 def assert_remote_target(runner: "ServiceRunner", repo: str, target_head: str) -> None:
@@ -100,13 +98,13 @@ def _execute_normal(
     target: str,
     *,
     progress_callback: ProgressCallback | None,
-) -> None:
+) -> dict[str, list[str]] | None:
     state = runner._snapshot_repo_runtime(repo)
     if not state.pending_changes:
         repo_path = runner.config_dir / state.config.path
         current_head = get_head(repo_path)
         if current_head == target and repo not in runner._startup_repo_locks:
-            return
+            return None
         if current_head != target:
             pending_changes = get_pending_changes(repo_path, state.config.branch)
             if not pending_changes.get("commits"):
@@ -133,7 +131,7 @@ def _execute_normal(
         if progress_callback is not None
         else {}
     )
-    runner.trigger_pull(
+    result = runner.trigger_pull(
         repo,
         auto=False,
         orchestrator_attempt_id=approval["orchestrator_attempt_id"],
@@ -142,6 +140,9 @@ def _execute_normal(
         target_head=target,
         **progress_kwargs,
     )
+    if isinstance(result, dict) and result.get("dependent_readiness_failures"):
+        return result
+    return None
 
 
 def validate_approved_plan(
@@ -173,7 +174,7 @@ def _execute_retry(
     branch: str,
     *,
     progress_callback: ProgressCallback | None,
-) -> None:
+) -> dict[str, list[str]] | None:
     state = runner._snapshot_repo_runtime(repo)
     repo_path = runner.config_dir / state.config.path
     current_head = get_head(repo_path)
@@ -204,7 +205,7 @@ def _execute_retry(
             if progress_callback is not None
             else {}
         )
-        runner.trigger_pull(
+        result = runner.trigger_pull(
             repo,
             auto=False,
             orchestrator_attempt_id=approval["orchestrator_attempt_id"],
@@ -213,6 +214,9 @@ def _execute_retry(
             target_head=target,
             **progress_kwargs,
         )
+        if isinstance(result, dict) and result.get("dependent_readiness_failures"):
+            return result
+        return None
         return
 
     if not lock.acquire(blocking=False):
@@ -236,8 +240,8 @@ def _execute_retry(
             suppressed = affected
             runner._suppress_pending_restarts(suppressed)
             runner._require_config_generation(config_snapshot)
-            runner._restart_after_pull_legacy(repo, affected)
-            return
+            failures = runner._restart_after_pull_legacy(repo, affected)
+            return {"dependent_readiness_failures": failures} if failures else None
         reload_plan = runner._prepare_current_manifest_config(repo)
         config_snapshot, state = runner._snapshot_repo_and_config(repo)
         repo_path = runner.config_dir / state.config.path
@@ -274,7 +278,7 @@ def _execute_retry(
             else {}
         )
         runner._require_config_generation(config_snapshot)
-        run_manifest_deployment(
+        dependent_readiness_failures = run_manifest_deployment(
             runner,
             repo,
             affected,
@@ -287,6 +291,11 @@ def _execute_retry(
             config_snapshot=config_snapshot,
             **config_kwargs,
             **progress_kwargs,
+        )
+        return (
+            {"dependent_readiness_failures": dependent_readiness_failures}
+            if dependent_readiness_failures
+            else None
         )
     finally:
         runner._release_restart_suppression(suppressed)

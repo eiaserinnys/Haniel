@@ -178,6 +178,19 @@ class TestDeployResult:
         )
         assert msg.error is None
         assert msg.duration_ms == 8200
+        assert msg.dependent_readiness_failures == []
+
+    def test_success_with_dependent_readiness_failures(self):
+        msg = DeployResult(
+            deploy_id="d1",
+            node_id="n1",
+            status="success",
+            dependent_readiness_failures=["bot", "keke"],
+            orchestrator_attempt_id="a1",
+            connection_generation="g1",
+        )
+
+        assert msg.dependent_readiness_failures == ["bot", "keke"]
 
     def test_failed_with_error(self):
         msg = DeployResult(

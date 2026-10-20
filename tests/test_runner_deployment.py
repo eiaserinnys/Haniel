@@ -223,6 +223,59 @@ def configure_processes(runner: ServiceRunner, events: list[str]) -> dict[str, b
     return running
 
 
+def test_dependent_readiness_timeout_keeps_attempt_success_and_journal_observation(
+    manifest_runner: tuple[ServiceRunner, Path, str],
+) -> None:
+    runner, _repo, previous_head = manifest_runner
+    snapshot = runner._snapshot_config_state()
+    replacement = snapshot.config.model_copy(deep=True)
+    replacement.repos["other"] = RepoConfig(
+        url="git@github.com:test/other.git", path="./other"
+    )
+    replacement.services["bot"] = ServiceConfig(run="bot", repo="other", after=["app"])
+    runner._replace_config_snapshot(replacement, snapshot.generation)
+    events: list[str] = []
+    running = {"app": True, "bot": True}
+
+    def stop(name: str) -> bool:
+        events.append(f"stop:{name}")
+        running[name] = False
+        return True
+
+    def start(name: str) -> bool:
+        events.append(f"start:{name}")
+        running[name] = True
+        return True
+
+    runner.process_manager.is_running = MagicMock(
+        side_effect=lambda name: running[name]
+    )
+    runner.process_manager.stop_service = MagicMock(side_effect=stop)
+    runner._blocked_start_dependencies = MagicMock(return_value=[])
+    runner._start_service = MagicMock(side_effect=start)
+    runner.process_manager.wait_for_ready = MagicMock(
+        side_effect=lambda name, timeout=None: (
+            events.append(f"ready:{name}") or name != "bot"
+        )
+    )
+    runner.execute_hook = MagicMock(return_value=True)
+
+    with patch(
+        "haniel.core.runner_deployment.subprocess_command_runner",
+        return_value=lambda _command, _environment: None,
+    ):
+        failures = run_manifest_deployment(runner, "app", ["app", "bot"], previous_head)
+
+    journal = DeploymentStateStore(runner.config_dir / ".haniel" / "deployments").read(
+        "app"
+    )
+    assert journal is not None
+    assert journal["state"] == "success"
+    assert journal["dependent_readiness_failures"] == ["bot"]
+    assert failures == ["bot"]
+    assert "start:bot" in events
+
+
 @contextmanager
 def resident_owner(
     runner: ServiceRunner, instance_id: str = "owner-1"

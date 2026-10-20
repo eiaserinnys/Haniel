@@ -289,7 +289,11 @@ class DeployAttemptStore(
         status: str,
         error: str | None,
         duration_ms: int | None,
+        dependent_readiness_failures: list[str] | None = None,
     ) -> dict[str, Any]:
+        failures_json = json.dumps(
+            list(dict.fromkeys(dependent_readiness_failures or []))
+        )
         async with self._mutation_lock:
             try:
                 attempt = await self._current_attempt(
@@ -308,8 +312,15 @@ class DeployAttemptStore(
                 elif status == "failed":
                     await self._db.execute(
                         "UPDATE deploy_attempts SET result_status = ?, result_error = ?, "
-                        "duration_ms = ? WHERE orchestrator_attempt_id = ?",
-                        (status, error, duration_ms, orchestrator_attempt_id),
+                        "duration_ms = ?, dependent_readiness_failures_json = ? "
+                        "WHERE orchestrator_attempt_id = ?",
+                        (
+                            status,
+                            error,
+                            duration_ms,
+                            failures_json,
+                            orchestrator_attempt_id,
+                        ),
                     )
                     result = await self._fail_attempt_unlocked(
                         attempt={**attempt, "duration_ms": duration_ms},
@@ -321,8 +332,9 @@ class DeployAttemptStore(
                 else:
                     await self._db.execute(
                         "UPDATE deploy_attempts SET result_status = 'success', result_error = NULL, "
-                        "duration_ms = ? WHERE orchestrator_attempt_id = ?",
-                        (duration_ms, orchestrator_attempt_id),
+                        "duration_ms = ?, dependent_readiness_failures_json = ? "
+                        "WHERE orchestrator_attempt_id = ?",
+                        (duration_ms, failures_json, orchestrator_attempt_id),
                     )
                     attempt = await self._attempt(orchestrator_attempt_id)
                     result = await self._finalize_normal_if_ready(attempt)
