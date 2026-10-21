@@ -22,6 +22,7 @@ from .api import create_api_routes
 from .auth import AuthConfig, create_auth_routes
 from .event_store import EventStore
 from .hub import WebSocketHub
+from .log_redaction import install_query_token_redaction
 from .node_registry import NodeRegistry
 from .push import NullPushService, PushService, RelayPushService
 
@@ -261,6 +262,7 @@ def create_app() -> Starlette:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    install_query_token_redaction()
 
     token = os.environ.get("TOKEN")
     if not token:
