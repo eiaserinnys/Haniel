@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import signal
 import subprocess
 from unittest.mock import MagicMock, mock_open, patch
@@ -10,6 +11,8 @@ import pytest
 
 from haniel.platform import get_platform_handler
 from haniel.platform.posix import PosixHandler
+
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX process group semantics")
 
 
 def _completed(stdout: str, returncode: int = 0) -> subprocess.CompletedProcess:

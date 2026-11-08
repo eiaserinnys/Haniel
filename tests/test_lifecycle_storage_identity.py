@@ -22,6 +22,7 @@ def _ps_result(stdout: str, returncode: int = 0) -> subprocess.CompletedProcess:
 
 def test_darwin_reads_ps_start_time() -> None:
     with (
+        patch("haniel.core.lifecycle_storage.os.name", "posix"),
         patch("haniel.core.lifecycle_storage.sys.platform", "darwin"),
         patch(
             "haniel.core.lifecycle_storage.subprocess.run",
@@ -43,6 +44,7 @@ def test_darwin_reads_ps_start_time() -> None:
 
 def test_darwin_ps_single_digit_day_with_padding() -> None:
     with (
+        patch("haniel.core.lifecycle_storage.os.name", "posix"),
         patch("haniel.core.lifecycle_storage.sys.platform", "darwin"),
         patch(
             "haniel.core.lifecycle_storage.subprocess.run",
@@ -58,6 +60,7 @@ def test_darwin_ps_parsing_ignores_process_locale(monkeypatch) -> None:
     monkeypatch.setenv("LANG", "ko_KR.UTF-8")
     monkeypatch.setenv("LC_ALL", "ko_KR.UTF-8")
     with (
+        patch("haniel.core.lifecycle_storage.os.name", "posix"),
         patch("haniel.core.lifecycle_storage.sys.platform", "darwin"),
         patch(
             "haniel.core.lifecycle_storage.subprocess.run",
@@ -82,6 +85,7 @@ def test_darwin_ps_parsing_ignores_process_locale(monkeypatch) -> None:
 )
 def test_darwin_ps_failure_returns_none(result: subprocess.CompletedProcess) -> None:
     with (
+        patch("haniel.core.lifecycle_storage.os.name", "posix"),
         patch("haniel.core.lifecycle_storage.sys.platform", "darwin"),
         patch("haniel.core.lifecycle_storage.subprocess.run", return_value=result),
     ):
@@ -98,6 +102,7 @@ def test_darwin_ps_failure_returns_none(result: subprocess.CompletedProcess) -> 
 )
 def test_darwin_ps_exception_returns_none(error: Exception) -> None:
     with (
+        patch("haniel.core.lifecycle_storage.os.name", "posix"),
         patch("haniel.core.lifecycle_storage.sys.platform", "darwin"),
         patch("haniel.core.lifecycle_storage.subprocess.run", side_effect=error),
     ):
@@ -118,6 +123,7 @@ def test_darwin_ps_exception_returns_none(error: Exception) -> None:
 )
 def test_darwin_ps_malformed_output_returns_none(stdout: str) -> None:
     with (
+        patch("haniel.core.lifecycle_storage.os.name", "posix"),
         patch("haniel.core.lifecycle_storage.sys.platform", "darwin"),
         patch(
             "haniel.core.lifecycle_storage.subprocess.run",
@@ -130,6 +136,7 @@ def test_darwin_ps_malformed_output_returns_none(stdout: str) -> None:
 def test_linux_proc_stat_takes_priority_over_ps() -> None:
     stat_line = "4242 (worker) S " + " ".join(str(value) for value in range(1, 21))
     with (
+        patch("haniel.core.lifecycle_storage.os.name", "posix"),
         patch("haniel.core.lifecycle_storage.sys.platform", "linux"),
         patch("haniel.core.lifecycle_storage.Path.read_text", return_value=stat_line),
         patch("haniel.core.lifecycle_storage.subprocess.run") as run,
@@ -146,6 +153,7 @@ def test_linux_proc_stat_takes_priority_over_ps() -> None:
 )
 def test_missing_procfs_falls_back_to_ps(error: Exception) -> None:
     with (
+        patch("haniel.core.lifecycle_storage.os.name", "posix"),
         patch("haniel.core.lifecycle_storage.sys.platform", "linux"),
         patch("haniel.core.lifecycle_storage.Path.read_text", side_effect=error),
         patch(
@@ -160,6 +168,7 @@ def test_missing_procfs_falls_back_to_ps(error: Exception) -> None:
 
 def test_short_proc_stat_falls_back_to_ps() -> None:
     with (
+        patch("haniel.core.lifecycle_storage.os.name", "posix"),
         patch("haniel.core.lifecycle_storage.sys.platform", "linux"),
         patch(
             "haniel.core.lifecycle_storage.Path.read_text",
