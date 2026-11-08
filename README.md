@@ -104,6 +104,10 @@ on Intel Macs. The installer and the generated LaunchAgent append these
 directories to the tool search PATH, but tools are never installed
 automatically.
 
+The hooks in `haniel.yaml.example` use Windows venv paths. The shared hook
+runner does not translate them for macOS, so write POSIX paths such as
+`./.venv/bin/pip` in macOS service hooks.
+
 Service registration installs a user LaunchAgent at
 `~/Library/LaunchAgents/com.haniel.<name>.plist`. It is not loaded during
 installation; after logging in as the same user, start and manage it with:

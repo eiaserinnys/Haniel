@@ -353,11 +353,13 @@ def test_conf_values_are_data_not_shell_code(tmp_path: Path) -> None:
 def test_conf_value_keeps_equals_sign(tmp_path: Path) -> None:
     lines = _conf_lines(tmp_path)
     lines.append("WEBHOOK_URL=https://hooks.example.test/services/a=b")
+    lines.append("CONFIG=haniel=yaml.yaml")
 
     result, _, launches = _run_wrapper(tmp_path, [0], conf_text="\n".join(lines) + "\n")
 
     assert result.returncode == 0, result.stderr
-    assert len(launches) == 1
+    expected = f"0|active-self-head={'a' * 40}|-m haniel.cli run {tmp_path / 'haniel=yaml.yaml'}"
+    assert launches == [expected]
 
 
 def test_wrapper_refuses_to_launch_without_valid_release(tmp_path: Path) -> None:
