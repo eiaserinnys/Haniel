@@ -437,7 +437,7 @@ class TestFinalizer:
         from haniel.installer.state import InstallState
 
         mock_system.return_value = "Windows"
-        mock_which.side_effect = lambda cmd: {
+        mock_which.side_effect = lambda cmd, path=None: {
             "python": r"C:\Python312\python.exe",
         }.get(cmd)
         mock_run.return_value = MagicMock(returncode=0, stderr="")
@@ -489,7 +489,7 @@ class TestFinalizer:
 
         mock_system.return_value = "Windows"
         # Python is found but WinSW is not (no bin/winsw.exe, not in PATH)
-        mock_which.side_effect = lambda cmd: {
+        mock_which.side_effect = lambda cmd, path=None: {
             "python": r"C:\Python312\python.exe",
         }.get(cmd)
 
@@ -515,7 +515,7 @@ class TestFinalizer:
         from haniel.installer.state import InstallState
 
         mock_system.return_value = "Windows"
-        mock_which.side_effect = lambda cmd: {
+        mock_which.side_effect = lambda cmd, path=None: {
             "python": r"C:\Python312\python.exe",
         }.get(cmd)
 
@@ -543,11 +543,11 @@ class TestFinalizer:
 
     @patch("platform.system")
     def test_register_service_non_windows(self, mock_system, finalizer_config):
-        """Test service registration logs instructions on non-Windows/non-Linux (e.g. macOS)."""
+        """Test service registration logs instructions on unsupported OSes (e.g. FreeBSD)."""
         from haniel.installer.finalize import Finalizer
         from haniel.installer.state import InstallState
 
-        mock_system.return_value = "Darwin"
+        mock_system.return_value = "FreeBSD"
 
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir)
@@ -1722,7 +1722,7 @@ class TestFinalizerExtended:
         from haniel.installer.state import InstallState
 
         mock_system.return_value = "Windows"
-        mock_which.side_effect = lambda cmd: {
+        mock_which.side_effect = lambda cmd, path=None: {
             "python": r"C:\Python312\python.exe",
         }.get(cmd)
         mock_run.return_value = MagicMock(returncode=0, stderr="")
@@ -1800,7 +1800,7 @@ class TestFinalizerExtended:
         )
 
         mock_system.return_value = "Windows"
-        mock_which.side_effect = lambda cmd: {
+        mock_which.side_effect = lambda cmd, path=None: {
             "python": r"C:\Python312\python.exe",
         }.get(cmd)
         mock_run.return_value = MagicMock(returncode=0, stderr="")
@@ -1907,7 +1907,7 @@ class TestServiceAccount:
     @patch("platform.system", return_value="Windows")
     @patch(
         "shutil.which",
-        side_effect=lambda cmd: {
+        side_effect=lambda cmd, path=None: {
             "python": r"C:\Python312\python.exe",
         }.get(cmd),
     )
@@ -1942,7 +1942,7 @@ class TestServiceAccount:
     @patch("platform.system", return_value="Windows")
     @patch(
         "shutil.which",
-        side_effect=lambda cmd: {
+        side_effect=lambda cmd, path=None: {
             "python": r"C:\Python312\python.exe",
         }.get(cmd),
     )
@@ -1974,7 +1974,7 @@ class TestServiceAccount:
     @patch("platform.system", return_value="Windows")
     @patch(
         "shutil.which",
-        side_effect=lambda cmd: {
+        side_effect=lambda cmd, path=None: {
             "python": r"C:\Python312\python.exe",
         }.get(cmd),
     )
@@ -2011,7 +2011,7 @@ class TestServiceAccount:
     @patch("platform.system", return_value="Windows")
     @patch(
         "shutil.which",
-        side_effect=lambda cmd: {
+        side_effect=lambda cmd, path=None: {
             "python": r"C:\Python312\python.exe",
         }.get(cmd),
     )

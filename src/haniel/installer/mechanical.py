@@ -20,8 +20,8 @@ import logging
 import os
 import platform
 import re
-import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -29,9 +29,25 @@ from ..config import HanielConfig
 from ..core.release_staging import initial_clone_path
 from ..core.safety_redaction import bounded_redact_text
 from .state import InstallState
-from .utils import detect_tool_paths, find_winsw
+from .utils import detect_tool_paths, find_tool, find_winsw, get_tool_environment
 
 logger = logging.getLogger(__name__)
+
+
+def _darwin_python_command() -> str | None:
+    """Return Haniel's own interpreter on Darwin when it is executable.
+
+    A macOS install has no guaranteed ``python`` alias and Haniel already
+    runs on a chosen interpreter, so requirement checks and venv creation
+    reuse that interpreter instead of picking an arbitrary system python3.
+    """
+    executable = sys.executable
+    if not executable:
+        return None
+    path = Path(executable)
+    if not path.is_file() or not os.access(path, os.X_OK):
+        return None
+    return str(path)
 
 
 class MechanicalInstaller:
@@ -129,21 +145,36 @@ class MechanicalInstaller:
         # Check Python
         if "python" in requirements:
             try:
+                if platform.system() == "Darwin":
+                    python_command = _darwin_python_command()
+                    if python_command is None:
+                        raise RuntimeError(
+                            "Haniel's Python interpreter is not executable: "
+                            f"{sys.executable}"
+                        )
+                else:
+                    python_command = "python"
                 result = subprocess.run(
-                    ["python", "--version"],
+                    [python_command, "--version"],
                     capture_output=True,
                     text=True,
                     timeout=10,
                 )
                 version = result.stdout.strip().replace("Python ", "")
                 passes, msg = self._check_version(version, str(requirements["python"]))
+                error_hint = ""
+                if not passes and platform.system() == "Darwin":
+                    error_hint = (
+                        " Install a newer Python via: brew install python"
+                        " (then reinstall Haniel with that Python)"
+                    )
                 results.append(
                     {
                         "name": "python",
                         "installed": passes,
                         "version": version,
                         "required": str(requirements["python"]),
-                        "message": msg,
+                        "message": msg + error_hint,
                     }
                 )
             except Exception as e:
@@ -157,17 +188,21 @@ class MechanicalInstaller:
 
         # Check Node.js
         if "node" in requirements:
-            _node_install_hint = (
-                "winget install OpenJS.NodeJS.LTS (or re-run install-haniel.ps1)"
-                if platform.system() == "Windows"
-                else "sudo apt install nodejs (or use nvm: https://github.com/nvm-sh/nvm)"
-            )
+            if platform.system() == "Windows":
+                _node_install_hint = (
+                    "winget install OpenJS.NodeJS.LTS (or re-run install-haniel.ps1)"
+                )
+            elif platform.system() == "Darwin":
+                _node_install_hint = "brew install node"
+            else:
+                _node_install_hint = "sudo apt install nodejs (or use nvm: https://github.com/nvm-sh/nvm)"
             try:
                 result = subprocess.run(
                     ["node", "--version"],
                     capture_output=True,
                     text=True,
                     timeout=10,
+                    env=get_tool_environment(),
                 )
                 version = result.stdout.strip().lstrip("v")
                 passes, msg = self._check_version(version, str(requirements["node"]))
@@ -220,7 +255,7 @@ class MechanicalInstaller:
 
         # Check Claude Code
         if "claude-code" in requirements and requirements["claude-code"]:
-            claude_path = shutil.which("claude")
+            claude_path = find_tool("claude")
             results.append(
                 {
                     "name": "claude-code",
@@ -288,6 +323,7 @@ class MechanicalInstaller:
                             capture_output=True,
                             text=True,
                             timeout=120,
+                            env=get_tool_environment(),
                         )
                         if result.returncode != 0:
                             error_msg = bounded_redact_text(
@@ -374,6 +410,7 @@ class MechanicalInstaller:
                     capture_output=True,
                     text=True,
                     timeout=300,
+                    env=get_tool_environment(),
                 )
                 if result.returncode != 0:
                     error_msg = bounded_redact_text(
@@ -410,6 +447,7 @@ class MechanicalInstaller:
             capture_output=True,
             text=True,
             timeout=30,
+            env=get_tool_environment(),
         )
         if origin.returncode != 0 or origin.stdout.strip() != repo.url:
             raise RuntimeError(
@@ -429,6 +467,7 @@ class MechanicalInstaller:
             capture_output=True,
             text=True,
             timeout=120,
+            env=get_tool_environment(),
         )
         if branch.returncode != 0:
             raise RuntimeError(
@@ -493,9 +532,21 @@ class MechanicalInstaller:
         """
         try:
             if not env_path.exists():
+                if platform.system() == "Darwin":
+                    python_command = _darwin_python_command()
+                    if python_command is None:
+                        message = (
+                            "Haniel's Python interpreter is not executable: "
+                            f"{sys.executable}"
+                        )
+                        logger.error(message)
+                        self.state.mark_failed(f"environments:{name}", message)
+                        return False
+                else:
+                    python_command = "python"
                 logger.info(f"Creating venv: {name} at {env_path}")
                 subprocess.run(
-                    ["python", "-m", "venv", str(env_path)],
+                    [python_command, "-m", "venv", str(env_path)],
                     check=True,
                     timeout=60,
                 )
@@ -702,11 +753,18 @@ class MechanicalInstaller:
 
         Ensures tools like node, pnpm, npx are findable even when running
         under an administrator PowerShell that lacks the user's PATH entries.
+        The installer tool environment supplies Homebrew directories on
+        Darwin, and detected tool directories are appended once.
         """
-        env = os.environ.copy()
-        tool_paths = detect_tool_paths(commands)
-        if tool_paths:
-            env["PATH"] = env.get("PATH", "") + os.pathsep + os.pathsep.join(tool_paths)
+        env = get_tool_environment()
+        entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry]
+        seen = set(entries)
+        for tool_path in detect_tool_paths(commands):
+            if tool_path in seen:
+                continue
+            entries.append(tool_path)
+            seen.add(tool_path)
+        env["PATH"] = os.pathsep.join(entries)
         return env
 
     def create_static_configs(self) -> None:

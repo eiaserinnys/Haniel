@@ -13,12 +13,12 @@ haniel doesn't care what each phase does - it just coordinates the flow.
 from __future__ import annotations
 
 import logging
-import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from ..config import HanielConfig
 from .state import InstallState, InstallPhase
+from .utils import find_tool
 
 if TYPE_CHECKING:
     from .finalize import Finalizer
@@ -102,7 +102,7 @@ class InstallOrchestrator:
         Returns:
             True if Claude Code is installed
         """
-        claude_path = shutil.which("claude")
+        claude_path = find_tool("claude")
         if claude_path:
             logger.info(f"Claude Code found at: {claude_path}")
             return True

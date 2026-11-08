@@ -88,6 +88,40 @@ Haniel watches the repo, pulls changes, runs the build hook, and restarts the se
 irm https://raw.githubusercontent.com/eiaserinnys/haniel/main/install-haniel.ps1 | iex
 ```
 
+### Install on macOS
+
+Install Python 3.11 or newer and git first, plus Node, pnpm or Claude Code
+when the services need them. There is no automatic tool installer. Install
+Haniel into the virtual environment of the Python you choose:
+
+```bash
+python3 -m venv ~/.local/haniel-venv
+~/.local/haniel-venv/bin/pip install haniel
+```
+
+Homebrew lives in `/opt/homebrew/bin` on Apple Silicon and in `/usr/local/bin`
+on Intel Macs. The installer and the generated LaunchAgent append these
+directories to the tool search PATH, but tools are never installed
+automatically.
+
+The hooks in `haniel.yaml.example` use Windows venv paths. The shared hook
+runner does not translate them for macOS, so write POSIX paths such as
+`./.venv/bin/pip` in macOS service hooks.
+
+Service registration installs a user LaunchAgent at
+`~/Library/LaunchAgents/com.haniel.<name>.plist`. It is not loaded during
+installation; after logging in as the same user, start and manage it with:
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.haniel.runner.plist
+launchctl print gui/$(id -u)/com.haniel.runner
+launchctl kickstart -k gui/$(id -u)/com.haniel.runner
+launchctl bootout gui/$(id -u)/com.haniel.runner
+```
+
+With self-update enabled the agent runs `haniel-runner.sh` from the Haniel
+repo, which prepares a release and relaunches on exit codes 10 and 11.
+
 ### Connect Claude Code
 
 ```json

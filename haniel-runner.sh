@@ -1,45 +1,79 @@
 #!/usr/bin/env bash
-# haniel-runner.sh - outer loop wrapper for Haniel self-update on Linux/systemd.
+# haniel-runner.sh - outer loop wrapper for Haniel self-update.
 #
-# Register this script as the systemd service ExecStart, not `python -m haniel`
-# directly. Exit code 10 from Haniel means "self-update approved"; this wrapper
-# then prepares a commit-specific release, atomically switches `current.txt`, writes
-# the self-update result marker, and launches Haniel again.
+# Use this script as the Linux systemd service ExecStart or as the macOS
+# LaunchAgent ProgramArguments entry, not `python -m haniel` directly. Exit code
+# 10 from Haniel means "self-update approved"; this wrapper then prepares a
+# commit-specific release, atomically switches `current.txt`, writes the
+# self-update result marker, and launches Haniel again.
+#
+# The script stays compatible with the Bash 3.2 that ships with macOS. An
+# optional argument selects the runner configuration file so a re-executed
+# release wrapper keeps the original installation root.
 
 set -u
 unset NODE_CHANNEL_FD
 
-ROOT_DIR="$(pwd)"
-CONF_PATH="$ROOT_DIR/haniel-runner.conf"
-RUNNER_SCRIPT_PATH="$(readlink -f "$0")"
+if (( $# > 1 )); then
+  echo "Usage: haniel-runner.sh [runner-conf-path]" >&2
+  exit 1
+fi
+
+if (( $# == 1 )); then
+  case "$1" in
+    /*) CONF_PATH="$1" ;;
+    *) CONF_PATH="$(pwd)/$1" ;;
+  esac
+  conf_dir="$(dirname "$CONF_PATH")"
+  ROOT_DIR="$(cd "$conf_dir" 2>/dev/null && pwd -P)"
+  if [[ -z "$ROOT_DIR" ]]; then
+    ROOT_DIR="$conf_dir"
+  fi
+  CONF_PATH="$ROOT_DIR/$(basename "$CONF_PATH")"
+else
+  ROOT_DIR="$(pwd)"
+  CONF_PATH="$ROOT_DIR/haniel-runner.conf"
+fi
 
 if [[ ! -f "$CONF_PATH" ]]; then
   echo "Configuration file not found: $CONF_PATH" >&2
   exit 1
 fi
 
-declare -A CONFIG
-while IFS='=' read -r raw_key raw_value; do
+WEBHOOK_URL=""
+HANIEL_REPO=""
+HANIEL_RELEASE_ROOT=".local/haniel-releases"
+HANIEL_RELEASE_RETAIN_EXTRA=3
+HANIEL_RELEASE_MIN_FREE_MB=5120
+CONFIG_FILE=""
+MAX_GIT_FAILURES=3
+PYTHON_BIN_CONFIG=""
+SELF_UPDATE_EXIT_TIMEOUT=60
+CRASH_RESTART_BASE_SECONDS=5
+CRASH_RESTART_MAX_SECONDS=60
+CRASH_RESET_SECONDS=300
+
+while IFS='=' read -r raw_key raw_value || [[ -n "$raw_key" ]]; do
   key="$(printf '%s' "$raw_key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   value="$(printf '%s' "${raw_value:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   if [[ -z "$key" || "$key" == \#* ]]; then
     continue
   fi
-  CONFIG["$key"]="$value"
+  case "$key" in
+    WEBHOOK_URL) WEBHOOK_URL="$value" ;;
+    HANIEL_REPO) HANIEL_REPO="$value" ;;
+    HANIEL_RELEASE_ROOT) HANIEL_RELEASE_ROOT="${value:-.local/haniel-releases}" ;;
+    HANIEL_RELEASE_RETAIN_EXTRA) HANIEL_RELEASE_RETAIN_EXTRA="${value:-3}" ;;
+    HANIEL_RELEASE_MIN_FREE_MB) HANIEL_RELEASE_MIN_FREE_MB="${value:-5120}" ;;
+    CONFIG) CONFIG_FILE="$value" ;;
+    MAX_GIT_FAILURES) MAX_GIT_FAILURES="${value:-3}" ;;
+    PYTHON_BIN) PYTHON_BIN_CONFIG="$value" ;;
+    SELF_UPDATE_EXIT_TIMEOUT) SELF_UPDATE_EXIT_TIMEOUT="${value:-60}" ;;
+    CRASH_RESTART_BASE_SECONDS) CRASH_RESTART_BASE_SECONDS="${value:-5}" ;;
+    CRASH_RESTART_MAX_SECONDS) CRASH_RESTART_MAX_SECONDS="${value:-60}" ;;
+    CRASH_RESET_SECONDS) CRASH_RESET_SECONDS="${value:-300}" ;;
+  esac
 done < "$CONF_PATH"
-
-WEBHOOK_URL="${CONFIG[WEBHOOK_URL]:-}"
-HANIEL_REPO="${CONFIG[HANIEL_REPO]:-}"
-HANIEL_RELEASE_ROOT="${CONFIG[HANIEL_RELEASE_ROOT]:-.local/haniel-releases}"
-HANIEL_RELEASE_RETAIN_EXTRA="${CONFIG[HANIEL_RELEASE_RETAIN_EXTRA]:-3}"
-HANIEL_RELEASE_MIN_FREE_MB="${CONFIG[HANIEL_RELEASE_MIN_FREE_MB]:-5120}"
-CONFIG_FILE="${CONFIG[CONFIG]:-}"
-MAX_GIT_FAILURES="${CONFIG[MAX_GIT_FAILURES]:-3}"
-PYTHON_BIN_CONFIG="${CONFIG[PYTHON_BIN]:-}"
-SELF_UPDATE_EXIT_TIMEOUT="${CONFIG[SELF_UPDATE_EXIT_TIMEOUT]:-60}"
-CRASH_RESTART_BASE_SECONDS="${CONFIG[CRASH_RESTART_BASE_SECONDS]:-5}"
-CRASH_RESTART_MAX_SECONDS="${CONFIG[CRASH_RESTART_MAX_SECONDS]:-60}"
-CRASH_RESET_SECONDS="${CONFIG[CRASH_RESET_SECONDS]:-300}"
 
 if [[ -z "$HANIEL_REPO" || -z "$CONFIG_FILE" ]]; then
   echo "HANIEL_REPO and CONFIG must be set in haniel-runner.conf" >&2
@@ -69,6 +103,39 @@ if [[ ! "$HANIEL_RELEASE_MIN_FREE_MB" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
+path_has_dir() {
+  local dir="$1"
+  case ":${PATH:-}:" in
+    *":$dir:"*) return 0 ;;
+  esac
+  return 1
+}
+
+append_path_dir() {
+  local dir="$1"
+  if [[ -z "$dir" || ! -d "$dir" ]]; then
+    return
+  fi
+  if path_has_dir "$dir"; then
+    return
+  fi
+  PATH="${PATH:+$PATH:}$dir"
+  export PATH
+}
+
+if [[ "$(uname -s 2>/dev/null)" == "Darwin" ]]; then
+  append_path_dir /opt/homebrew/bin
+  append_path_dir /usr/local/bin
+  if [[ -n "${HOME:-}" ]]; then
+    append_path_dir "$HOME/.local/bin"
+    append_path_dir "$HOME/.npm-global/bin"
+  fi
+  append_path_dir /usr/bin
+  append_path_dir /bin
+  append_path_dir /usr/sbin
+  append_path_dir /sbin
+fi
+
 resolve_path() {
   local path="$1"
   if [[ "$path" = /* ]]; then
@@ -81,7 +148,6 @@ resolve_path() {
 REPO_PATH="$(resolve_path "$HANIEL_REPO")"
 RELEASE_ROOT="$(resolve_path "$HANIEL_RELEASE_ROOT")"
 CONFIG_PATH="$(resolve_path "$CONFIG_FILE")"
-RELEASE_HELPER="$(dirname "$RUNNER_SCRIPT_PATH")/scripts/haniel_atomic_release.py"
 
 detect_python() {
   if [[ -n "$PYTHON_BIN_CONFIG" ]]; then
@@ -104,6 +170,22 @@ if [[ -z "$PYTHON_BIN" || ! -x "$PYTHON_BIN" ]]; then
   echo "Python executable not found. Set PYTHON_BIN in haniel-runner.conf." >&2
   exit 1
 fi
+
+canonical_path() {
+  "$PYTHON_BIN" - "$1" <<'PY'
+import pathlib
+import sys
+
+print(pathlib.Path(sys.argv[1]).resolve())
+PY
+}
+
+if ! RUNNER_SCRIPT_PATH="$(canonical_path "$0")" || [[ -z "$RUNNER_SCRIPT_PATH" ]]; then
+  echo "Failed to resolve the runner script path: $0" >&2
+  exit 1
+fi
+
+RELEASE_HELPER="$(dirname "$RUNNER_SCRIPT_PATH")/scripts/haniel_atomic_release.py"
 if [[ ! -f "$RELEASE_HELPER" ]]; then
   echo "Atomic release helper not found: $RELEASE_HELPER" >&2
   exit 1
@@ -173,7 +255,10 @@ load_preparation_result() {
     ACTIVE_COMMIT=""
     return 1
   fi
-  mapfile -t fields < <("$PYTHON_BIN" - "$PREPARATION_RESULT_PATH" <<'PY'
+  fields=()
+  while IFS= read -r field; do
+    fields+=("$field")
+  done < <("$PYTHON_BIN" - "$PREPARATION_RESULT_PATH" <<'PY'
 import json
 import sys
 
@@ -346,7 +431,7 @@ report_release_prune_result() {
   if [[ "$exit_code" -ne 0 ]]; then
     send_webhook "Atomic release cleanup process exited with code $exit_code." "warning"
   fi
-  if ! prune_warnings="$($ACTIVE_PYTHON - "$PRUNE_RESULT_PATH" 2>/dev/null <<'PY'
+  if ! prune_warnings="$("$ACTIVE_PYTHON" - "$PRUNE_RESULT_PATH" 2>/dev/null <<'PY'
 import json
 import sys
 
@@ -470,10 +555,13 @@ while true; do
 
     active_runner="$ACTIVE_REPO/haniel-runner.sh"
     if [[ "$PREPARATION_SWITCHED" == "true" && -f "$active_runner" ]]; then
-      active_runner_path="$(readlink -f "$active_runner")"
+      if ! active_runner_path="$(canonical_path "$active_runner")"; then
+        echo "Failed to resolve the release runner path: $active_runner" >&2
+        exit 1
+      fi
       if [[ "$RUNNER_SCRIPT_PATH" != "$active_runner_path" ]]; then
         echo "[haniel-runner] Re-executing current release wrapper."
-        exec "$active_runner"
+        exec /bin/bash "$active_runner" "$CONF_PATH"
       fi
     fi
   fi
