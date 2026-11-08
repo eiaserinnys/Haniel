@@ -106,6 +106,8 @@ class PosixHandler(PlatformHandler):
         except (OSError, subprocess.SubprocessError):
             return None
 
+        if result.returncode != 0:
+            return None
         command = result.stdout.strip()
         return command or None
 
@@ -227,7 +229,7 @@ class PosixHandler(PlatformHandler):
     def _get_listening_pids_from_lsof(port: int) -> set[int]:
         try:
             result = subprocess.run(
-                ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                ["lsof", "-nP", "-a", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
                 capture_output=True,
                 text=True,
                 timeout=2,
@@ -235,37 +237,53 @@ class PosixHandler(PlatformHandler):
             )
         except (OSError, subprocess.SubprocessError):
             return set()
+        if result.returncode != 0:
+            return set()
 
         pids: set[int] = set()
         for line in result.stdout.splitlines():
             try:
-                pids.add(int(line.strip()))
+                pid = int(line.strip())
             except ValueError:
-                pass
+                continue
+            if pid > 0:
+                pids.add(pid)
         return pids
 
     @staticmethod
     def _get_process_tree(root_pid: int) -> set[int]:
         tree = {root_pid}
+        try:
+            result = subprocess.run(
+                ["ps", "-axo", "pid=,ppid="],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return tree
+        if result.returncode != 0:
+            return tree
+
+        children: dict[int, list[int]] = {}
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if len(fields) != 2:
+                continue
+            try:
+                pid = int(fields[0])
+                parent = int(fields[1])
+            except ValueError:
+                continue
+            if pid <= 0 or parent <= 0:
+                continue
+            children.setdefault(parent, []).append(pid)
+
         frontier = [root_pid]
         while frontier:
-            pid = frontier.pop()
-            try:
-                result = subprocess.run(
-                    ["ps", "-o", "pid=", "--ppid", str(pid)],
-                    capture_output=True,
-                    text=True,
-                    timeout=2,
-                    check=False,
-                )
-            except (OSError, subprocess.SubprocessError):
-                continue
-
-            for line in result.stdout.splitlines():
-                try:
-                    child = int(line.strip())
-                except ValueError:
-                    continue
+            parent = frontier.pop()
+            for child in children.get(parent, []):
                 if child not in tree:
                     tree.add(child)
                     frontier.append(child)
