@@ -138,9 +138,10 @@ def test_linux_proc_stat_takes_priority_over_ps() -> None:
     with (
         patch("haniel.core.lifecycle_storage.os.name", "posix"),
         patch("haniel.core.lifecycle_storage.sys.platform", "linux"),
-        patch("haniel.core.lifecycle_storage.Path.read_text", return_value=stat_line),
+        patch("haniel.core.lifecycle_storage.Path") as path_class,
         patch("haniel.core.lifecycle_storage.subprocess.run") as run,
     ):
+        path_class.return_value.read_text.return_value = stat_line
         identity = process_start_identity(4242)
 
     assert identity == "proc-start-ticks:19"
@@ -155,12 +156,13 @@ def test_missing_procfs_falls_back_to_ps(error: Exception) -> None:
     with (
         patch("haniel.core.lifecycle_storage.os.name", "posix"),
         patch("haniel.core.lifecycle_storage.sys.platform", "linux"),
-        patch("haniel.core.lifecycle_storage.Path.read_text", side_effect=error),
+        patch("haniel.core.lifecycle_storage.Path") as path_class,
         patch(
             "haniel.core.lifecycle_storage.subprocess.run",
             return_value=_ps_result("Sun Nov  8 01:48:43 2026\n"),
         ),
     ):
+        path_class.return_value.read_text.side_effect = error
         identity = process_start_identity(5)
 
     assert identity == "ps-start-utc:2026-11-08T01:48:43"
@@ -170,15 +172,13 @@ def test_short_proc_stat_falls_back_to_ps() -> None:
     with (
         patch("haniel.core.lifecycle_storage.os.name", "posix"),
         patch("haniel.core.lifecycle_storage.sys.platform", "linux"),
-        patch(
-            "haniel.core.lifecycle_storage.Path.read_text",
-            return_value="4242 (worker) S 1 2 3",
-        ),
+        patch("haniel.core.lifecycle_storage.Path") as path_class,
         patch(
             "haniel.core.lifecycle_storage.subprocess.run",
             return_value=_ps_result("Sun Nov  8 01:48:43 2026\n"),
         ),
     ):
+        path_class.return_value.read_text.return_value = "4242 (worker) S 1 2 3"
         identity = process_start_identity(4242)
 
     assert identity == "ps-start-utc:2026-11-08T01:48:43"
