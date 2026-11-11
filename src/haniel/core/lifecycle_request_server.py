@@ -61,18 +61,23 @@ class LifecycleRequestServer:
             self.process_pending_once()
             self._stopping.wait(self.poll_interval)
 
-    def _visible_request_ids(self) -> set[str]:
+    def _visible_request_names(self) -> set[str]:
         try:
             names = os.listdir(self.control.requests_dir)
-        except FileNotFoundError:
+        except OSError:
             return set()
-        return {name.removesuffix(".json") for name in names if name.endswith(".json")}
+        return {name for name in names if name.endswith(".json")}
 
     def process_pending_once(self) -> None:
         """Process every visible request while isolating each file and result write."""
-        request_ids = self._visible_request_ids()
-        self._terminal_request_ids.intersection_update(request_ids)
-        for request_id in sorted(request_ids - self._terminal_request_ids):
+        names = self._visible_request_names()
+        self._terminal_request_ids.intersection_update(
+            name.removesuffix(".json") for name in names
+        )
+        for name in sorted(names):
+            request_id = name.removesuffix(".json")
+            if request_id in self._terminal_request_ids:
+                continue
             try:
                 self.handle_request(request_id)
             except Exception as error:
