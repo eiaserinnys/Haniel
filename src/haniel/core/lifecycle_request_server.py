@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from typing import TYPE_CHECKING, Any
 
@@ -40,6 +41,7 @@ class LifecycleRequestServer:
         self.poll_interval = poll_interval
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
+        self._terminal_request_ids: set[str] = set()
 
     def start(self) -> None:
         self._thread = threading.Thread(
@@ -59,10 +61,18 @@ class LifecycleRequestServer:
             self.process_pending_once()
             self._stopping.wait(self.poll_interval)
 
+    def _visible_request_ids(self) -> set[str]:
+        try:
+            names = os.listdir(self.control.requests_dir)
+        except FileNotFoundError:
+            return set()
+        return {name.removesuffix(".json") for name in names if name.endswith(".json")}
+
     def process_pending_once(self) -> None:
         """Process every visible request while isolating each file and result write."""
-        for path in sorted(self.control.requests_dir.glob("*.json")):
-            request_id = path.stem
+        request_ids = self._visible_request_ids()
+        self._terminal_request_ids.intersection_update(request_ids)
+        for request_id in sorted(request_ids - self._terminal_request_ids):
             try:
                 self.handle_request(request_id)
             except Exception as error:
@@ -78,6 +88,7 @@ class LifecycleRequestServer:
     def handle_request(self, request_id: str) -> None:
         """Process one queued request synchronously through the resident owner."""
         if self.control.read_result(request_id).get("terminal"):
+            self._terminal_request_ids.add(request_id)
             return
         path = self.control.request_path(request_id)
         try:
