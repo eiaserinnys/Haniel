@@ -803,3 +803,94 @@ def test_lifecycle_server_close_bounds_worker_wait(tmp_path: Path) -> None:
     assert server._stopping.is_set()
     assert thread.join_timeout == DEFAULT_THREAD_JOIN_TIMEOUT_SECONDS
     assert thread.is_alive() is True
+
+
+def _read_result_ids(read_result: MagicMock) -> list[str]:
+    return [call.args[0] for call in read_result.call_args_list]
+
+
+def test_terminal_requests_are_not_reread_on_later_polls(tmp_path: Path) -> None:
+    control = LifecycleControl(tmp_path / "haniel.yaml")
+    control.submit_request(
+        "done-1", {"kind": "stop", "expected_instance": "instance-a"}
+    )
+    control.ack("done-1", "terminal", {"ok": True, "request_id": "done-1"})
+    server = LifecycleRequestServer(
+        control=control,
+        runner=MagicMock(),
+        instance_id="instance-a",
+    )
+
+    with patch.object(control, "read_result", wraps=control.read_result) as probe:
+        server.process_pending_once()
+        assert _read_result_ids(probe) == ["done-1"]
+
+        probe.reset_mock()
+        server.process_pending_once()
+        assert _read_result_ids(probe) == []
+
+
+def test_pending_request_is_read_every_poll_until_it_becomes_terminal(
+    tmp_path: Path,
+) -> None:
+    control = LifecycleControl(tmp_path / "haniel.yaml")
+    control.submit_request(
+        "runtime-1",
+        {
+            "kind": "runtime-handover",
+            "repo": "app",
+            "target_ref": "origin/main",
+            "expected_operation": "upgrade",
+            "executor_instance": "instance-a",
+        },
+    )
+    server = LifecycleRequestServer(
+        control=control,
+        runner=MagicMock(),
+        instance_id="instance-a",
+    )
+
+    with patch.object(control, "read_result", wraps=control.read_result) as probe:
+        server.process_pending_once()
+        server.process_pending_once()
+        assert _read_result_ids(probe) == ["runtime-1", "runtime-1"]
+
+        control.ack("runtime-1", "terminal", {"ok": True, "request_id": "runtime-1"})
+        probe.reset_mock()
+
+        server.process_pending_once()
+        assert _read_result_ids(probe) == ["runtime-1"]
+
+        probe.reset_mock()
+        server.process_pending_once()
+        assert _read_result_ids(probe) == []
+
+
+def test_vanished_request_file_is_forgotten(tmp_path: Path) -> None:
+    control = LifecycleControl(tmp_path / "haniel.yaml")
+    control.submit_request(
+        "done-1", {"kind": "stop", "expected_instance": "instance-a"}
+    )
+    control.ack("done-1", "terminal", {"ok": True, "request_id": "done-1"})
+    server = LifecycleRequestServer(
+        control=control,
+        runner=MagicMock(),
+        instance_id="instance-a",
+    )
+
+    with patch.object(control, "read_result", wraps=control.read_result) as probe:
+        server.process_pending_once()
+        probe.reset_mock()
+
+        server.process_pending_once()
+        assert _read_result_ids(probe) == []
+
+        control.request_path("done-1").unlink()
+        server.process_pending_once()
+        assert _read_result_ids(probe) == []
+
+        control.submit_request(
+            "done-1", {"kind": "stop", "expected_instance": "instance-a"}
+        )
+        server.process_pending_once()
+        assert _read_result_ids(probe) == ["done-1"]
