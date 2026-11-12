@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -103,6 +104,27 @@ def _write_pending(tmp_path: Path, deploy_id: str, started_at: str) -> None:
     )
 
 
+def _write_deployment_record(
+    tmp_path: Path,
+    *,
+    state: str,
+    target_head: str,
+    previous_head: str | None = None,
+) -> None:
+    path = tmp_path / ".haniel" / "deployments" / "appA.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "state": state,
+                "target_head": target_head,
+                "previous_head": previous_head,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 class TestHandleDeployApprovalNonSelf:
     def test_unknown_repo_raises(self, tmp_path: Path) -> None:
         runner = _build_runner(tmp_path)
@@ -128,21 +150,146 @@ class TestHandleDeployApprovalNonSelf:
         )
         assert result is None
 
-    def test_no_pending_changes_still_enters_execution_path(
+    def test_no_pending_manifest_success_record_returns_without_pull(
         self,
         tmp_path: Path,
     ) -> None:
-        """Memory state is not proof; settled HEAD remains the success authority."""
+        """A settled manifest target is a no-op only when the journal proves it."""
+        runner = _build_runner(tmp_path)
+        state = runner._repo_states["appA"]
+        state.config.release_manifest = "release.json"
+        state.pending_changes = None
+        runner.trigger_pull = MagicMock()  # type: ignore[assignment]
+        _write_deployment_record(tmp_path, state="success", target_head="abc1234")
+        store = runner._deployment_state_store()
+        store.read = MagicMock(wraps=store.read)  # type: ignore[method-assign]
+        runner._deployment_state_store = MagicMock(  # type: ignore[method-assign]
+            return_value=store
+        )
+        with (
+            patch(
+                "haniel.core.orchestrated_deploy_execution.get_head",
+                return_value="abc1234",
+            ),
+            patch(
+                "haniel.core.orchestrated_deploy_execution.run_manifest_deployment"
+            ) as manifest,
+        ):
+            result = runner._handle_deploy_approval(_approval())
+
+        assert result is None
+        store.read.assert_called_once_with("appA")
+        runner.trigger_pull.assert_not_called()
+        manifest.assert_not_called()
+
+    def test_no_pending_manifest_failed_record_redeploys_with_record_previous_head(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        runner = _build_runner(tmp_path)
+        state = runner._repo_states["appA"]
+        state.config.release_manifest = "release.json"
+        state.pending_changes = None
+        runner.trigger_pull = MagicMock()  # type: ignore[assignment]
+        _write_deployment_record(
+            tmp_path,
+            state="failed",
+            target_head="abc1234",
+            previous_head="deadbeef",
+        )
+        with (
+            patch(
+                "haniel.core.orchestrated_deploy_execution.get_head",
+                return_value="abc1234",
+            ),
+            patch(
+                "haniel.core.orchestrated_deploy_execution.run_manifest_deployment"
+            ) as manifest,
+        ):
+            result = runner._handle_deploy_approval(_approval())
+
+        assert result is None
+        manifest.assert_called_once_with(
+            runner,
+            "appA",
+            ["svc-a"],
+            "deadbeef",
+            orchestrator_attempt_id="orch-1",
+            node_id="node-a",
+            branch="main",
+            expected_operation="upgrade",
+            request_id="orch-1",
+            config_snapshot=ANY,
+        )
+        runner.trigger_pull.assert_not_called()
+
+    def test_no_pending_manifest_without_record_fails_without_side_effects(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        runner = _build_runner(tmp_path)
+        state = runner._repo_states["appA"]
+        state.config.release_manifest = "release.json"
+        state.pending_changes = None
+        runner.trigger_pull = MagicMock()  # type: ignore[assignment]
+        with (
+            patch(
+                "haniel.core.orchestrated_deploy_execution.get_head",
+                return_value="abc1234",
+            ),
+            patch(
+                "haniel.core.orchestrated_deploy_execution.run_manifest_deployment"
+            ) as manifest,
+            pytest.raises(
+                ApprovalRevalidationError, match="no durable success evidence"
+            ),
+        ):
+            runner._handle_deploy_approval(_approval())
+
+        runner.trigger_pull.assert_not_called()
+        manifest.assert_not_called()
+
+    def test_no_pending_legacy_repo_restarts_affected_services(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A settled legacy checkout restarts services instead of a silent no-op."""
         runner = _build_runner(tmp_path)
         runner._repo_states["appA"].pending_changes = None
         runner.trigger_pull = MagicMock()  # type: ignore[assignment]
+        runner._restart_after_pull_legacy = MagicMock()  # type: ignore[assignment]
         with patch(
             "haniel.core.orchestrated_deploy_execution.get_head",
             return_value="abc1234",
         ):
             result = runner._handle_deploy_approval(_approval())
+
         runner.trigger_pull.assert_not_called()
+        runner._restart_after_pull_legacy.assert_called_once_with("appA", ["svc-a"])
         assert result is None
+
+    def test_legacy_approval_activates_approved_target_not_branch_tip(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        runner = _build_runner(tmp_path)
+        runner._repo_states["appA"].pending_changes = {"commits": ["abc1234 fix"]}
+        runner._pull_repo = MagicMock(  # type: ignore[assignment]
+            return_value=(True, [])
+        )
+        runner._restart_after_pull_legacy = MagicMock()  # type: ignore[assignment]
+        with (
+            patch(
+                "haniel.core.runner.activate_repo_target", return_value=[]
+            ) as activate,
+            patch("haniel.core.runner.get_head", return_value="abc1234"),
+        ):
+            result = runner._handle_deploy_approval(_approval())
+
+        assert result is None
+        runner._pull_repo.assert_not_called()
+        activate.assert_called_once_with(tmp_path / "appA", "abc1234", strategy="merge")
+        runner._restart_after_pull_legacy.assert_called_once_with("appA", ["svc-a"])
 
     def test_missing_approved_target_is_typed_revalidation_failure(
         self, tmp_path: Path
