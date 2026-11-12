@@ -49,6 +49,7 @@ from .git import (
     GitError,
     activate_repo_target,
     fetch_repo,
+    get_changed_paths,
     get_head,
     get_pending_changes,
     get_remote_head,
@@ -134,6 +135,24 @@ _OPERATIONAL_DEPLOYMENT_ERRORS = (
     ReleaseManifestActivationRequired,
     StableDeploymentError,
 )
+
+# Branches of the haniel repo that a node never runs. A commit touching only
+# these does not change what the node executes, so it must not open a
+# self-update that blocks the node's other deployments.
+SELF_UPDATE_UNUSED_PATH_PREFIXES = (
+    "orch-server/",
+    "relay/",
+    "docs/",
+    "examples/",
+    ".github/",
+    "tests/",
+)
+
+
+def is_self_update_unused_path(path: str) -> bool:
+    """Return True when a changed path cannot change what a node runs."""
+    normalized = path.replace("\\", "/")
+    return normalized.startswith(SELF_UPDATE_UNUSED_PATH_PREFIXES)
 
 
 class CyclicDependencyError(Exception):
@@ -425,6 +444,10 @@ class ServiceRunner:
         # Deduplication: track last notified pending_changes hash per repo
         # to avoid spamming Slack on every poll when content hasn't changed.
         self._last_pending_hash: dict[str, str] = {}
+
+        # Last self-repo remote head skipped because it only touched paths a
+        # node never runs; keeps the info log to one line per head.
+        self._self_update_unused_head: str | None = None
 
         # Track whether startup post_pull hooks have been considered.
         self._post_pull_executed = False
@@ -3206,6 +3229,10 @@ class ServiceRunner:
                 pending_changes = runtime.pending_changes
                 repo_changed = False
                 should_notify_pending = False
+                # Range the pending evidence was built from, used to tell
+                # whether the change can affect what this node runs.
+                pending_scope_base: str | None = None
+                pending_scope_target: str | None = None
 
                 if current_head != runtime.last_head:
                     # External pull or other process advanced HEAD
@@ -3234,6 +3261,8 @@ class ServiceRunner:
                             repo_path, previous_head, current_head
                         )
                         should_notify_pending = True
+                        pending_scope_base = previous_head
+                        pending_scope_target = current_head
                     else:
                         pending_changes = get_pending_changes(
                             path=repo_path,
@@ -3243,6 +3272,9 @@ class ServiceRunner:
                                 if self_uses_active_release
                                 else {}
                             ),
+                        )
+                        pending_scope_base = (
+                            current_head if self_uses_active_release else "HEAD"
                         )
                 else:
                     # current == last_head, check if remote has new commits
@@ -3264,6 +3296,9 @@ class ServiceRunner:
                                 else {}
                             ),
                         )
+                        pending_scope_base = (
+                            current_head if self_uses_active_release else "HEAD"
+                        )
                     else:
                         # A self checkout can already match origin while the running
                         # process still uses the previous code. Preserve the restart
@@ -3274,6 +3309,25 @@ class ServiceRunner:
                             and self._state.self_update_pending
                         ):
                             pending_changes = None
+
+                # A self-repo commit that only touches branches this node
+                # never runs is not a self update; keep it from blocking the
+                # node's other deployments without any approval round trip.
+                if (
+                    name == config_snapshot.self_repo
+                    and pending_changes
+                    and pending_scope_base is not None
+                    and self._only_unused_self_update_paths(
+                        repo_path,
+                        runtime.config.branch,
+                        pending_scope_base,
+                        pending_scope_target,
+                    )
+                ):
+                    if name in changed:
+                        changed.remove(name)
+                    repo_changed = False
+                    pending_changes = None
 
                 observation = RepoObservation(
                     generation=runtime.generation,
@@ -3339,6 +3393,36 @@ class ServiceRunner:
                 )
 
         return changed
+
+    def _only_unused_self_update_paths(
+        self,
+        repo_path: Path,
+        branch: str,
+        local_ref: str,
+        target_head: str | None,
+    ) -> bool:
+        """True when every changed path is outside the node's own code."""
+        paths = get_changed_paths(
+            path=repo_path,
+            branch=branch,
+            local_ref=local_ref,
+        )
+        if not paths or not all(is_self_update_unused_path(item) for item in paths):
+            return False
+        if target_head is None:
+            try:
+                target_head = get_remote_head(repo_path, branch)
+            except GitError:
+                target_head = None
+        if target_head is not None and target_head != self._self_update_unused_head:
+            self._self_update_unused_head = target_head
+            logger.info(
+                "Self repo changes at %s only touch node-unused paths (%s); "
+                "not reporting a self update",
+                target_head[:8],
+                ", ".join(sorted(paths)),
+            )
+        return True
 
     def _notify_orchestrator_change(self, name: str) -> None:
         if not self._orch_client:

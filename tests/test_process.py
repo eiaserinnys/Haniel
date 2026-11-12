@@ -9,6 +9,7 @@ Tests cover:
 """
 
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -428,6 +429,64 @@ class TestProcessManager:
         process_manager.platform.is_port_owned_by_process_tree.return_value = True
 
         assert process_manager._check_ready_condition(condition, managed) is True
+
+    def test_ready_condition_met_after_timeout_records_ready(
+        self, process_manager: ProcessManager
+    ):
+        """A condition that only matches past the limit still marks ready."""
+        process = MagicMock()
+        process.poll.return_value = None
+        managed = ManagedProcess(
+            name="test",
+            config=ServiceConfig(run="echo hello", ready="port:4306"),
+            process=process,
+            ready_event=threading.Event(),
+        )
+        process_manager._processes["test"] = managed
+        process_manager.ready_recheck_interval = 0.01
+        process_manager.health_manager = MagicMock()
+        process_manager._check_ready_condition = MagicMock(
+            side_effect=[False, False, False, True]
+        )
+        on_ready = MagicMock()
+
+        process_manager._ready_monitor_loop(
+            managed,
+            ReadyCondition.parse("port:4306"),
+            0.02,
+            on_ready,
+        )
+
+        assert managed.ready_event.is_set()
+        process_manager.health_manager.record_ready.assert_called_once_with("test")
+        on_ready.assert_called_once()
+
+    def test_ready_monitor_stops_when_process_exits_after_timeout(
+        self, process_manager: ProcessManager
+    ):
+        """A process that exits after the limit is not marked ready."""
+        process = MagicMock()
+        process.poll.side_effect = [None, None, 1]
+        managed = ManagedProcess(
+            name="test",
+            config=ServiceConfig(run="echo hello", ready="port:4306"),
+            process=process,
+            ready_event=threading.Event(),
+        )
+        process_manager._processes["test"] = managed
+        process_manager.ready_recheck_interval = 0.01
+        process_manager.health_manager = MagicMock()
+        process_manager._check_ready_condition = MagicMock(return_value=False)
+
+        process_manager._ready_monitor_loop(
+            managed,
+            ReadyCondition.parse("port:4306"),
+            0.0,
+            None,
+        )
+
+        assert not managed.ready_event.is_set()
+        process_manager.health_manager.record_ready.assert_not_called()
 
     @pytest.mark.skipif(
         not DUMMY_SERVER.exists(),

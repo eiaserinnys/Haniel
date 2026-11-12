@@ -107,6 +107,7 @@ class ProcessManager:
     STALE_INSTANCE_GRACE_TIMEOUT = 5  # seconds
     IMMEDIATE_EXIT_WINDOW = 1.0  # seconds
     POLL_INTERVAL = 0.1  # seconds
+    READY_RECHECK_INTERVAL = 10  # seconds between checks past the ready limit
 
     def __init__(
         self,
@@ -131,6 +132,7 @@ class ProcessManager:
         self.platform = get_platform_handler()
         self.stale_instance_grace_timeout = self.STALE_INSTANCE_GRACE_TIMEOUT
         self.immediate_exit_window = self.IMMEDIATE_EXIT_WINDOW
+        self.ready_recheck_interval = self.READY_RECHECK_INTERVAL
 
         self._processes: dict[str, ManagedProcess] = {}
         self._lock = threading.Lock()
@@ -648,7 +650,12 @@ class ProcessManager:
         timeout: float,
         on_ready: Callable[[], None] | None,
     ) -> None:
-        """Monitor loop for ready condition."""
+        """Monitor loop for ready condition.
+
+        Past the ready limit the same condition keeps being checked at a
+        slower interval, so a slow service is still recorded ready when its
+        condition finally matches.
+        """
         start_time = time.time()
 
         # Special handling for delay condition
@@ -681,33 +688,83 @@ class ProcessManager:
                 )
                 managed._ready_callback_added = True
 
-            # Wait for log pattern or timeout
-            if log_ready_event.wait(timeout=timeout):
-                if managed.ready_event:
-                    managed.ready_event.set()
-                self.health_manager.record_ready(managed.name)
-                if on_ready:
-                    on_ready()
-            return
+            deadline = start_time + timeout
+            warned = False
+            while True:
+                now = time.time()
+                if now >= deadline and not warned:
+                    self._warn_ready_timeout(managed, timeout)
+                    warned = True
+                wait_for = (
+                    self.ready_recheck_interval
+                    if now >= deadline
+                    else min(self.ready_recheck_interval, max(deadline - now, 0.0))
+                )
+                if log_ready_event.wait(timeout=wait_for):
+                    self._record_ready(managed, start_time, timeout, on_ready)
+                    return
+                if self._ready_monitor_should_stop(managed):
+                    return
 
         # Polling-based conditions
-        while time.time() - start_time < timeout:
-            # Check if process is still running
-            if managed.process and managed.process.poll() is not None:
-                return  # Process exited
-
-            if self._check_ready_condition(condition, managed):
-                if managed.ready_event:
-                    managed.ready_event.set()
-                self.health_manager.record_ready(managed.name)
-                if on_ready:
-                    on_ready()
+        deadline = start_time + timeout
+        warned = False
+        while True:
+            if self._ready_monitor_should_stop(managed):
                 return
 
-            time.sleep(self.POLL_INTERVAL)
+            if self._check_ready_condition(condition, managed):
+                self._record_ready(managed, start_time, timeout, on_ready)
+                return
 
-        # Timeout - still mark as running but not ready
-        # Service will continue, but ready wasn't detected
+            now = time.time()
+            if now >= deadline and not warned:
+                self._warn_ready_timeout(managed, timeout)
+                warned = True
+            wait_for = (
+                self.ready_recheck_interval
+                if now >= deadline
+                else min(self.POLL_INTERVAL, max(deadline - now, 0.0))
+            )
+            time.sleep(wait_for)
+
+    def _ready_monitor_should_stop(self, managed: ManagedProcess) -> bool:
+        """Stop watching when the process or its ownership is gone."""
+        if managed.intentional_stop:
+            return True
+        if managed.process is not None and managed.process.poll() is not None:
+            return True
+        return self._processes.get(managed.name) is not managed
+
+    def _record_ready(
+        self,
+        managed: ManagedProcess,
+        start_time: float,
+        timeout: float,
+        on_ready: Callable[[], None] | None,
+    ) -> None:
+        """Record ready and note when it happened past the limit."""
+        if managed.ready_event:
+            managed.ready_event.set()
+        self.health_manager.record_ready(managed.name)
+        if on_ready:
+            on_ready()
+        elapsed = time.time() - start_time
+        if elapsed > timeout:
+            logger.info(
+                "Ready condition for %s satisfied after the %.0fs limit (%.1fs)",
+                managed.name,
+                timeout,
+                elapsed,
+            )
+
+    @staticmethod
+    def _warn_ready_timeout(managed: ManagedProcess, timeout: float) -> None:
+        logger.warning(
+            "Ready condition not confirmed within %.0fs for %s; continuing to check",
+            timeout,
+            managed.name,
+        )
 
     def _check_ready_condition(
         self,

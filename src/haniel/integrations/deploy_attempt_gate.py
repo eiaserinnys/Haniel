@@ -11,6 +11,14 @@ class DeployPermissionError(RuntimeError):
     pass
 
 
+_REJECTION_ERRORS = frozenset(
+    {
+        "retry_requires_manual_approval",
+        "self_update_pending",
+    }
+)
+
+
 @dataclass
 class _PendingPermission:
     deploy_id: str
@@ -93,9 +101,12 @@ class DeployAttemptGate:
             completed = self._pending.pop(requested_orchestrator_attempt_id, pending)
         response = completed.response or {"accepted": False, "error": "ACK lost"}
         if not response.get("accepted"):
-            raise DeployPermissionError(
-                str(response.get("error", "deploy attempt rejected"))
-            )
+            error = str(response.get("error", "deploy attempt rejected"))
+            if error == "self_update_pending":
+                raise DeployPermissionError(
+                    "self_update_pending: a self update is pending on this node"
+                )
+            raise DeployPermissionError(error)
         return response
 
     @staticmethod
@@ -130,7 +141,7 @@ class DeployAttemptGate:
         elif ack.get("accepted") is False:
             if (
                 keys != common | rejected_only
-                or ack.get("error") != "retry_requires_manual_approval"
+                or ack.get("error") not in _REJECTION_ERRORS
             ):
                 raise DeployPermissionError("rejected ACK fields are contaminated")
         else:
