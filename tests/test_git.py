@@ -15,6 +15,7 @@ from haniel.core.git import (
     GitFetchError,
     GitPullError,
     GitTimeoutError,
+    get_changed_paths,
     get_head,
     get_remote_head,
     clone_repo,
@@ -128,6 +129,63 @@ class TestGetRemoteHead:
         """Should raise GitError for nonexistent paths."""
         with pytest.raises(GitError):
             get_remote_head(tmp_path / "nonexistent", "master")
+
+
+class TestGetChangedPaths:
+    """Tests for get_changed_paths function."""
+
+    def test_moved_file_keeps_source_side_path(self, git_repo: Path, bare_remote: Path):
+        """A file moved out of src/ still appears as a src/ change."""
+        source_dir = git_repo / "src"
+        source_dir.mkdir()
+        (source_dir / "app.py").write_text("print('app')\n")
+        subprocess.run(
+            ["git", "add", "."], cwd=git_repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add app"],
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "push", "origin", "master"],
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
+        )
+        base = get_head(git_repo)
+
+        docs_dir = git_repo / "docs"
+        docs_dir.mkdir()
+        subprocess.run(
+            ["git", "mv", "src/app.py", "docs/app.py"],
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Move app to docs"],
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "push", "origin", "master"],
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
+        )
+
+        paths = get_changed_paths(git_repo, "master", local_ref=base)
+
+        assert paths is not None
+        assert "src/app.py" in paths
+        assert "docs/app.py" in paths
+
+    def test_returns_none_when_range_cannot_be_read(self, git_repo: Path):
+        """An unreadable range is reported as no path list at all."""
+        assert get_changed_paths(git_repo, "master", local_ref="missing-ref") is None
 
 
 class TestCloneRepo:

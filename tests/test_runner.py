@@ -2009,6 +2009,95 @@ class TestServiceRunnerPollCycle:
         assert discarded == []
 
 
+class TestSelfUpdateScopeFilter:
+    """Self updates ignore commits that only touch node-unused paths."""
+
+    def _runner(self, tmp_path: Path) -> ServiceRunner:
+        repo_path = tmp_path / "haniel"
+        repo_path.mkdir()
+        (repo_path / ".git").mkdir()
+        config = HanielConfig.model_validate(
+            {
+                "poll_interval": 1,
+                "repos": {
+                    "haniel": {
+                        "url": "git@github.com:test/haniel.git",
+                        "branch": "main",
+                        "path": "./haniel",
+                    }
+                },
+                "services": {},
+                "self": {"repo": "haniel", "auto_update": False},
+                "orchestrator_client": {
+                    "url": "ws://localhost/ws/node",
+                    "token": "test",
+                    "node_id": "node-a",
+                },
+            }
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        runner._repo_states["haniel"].last_head = "old-head"
+        runner._orch_client = MagicMock()
+        return runner
+
+    @pytest.mark.parametrize(
+        ("changed_paths", "expected_changed", "notifies_self_update"),
+        [
+            (["orch-server/hub.py", "docs/adr.md"], [], False),
+            (["orch-server/hub.py", "src/haniel/core/git.py"], ["haniel"], True),
+            (None, ["haniel"], True),
+        ],
+    )
+    @patch(
+        "haniel.core.runner.get_pending_changes",
+        return_value={"commits": ["remote-head docs"], "stat": "2 files"},
+    )
+    @patch("haniel.core.runner.get_remote_head", return_value="remote-head")
+    @patch("haniel.core.runner.get_head", return_value="old-head")
+    @patch("haniel.core.runner.fetch_repo", return_value=True)
+    def test_poll_cycle_filters_node_unused_self_update_paths(
+        self,
+        mock_fetch,
+        mock_head,
+        mock_remote_head,
+        mock_pending,
+        changed_paths,
+        expected_changed,
+        notifies_self_update,
+        tmp_path: Path,
+    ) -> None:
+        runner = self._runner(tmp_path)
+
+        with (
+            patch(
+                "haniel.core.runner.get_changed_paths",
+                return_value=changed_paths,
+            ),
+            patch("haniel.core.repo_reconciliation.get_head", return_value="old-head"),
+            patch(
+                "haniel.core.repo_reconciliation.get_remote_head",
+                return_value="remote-head",
+            ),
+        ):
+            assert runner._detect_changes() == expected_changed
+
+        if notifies_self_update:
+            runner._orch_client.notify_change.assert_called_once()
+            assert (
+                runner._orch_client.notify_change.call_args.kwargs["is_self_update"]
+                is True
+            )
+        else:
+            runner._orch_client.notify_change.assert_not_called()
+            assert runner._repo_states["haniel"].pending_changes is None
+            assert runner._state.self_update_pending is False
+            runner._orch_client.notify_repo_reconciliation.assert_called_once()
+            assert (
+                runner._orch_client.notify_repo_reconciliation.call_args.args[1]
+                == "observed"
+            )
+
+
 class TestServiceRunnerMcp:
     """Tests for ServiceRunner MCP integration."""
 

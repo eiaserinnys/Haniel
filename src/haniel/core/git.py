@@ -443,6 +443,43 @@ def get_pending_changes(
         return {"commits": [], "stat": None}
 
 
+def get_changed_paths(
+    path: Path,
+    branch: str,
+    remote: str = "origin",
+    *,
+    local_ref: str = "HEAD",
+) -> list[str] | None:
+    """List paths changed between local_ref and the remote branch.
+
+    Requires a prior fetch. ``--no-renames`` keeps a file moved out of a
+    branch visible on its old path too, so a move from ``src/`` to ``docs/``
+    still counts as a change to ``src/``.
+
+    Returns:
+        Changed paths, or None when git cannot produce the list (missing
+        refs, not a repository, or no paths at all).
+    """
+    try:
+        result = _run_git(
+            [
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                f"{local_ref}..{remote}/{branch}",
+            ],
+            cwd=path,
+            check=False,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    paths = [item for item in result.stdout.split("\0") if item]
+    return paths or None
+
+
 def has_changes(path: Path, branch: str, remote: str = "origin") -> bool:
     """Check if there are changes between local and remote.
 
