@@ -208,6 +208,34 @@ class TestNormalFinalization:
             row["error"] for row in history if row["deploy_id"] == "attempt:a1"
         )
 
+    async def test_settled_remote_ahead_still_succeeds(self, store: EventStore):
+        await canonical(store)
+        await begin(store)
+        attempts = store.attempts
+        assert attempts is not None
+        await attempts.record_result(
+            deploy_id="n:r:main:target",
+            orchestrator_attempt_id="a1",
+            connection_generation="g1",
+            status="success",
+            error=None,
+            duration_ms=5,
+        )
+
+        settled = await attempts.record_settled(
+            deploy_id="n:r:main:target",
+            orchestrator_attempt_id="a1",
+            connection_generation="g1",
+            local_head="target",
+            remote_head="newer",
+        )
+
+        assert settled["status"] == "success"
+        assert (await store.get_deploy_event("n:r:main:target"))["status"] == "success"
+        attempt = await attempts.get_attempt("a1")
+        assert attempt["outcome"] == "success"
+        assert attempt["settled_remote_head"] == "newer"
+
     async def test_settled_from_other_connection_generation_is_ignored(
         self, store: EventStore
     ):

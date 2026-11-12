@@ -311,6 +311,27 @@ class TestNodeDeployReportReconciliation:
         assert attempt["status"] == "failed"
         assert attempt["error"] == "verify failed"
 
+    async def test_failure_blocks_equal_observation(self, store: EventStore):
+        deploy_id = await self._seed(store)
+        await store.record_node_deploy_report(node_report("started"))
+        failed = await store.record_node_deploy_report(
+            node_report("failed", error="verify failed")
+        )
+        assert failed["status"] == "failed"
+        assert (await store.get_deploy_event(deploy_id))["status"] == "pending"
+
+        resolved = await store.resolve_observed_pending(
+            deploy_id=deploy_id,
+            node_id="n1",
+            repo="repo",
+            branch="main",
+            local_head="target",
+            remote_head="target",
+        )
+
+        assert resolved is False
+        assert (await store.get_deploy_event(deploy_id))["status"] == "pending"
+
     async def test_other_target_success_does_not_touch_pending(self, store: EventStore):
         deploy_id = await self._seed(store, "target-a")
 

@@ -1178,6 +1178,42 @@ class TestRepoReconciliation:
         await hub._handle_deploy_result(deploy_result(self.DEPLOY_ID, status="success"))
         assert (await store.get_deploy_event(self.DEPLOY_ID))["status"] == "pending"
 
+    async def test_settled_remote_ahead_keeps_newer_pending(self, hub, store):
+        old_id = "n1:repo:main:old"
+        await store.create_deploy_event(
+            deploy_id=old_id,
+            node_id="n1",
+            repo="repo",
+            branch="main",
+            commits=["old change"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-08-01T00:00:00Z",
+            target_head="old",
+        )
+        await begin_attempt(store, old_id)
+        new_id = "n1:repo:main:new"
+        await store.create_deploy_event(
+            deploy_id=new_id,
+            node_id="n1",
+            repo="repo",
+            branch="main",
+            commits=["new change"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-08-02T00:00:00Z",
+            target_head="new",
+        )
+
+        bind_generation(hub)
+        await hub._handle_deploy_result(deploy_result(old_id, status="success"))
+        await hub.deploy_coordinator.handle_settled(
+            settled(old_id, local_head="old", remote_head="new")
+        )
+
+        assert (await store.get_deploy_event(old_id))["status"] == "success"
+        assert (await store.get_deploy_event(new_id))["status"] == "pending"
+
     async def test_raw_success_then_settled_mismatch_reopens_retryable(
         self, hub, store
     ):
