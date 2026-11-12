@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from starlette.requests import Request
@@ -111,10 +112,10 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
                 }
             )
         except PlanRejected as exc:
-            return JSONResponse(
-                {"error": str(exc), "deploy_id": deploy_id},
-                status_code=exc.status_code,
-            )
+            body: dict[str, Any] = {"error": str(exc), "deploy_id": deploy_id}
+            if exc.blocking_self_update is not None:
+                body["blocking_self_update"] = exc.blocking_self_update
+            return JSONResponse(body, status_code=exc.status_code)
 
     async def reject_deploy(request: Request) -> JSONResponse:
         """POST /api/orch/reject — reject a pending deploy."""
@@ -139,6 +140,13 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         await store.update_deploy_status(
             deploy_id, DeployStatus.REJECTED, reject_reason=reason
         )
+        if event["is_self_update"]:
+            postponed_until = datetime.now(timezone.utc) + timedelta(
+                seconds=hub.self_update_postpone_sec
+            )
+            await store.set_deploy_postponed_until(
+                deploy_id, postponed_until.isoformat()
+            )
         await hub.deploy_coordinator.resolve_terminal_canonicals(
             {deploy_id}, message="deploy was rejected during preflight"
         )
@@ -218,12 +226,14 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
                 await _approve_one(event, "dashboard", "manual_batch")
                 approved.append(deploy_id)
             except (PlanRejected, ValueError) as exc:
-                failed.append(
-                    {
-                        "deploy_id": deploy_id,
-                        "reason": str(exc),
-                    }
-                )
+                item: dict[str, Any] = {
+                    "deploy_id": deploy_id,
+                    "reason": str(exc),
+                }
+                blocking = getattr(exc, "blocking_self_update", None)
+                if blocking is not None:
+                    item["blocking_self_update"] = blocking
+                failed.append(item)
 
         response: dict[str, Any] = {"approved": approved, "failed": failed}
         if auto_superseded:

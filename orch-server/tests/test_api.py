@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -373,6 +374,45 @@ class TestApproveDeploy:
         )
         assert (await store.get_deploy_event("regular"))["status"] == "pending"
 
+    async def test_self_update_priority_409_carries_blocking_row(
+        self, hub, registry, store, routes
+    ):
+        await _seed_pending(store, "self", "n1", repo="haniel", is_self_update=True)
+        await _seed_pending(store, "regular", "n1", repo="soulstream")
+        await _register_node(
+            hub,
+            registry,
+            AsyncMock(),
+            NodeHello(
+                node_id="n1",
+                token="t",
+                hostname="h",
+                os="Linux",
+                arch="x86_64",
+                haniel_version="0.1.0",
+            ),
+        )
+        blocking = await store.get_deploy_event("self")
+
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        response = TestClient(Starlette(routes=routes)).post(
+            "/api/orch/approve", json={"deploy_id": "regular"}
+        )
+
+        assert response.status_code == 409
+        assert response.json()["blocking_self_update"] == {
+            "deploy_id": "self",
+            "node_id": "n1",
+            "repo": "haniel",
+            "branch": "main",
+            "target_head": "self",
+            "status": "pending",
+            "created_at": blocking["created_at"],
+            "updated_at": blocking["updated_at"],
+        }
+
     async def test_deploying_state_exists_before_node_can_return_result(
         self, hub, registry, store, routes
     ):
@@ -573,6 +613,64 @@ class TestRejectDeploy:
         assert event["status"] == "rejected"
         assert event["reject_reason"] == "not ready"
 
+    async def test_regular_reject_does_not_record_postponement(
+        self, hub, store, routes
+    ):
+        await _seed_pending(store, "d1", "n1")
+
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        resp = TestClient(Starlette(routes=routes)).post(
+            "/api/orch/reject", json={"deploy_id": "d1"}
+        )
+
+        assert resp.status_code == 200
+        assert (await store.get_deploy_event("d1"))["postponed_until"] is None
+
+    async def test_self_update_reject_records_default_postponement(
+        self, hub, store, routes
+    ):
+        await _seed_pending(store, "self", "n1", repo="haniel", is_self_update=True)
+
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        resp = TestClient(Starlette(routes=routes)).post(
+            "/api/orch/reject", json={"deploy_id": "self"}
+        )
+
+        assert resp.status_code == 200
+        event = await store.get_deploy_event("self")
+        assert event["status"] == "rejected"
+        remaining = datetime.fromisoformat(event["postponed_until"]) - datetime.now(
+            timezone.utc
+        )
+        assert timedelta(hours=5, minutes=59) <= remaining <= timedelta(hours=6)
+
+    async def test_self_update_reject_uses_configured_postponement(
+        self, registry, store
+    ):
+        hub = WebSocketHub(
+            registry, store, token="test-token", self_update_postpone_sec=120
+        )
+        routes = create_api_routes(hub, store)
+        await _seed_pending(store, "self", "n1", repo="haniel", is_self_update=True)
+
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+
+        resp = TestClient(Starlette(routes=routes)).post(
+            "/api/orch/reject", json={"deploy_id": "self"}
+        )
+
+        assert resp.status_code == 200
+        event = await store.get_deploy_event("self")
+        remaining = datetime.fromisoformat(event["postponed_until"]) - datetime.now(
+            timezone.utc
+        )
+        assert timedelta(seconds=115) <= remaining <= timedelta(seconds=125)
+
     async def test_reject_not_found(self, hub, store, routes):
         from starlette.applications import Starlette
         from starlette.testclient import TestClient
@@ -616,6 +714,7 @@ class TestApproveAll:
                 haniel_version="0.1.0",
             ),
         )
+        blocking = await store.get_deploy_event("self")
         from starlette.applications import Starlette
         from starlette.testclient import TestClient
 
@@ -628,6 +727,16 @@ class TestApproveAll:
             {
                 "deploy_id": "regular",
                 "reason": "self-update self must be approved or postponed before other deployments on node n1",
+                "blocking_self_update": {
+                    "deploy_id": "self",
+                    "node_id": "n1",
+                    "repo": "haniel",
+                    "branch": "main",
+                    "target_head": "self",
+                    "status": "pending",
+                    "created_at": blocking["created_at"],
+                    "updated_at": blocking["updated_at"],
+                },
             }
         ]
         assert (await store.get_deploy_event("self"))["status"] == "deploying"

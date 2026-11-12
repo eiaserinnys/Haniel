@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable, Literal
 from uuid import uuid4
 
 from .connection_lifecycle import (
@@ -35,8 +35,15 @@ ConnectionPresence = Callable[[str, str, str], bool]
 class PlanRejected(RuntimeError):
     """Manual retry preflight ended before begin."""
 
-    def __init__(self, message: str, status_code: int) -> None:
+    def __init__(
+        self,
+        message: str,
+        status_code: int,
+        *,
+        blocking_self_update: dict[str, Any] | None = None,
+    ) -> None:
         self.status_code = status_code
+        self.blocking_self_update = blocking_self_update
         super().__init__(message)
 
 
@@ -130,6 +137,19 @@ class DeployAttemptCoordinator(
                     f"self-update {blocking_self_update['deploy_id']} must be approved "
                     f"or postponed before other deployments on node {event['node_id']}",
                     409,
+                    blocking_self_update={
+                        key: blocking_self_update[key]
+                        for key in (
+                            "deploy_id",
+                            "node_id",
+                            "repo",
+                            "branch",
+                            "target_head",
+                            "status",
+                            "created_at",
+                            "updated_at",
+                        )
+                    },
                 )
             generation = self._require_generation(event["node_id"])
             retry_required = await self.attempts.has_retry_requirement(
@@ -205,8 +225,20 @@ class DeployAttemptCoordinator(
             raise ValueError("auto attempt request requires orchestrator_attempt_id")
         async with self._coordination_lock:
             generation = self._require_generation(msg.node_id)
+            event = await self._store.get_deploy_event(msg.deploy_id)
+            if event is None or not event.get("is_self_update"):
+                active_self_update = await self._store.get_active_self_update_for_node(
+                    msg.node_id
+                )
+                if active_self_update is not None:
+                    await self._send_auto_rejection(
+                        msg, requested, generation, "self_update_pending"
+                    )
+                    return
             if await self.attempts.has_retry_requirement(msg.deploy_id):
-                await self._send_auto_retry_rejection(msg, requested, generation)
+                await self._send_auto_rejection(
+                    msg, requested, generation, "retry_requires_manual_approval"
+                )
                 return
             probe_id = uuid4().hex
             try:
@@ -220,7 +252,9 @@ class DeployAttemptCoordinator(
                 )
             except PermissionError as exc:
                 if str(exc) == "retry_requires_manual_approval":
-                    await self._send_auto_retry_rejection(msg, requested, generation)
+                    await self._send_auto_rejection(
+                        msg, requested, generation, "retry_requires_manual_approval"
+                    )
                 return
             except ValueError:
                 return
@@ -447,11 +481,12 @@ class DeployAttemptCoordinator(
             ],
         )
 
-    async def _send_auto_retry_rejection(
+    async def _send_auto_rejection(
         self,
         msg: RepoReconciliation,
         requested: str,
         generation: str,
+        error: Literal["retry_requires_manual_approval", "self_update_pending"],
     ) -> None:
         await self._send(
             msg.node_id,
@@ -461,7 +496,7 @@ class DeployAttemptCoordinator(
                 requested_orchestrator_attempt_id=requested,
                 deploy_id=msg.deploy_id,
                 connection_generation=generation,
-                error="retry_requires_manual_approval",
+                error=error,
             ),
         )
 

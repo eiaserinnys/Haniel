@@ -20,6 +20,7 @@ from haniel_orch.protocol import (
     DeployProgress,
     DeployReportAck,
     DeployResult,
+    DeployStatus,
     NodeHello,
     NodeDeployReport,
     NodeStatus,
@@ -725,6 +726,158 @@ class TestHandleChangeNotification:
         assert event["is_self_update"] is expected
 
 
+class TestPostponedSelfUpdateRevival:
+    """A postponed self-update returns to pending on the next node notification."""
+
+    DEPLOY_ID = "n1:haniel:main:abc1234"
+
+    async def _seed_postponed(
+        self, store: EventStore, *, postponed_until: str | None
+    ) -> None:
+        await store.create_deploy_event(
+            deploy_id=self.DEPLOY_ID,
+            node_id="n1",
+            repo="haniel",
+            branch="main",
+            commits=["abc1234 self update"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+            target_head="abc1234",
+            is_self_update=True,
+        )
+        await store.update_deploy_status(
+            self.DEPLOY_ID, DeployStatus.REJECTED, reject_reason="postponed"
+        )
+        if postponed_until is not None:
+            await store.set_deploy_postponed_until(self.DEPLOY_ID, postponed_until)
+
+    def _notification(self) -> ChangeNotification:
+        return ChangeNotification(
+            deploy_id=self.DEPLOY_ID,
+            node_id="n1",
+            repo="haniel",
+            branch="main",
+            commits=["abc1234 self update"],
+            affected_services=[],
+            detected_at="2026-01-01T00:00:00Z",
+            target_head="abc1234",
+            is_self_update=True,
+        )
+
+    async def test_due_postponement_returns_to_pending_and_broadcasts(
+        self, hub: WebSocketHub, store: EventStore
+    ):
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        await self._seed_postponed(
+            store,
+            postponed_until=(
+                datetime.now(timezone.utc) - timedelta(minutes=1)
+            ).isoformat(),
+        )
+
+        await hub._handle_change_notification(self._notification())
+
+        event = await store.get_deploy_event(self.DEPLOY_ID)
+        assert event["status"] == "pending"
+        assert event["reject_reason"] is None
+        assert event["postponed_until"] is None
+        assert event["approved_by"] is None
+        assert event["error"] is None
+        sent = [json.loads(call.args[0]) for call in ws_dash.send_text.call_args_list]
+        assert sent == [
+            {
+                "type": "new_pending",
+                "deploy_id": self.DEPLOY_ID,
+                "node_id": "n1",
+                "repo": "haniel",
+                "branch": "main",
+                "detected_at": "2026-01-01T00:00:00Z",
+            }
+        ]
+
+    async def test_before_deadline_stays_rejected(
+        self, hub: WebSocketHub, store: EventStore
+    ):
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        await self._seed_postponed(
+            store,
+            postponed_until=(
+                datetime.now(timezone.utc) + timedelta(hours=1)
+            ).isoformat(),
+        )
+
+        await hub._handle_change_notification(self._notification())
+
+        assert (await store.get_deploy_event(self.DEPLOY_ID))["status"] == "rejected"
+        ws_dash.send_text.assert_not_called()
+
+    async def test_rejected_row_without_postponement_stays_rejected(
+        self, hub: WebSocketHub, store: EventStore
+    ):
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        await self._seed_postponed(store, postponed_until=None)
+
+        await hub._handle_change_notification(self._notification())
+
+        assert (await store.get_deploy_event(self.DEPLOY_ID))["status"] == "rejected"
+        ws_dash.send_text.assert_not_called()
+
+    async def test_other_pending_in_branch_blocks_revival(
+        self, hub: WebSocketHub, store: EventStore
+    ):
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        await self._seed_postponed(
+            store,
+            postponed_until=(
+                datetime.now(timezone.utc) - timedelta(minutes=1)
+            ).isoformat(),
+        )
+        await store.create_deploy_event(
+            deploy_id="n1:haniel:main:def5678",
+            node_id="n1",
+            repo="haniel",
+            branch="main",
+            commits=["def5678 newer"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-01-02T00:00:00Z",
+            target_head="def5678",
+            is_self_update=True,
+        )
+
+        await hub._handle_change_notification(self._notification())
+
+        assert (await store.get_deploy_event(self.DEPLOY_ID))["status"] == "rejected"
+        assert (await store.get_deploy_event("n1:haniel:main:def5678"))[
+            "status"
+        ] == "pending"
+        ws_dash.send_text.assert_not_called()
+
+    async def test_revival_error_is_swallowed(
+        self, hub: WebSocketHub, store: EventStore, monkeypatch
+    ):
+        await self._seed_postponed(
+            store,
+            postponed_until=(
+                datetime.now(timezone.utc) - timedelta(minutes=1)
+            ).isoformat(),
+        )
+
+        async def boom(_deploy_id: str) -> bool:
+            raise RuntimeError("revival failed")
+
+        monkeypatch.setattr(store, "reopen_postponed_self_update", boom)
+
+        await hub._handle_change_notification(self._notification())
+
+        assert (await store.get_deploy_event(self.DEPLOY_ID))["status"] == "rejected"
+
+
 class TestHandleChangeNotificationSupersede:
     """change_notification 수신 시점 supersede — 같은 (node, repo, branch)
     이전 PENDING은 즉시 REJECTED('superseded by ${new}'). DEPLOYING은 무관.
@@ -1159,6 +1312,46 @@ class TestRepoReconciliation:
         assert await store.get_active_deploys() == []
         event = await store.get_deploy_event(self.DEPLOY_ID)
         assert event["status"] == "success"
+
+    async def test_self_update_close_broadcasts_closed_row_id(self, hub, store):
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        target_id = "n1:haniel:main:target"
+        await store.create_deploy_event(
+            deploy_id=target_id,
+            node_id="n1",
+            repo="haniel",
+            branch="main",
+            commits=["target self update"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+            target_head="target",
+            is_self_update=True,
+        )
+
+        await hub._repo_reconciler.handle(
+            RepoReconciliation(
+                phase="observed",
+                deploy_id="n1:haniel:main:newer",
+                node_id="n1",
+                repo="haniel",
+                branch="main",
+                local_head="target",
+                remote_head="newer",
+            )
+        )
+
+        assert (await store.get_deploy_event(target_id))["status"] == "success"
+        sent = [json.loads(call.args[0]) for call in ws_dash.send_text.call_args_list]
+        assert sent == [
+            {
+                "type": "status_change",
+                "deploy_id": target_id,
+                "status": "success",
+                "node_id": "n1",
+            }
+        ]
 
     async def test_failed_equal_observation_stays_retryable_and_late_result_is_ignored(
         self, hub, store

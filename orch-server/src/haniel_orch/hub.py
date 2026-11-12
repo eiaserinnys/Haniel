@@ -59,6 +59,7 @@ class WebSocketHub:
         auth_bearer_token: str = "",
         command_timeout_sec: float = 30.0,
         deploy_timeout_sec: float = 300.0,
+        self_update_postpone_sec: float = 21600.0,
     ) -> None:
         self._registry = registry
         self._store = store
@@ -75,6 +76,7 @@ class WebSocketHub:
         self._command_timeout_sec = command_timeout_sec
         self._pending_commands: dict[str, PendingCommand] = {}
         self._deploy_timeout_sec = deploy_timeout_sec
+        self._self_update_postpone_sec = self_update_postpone_sec
         self._repo_reconciler = RepoReconciler(store, self.broadcast_to_dashboards)
         self.deploy_coordinator = DeployAttemptCoordinator(
             store,
@@ -95,6 +97,11 @@ class WebSocketHub:
     def registry(self) -> NodeRegistry:
         """Public accessor for the node registry."""
         return self._registry
+
+    @property
+    def self_update_postpone_sec(self) -> float:
+        """How long a rejected self-update stays postponed before revival."""
+        return self._self_update_postpone_sec
 
     def _verify_dashboard_token(self, token: str | None) -> bool:
         """Verify dashboard WebSocket token. Empty auth_bearer_token = auth disabled."""
@@ -268,6 +275,7 @@ class WebSocketHub:
             is_self_update=is_self_update,
         )
         if not inserted:
+            await self._revive_postponed_self_update(msg)
             return
 
         inserted_event = await self._store.get_deploy_event(msg.deploy_id)
@@ -322,6 +330,30 @@ class WebSocketHub:
                 "node_id": msg.node_id,
             },
         )
+
+    async def _revive_postponed_self_update(self, msg: ChangeNotification) -> None:
+        """Return a due postponed self-update to pending on a repeat notification.
+
+        Exceptions are logged and swallowed: a raise here would disconnect the
+        node that sent the notification.
+        """
+        try:
+            if not await self._store.reopen_postponed_self_update(msg.deploy_id):
+                return
+            await self.broadcast_to_dashboards(
+                {
+                    "type": "new_pending",
+                    "deploy_id": msg.deploy_id,
+                    "node_id": msg.node_id,
+                    "repo": msg.repo,
+                    "branch": msg.branch,
+                    "detected_at": msg.detected_at,
+                }
+            )
+        except Exception:
+            logger.exception(
+                "Failed to revive postponed self-update %s", msg.deploy_id
+            )
 
     async def _handle_deploy_result(self, msg: DeployResult) -> None:
         """Delegate result correlation to the durable attempt coordinator."""

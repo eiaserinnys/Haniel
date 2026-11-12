@@ -122,6 +122,7 @@ CANONICAL_COLUMNS = {
     "expected_manifest_identity": "TEXT",
     "expected_manifest_digest": "TEXT",
     "is_self_update": "INTEGER NOT NULL DEFAULT 0",
+    "postponed_until": "TEXT",
 }
 
 ATTEMPT_COLUMNS = {

@@ -309,7 +309,7 @@ class RejectedDeployAttemptAck(StrictMessage):
     requested_orchestrator_attempt_id: str
     deploy_id: str
     connection_generation: str
-    error: Literal["retry_requires_manual_approval"]
+    error: Literal["retry_requires_manual_approval", "self_update_pending"]
 
 
 DeployAttemptAck = Annotated[
