@@ -105,9 +105,34 @@ def _execute_normal(
     if not state.pending_changes:
         repo_path = runner.config_dir / state.config.path
         current_head = get_head(repo_path)
-        if current_head == target and repo not in runner._startup_repo_locks:
+        record: dict[str, Any] | None = None
+        if current_head == target:
+            if repo in runner._startup_repo_locks:
+                # A startup deployment owns the checkout. Wait for it like
+                # trigger_pull does and only then read durable evidence.
+                lock = state.pull_lock
+                lock.acquire()
+                try:
+                    state = runner._snapshot_repo_runtime(repo)
+                    repo_path = runner.config_dir / state.config.path
+                    current_head = get_head(repo_path)
+                    record = runner._deployment_state_store().read(repo)
+                finally:
+                    lock.release()
+            else:
+                record = runner._deployment_state_store().read(repo)
+        if not state.pending_changes and current_head == target:
+            _resolve_normal_at_target(
+                runner,
+                approval,
+                repo,
+                branch,
+                target,
+                record,
+                progress_callback=progress_callback,
+            )
             return
-        if current_head != target:
+        if not state.pending_changes:
             pending_changes = get_pending_changes(repo_path, state.config.branch)
             if not pending_changes.get("commits"):
                 raise ApprovalRevalidationError(
@@ -144,77 +169,74 @@ def _execute_normal(
     )
 
 
-def validate_approved_plan(
-    planner: "DeployRetryPlanner", probe: dict[str, Any], approval: dict[str, Any]
-) -> "RetryPlan":
-    checks = {
-        "probe_id": approval.get("probe_id") == probe.get("probe_id"),
-        "connection_generation": approval.get("connection_generation")
-        == probe.get("connection_generation"),
-        "deploy_id": approval.get("deploy_id") == probe.get("deploy_id"),
-    }
-    mismatches = [name for name, matches in checks.items() if not matches]
-    if mismatches:
-        raise ApprovalRevalidationError(
-            "approval preflight snapshot mismatch: " + ", ".join(mismatches)
-        )
-    plan = planner.revalidate(probe, approval)
-    if plan.mode == "fail_closed":
-        raise ApprovalRevalidationError(plan.error or plan.reason)
-    return plan
-
-
-def _execute_retry(
+def _resolve_normal_at_target(
     runner: "ServiceRunner",
     approval: dict[str, Any],
-    probe: dict[str, Any],
-    plan: "RetryPlan",
     repo: str,
     branch: str,
+    target: str,
+    record: dict[str, Any] | None,
     *,
     progress_callback: ProgressCallback | None,
 ) -> None:
-    state = runner._snapshot_repo_runtime(repo)
-    repo_path = runner.config_dir / state.config.path
-    current_head = get_head(repo_path)
-    lock = state.pull_lock
-    target = probe["target_head"]
-    if current_head != target:
-        if not state.pending_changes:
-            from .git import get_pending_changes
+    """Ground a no-op approval in durable evidence, retry it, or fail it."""
 
-            pending = get_pending_changes(repo_path, branch)
-            if not runner._commit_repo_observation(
-                RepoObservation(
-                    generation=state.generation,
-                    repo_name=repo,
-                    repo_config=state.config,
-                    last_fetch=state.last_fetch,
-                    fetch_error=state.fetch_error,
-                    last_head=state.last_head,
-                    pending_changes=pending,
-                    changed=True,
-                )
-            ):
-                raise ApprovalRevalidationError(
-                    "CONFIG_GENERATION_CHANGED: config changed before retry"
-                )
-        progress_kwargs = (
-            {"progress_callback": progress_callback}
-            if progress_callback is not None
-            else {}
-        )
-        runner.trigger_pull(
+    node_id = approval["deploy_id"].split(":", 1)[0]
+    state = runner._snapshot_repo_runtime(repo)
+    if state.config.release_manifest is None:
+        _redeploy_at_target(
+            runner,
+            approval,
             repo,
-            auto=False,
-            orchestrator_attempt_id=approval["orchestrator_attempt_id"],
-            node_id=probe["node_id"],
-            branch=branch,
-            target_head=target,
-            **progress_kwargs,
+            branch,
+            target,
+            None,
+            node_id,
+            progress_callback=progress_callback,
         )
         return
+    record_state = record.get("state") if record is not None else None
+    record_target = record.get("target_head") if record is not None else None
+    if record_state == "success" and record_target == target:
+        return
+    previous_head = record.get("previous_head") if record is not None else None
+    if (
+        record_target == target
+        and record_state in ("failed", "verification_failed")
+        and previous_head
+    ):
+        _redeploy_at_target(
+            runner,
+            approval,
+            repo,
+            branch,
+            target,
+            previous_head,
+            node_id,
+            progress_callback=progress_callback,
+        )
+        return
+    raise ApprovalRevalidationError(
+        f"approved target {target} is already checked out but has no durable "
+        f"success evidence: record state={record_state!r} target={record_target!r}"
+    )
 
+
+def _redeploy_at_target(
+    runner: "ServiceRunner",
+    approval: dict[str, Any],
+    repo: str,
+    branch: str,
+    target: str,
+    previous_head: str | None,
+    node_id: str,
+    *,
+    progress_callback: ProgressCallback | None,
+) -> None:
+    """Redeploy a target that is already checked out (retry and normal share)."""
+
+    state = runner._snapshot_repo_runtime(repo)
+    lock = state.pull_lock
     if not lock.acquire(blocking=False):
         raise StableDeploymentError(
             "DEPLOYMENT_LEASE_CONFLICT", f"already deploying {repo}"
@@ -254,7 +276,6 @@ def _execute_retry(
             list(reload_plan.quiesce_services) if reload_plan is not None else affected
         )
         runner._suppress_pending_restarts(suppressed)
-        previous_head = plan.evidence.get("original_previous_head")
         if not previous_head:
             raise ApprovalRevalidationError(
                 "manifest retry has no durable original previous_head"
@@ -280,7 +301,7 @@ def _execute_retry(
             affected,
             previous_head,
             orchestrator_attempt_id=approval["orchestrator_attempt_id"],
-            node_id=probe["node_id"],
+            node_id=node_id,
             branch=branch,
             expected_operation="upgrade",
             request_id=approval["orchestrator_attempt_id"],
@@ -293,6 +314,93 @@ def _execute_retry(
         if deployment_lease is not None:
             deployment_lease.__exit__(None, None, None)
         lock.release()
+
+
+def validate_approved_plan(
+    planner: "DeployRetryPlanner", probe: dict[str, Any], approval: dict[str, Any]
+) -> "RetryPlan":
+    checks = {
+        "probe_id": approval.get("probe_id") == probe.get("probe_id"),
+        "connection_generation": approval.get("connection_generation")
+        == probe.get("connection_generation"),
+        "deploy_id": approval.get("deploy_id") == probe.get("deploy_id"),
+    }
+    mismatches = [name for name, matches in checks.items() if not matches]
+    if mismatches:
+        raise ApprovalRevalidationError(
+            "approval preflight snapshot mismatch: " + ", ".join(mismatches)
+        )
+    plan = planner.revalidate(probe, approval)
+    if plan.mode == "fail_closed":
+        raise ApprovalRevalidationError(plan.error or plan.reason)
+    return plan
+
+
+def _execute_retry(
+    runner: "ServiceRunner",
+    approval: dict[str, Any],
+    probe: dict[str, Any],
+    plan: "RetryPlan",
+    repo: str,
+    branch: str,
+    *,
+    progress_callback: ProgressCallback | None,
+) -> None:
+    state = runner._snapshot_repo_runtime(repo)
+    repo_path = runner.config_dir / state.config.path
+    current_head = get_head(repo_path)
+    target = probe["target_head"]
+    if current_head != target:
+        if not state.pending_changes:
+            from .git import get_pending_changes
+
+            pending = get_pending_changes(repo_path, branch)
+            if not runner._commit_repo_observation(
+                RepoObservation(
+                    generation=state.generation,
+                    repo_name=repo,
+                    repo_config=state.config,
+                    last_fetch=state.last_fetch,
+                    fetch_error=state.fetch_error,
+                    last_head=state.last_head,
+                    pending_changes=pending,
+                    changed=True,
+                )
+            ):
+                raise ApprovalRevalidationError(
+                    "CONFIG_GENERATION_CHANGED: config changed before retry"
+                )
+        progress_kwargs = (
+            {"progress_callback": progress_callback}
+            if progress_callback is not None
+            else {}
+        )
+        runner.trigger_pull(
+            repo,
+            auto=False,
+            orchestrator_attempt_id=approval["orchestrator_attempt_id"],
+            node_id=probe["node_id"],
+            branch=branch,
+            target_head=target,
+            **progress_kwargs,
+        )
+        return
+
+    previous_head = (
+        plan.evidence.get("original_previous_head")
+        if state.config.release_manifest is not None
+        else None
+    )
+    _redeploy_at_target(
+        runner,
+        approval,
+        repo,
+        branch,
+        target,
+        previous_head,
+        probe["node_id"],
+        progress_callback=progress_callback,
+    )
 
 
 def build_recovery_evidence(

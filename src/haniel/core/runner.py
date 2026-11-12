@@ -2227,10 +2227,53 @@ class ServiceRunner:
                         raise
                 else:
                     self._require_config_generation(config_snapshot)
-                    success, discarded = self._pull_repo(repo_name)
-                    if not success:
-                        raise StableDeploymentError(
-                            "PULL_FAILED", f"git pull failed for {repo_name}"
+                    if target_head is None:
+                        success, discarded = self._pull_repo(repo_name)
+                        if not success:
+                            raise StableDeploymentError(
+                                "PULL_FAILED", f"git pull failed for {repo_name}"
+                            )
+                    else:
+                        assert previous_head is not None
+                        try:
+                            discarded = activate_repo_target(
+                                repo_path,
+                                target_head,
+                                strategy=runtime.config.pull_strategy or "merge",
+                            )
+                        except GitError as error:
+                            logger.error(
+                                "Failed to activate approved target for %s: %s",
+                                repo_name,
+                                bounded_redact_text(str(error)),
+                            )
+                            raise StableDeploymentError(
+                                "PULL_FAILED",
+                                f"git pull failed for {repo_name}",
+                            ) from error
+                        head = get_head(repo_path)
+                        if not self._commit_repo_observation(
+                            RepoObservation(
+                                generation=runtime.generation,
+                                repo_name=repo_name,
+                                repo_config=runtime.config,
+                                last_fetch=runtime.last_fetch,
+                                fetch_error=None,
+                                last_head=head,
+                                pending_changes=None,
+                                changed=True,
+                            )
+                        ):
+                            self._restore_failed_activation(repo_path, previous_head)
+                            raise StableDeploymentError(
+                                "CONFIG_GENERATION_CHANGED",
+                                f"config changed before pull result commit for {repo_name}",
+                            )
+                        head_short = head[:8] if head else "unknown"
+                        logger.info(
+                            "Activated approved target for %s, new HEAD: %s",
+                            repo_name,
+                            head_short,
                         )
 
                 if runtime.config.release_manifest:
@@ -3364,6 +3407,12 @@ class ServiceRunner:
             self._require_config_generation(config_snapshot)
         except StableDeploymentError:
             logger.info("Discarded stale reconciliation report for %s", name)
+            return
+        if state.pull_lock.locked() or name in self._startup_repo_locks:
+            logger.info(
+                "Skipping reconciliation observation for %s while a deployment owns it",
+                name,
+            )
             return
         self._orch_client.notify_repo_reconciliation(snapshot, "observed", wait=True)
 

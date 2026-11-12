@@ -1538,6 +1538,62 @@ class TestServiceRunnerPollCycle:
         snapshot = runner._orch_client.notify_repo_reconciliation.call_args.args[0]
         assert snapshot.in_sync
 
+    @patch(
+        "haniel.core.runner.get_pending_changes",
+        return_value={"commits": [], "stat": None},
+    )
+    @patch("haniel.core.runner.get_remote_head", return_value="new-head")
+    @patch("haniel.core.runner.get_head", return_value="new-head")
+    @patch("haniel.core.runner.fetch_repo", return_value=False)
+    def test_pull_lock_owned_repo_skips_observed_reconciliation(
+        self,
+        mock_fetch,
+        mock_head,
+        mock_remote_head,
+        mock_pending,
+        tmp_path: Path,
+    ):
+        repo_path = tmp_path / "regular"
+        repo_path.mkdir()
+        (repo_path / ".git").mkdir()
+        config = HanielConfig(
+            repos={
+                "regular": RepoConfig(
+                    url="git@github.com:test/regular.git",
+                    branch="main",
+                    path="./regular",
+                )
+            },
+            services={},
+            orchestrator_client={
+                "url": "ws://localhost/ws/node",
+                "token": "test",
+                "node_id": "node-a",
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        runner._repo_states["regular"].last_head = "old-head"
+        runner._orch_client = MagicMock()
+        lock = runner._pull_locks["regular"]
+        lock.acquire()
+        try:
+            with (
+                patch(
+                    "haniel.core.repo_reconciliation.get_head",
+                    return_value="new-head",
+                ),
+                patch(
+                    "haniel.core.repo_reconciliation.get_remote_head",
+                    return_value="new-head",
+                ),
+            ):
+                assert runner._detect_changes() == ["regular"]
+        finally:
+            lock.release()
+
+        runner._orch_client.notify_change.assert_not_called()
+        runner._orch_client.notify_repo_reconciliation.assert_not_called()
+
     def test_schedule_restart(self, tmp_path: Path):
         """Test scheduling a service restart."""
         config = HanielConfig(
