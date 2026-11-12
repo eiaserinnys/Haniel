@@ -252,6 +252,11 @@ class EventStore(EventStoreLifecycleMixin):
                            SELECT 1 FROM deploy_attempts a
                            WHERE a.deploy_id = deploy_events.deploy_id
                              AND a.outcome = 'active'
+                         )
+                         AND NOT EXISTS (
+                           SELECT 1 FROM node_deploy_attempts n
+                           WHERE n.deploy_id = deploy_events.deploy_id
+                             AND n.outcome = 'failed'
                          )""",
                     (
                         DeployStatus.SUCCESS.value,

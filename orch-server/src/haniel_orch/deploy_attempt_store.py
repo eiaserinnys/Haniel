@@ -356,7 +356,7 @@ class DeployAttemptStore(
                 attempt = await self._attempt(orchestrator_attempt_id)
                 if attempt["execution_mode"] != "execute":
                     result = {"status": "recorded"}
-                elif local_head != remote_head or local_head != attempt["target_head"]:
+                elif local_head != attempt["target_head"]:
                     result = await self._fail_attempt_unlocked(
                         attempt=attempt,
                         kind="settled_head_mismatch",

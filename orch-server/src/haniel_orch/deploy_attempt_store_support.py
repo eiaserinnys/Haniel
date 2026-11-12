@@ -183,7 +183,6 @@ class DeployAttemptStoreSupport:
         if (
             attempt["result_status"] == "success"
             and attempt["settled_local_head"] == attempt["target_head"]
-            and attempt["settled_remote_head"] == attempt["target_head"]
         ):
             return await self._success_unlocked(attempt, "success")
         return {"status": "recorded"}
