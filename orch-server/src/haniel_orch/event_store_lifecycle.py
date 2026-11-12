@@ -110,6 +110,22 @@ class EventStoreLifecycleMixin:
                 await self._db.rollback()
                 raise
 
+    async def set_deploy_postponed_until(
+        self, deploy_id: str, postponed_until: str
+    ) -> None:
+        """Record when a postponed self-update may return to pending."""
+        async with self._mutation_lock:
+            try:
+                await self._db.execute(
+                    "UPDATE deploy_events SET postponed_until = ?, updated_at = ? "
+                    "WHERE deploy_id = ?",
+                    (postponed_until, now_iso(), deploy_id),
+                )
+                await self._db.commit()
+            except Exception:
+                await self._db.rollback()
+                raise
+
     async def _update_deploy_status_unlocked(
         self,
         deploy_id: str,

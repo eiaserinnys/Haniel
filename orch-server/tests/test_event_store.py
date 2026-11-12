@@ -204,6 +204,194 @@ class TestCreateDeployEvent:
             await migrated.close()
 
 
+class TestSupersedePostponement:
+    async def test_supersede_rejection_does_not_set_postponed_until(
+        self, store: EventStore
+    ):
+        for deploy_id, detected_at in (
+            ("n1:haniel:main:old", "2026-01-01T00:00:00Z"),
+            ("n1:haniel:main:new", "2026-01-02T00:00:00Z"),
+        ):
+            await store.create_deploy_event(
+                deploy_id=deploy_id,
+                node_id="n1",
+                repo="haniel",
+                branch="main",
+                commits=["h update"],
+                affected_services=[],
+                diff_stat=None,
+                detected_at=detected_at,
+                is_self_update=True,
+            )
+
+        old = await store.get_deploy_event("n1:haniel:main:old")
+        assert old["status"] == "rejected"
+        assert old["reject_reason"] == "superseded by n1:haniel:main:new"
+        assert old["postponed_until"] is None
+
+
+class TestSelfUpdateObservedResolution:
+    """A timed-out self-update closes from a newer remote observation."""
+
+    DEPLOY_ID = "n1:haniel:main:target"
+
+    async def _seed_self_update(self, store: EventStore) -> None:
+        await store.create_deploy_event(
+            deploy_id=self.DEPLOY_ID,
+            node_id="n1",
+            repo="haniel",
+            branch="main",
+            commits=["target self update"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+            target_head="target",
+            is_self_update=True,
+        )
+
+    async def _add_retry_marker_and_failed_node_attempt(self, store: EventStore) -> None:
+        assert store.attempts is not None
+        await store.attempts.begin_normal_attempt(
+            orchestrator_attempt_id="timed-out-source",
+            deploy_id=self.DEPLOY_ID,
+            connection_generation="g1",
+            current_generation="g1",
+            source="manual_single",
+            approved_by="director",
+            deadline_at="2099-01-01T00:00:00Z",
+        )
+        await store.attempts.fail_active_attempt(
+            "timed-out-source",
+            kind="attempt_deadline",
+            stage="execution",
+            reason="attempt_deadline",
+            error="attempt timed out",
+        )
+        await store.record_node_deploy_report(
+            NodeDeployReport(
+                phase="started",
+                node_attempt_id="node-self",
+                journal_attempt_id="journal-self",
+                deploy_id=self.DEPLOY_ID,
+                node_id="n1",
+                repo="haniel",
+                branch="main",
+                target_head="target",
+                local_head="old",
+                trigger="local",
+            )
+        )
+        await store.record_node_deploy_report(
+            NodeDeployReport(
+                phase="failed",
+                node_attempt_id="node-self",
+                journal_attempt_id="journal-self",
+                deploy_id=self.DEPLOY_ID,
+                node_id="n1",
+                repo="haniel",
+                branch="main",
+                target_head="target",
+                local_head="old",
+                trigger="local",
+                error="verify failed",
+                duration_ms=25,
+            )
+        )
+
+    async def test_ahead_observation_closes_retry_marked_self_update(
+        self, store: EventStore
+    ):
+        await self._seed_self_update(store)
+        await self._add_retry_marker_and_failed_node_attempt(store)
+        assert (await store.get_deploy_event(self.DEPLOY_ID))["status"] == "pending"
+        assert store.attempts is not None
+        assert await store.attempts.has_retry_requirement(self.DEPLOY_ID)
+
+        resolved = await store.resolve_observed_pending(
+            deploy_id="n1:haniel:main:newer",
+            node_id="n1",
+            repo="haniel",
+            branch="main",
+            local_head="target",
+            remote_head="newer",
+        )
+
+        assert resolved == self.DEPLOY_ID
+        assert (await store.get_deploy_event(self.DEPLOY_ID))["status"] == "success"
+        assert await store.attempts.has_retry_requirement(self.DEPLOY_ID) is False
+
+    async def test_active_attempt_blocks_self_update_close(self, store: EventStore):
+        await self._seed_self_update(store)
+        assert store.attempts is not None
+        await store.attempts.begin_normal_attempt(
+            orchestrator_attempt_id="active-self",
+            deploy_id=self.DEPLOY_ID,
+            connection_generation="g1",
+            current_generation="g1",
+            source="manual_single",
+            approved_by="director",
+            deadline_at="2099-01-01T00:00:00Z",
+        )
+        # Force the canonical back to pending so the active-attempt guard is
+        # the only thing left that can prevent the close.
+        await store.update_deploy_status(self.DEPLOY_ID, DeployStatus.PENDING)
+
+        resolved = await store.resolve_observed_pending(
+            deploy_id="n1:haniel:main:newer",
+            node_id="n1",
+            repo="haniel",
+            branch="main",
+            local_head="target",
+            remote_head="newer",
+        )
+
+        assert resolved is False
+        assert (await store.get_deploy_event(self.DEPLOY_ID))["status"] == "pending"
+
+    async def test_regular_retry_row_is_not_closed(self, store: EventStore):
+        deploy_id = "n1:repo:main:target"
+        await store.create_deploy_event(
+            deploy_id=deploy_id,
+            node_id="n1",
+            repo="repo",
+            branch="main",
+            commits=["target regular change"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z",
+            target_head="target",
+        )
+        assert store.attempts is not None
+        await store.attempts.begin_normal_attempt(
+            orchestrator_attempt_id="failed-source",
+            deploy_id=deploy_id,
+            connection_generation="g1",
+            current_generation="g1",
+            source="manual_single",
+            approved_by="director",
+            deadline_at="2099-01-01T00:00:00Z",
+        )
+        await store.attempts.fail_active_attempt(
+            "failed-source",
+            kind="deploy_result_failed",
+            stage="execution",
+            reason="deploy_result_failed",
+            error="hook failed",
+        )
+
+        resolved = await store.resolve_observed_pending(
+            deploy_id=deploy_id,
+            node_id="n1",
+            repo="repo",
+            branch="main",
+            local_head="target",
+            remote_head="target",
+        )
+
+        assert resolved is False
+        assert (await store.get_deploy_event(deploy_id))["status"] == "pending"
+
+
 class TestMutationBoundary:
     PUBLIC_MUTATIONS = {
         "initialize",

@@ -236,10 +236,17 @@ class EventStore(EventStoreLifecycleMixin):
         branch: str,
         local_head: str,
         remote_head: str,
-    ) -> bool:
-        """Resolve one exact non-retry stale row from observed Git truth."""
+    ) -> str | bool:
+        """Resolve one stale row from observed Git truth.
+
+        Returns the deploy_id of the row that was closed, or False when no
+        row matched. The exact non-retry path is unchanged. A timed-out
+        self-update keeps a deploy_id built from an older remote head, so it
+        closes on a newer observation whose local_head is its target_head.
+        """
         async with self._mutation_lock:
             try:
+                now = now_iso()
                 cursor = await self._db.execute(
                     """UPDATE deploy_events SET status = ?, updated_at = ?
                        WHERE deploy_id = ? AND node_id = ? AND repo = ? AND branch = ?
@@ -260,7 +267,7 @@ class EventStore(EventStoreLifecycleMixin):
                          )""",
                     (
                         DeployStatus.SUCCESS.value,
-                        now_iso(),
+                        now,
                         deploy_id,
                         node_id,
                         repo,
@@ -269,6 +276,108 @@ class EventStore(EventStoreLifecycleMixin):
                         local_head,
                         local_head,
                         remote_head,
+                    ),
+                )
+                closed_id: str | None = deploy_id if cursor.rowcount == 1 else None
+                if closed_id is None:
+                    closed_id = await self._close_observed_self_update(
+                        node_id=node_id,
+                        repo=repo,
+                        branch=branch,
+                        local_head=local_head,
+                        now=now,
+                    )
+                await self._db.commit()
+                return closed_id or False
+            except Exception:
+                await self._db.rollback()
+                raise
+
+    async def _close_observed_self_update(
+        self,
+        *,
+        node_id: str,
+        repo: str,
+        branch: str,
+        local_head: str,
+        now: str,
+    ) -> str | None:
+        """Close a timed-out self-update that a newer observation proves done.
+
+        Retry markers and failed node reports do not block this path: the
+        dashboard-timeout row is the same deployment the node finished. An
+        active orchestrator attempt still does.
+        """
+        cursor = await self._db.execute(
+            """SELECT deploy_id FROM deploy_events
+               WHERE node_id = ? AND repo = ? AND branch = ?
+                 AND is_self_update = 1 AND status = ? AND target_head = ?
+                 AND NOT EXISTS (
+                   SELECT 1 FROM deploy_attempts a
+                   WHERE a.deploy_id = deploy_events.deploy_id
+                     AND a.outcome = 'active'
+                 )
+               ORDER BY detected_at DESC, created_at DESC, deploy_id DESC
+               LIMIT 1""",
+            (node_id, repo, branch, DeployStatus.PENDING.value, local_head),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        closed_id = row[0]
+        updated = await self._db.execute(
+            """UPDATE deploy_events SET status = ?, updated_at = ?
+               WHERE deploy_id = ? AND status = ? AND is_self_update = 1
+                 AND target_head = ?
+                 AND NOT EXISTS (
+                   SELECT 1 FROM deploy_attempts a
+                   WHERE a.deploy_id = deploy_events.deploy_id
+                     AND a.outcome = 'active'
+                 )""",
+            (
+                DeployStatus.SUCCESS.value,
+                now,
+                closed_id,
+                DeployStatus.PENDING.value,
+                local_head,
+            ),
+        )
+        if updated.rowcount != 1:
+            return None
+        await event_store_mutations._cleanup_retry_rows(self._db, [closed_id])
+        return closed_id
+
+    async def reopen_postponed_self_update(self, deploy_id: str) -> bool:
+        """Return one due postponed self-update to pending.
+
+        The row stays rejected while another pending or deploying deploy
+        exists for the same (node, repo, branch).
+        """
+        async with self._mutation_lock:
+            try:
+                now = now_iso()
+                cursor = await self._db.execute(
+                    """UPDATE deploy_events SET status = ?, reject_reason = NULL,
+                           postponed_until = NULL, approved_by = NULL, error = NULL,
+                           updated_at = ?
+                       WHERE deploy_id = ? AND is_self_update = 1 AND status = ?
+                         AND postponed_until IS NOT NULL AND postponed_until <= ?
+                         AND NOT EXISTS (
+                           SELECT 1 FROM deploy_events other
+                           WHERE other.node_id = deploy_events.node_id
+                             AND other.repo = deploy_events.repo
+                             AND other.branch = deploy_events.branch
+                             AND other.deploy_id != deploy_events.deploy_id
+                             AND other.status IN (?, ?)
+                         )""",
+                    (
+                        DeployStatus.PENDING.value,
+                        now,
+                        deploy_id,
+                        DeployStatus.REJECTED.value,
+                        now,
+                        DeployStatus.PENDING.value,
+                        DeployStatus.DEPLOYING.value,
                     ),
                 )
                 await self._db.commit()

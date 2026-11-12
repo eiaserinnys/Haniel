@@ -121,6 +121,7 @@ class OrchestratorConfig(BaseModel):
     push: PushConfig | None = None  # None = push disabled
     command_timeout_sec: float = 30.0  # service-command 응답 대기 타임아웃
     deploy_timeout_sec: float = 300.0  # deploy 결과 대기 타임아웃 (5분)
+    self_update_postpone_sec: float = 21600.0  # 자기 갱신 거절 후 되돌아옴까지 (6시간)
 
 
 class OrchestratorServer:
@@ -141,6 +142,7 @@ class OrchestratorServer:
             auth_bearer_token=config.auth_bearer_token,
             command_timeout_sec=config.command_timeout_sec,
             deploy_timeout_sec=config.deploy_timeout_sec,
+            self_update_postpone_sec=config.self_update_postpone_sec,
         )
         self._app: Starlette | None = None
 
@@ -257,6 +259,7 @@ def create_app() -> Starlette:
         DASHBOARD_DIR      — override dashboard static file path
         ORCH_COMMAND_TIMEOUT_SEC — optional override, default 30.0s (service-command 응답 대기)
         ORCH_DEPLOY_TIMEOUT_SEC  — optional override, default 300.0s (deploy 결과 대기)
+        ORCH_SELF_UPDATE_POSTPONE_SEC — optional override, default 21600.0s (자기 갱신 거절 후 되돌아옴까지)
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -298,6 +301,19 @@ def create_app() -> Starlette:
                 f"ORCH_DEPLOY_TIMEOUT_SEC must be > 0, got {deploy_override}"
             )
         config = config.model_copy(update={"deploy_timeout_sec": deploy_override})
+
+    # ORCH_SELF_UPDATE_POSTPONE_SEC: optional override.
+    # 기본값(21600.0)은 OrchestratorConfig.self_update_postpone_sec 필드가 정본으로 보유
+    # (env-variables.md §1: 코드에 fallback 기본값을 두지 않음).
+    if "ORCH_SELF_UPDATE_POSTPONE_SEC" in os.environ:
+        postpone_override = float(os.environ["ORCH_SELF_UPDATE_POSTPONE_SEC"])
+        if postpone_override <= 0:
+            raise ValueError(
+                f"ORCH_SELF_UPDATE_POSTPONE_SEC must be > 0, got {postpone_override}"
+            )
+        config = config.model_copy(
+            update={"self_update_postpone_sec": postpone_override}
+        )
 
     server = OrchestratorServer(config)
     return server.build_app()

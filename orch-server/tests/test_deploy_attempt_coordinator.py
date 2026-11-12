@@ -279,6 +279,119 @@ class TestSelfUpdatePriority:
             await harness.close()
 
 
+class TestAutoSelfUpdateGate:
+    def _request(
+        self,
+        *,
+        deploy_id: str,
+        node_id: str = "n",
+        repo: str = "r",
+    ) -> RepoReconciliation:
+        return RepoReconciliation(
+            phase="attempt_started",
+            deploy_id=deploy_id,
+            node_id=node_id,
+            repo=repo,
+            branch="main",
+            local_head="old",
+            remote_head="target",
+            orchestrator_attempt_id="auto-gated",
+        )
+
+    @pytest.mark.parametrize("status", [DeployStatus.PENDING, DeployStatus.DEPLOYING])
+    async def test_open_self_update_rejects_other_repo_auto_request(
+        self, store: EventStore, status: DeployStatus
+    ):
+        await seed_named(
+            store,
+            deploy_id="self",
+            node_id="n",
+            repo="haniel",
+            is_self_update=True,
+        )
+        if status is DeployStatus.DEPLOYING:
+            await store.update_deploy_status("self", status)
+        await seed_named(
+            store, deploy_id="n:soulstream:main:target", node_id="n", repo="soulstream"
+        )
+        harness = Harness(store)
+        try:
+            before = await store.get_deploy_history()
+
+            await harness.coordinator.handle_auto_request(
+                self._request(
+                    deploy_id="n:soulstream:main:target", repo="soulstream"
+                )
+            )
+
+            ack = harness.sent[-1][1]
+            assert isinstance(ack, RejectedDeployAttemptAck)
+            assert ack.error == "self_update_pending"
+            assert ack.deploy_id == "n:soulstream:main:target"
+            assert await store.attempts.get_active_probes() == []
+            assert await store.attempts.get_active_attempts() == []
+            assert await store.get_deploy_history() == before
+            assert (await store.get_deploy_event("n:soulstream:main:target"))[
+                "status"
+            ] == "pending"
+        finally:
+            await harness.close()
+
+    async def test_self_update_own_auto_request_is_not_blocked(self, store: EventStore):
+        await seed_named(
+            store,
+            deploy_id="n:haniel:main:target",
+            node_id="n",
+            repo="haniel",
+            is_self_update=True,
+        )
+        harness = Harness(store)
+        try:
+            await harness.coordinator.handle_auto_request(
+                self._request(deploy_id="n:haniel:main:target", repo="haniel")
+            )
+
+            probe = harness.sent[-1][1]
+            assert isinstance(probe, DeployPlanProbe)
+            assert (await store.attempts.get_active_probes())[0]["deploy_id"] == (
+                "n:haniel:main:target"
+            )
+        finally:
+            await harness.close()
+
+    async def test_self_update_does_not_block_another_node_auto_request(
+        self, store: EventStore
+    ):
+        await seed_named(
+            store,
+            deploy_id="n:haniel:main:target",
+            node_id="n",
+            repo="haniel",
+            is_self_update=True,
+        )
+        await seed_named(
+            store,
+            deploy_id="n2:soulstream:main:target",
+            node_id="n2",
+            repo="soulstream",
+        )
+        harness = Harness(store)
+        harness.coordinator._connections["n2"] = ActiveConnection("g2", "token-g2")
+        try:
+            await harness.coordinator.handle_auto_request(
+                self._request(
+                    deploy_id="n2:soulstream:main:target",
+                    node_id="n2",
+                    repo="soulstream",
+                )
+            )
+
+            probe = harness.sent[-1][1]
+            assert isinstance(probe, DeployPlanProbe)
+        finally:
+            await harness.close()
+
+
 class TestAutoPermission:
     async def test_new_change_begins_before_accepted_ack(self, store: EventStore):
         await seed(store)

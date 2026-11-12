@@ -35,12 +35,12 @@ class RepoReconciler:
             local_head=msg.local_head,
             remote_head=msg.remote_head,
         )
-        if not resolved:
+        if resolved is False:
             return
         await self._broadcast(
             {
                 "type": "status_change",
-                "deploy_id": msg.deploy_id,
+                "deploy_id": resolved,
                 "status": DeployStatus.SUCCESS.value,
                 "node_id": msg.node_id,
             }
