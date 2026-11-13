@@ -86,7 +86,7 @@ class LogCapture:
         if not line:
             return
 
-        timestamp = datetime.now().strftime("%H:%M:%S")
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         formatted = f"[{timestamp}] [{source}] {line}"
 
         with self._lock:
