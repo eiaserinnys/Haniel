@@ -3202,25 +3202,24 @@ class TestStartupUpdates:
     @patch("haniel.core.runner.sync_disk")
     @patch("haniel.core.runner.get_head", return_value="head_one")
     @patch("haniel.core.runner.fetch_repo", return_value=False)
-    def test_first_start_without_record_runs_post_pull_and_records_head(
+    def test_first_start_without_record_skips_post_pull_and_records_head(
         self, mock_fetch, mock_head, mock_sync, tmp_path: Path
     ) -> None:
-        """A repo with no completion record is rebuilt once and then recorded."""
+        """A repo with no record and no remote update is not rebuilt, only recorded."""
         runner, _repo_path = self._legacy_repo_runner(tmp_path)
 
         runner._apply_startup_updates()
 
-        assert runner._startup_updated_repos == {"app-repo"}
+        assert runner._startup_updated_repos == set()
 
         with (
             patch.object(runner, "execute_hook", return_value=True) as mock_hook,
-            patch.object(runner, "_start_service", return_value=True),
+            patch.object(runner, "_start_service", return_value=True) as mock_start,
         ):
             runner.start_services()
 
-        assert [hook.args for hook in mock_hook.call_args_list] == [
-            ("app", "post_pull")
-        ]
+        mock_hook.assert_not_called()
+        mock_start.assert_called_once_with("app")
         assert read_completed_commits(tmp_path) == {"app-repo": "head_one"}
 
     @patch("haniel.core.runner.sync_disk")
@@ -3301,28 +3300,33 @@ class TestStartupUpdates:
 
     @patch("haniel.core.runner.sync_disk")
     @patch("haniel.core.runner.reset_repo_to")
-    @patch("haniel.core.runner.get_head", return_value="head_one")
-    @patch("haniel.core.runner.fetch_repo", return_value=False)
-    def test_first_start_hook_failure_starts_with_error_only(
+    @patch("haniel.core.runner.get_head", return_value="pulled_head")
+    @patch("haniel.core.runner.pull_repo")
+    @patch("haniel.core.runner.fetch_repo", return_value=True)
+    def test_first_start_pulled_repo_hook_failure_starts_with_error_only(
         self,
         mock_fetch,
+        mock_pull,
         mock_head,
         mock_reset,
         mock_sync,
         tmp_path: Path,
     ) -> None:
-        """Without a completed build, a failing first rebuild does not block startup."""
-        runner, _repo_path = self._legacy_repo_runner(tmp_path)
+        """A pulled repo with no record still starts when its rebuild keeps failing."""
+        runner, repo_path = self._legacy_repo_runner(tmp_path)
 
         runner._apply_startup_updates()
 
+        assert runner._startup_updated_repos == {"app-repo"}
+
         with (
-            patch.object(runner, "execute_hook", return_value=False),
+            patch.object(runner, "execute_hook", return_value=False) as mock_hook,
             patch.object(runner, "_start_service", return_value=True) as mock_start,
         ):
             runner.start_services()
 
-        mock_reset.assert_not_called()
+        assert mock_hook.call_count == 2
+        mock_reset.assert_called_once_with(repo_path, "pulled_head")
         mock_start.assert_called_once_with("app")
         assert read_completed_commits(tmp_path) == {}
 

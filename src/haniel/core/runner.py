@@ -944,6 +944,23 @@ class ServiceRunner:
                         repo_name,
                         error,
                     )
+            # Repos not updated at this startup and never recorded keep their
+            # current build: record HEAD as the baseline instead of rebuilding.
+            recorded = read_legacy_post_pull_commits(self.config_dir)
+            for repo_name in sorted(marker_repos - self._startup_updated_repos):
+                if repo_name in recorded:
+                    continue
+                try:
+                    runtime = self._snapshot_repo_runtime(repo_name)
+                    completed[repo_name] = get_head(
+                        self.config_dir / runtime.config.path
+                    )
+                except (GitError, ValueError) as error:
+                    logger.warning(
+                        "Cannot record baseline post_pull commit for %s: %s",
+                        repo_name,
+                        error,
+                    )
             if self._persist_legacy_build_completions(completed):
                 sync_disk()
 
@@ -3173,16 +3190,20 @@ class ServiceRunner:
         """Detect an update that stopped before its post_pull build finished.
 
         Returns True when the repository must be treated as updated so its
-        post_pull hook runs again.
+        post_pull hook runs again. A repository with no record at all is not
+        treated as interrupted: there is nothing to compare against, and
+        rebuilding every such repository would hold the node's services down
+        for the whole first start. Its current HEAD becomes the baseline record.
         """
         if repo_name not in marker_repos or repo_config.release_manifest:
             return False
         if recorded_commit is None:
-            logger.warning(
-                "No completed legacy post_pull record for %s; running post_pull once",
+            logger.info(
+                "No completed legacy post_pull record for %s; "
+                "recording the current HEAD as the completed baseline",
                 repo_name,
             )
-            return True
+            return False
         current_head = get_head(repo_path)
         if recorded_commit == current_head:
             return False
