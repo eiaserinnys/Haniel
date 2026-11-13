@@ -59,6 +59,11 @@ from .git import (
     sha256_file_at_commit,
 )
 from .health import HealthManager, ServiceState
+from .legacy_build_marker import (
+    read_completed_commits as read_legacy_post_pull_commits,
+    sync_disk,
+    write_completed_commits as write_legacy_post_pull_commits,
+)
 from .process import ProcessManager
 from .deployment import DeploymentError, DeploymentStateStore
 from .deployment_command_runner import CommandSpec, _command_failure_message
@@ -153,6 +158,26 @@ def is_self_update_unused_path(path: str) -> bool:
     """Return True when a changed path cannot change what a node runs."""
     normalized = path.replace("\\", "/")
     return normalized.startswith(SELF_UPDATE_UNUSED_PATH_PREFIXES)
+
+
+def _tracked_worktree_dirty(repo_path: Path) -> bool:
+    """Return True when tracked files differ from HEAD or git status fails."""
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.warning("git status failed in %s: %s", repo_path, error)
+        return True
+    if result.returncode != 0:
+        logger.warning("git status failed in %s: %s", repo_path, result.stderr.strip())
+        return True
+    return bool(result.stdout.strip())
 
 
 class CyclicDependencyError(Exception):
@@ -452,6 +477,9 @@ class ServiceRunner:
         # Track whether startup post_pull hooks have been considered.
         self._post_pull_executed = False
         self._startup_updated_repos: set[str] = set()
+        # Pre-pull HEAD of each legacy repo pulled during this startup, used to
+        # roll back a post_pull failure that has no earlier completed build.
+        self._startup_updated_repo_heads: dict[str, str] = {}
         self._startup_manifest_updates: dict[str, str] = {}
         self._startup_manifest_request_ids: dict[str, str] = {}
         self._startup_manifest_operations: dict[str, str] = {}
@@ -873,8 +901,10 @@ class ServiceRunner:
             return
 
         # Run legacy post_pull hooks on first start only for repos updated at startup.
+        blocked_repos: set[str] = set()
         if not self._post_pull_executed:
             self._post_pull_executed = True
+            hook_failures: dict[str, list[str]] = {}
             for name in startup_order:
                 if self._stop_event.is_set():
                     logger.info("Stopping startup hooks because shutdown was requested")
@@ -882,9 +912,40 @@ class ServiceRunner:
                 service = enabled_services[name]
                 if service.repo in self._startup_updated_repos:
                     if not self.execute_hook(name, "post_pull"):
+                        hook_failures.setdefault(service.repo, []).append(name)
                         startup_report_errors.setdefault(service.repo, []).append(
                             f"post_pull hook failed for {name}"
                         )
+
+            blocked_repos, recovered = self._resolve_startup_post_pull_failures(
+                hook_failures,
+                startup_order,
+                enabled_services,
+                startup_report_errors,
+            )
+            sync_disk()
+            completed: dict[str, str] = dict(recovered)
+            marker_repos = self._legacy_post_pull_marker_repos(config_snapshot)
+            for repo_name in sorted(self._startup_updated_repos):
+                if (
+                    repo_name not in marker_repos
+                    or repo_name in hook_failures
+                    or repo_name in blocked_repos
+                ):
+                    continue
+                try:
+                    runtime = self._snapshot_repo_runtime(repo_name)
+                    completed[repo_name] = get_head(
+                        self.config_dir / runtime.config.path
+                    )
+                except (GitError, ValueError) as error:
+                    logger.warning(
+                        "Cannot record completed post_pull for %s: %s",
+                        repo_name,
+                        error,
+                    )
+            if self._persist_legacy_build_completions(completed):
+                sync_disk()
 
         manifest_services: dict[str, list[str]] = {}
         for repo_name in self._startup_manifest_updates:
@@ -905,6 +966,16 @@ class ServiceRunner:
                 logger.info("Service already running after handover: %s", name)
                 continue
             repo_name = enabled_services[name].repo
+            if repo_name in blocked_repos:
+                logger.error(
+                    "Not starting %s: repository %s has no completed post_pull build",
+                    name,
+                    repo_name,
+                )
+                startup_report_errors.setdefault(repo_name, []).append(
+                    f"service start skipped for {name}"
+                )
+                continue
             if repo_name not in self._startup_manifest_updates:
                 if not self._start_service(name):
                     startup_report_errors.setdefault(repo_name, []).append(
@@ -1047,6 +1118,152 @@ class ServiceRunner:
                 ),
                 error="; ".join(errors) if errors else None,
             )
+
+    def _legacy_post_pull_marker_repos(
+        self, snapshot: RunnerConfigSnapshot
+    ) -> set[str]:
+        """Repos whose completed legacy post_pull build must be recorded."""
+        targets: set[str] = set()
+        for repo_name, repo_config in snapshot.repo_identity.items():
+            if repo_name == snapshot.self_repo or repo_config.release_manifest:
+                continue
+            if repo_config.hooks is not None and repo_config.hooks.post_pull:
+                targets.add(repo_name)
+                continue
+            for service_name in snapshot.startup_order:
+                service = snapshot.enabled_services[service_name]
+                if (
+                    service.repo == repo_name
+                    and service.hooks is not None
+                    and service.hooks.post_pull
+                ):
+                    targets.add(repo_name)
+                    break
+        return targets
+
+    def _resolve_startup_post_pull_failures(
+        self,
+        hook_failures: dict[str, list[str]],
+        startup_order: list[str],
+        enabled_services: dict[str, ServiceConfig],
+        startup_report_errors: dict[str, list[str]],
+    ) -> tuple[set[str], dict[str, str]]:
+        """Roll failed startup post_pull builds back to the last completed commit.
+
+        Returns the repos that may not start and the commits whose build was
+        restored by rollback.
+        """
+        blocked: set[str] = set()
+        recovered: dict[str, str] = {}
+        if not hook_failures:
+            return blocked, recovered
+        markers = read_legacy_post_pull_commits(self.config_dir)
+        for repo_name in sorted(hook_failures):
+            try:
+                runtime = self._snapshot_repo_runtime(repo_name)
+            except ValueError:
+                continue
+            repo_path = self.config_dir / runtime.config.path
+            recorded = markers.get(repo_name)
+            try:
+                current_head = get_head(repo_path)
+            except GitError as error:
+                logger.warning(
+                    "Cannot read HEAD of %s after post_pull failure: %s",
+                    repo_name,
+                    error,
+                )
+                current_head = None
+            if recorded is not None and recorded != current_head:
+                recover_to: str | None = recorded
+            else:
+                recover_to = self._startup_updated_repo_heads.get(repo_name)
+
+            rerun_failed: list[str] = []
+            if recover_to is not None:
+                try:
+                    reset_repo_to(repo_path, recover_to)
+                except GitError as error:
+                    logger.error(
+                        "Failed to roll %s back to %s: %s",
+                        repo_name,
+                        recover_to,
+                        error,
+                    )
+                    rerun_failed = ["rollback failed"]
+                else:
+                    rerun_failed = [
+                        name
+                        for name in startup_order
+                        if enabled_services[name].repo == repo_name
+                        and not self.execute_hook(name, "post_pull")
+                    ]
+
+            if recover_to is not None and not rerun_failed:
+                recovered[repo_name] = recover_to
+                startup_report_errors.setdefault(repo_name, []).append(
+                    f"post_pull failed; rolled back to {recover_to}"
+                )
+                logger.warning(
+                    "Rolled %s back to completed post_pull commit %s",
+                    repo_name,
+                    recover_to,
+                )
+                continue
+
+            if recorded is not None:
+                blocked.add(repo_name)
+                startup_report_errors.setdefault(repo_name, []).append(
+                    f"post_pull failed after rollback to {recover_to}; "
+                    f"services using {repo_name} were not started"
+                )
+                logger.error(
+                    "post_pull failed for %s even after rollback; not starting "
+                    "its services",
+                    repo_name,
+                )
+            else:
+                logger.warning(
+                    "post_pull failed for %s on the first startup after upgrade; "
+                    "starting anyway because no completed build was recorded",
+                    repo_name,
+                )
+        return blocked, recovered
+
+    def _persist_legacy_build_completions(self, completions: dict[str, str]) -> bool:
+        """Merge completed post_pull commits into the marker file."""
+        if not completions:
+            return False
+        markers = read_legacy_post_pull_commits(self.config_dir)
+        markers.update(completions)
+        try:
+            write_legacy_post_pull_commits(self.config_dir, markers)
+        except OSError as error:
+            logger.warning(
+                "Failed to record completed legacy post_pull builds: %s", error
+            )
+            return False
+        return True
+
+    def _record_legacy_build_completion(self, repo_name: str) -> None:
+        """Sync and record one repo whose approved legacy post_pull succeeded."""
+        try:
+            runtime = self._snapshot_repo_runtime(repo_name)
+        except ValueError:
+            return
+        if repo_name == self._self_repo or runtime.config.release_manifest:
+            return
+        repo_path = self.config_dir / runtime.config.path
+        try:
+            completed_head = get_head(repo_path)
+        except GitError as error:
+            logger.warning(
+                "Cannot record completed post_pull for %s: %s", repo_name, error
+            )
+            return
+        sync_disk()
+        if self._persist_legacy_build_completions({repo_name: completed_head}):
+            sync_disk()
 
     def _release_startup_repo_locks(self) -> None:
         """Release repo leases retained across startup manifest handover."""
@@ -2442,6 +2659,8 @@ class ServiceRunner:
                 "APPLY_FAILED", f"post_pull hook failed for: {failed}"
             )
 
+        self._record_legacy_build_completion(repo_name)
+
         shutdown_order = [s for s in self.get_shutdown_order() if s in affected]
         for service in shutdown_order:
             self._cancel_pending_restart(service)
@@ -2579,6 +2798,7 @@ class ServiceRunner:
         updated: list[str] = []
         failed: list[str] = []
         self._startup_updated_repos.clear()
+        self._startup_updated_repo_heads.clear()
         self._startup_manifest_updates.clear()
         self._startup_manifest_request_ids.clear()
         self._startup_manifest_operations.clear()
@@ -2591,6 +2811,8 @@ class ServiceRunner:
 
         startup_snapshot = self._snapshot_config_state()
         startup_repo_names = tuple(startup_snapshot.repo_identity)
+        marker_repos = self._legacy_post_pull_marker_repos(startup_snapshot)
+        markers = read_legacy_post_pull_commits(self.config_dir)
 
         for name in startup_repo_names:
             if name == self._snapshot_config_state().self_repo:
@@ -2637,6 +2859,13 @@ class ServiceRunner:
                 )
                 config_snapshot, runtime = self._snapshot_repo_and_config(name)
                 repo_path = self.config_dir / runtime.config.path
+                interrupted_legacy_update = self._recover_interrupted_legacy_update(
+                    name,
+                    repo_path,
+                    runtime.config,
+                    marker_repos,
+                    markers.get(name),
+                )
                 if has_updates:
                     logger.info("Startup update: pulling %s", name)
                     previous_head = get_head(repo_path)
@@ -2811,7 +3040,11 @@ class ServiceRunner:
                         self._startup_manifest_config_snapshots[name] = config_snapshot
                     else:
                         self._startup_updated_repos.add(name)
+                        assert previous_head is not None
+                        self._startup_updated_repo_heads[name] = previous_head
                 else:
+                    if interrupted_legacy_update:
+                        self._startup_updated_repos.add(name)
                     self._commit_repo_observation(
                         RepoObservation(
                             generation=runtime.generation,
@@ -2928,6 +3161,51 @@ class ServiceRunner:
                 len(failed),
                 ", ".join(failed),
             )
+
+    def _recover_interrupted_legacy_update(
+        self,
+        repo_name: str,
+        repo_path: Path,
+        repo_config: RepoConfig,
+        marker_repos: set[str],
+        recorded_commit: str | None,
+    ) -> bool:
+        """Detect an update that stopped before its post_pull build finished.
+
+        Returns True when the repository must be treated as updated so its
+        post_pull hook runs again.
+        """
+        if repo_name not in marker_repos or repo_config.release_manifest:
+            return False
+        if recorded_commit is None:
+            logger.warning(
+                "No completed legacy post_pull record for %s; running post_pull once",
+                repo_name,
+            )
+            return True
+        current_head = get_head(repo_path)
+        if recorded_commit == current_head:
+            return False
+        logger.warning(
+            "Interrupted legacy update in %s: HEAD %s is not the completed "
+            "post_pull commit %s",
+            repo_name,
+            current_head,
+            recorded_commit,
+        )
+        if (repo_config.pull_strategy or "merge") == "force":
+            if _tracked_worktree_dirty(repo_path):
+                logger.warning(
+                    "Discarding tracked changes in %s before retrying post_pull",
+                    repo_name,
+                )
+                reset_repo_to(repo_path, current_head)
+        else:
+            logger.warning(
+                "Leaving merge-strategy checkout %s in place; re-running post_pull",
+                repo_name,
+            )
+        return True
 
     def _ensure_release_manifest_activation(self, repo_name: str) -> bool:
         """Activate a conventional remote manifest before any new code is pulled."""

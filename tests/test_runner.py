@@ -17,6 +17,10 @@ from haniel.config import (
 )
 from haniel.core.git import GitError, GitTimeoutError, get_head
 from haniel.core.health import ServiceState
+from haniel.core.legacy_build_marker import (
+    read_completed_commits,
+    write_completed_commits,
+)
 from haniel.core.runner import (
     ServiceRunner,
     DependencyGraph,
@@ -3096,6 +3100,248 @@ class TestStartupUpdates:
         mock_pull.assert_called_once()
         _, kwargs = mock_pull.call_args
         assert kwargs.get("strategy") == "merge"
+
+    @staticmethod
+    def _legacy_repo_runner(
+        tmp_path: Path, *, pull_strategy: str | None = None
+    ) -> tuple[ServiceRunner, Path]:
+        repo_path = tmp_path / "app-repo"
+        repo_path.mkdir()
+        (repo_path / ".git").mkdir()
+        config = HanielConfig(
+            poll_interval=5,
+            repos={
+                "app-repo": RepoConfig(
+                    url="git@github.com:test/app.git",
+                    branch="main",
+                    path="./app-repo",
+                    pull_strategy=pull_strategy,
+                ),
+            },
+            services={
+                "app": ServiceConfig(
+                    run="echo app",
+                    repo="app-repo",
+                    hooks=HooksConfig(post_pull="echo build"),
+                ),
+            },
+        )
+        return ServiceRunner(config, config_dir=tmp_path), repo_path
+
+    def test_marker_targets_skip_self_manifest_and_hookless_repos(
+        self, tmp_path: Path
+    ) -> None:
+        """Only legacy repos whose post_pull runs at startup keep a build record."""
+        from haniel.config import SelfUpdateConfig
+
+        config = HanielConfig(
+            pull_strategy=None,
+            repos={
+                "app-repo": RepoConfig(url="git@test/app", path="./app-repo"),
+                "hookless-repo": RepoConfig(url="git@test/plain", path="./plain"),
+                "manifest-repo": RepoConfig(
+                    url="git@test/manifest",
+                    path="./manifest",
+                    release_manifest="deploy/release.json",
+                ),
+                "haniel-repo": RepoConfig(url="git@test/haniel", path="./haniel"),
+            },
+            services={
+                "app": ServiceConfig(
+                    run="echo app",
+                    repo="app-repo",
+                    hooks=HooksConfig(post_pull="echo build"),
+                ),
+                "plain": ServiceConfig(run="echo plain", repo="hookless-repo"),
+                "manifest": ServiceConfig(run="echo manifest", repo="manifest-repo"),
+            },
+            **{"self": SelfUpdateConfig(repo="haniel-repo")},
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+
+        targets = runner._legacy_post_pull_marker_repos(runner._snapshot_config_state())
+
+        assert targets == {"app-repo"}
+
+    @patch("haniel.core.runner.sync_disk")
+    @patch("haniel.core.runner.reset_repo_to")
+    @patch("haniel.core.runner._tracked_worktree_dirty", return_value=True)
+    @patch("haniel.core.runner.get_head", return_value="new_head")
+    @patch("haniel.core.runner.fetch_repo", return_value=False)
+    def test_interrupted_force_update_resets_and_reruns_post_pull(
+        self,
+        mock_fetch,
+        mock_head,
+        mock_dirty,
+        mock_reset,
+        mock_sync,
+        tmp_path: Path,
+    ) -> None:
+        """A changed checkout whose build never completed is restored and rebuilt."""
+        runner, repo_path = self._legacy_repo_runner(tmp_path, pull_strategy="force")
+        write_completed_commits(tmp_path, {"app-repo": "old_head"})
+
+        runner._apply_startup_updates()
+
+        assert runner._startup_updated_repos == {"app-repo"}
+        mock_reset.assert_called_once_with(repo_path, "new_head")
+
+        with (
+            patch.object(runner, "execute_hook", return_value=True) as mock_hook,
+            patch.object(runner, "_start_service", return_value=True) as mock_start,
+        ):
+            runner.start_services()
+
+        assert [hook.args for hook in mock_hook.call_args_list] == [
+            ("app", "post_pull")
+        ]
+        mock_start.assert_called_once_with("app")
+        assert read_completed_commits(tmp_path) == {"app-repo": "new_head"}
+        assert mock_sync.call_count == 2
+
+    @patch("haniel.core.runner.sync_disk")
+    @patch("haniel.core.runner.get_head", return_value="head_one")
+    @patch("haniel.core.runner.fetch_repo", return_value=False)
+    def test_first_start_without_record_runs_post_pull_and_records_head(
+        self, mock_fetch, mock_head, mock_sync, tmp_path: Path
+    ) -> None:
+        """A repo with no completion record is rebuilt once and then recorded."""
+        runner, _repo_path = self._legacy_repo_runner(tmp_path)
+
+        runner._apply_startup_updates()
+
+        assert runner._startup_updated_repos == {"app-repo"}
+
+        with (
+            patch.object(runner, "execute_hook", return_value=True) as mock_hook,
+            patch.object(runner, "_start_service", return_value=True),
+        ):
+            runner.start_services()
+
+        assert [hook.args for hook in mock_hook.call_args_list] == [
+            ("app", "post_pull")
+        ]
+        assert read_completed_commits(tmp_path) == {"app-repo": "head_one"}
+
+    @patch("haniel.core.runner.sync_disk")
+    @patch("haniel.core.runner.reset_repo_to")
+    @patch(
+        "haniel.core.runner.get_head",
+        side_effect=["old_head", "new_head", "new_head"],
+    )
+    @patch("haniel.core.runner.pull_repo")
+    @patch("haniel.core.runner.fetch_repo", return_value=True)
+    def test_startup_hook_failure_rolls_back_to_previous_head_and_restarts(
+        self,
+        mock_fetch,
+        mock_pull,
+        mock_head,
+        mock_reset,
+        mock_sync,
+        tmp_path: Path,
+    ) -> None:
+        """A failed startup build returns to the pre-pull commit and rebuilds it."""
+        runner, repo_path = self._legacy_repo_runner(tmp_path)
+
+        runner._apply_startup_updates()
+
+        assert runner._startup_updated_repo_heads == {"app-repo": "old_head"}
+
+        with (
+            patch.object(
+                runner, "execute_hook", side_effect=[False, True]
+            ) as mock_hook,
+            patch.object(runner, "_start_service", return_value=True) as mock_start,
+        ):
+            runner.start_services()
+
+        assert len(mock_hook.call_args_list) == 2
+        mock_reset.assert_called_once_with(repo_path, "old_head")
+        mock_start.assert_called_once_with("app")
+        assert read_completed_commits(tmp_path) == {"app-repo": "old_head"}
+
+    @patch("haniel.core.runner.sync_disk")
+    @patch("haniel.core.runner.reset_repo_to")
+    @patch(
+        "haniel.core.runner.get_head",
+        side_effect=[
+            "interrupted_head",
+            "interrupted_head",
+            "new_head",
+            "new_head",
+        ],
+    )
+    @patch("haniel.core.runner.pull_repo")
+    @patch("haniel.core.runner.fetch_repo", return_value=True)
+    def test_rollback_failure_blocks_services_when_a_record_existed(
+        self,
+        mock_fetch,
+        mock_pull,
+        mock_head,
+        mock_reset,
+        mock_sync,
+        tmp_path: Path,
+    ) -> None:
+        """A repo with a completed build never starts when its rebuild fails again."""
+        runner, repo_path = self._legacy_repo_runner(tmp_path)
+        write_completed_commits(tmp_path, {"app-repo": "old_head"})
+
+        runner._apply_startup_updates()
+
+        with (
+            patch.object(runner, "execute_hook", return_value=False) as mock_hook,
+            patch.object(runner, "_start_service", return_value=True) as mock_start,
+        ):
+            runner.start_services()
+
+        assert mock_hook.call_count == 2
+        mock_reset.assert_called_once_with(repo_path, "old_head")
+        mock_start.assert_not_called()
+        assert read_completed_commits(tmp_path) == {"app-repo": "old_head"}
+
+    @patch("haniel.core.runner.sync_disk")
+    @patch("haniel.core.runner.reset_repo_to")
+    @patch("haniel.core.runner.get_head", return_value="head_one")
+    @patch("haniel.core.runner.fetch_repo", return_value=False)
+    def test_first_start_hook_failure_starts_with_error_only(
+        self,
+        mock_fetch,
+        mock_head,
+        mock_reset,
+        mock_sync,
+        tmp_path: Path,
+    ) -> None:
+        """Without a completed build, a failing first rebuild does not block startup."""
+        runner, _repo_path = self._legacy_repo_runner(tmp_path)
+
+        runner._apply_startup_updates()
+
+        with (
+            patch.object(runner, "execute_hook", return_value=False),
+            patch.object(runner, "_start_service", return_value=True) as mock_start,
+        ):
+            runner.start_services()
+
+        mock_reset.assert_not_called()
+        mock_start.assert_called_once_with("app")
+        assert read_completed_commits(tmp_path) == {}
+
+    @patch("haniel.core.runner.sync_disk")
+    @patch("haniel.core.runner.get_head", return_value="approved_head")
+    def test_approved_legacy_hook_success_records_new_head(
+        self, mock_head, mock_sync, tmp_path: Path
+    ) -> None:
+        """The approval path records the built commit after its hooks succeed."""
+        runner, _repo_path = self._legacy_repo_runner(tmp_path)
+
+        with (
+            patch.object(runner, "execute_hook", return_value=True),
+            patch.object(runner, "_start_service", return_value=True),
+        ):
+            runner._restart_after_pull_legacy("app-repo", ["app"])
+
+        assert read_completed_commits(tmp_path) == {"app-repo": "approved_head"}
+        assert mock_sync.call_count == 2
 
 
 class TestServiceRunnerCollectServicesInfo:
