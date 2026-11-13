@@ -40,7 +40,7 @@ def test_read_ignores_non_mapping_entries(tmp_path: Path) -> None:
 
 def test_sync_disk_flushes_through_os_sync(monkeypatch) -> None:
     calls: list[bool] = []
-    monkeypatch.setattr(os, "sync", lambda: calls.append(True))
+    monkeypatch.setattr(os, "sync", lambda: calls.append(True), raising=False)
 
     legacy_build_marker.sync_disk()
 
