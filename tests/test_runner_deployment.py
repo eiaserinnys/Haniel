@@ -612,6 +612,26 @@ def test_build_failure_does_not_probe_service_already_down_before_deployment(
     assert get_head(repo) == previous_head
 
 
+def test_manifest_build_flushes_repository_writes_to_disk(
+    manifest_runner: tuple[ServiceRunner, Path, str],
+) -> None:
+    runner, _repo, previous_head = manifest_runner
+    events: list[str] = []
+    configure_processes(runner, events)
+    runner.execute_hook = MagicMock(return_value=True)
+
+    with (
+        patch(
+            "haniel.core.runner_deployment.subprocess_command_runner",
+            return_value=lambda _spec, _env: None,
+        ),
+        patch("haniel.core.runner_deployment.sync_disk") as mock_sync,
+    ):
+        run_manifest_deployment(runner, "app", ["app"], previous_head)
+
+    mock_sync.assert_called_once_with()
+
+
 def test_apply_failure_restores_database_then_restarts_previous_release(
     manifest_runner: tuple[ServiceRunner, Path, str],
 ) -> None:

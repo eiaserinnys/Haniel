@@ -22,6 +22,7 @@ from .deployment import (
 )
 from .git import get_head, reset_repo_to, sha256_file_at_commit
 from .handover_config import BoundServiceEnvironment, require_handover_config_digest
+from .legacy_build_marker import sync_disk
 from .reporting_deployment_state import (
     ProgressCallback,
     ReportingDeploymentStateStore,
@@ -204,6 +205,7 @@ class RunnerDeploymentAdapter:
             raise RuntimeError(
                 f"post_pull hook failed for: {', '.join(sorted(failed))}"
             )
+        sync_disk()
 
     def stop(self) -> dict[str, Any]:
         self.require_current_config()

@@ -331,6 +331,17 @@ stop/start and readiness ordering, but their unchanged repositories are not rebu
 
 Non-zero exit codes trigger a webhook notification. Service startup continues regardless.
 
+For startup updates, haniel records the commit whose `post_pull` completed in
+`.haniel/legacy_post_pull.json` and flushes the checkout and marker to disk
+before starting services. On the next start, a checkout whose HEAD differs from
+that record is treated as an interrupted update and rebuilt once (`force`
+strategy discards tracked changes first). If a startup pull's `post_pull` fails,
+haniel returns to the pre-pull commit and reruns the build; when that also fails
+and the repository had a completed build record, services using the repository
+are not started. A repository without any record (first boot) keeps the
+existing behaviour: the error is reported and startup continues. Release
+manifest builds flush the worktree the same way before deployment proceeds.
+
 Do not place destructive schema migrations in `pre_start`: it is a per-service lifecycle hook and is not a release transaction. Use the repository `release_manifest` so migration, recovery, readiness, and final verification share one auditable control path.
 
 ## `self`
