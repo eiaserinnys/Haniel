@@ -338,8 +338,12 @@ that record is treated as an interrupted update and rebuilt once (`force`
 strategy discards tracked changes first). If a startup pull's `post_pull` fails,
 haniel returns to the pre-pull commit and reruns the build; when that also fails
 and the repository had a completed build record, services using the repository
-are not started. A repository without any record (first boot) keeps the
-existing behaviour: the error is reported and startup continues. Release
+are not started. A repository without any record (the first start of this
+version, or a newly added repository) is not rebuilt: haniel records its current
+HEAD as the completed build and starts its services, so the first start does not
+hold the whole node down while every hook runs. If such a repository is pulled
+during that same startup and its `post_pull` still fails after the rollback, the
+error is reported, no record is written, and startup continues. Release
 manifest builds flush the worktree the same way before deployment proceeds.
 
 Do not place destructive schema migrations in `pre_start`: it is a per-service lifecycle hook and is not a release transaction. Use the repository `release_manifest` so migration, recovery, readiness, and final verification share one auditable control path.
