@@ -1,0 +1,5303 @@
+{
+ "rest_reject": {
+  "broadcasts": [
+   {
+    "deploy_id": "n:r:main:r1",
+    "node_id": "n",
+    "status": "rejected",
+    "type": "status_change"
+   },
+   {
+    "deploy_id": "n:haniel:main:r2",
+    "node_id": "n",
+    "status": "rejected",
+    "type": "status_change"
+   }
+  ],
+  "history": {
+   "deploys": [
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": null,
+     "branch": "main",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "n:haniel:main:r2",
+     "deployment_kind": "legacy",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": null,
+     "expected_manifest_digest": null,
+     "expected_manifest_identity": null,
+     "is_self_update": true,
+     "node_id": "n",
+     "postponed_until": true,
+     "reject_reason": "rejected by dashboard",
+     "repo": "haniel",
+     "status": "rejected",
+     "target_head": "r2",
+     "terminal_error": null,
+     "terminal_kind": null,
+     "terminal_reason": null,
+     "terminal_stage": null,
+     "updated_at": true
+    },
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": null,
+     "branch": "main",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "n:r:main:r1",
+     "deployment_kind": "legacy",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": null,
+     "expected_manifest_digest": null,
+     "expected_manifest_identity": null,
+     "is_self_update": false,
+     "node_id": "n",
+     "postponed_until": null,
+     "reject_reason": "no thanks",
+     "repo": "r",
+     "status": "rejected",
+     "target_head": "r1",
+     "terminal_error": null,
+     "terminal_kind": null,
+     "terminal_reason": null,
+     "terminal_stage": null,
+     "updated_at": true
+    }
+   ]
+  },
+  "pending-after": {
+   "deploys": []
+  },
+  "pending-before": {
+   "deploys": [
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": null,
+     "branch": "main",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "n:haniel:main:r2",
+     "deployment_kind": "legacy",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": null,
+     "expected_manifest_digest": null,
+     "expected_manifest_identity": null,
+     "is_self_update": true,
+     "node_id": "n",
+     "postponed_until": null,
+     "reject_reason": null,
+     "repo": "haniel",
+     "status": "pending",
+     "target_head": "r2",
+     "updated_at": true
+    },
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": null,
+     "branch": "main",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "n:r:main:r1",
+     "deployment_kind": "legacy",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": null,
+     "expected_manifest_digest": null,
+     "expected_manifest_identity": null,
+     "is_self_update": false,
+     "node_id": "n",
+     "postponed_until": null,
+     "reject_reason": null,
+     "repo": "r",
+     "status": "pending",
+     "target_head": "r1",
+     "updated_at": true
+    }
+   ]
+  },
+  "reject-again-409": {
+   "body": {
+    "error": "deploy is 'rejected', not pending"
+   },
+   "status_code": 409
+  },
+  "reject-missing-id": {
+   "body": {
+    "error": "deploy_id is required"
+   },
+   "status_code": 400
+  },
+  "reject-regular": {
+   "body": {
+    "deploy_id": "n:r:main:r1",
+    "status": "rejected"
+   },
+   "status_code": 200
+  },
+  "reject-self-update": {
+   "body": {
+    "deploy_id": "n:haniel:main:r2",
+    "status": "rejected"
+   },
+   "status_code": 200
+  },
+  "reject-unknown": {
+   "body": {
+    "error": "deploy nope not found"
+   },
+   "status_code": 404
+  },
+  "rows": {
+   "attempts": [],
+   "events": [
+    {
+     "approved_by": null,
+     "branch": "main",
+     "deploy_id": "n:haniel:main:r2",
+     "duration_ms": null,
+     "error": null,
+     "is_self_update": 1,
+     "node_id": "n",
+     "postponed_until": true,
+     "reject_reason": "rejected by dashboard",
+     "repo": "haniel",
+     "status": "rejected",
+     "target_head": "r2",
+     "updated_at": true
+    },
+    {
+     "approved_by": null,
+     "branch": "main",
+     "deploy_id": "n:r:main:r1",
+     "duration_ms": null,
+     "error": null,
+     "is_self_update": 0,
+     "node_id": "n",
+     "postponed_until": null,
+     "reject_reason": "no thanks",
+     "repo": "r",
+     "status": "rejected",
+     "target_head": "r1",
+     "updated_at": true
+    }
+   ],
+   "lineage": [],
+   "markers": [],
+   "node_attempts": [],
+   "probes": []
+  }
+ },
+ "s01_create_supersedes_older_pending": [
+  {
+   "result": true,
+   "rows": {
+    "attempts": [],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:a",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "a",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "first"
+  },
+  {
+   "result": true,
+   "rows": {
+    "attempts": [],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:a",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": "superseded by n:r:main:b",
+      "repo": "r",
+      "status": "rejected",
+      "target_head": "a",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:b",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "b",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "second"
+  },
+  {
+   "result": false,
+   "rows": {
+    "attempts": [],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:a",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": "superseded by n:r:main:b",
+      "repo": "r",
+      "status": "rejected",
+      "target_head": "a",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:b",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "b",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "duplicate"
+  },
+  {
+   "result": true,
+   "rows": {
+    "attempts": [],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:a",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": "superseded by n:r:main:b",
+      "repo": "r",
+      "status": "rejected",
+      "target_head": "a",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:b",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": "superseded by n:r:main:c",
+      "repo": "r",
+      "status": "rejected",
+      "target_head": "b",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:c",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "c",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "third"
+  },
+  {
+   "result": true,
+   "rows": {
+    "attempts": [],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "dev",
+      "deploy_id": "n:r:dev:d",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "d",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:a",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": "superseded by n:r:main:b",
+      "repo": "r",
+      "status": "rejected",
+      "target_head": "a",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:b",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": "superseded by n:r:main:c",
+      "repo": "r",
+      "status": "rejected",
+      "target_head": "b",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:c",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "c",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "other-branch"
+  },
+  {
+   "result": [
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": null,
+     "branch": "dev",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "n:r:dev:d",
+     "deployment_kind": "legacy",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": null,
+     "expected_manifest_digest": null,
+     "expected_manifest_identity": null,
+     "is_self_update": false,
+     "node_id": "n",
+     "postponed_until": null,
+     "reject_reason": null,
+     "repo": "r",
+     "status": "pending",
+     "target_head": "d",
+     "terminal_error": null,
+     "terminal_kind": null,
+     "terminal_reason": null,
+     "terminal_stage": null,
+     "updated_at": true
+    },
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": null,
+     "branch": "main",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "n:r:main:a",
+     "deployment_kind": "legacy",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": null,
+     "expected_manifest_digest": null,
+     "expected_manifest_identity": null,
+     "is_self_update": false,
+     "node_id": "n",
+     "postponed_until": null,
+     "reject_reason": "superseded by n:r:main:b",
+     "repo": "r",
+     "status": "rejected",
+     "target_head": "a",
+     "terminal_error": null,
+     "terminal_kind": null,
+     "terminal_reason": null,
+     "terminal_stage": null,
+     "updated_at": true
+    },
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": null,
+     "branch": "main",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "n:r:main:b",
+     "deployment_kind": "legacy",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": null,
+     "expected_manifest_digest": null,
+     "expected_manifest_identity": null,
+     "is_self_update": false,
+     "node_id": "n",
+     "postponed_until": null,
+     "reject_reason": "superseded by n:r:main:c",
+     "repo": "r",
+     "status": "rejected",
+     "target_head": "b",
+     "terminal_error": null,
+     "terminal_kind": null,
+     "terminal_reason": null,
+     "terminal_stage": null,
+     "updated_at": true
+    },
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": null,
+     "branch": "main",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "n:r:main:c",
+     "deployment_kind": "legacy",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": null,
+     "expected_manifest_digest": null,
+     "expected_manifest_identity": null,
+     "is_self_update": false,
+     "node_id": "n",
+     "postponed_until": null,
+     "reject_reason": null,
+     "repo": "r",
+     "status": "pending",
+     "target_head": "c",
+     "terminal_error": null,
+     "terminal_kind": null,
+     "terminal_reason": null,
+     "terminal_stage": null,
+     "updated_at": true
+    }
+   ],
+   "step": "history"
+  }
+ ],
+ "s02_normal_success": [
+  {
+   "result": {
+    "affected_services_json": "[\"svc\"]",
+    "approved_by": "director",
+    "branch": "main",
+    "commits_json": "[\"c\"]",
+    "completed_at": null,
+    "connection_generation": "g1",
+    "deadline_at": true,
+    "deploy_id": "n:r:main:t1",
+    "detected_at": true,
+    "diff_stat": "1 file",
+    "duration_ms": null,
+    "execution_mode": "execute",
+    "expected_budget_sec": null,
+    "journal_attempt_id": null,
+    "journal_completed_at": null,
+    "journal_target_head": null,
+    "manifest_digest": null,
+    "manifest_identity": null,
+    "node_id": "n",
+    "orchestrator_attempt_id": "a1",
+    "original_previous_head": null,
+    "outcome": "active",
+    "probe_id": null,
+    "proposal_fingerprint": null,
+    "repo": "r",
+    "result_error": null,
+    "result_status": null,
+    "settled_at": null,
+    "settled_local_head": null,
+    "settled_remote_head": null,
+    "source": "manual_single",
+    "source_orchestrator_attempt_id": null,
+    "started_at": true,
+    "target_head": "t1",
+    "terminal_error": null,
+    "terminal_kind": null,
+    "terminal_reason": null,
+    "terminal_stage": null
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": null,
+      "deploy_id": "n:r:main:t1",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a1",
+      "outcome": "active",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ],
+    "events": [
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n:r:main:t1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "deploying",
+      "target_head": "t1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "begin"
+  },
+  {
+   "result": {
+    "status": "recorded"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": null,
+      "deploy_id": "n:r:main:t1",
+      "duration_ms": 321,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a1",
+      "outcome": "active",
+      "result_error": null,
+      "result_status": "success",
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ],
+    "events": [
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n:r:main:t1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "deploying",
+      "target_head": "t1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "result"
+  },
+  {
+   "result": {
+    "deploy_id": "n:r:main:t1",
+    "status": "success"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:t1",
+      "duration_ms": 321,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a1",
+      "outcome": "success",
+      "result_error": null,
+      "result_status": "success",
+      "settled_at": true,
+      "settled_local_head": "t1",
+      "settled_remote_head": "t1-remote-ahead",
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ],
+    "events": [
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n:r:main:t1",
+      "duration_ms": 321,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "success",
+      "target_head": "t1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "settled"
+  },
+  {
+   "result": {
+    "status": "ignored"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:t1",
+      "duration_ms": 321,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a1",
+      "outcome": "success",
+      "result_error": null,
+      "result_status": "success",
+      "settled_at": true,
+      "settled_local_head": "t1",
+      "settled_remote_head": "t1-remote-ahead",
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ],
+    "events": [
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n:r:main:t1",
+      "duration_ms": 321,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "success",
+      "target_head": "t1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "late-result-ignored"
+  },
+  {
+   "result": [
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": "director",
+     "attempt_outcome": "success",
+     "branch": "main",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "n:r:main:t1",
+     "deployment_kind": "legacy",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": 321,
+     "error": null,
+     "execution_mode": "execute",
+     "expected_manifest_digest": null,
+     "expected_manifest_identity": null,
+     "is_self_update": false,
+     "journal_attempt_id": null,
+     "node_id": "n",
+     "orchestrator_attempt_id": "a1",
+     "postponed_until": null,
+     "reject_reason": null,
+     "repo": "r",
+     "status": "success",
+     "target_head": "t1",
+     "terminal_error": null,
+     "terminal_kind": null,
+     "terminal_reason": null,
+     "terminal_stage": null,
+     "updated_at": true
+    }
+   ],
+   "step": "history"
+  }
+ ],
+ "s03_settled_first_then_result": [
+  {
+   "result": {
+    "status": "recorded"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": null,
+      "deploy_id": "n:r:main:t2",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a1",
+      "outcome": "active",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": true,
+      "settled_local_head": "t2",
+      "settled_remote_head": "t2",
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ],
+    "events": [
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n:r:main:t2",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "deploying",
+      "target_head": "t2",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "settled"
+  },
+  {
+   "result": {
+    "status": "ignored"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": null,
+      "deploy_id": "n:r:main:t2",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a1",
+      "outcome": "active",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": true,
+      "settled_local_head": "t2",
+      "settled_remote_head": "t2",
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ],
+    "events": [
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n:r:main:t2",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "deploying",
+      "target_head": "t2",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "wrong-generation-ignored"
+  },
+  {
+   "result": {
+    "deploy_id": "n:r:main:t2",
+    "status": "success"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:t2",
+      "duration_ms": 77,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a1",
+      "outcome": "success",
+      "result_error": null,
+      "result_status": "success",
+      "settled_at": true,
+      "settled_local_head": "t2",
+      "settled_remote_head": "t2",
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ],
+    "events": [
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n:r:main:t2",
+      "duration_ms": 77,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "success",
+      "target_head": "t2",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "result"
+  }
+ ],
+ "s04_failed_result_then_retry": [
+  {
+   "result": {
+    "deploy_id": "n:r:main:t3",
+    "status": "failed"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:t3",
+      "duration_ms": 9,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a1",
+      "outcome": "failed",
+      "result_error": "boom",
+      "result_status": "failed",
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "boom",
+      "terminal_kind": "deploy_result_failed",
+      "terminal_reason": "deploy_result_failed",
+      "terminal_stage": "execution"
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:t3",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "t3",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n:r:main:t3",
+      "lineage_orchestrator_attempt_id": "a1"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n:r:main:t3",
+      "last_failed_orchestrator_attempt_id": "a1",
+      "source_orchestrator_attempt_id": "a1"
+     }
+    ],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "failed-result"
+  },
+  {
+   "result": {
+    "error": "ValueError",
+    "message": "retry requires preflight"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:t3",
+      "duration_ms": 9,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a1",
+      "outcome": "failed",
+      "result_error": "boom",
+      "result_status": "failed",
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "boom",
+      "terminal_kind": "deploy_result_failed",
+      "terminal_reason": "deploy_result_failed",
+      "terminal_stage": "execution"
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:t3",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "t3",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n:r:main:t3",
+      "lineage_orchestrator_attempt_id": "a1"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n:r:main:t3",
+      "last_failed_orchestrator_attempt_id": "a1",
+      "source_orchestrator_attempt_id": "a1"
+     }
+    ],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "begin-refused-needs-preflight"
+  },
+  {
+   "result": {
+    "attempt": {
+     "affected_services_json": "[\"svc\"]",
+     "approved_by": "director",
+     "branch": "main",
+     "commits_json": "[\"c\"]",
+     "completed_at": null,
+     "connection_generation": "g2",
+     "deadline_at": true,
+     "deploy_id": "n:r:main:t3",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "execution_mode": "execute",
+     "expected_budget_sec": null,
+     "journal_attempt_id": null,
+     "journal_completed_at": null,
+     "journal_target_head": null,
+     "manifest_digest": null,
+     "manifest_identity": null,
+     "node_id": "n",
+     "orchestrator_attempt_id": "a2",
+     "original_previous_head": null,
+     "outcome": "active",
+     "probe_id": "p1",
+     "proposal_fingerprint": "fp1",
+     "repo": "r",
+     "result_error": null,
+     "result_status": null,
+     "settled_at": null,
+     "settled_local_head": null,
+     "settled_remote_head": null,
+     "source": "manual_single",
+     "source_orchestrator_attempt_id": "a1",
+     "started_at": true,
+     "target_head": "t3",
+     "terminal_error": null,
+     "terminal_kind": null,
+     "terminal_reason": null,
+     "terminal_stage": null
+    },
+    "status": "begun"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:t3",
+      "duration_ms": 9,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a1",
+      "outcome": "failed",
+      "result_error": "boom",
+      "result_status": "failed",
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "boom",
+      "terminal_kind": "deploy_result_failed",
+      "terminal_reason": "deploy_result_failed",
+      "terminal_stage": "execution"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": null,
+      "deploy_id": "n:r:main:t3",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a2",
+      "outcome": "active",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ],
+    "events": [
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n:r:main:t3",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "deploying",
+      "target_head": "t3",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n:r:main:t3",
+      "lineage_orchestrator_attempt_id": "a1"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n:r:main:t3",
+      "last_failed_orchestrator_attempt_id": "a1",
+      "source_orchestrator_attempt_id": "a1"
+     }
+    ],
+    "node_attempts": [],
+    "probes": [
+     {
+      "deploy_id": "n:r:main:t3",
+      "mode": "execute",
+      "probe_id": "p1",
+      "status": "begun",
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ]
+   },
+   "step": "begin-retry"
+  },
+  {
+   "result": {
+    "deploy_id": "n:r:main:t3",
+    "node_id": "n",
+    "status": "failed"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:t3",
+      "duration_ms": 9,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a1",
+      "outcome": "failed",
+      "result_error": "boom",
+      "result_status": "failed",
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "boom",
+      "terminal_kind": "deploy_result_failed",
+      "terminal_reason": "deploy_result_failed",
+      "terminal_stage": "execution"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:t3",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a2",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "journal changed",
+      "terminal_kind": "approval_revalidation_failed",
+      "terminal_reason": "approval_revalidation_failed",
+      "terminal_stage": "approval_revalidation"
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:t3",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "t3",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n:r:main:t3",
+      "lineage_orchestrator_attempt_id": "a1"
+     },
+     {
+      "deploy_id": "n:r:main:t3",
+      "lineage_orchestrator_attempt_id": "a2"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n:r:main:t3",
+      "last_failed_orchestrator_attempt_id": "a2",
+      "source_orchestrator_attempt_id": "a2"
+     }
+    ],
+    "node_attempts": [],
+    "probes": [
+     {
+      "deploy_id": "n:r:main:t3",
+      "mode": "execute",
+      "probe_id": "p1",
+      "status": "begun",
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ]
+   },
+   "step": "second-failure-keeps-source"
+  },
+  {
+   "result": {
+    "status": "ignored"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:t3",
+      "duration_ms": 9,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a1",
+      "outcome": "failed",
+      "result_error": "boom",
+      "result_status": "failed",
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "boom",
+      "terminal_kind": "deploy_result_failed",
+      "terminal_reason": "deploy_result_failed",
+      "terminal_stage": "execution"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:t3",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a2",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "journal changed",
+      "terminal_kind": "approval_revalidation_failed",
+      "terminal_reason": "approval_revalidation_failed",
+      "terminal_stage": "approval_revalidation"
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:t3",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "t3",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n:r:main:t3",
+      "lineage_orchestrator_attempt_id": "a1"
+     },
+     {
+      "deploy_id": "n:r:main:t3",
+      "lineage_orchestrator_attempt_id": "a2"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n:r:main:t3",
+      "last_failed_orchestrator_attempt_id": "a2",
+      "source_orchestrator_attempt_id": "a2"
+     }
+    ],
+    "node_attempts": [],
+    "probes": [
+     {
+      "deploy_id": "n:r:main:t3",
+      "mode": "execute",
+      "probe_id": "p1",
+      "status": "begun",
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ]
+   },
+   "step": "late-failure-ignored"
+  },
+  {
+   "result": [
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": "director",
+     "attempt_outcome": "failed",
+     "branch": "main",
+     "canonical_deploy_id": "n:r:main:t3",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "attempt:a1",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": 9,
+     "error": "boom",
+     "node_id": "n",
+     "repo": "r",
+     "status": "failed",
+     "terminal_error": "boom",
+     "terminal_kind": "deploy_result_failed",
+     "terminal_reason": "deploy_result_failed",
+     "terminal_stage": "execution",
+     "updated_at": true
+    },
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": "director",
+     "attempt_outcome": "failed",
+     "branch": "main",
+     "canonical_deploy_id": "n:r:main:t3",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "attempt:a2",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": "journal changed",
+     "node_id": "n",
+     "repo": "r",
+     "status": "failed",
+     "terminal_error": "journal changed",
+     "terminal_kind": "approval_revalidation_failed",
+     "terminal_reason": "approval_revalidation_failed",
+     "terminal_stage": "approval_revalidation",
+     "updated_at": true
+    },
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": null,
+     "branch": "main",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "n:r:main:t3",
+     "deployment_kind": "legacy",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": null,
+     "expected_manifest_digest": null,
+     "expected_manifest_identity": null,
+     "is_self_update": false,
+     "node_id": "n",
+     "postponed_until": null,
+     "reject_reason": null,
+     "repo": "r",
+     "status": "pending",
+     "target_head": "t3",
+     "terminal_error": null,
+     "terminal_kind": null,
+     "terminal_reason": null,
+     "terminal_stage": null,
+     "updated_at": true
+    }
+   ],
+   "step": "history"
+  }
+ ],
+ "s05_failure_with_newer_canonical": [
+  {
+   "result": true,
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": null,
+      "deploy_id": "n:r:main:old1",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a1",
+      "outcome": "active",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:new1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "new1",
+      "updated_at": true
+     },
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n:r:main:old1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "deploying",
+      "target_head": "old1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "newer-created"
+  },
+  {
+   "result": {
+    "deploy_id": "n:r:main:old1",
+    "status": "superseded"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:old1",
+      "duration_ms": 3,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a1",
+      "outcome": "failed",
+      "result_error": "late",
+      "result_status": "failed",
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "late",
+      "terminal_kind": "deploy_result_failed",
+      "terminal_reason": "deploy_result_failed",
+      "terminal_stage": "execution"
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:new1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "new1",
+      "updated_at": true
+     },
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n:r:main:old1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": "superseded by newer canonical",
+      "repo": "r",
+      "status": "rejected",
+      "target_head": "old1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "old-fails"
+  },
+  {
+   "result": [
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": "director",
+     "attempt_outcome": "failed",
+     "branch": "main",
+     "canonical_deploy_id": "n:r:main:old1",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "attempt:a1",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": 3,
+     "error": "late",
+     "node_id": "n",
+     "repo": "r",
+     "status": "failed",
+     "terminal_error": "late",
+     "terminal_kind": "deploy_result_failed",
+     "terminal_reason": "deploy_result_failed",
+     "terminal_stage": "execution",
+     "updated_at": true
+    },
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": null,
+     "branch": "main",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "n:r:main:new1",
+     "deployment_kind": "legacy",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": null,
+     "expected_manifest_digest": null,
+     "expected_manifest_identity": null,
+     "is_self_update": false,
+     "node_id": "n",
+     "postponed_until": null,
+     "reject_reason": null,
+     "repo": "r",
+     "status": "pending",
+     "target_head": "new1",
+     "terminal_error": null,
+     "terminal_kind": null,
+     "terminal_reason": null,
+     "terminal_stage": null,
+     "updated_at": true
+    },
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": "director",
+     "branch": "main",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "n:r:main:old1",
+     "deployment_kind": "legacy",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": null,
+     "expected_manifest_digest": null,
+     "expected_manifest_identity": null,
+     "is_self_update": false,
+     "node_id": "n",
+     "postponed_until": null,
+     "reject_reason": "superseded by newer canonical",
+     "repo": "r",
+     "status": "rejected",
+     "target_head": "old1",
+     "terminal_error": null,
+     "terminal_kind": null,
+     "terminal_reason": null,
+     "terminal_stage": null,
+     "updated_at": true
+    }
+   ],
+   "step": "history"
+  }
+ ],
+ "s06_settled_mismatch_and_deadline": [
+  {
+   "result": {
+    "deploy_id": "n:r:main:m1",
+    "status": "failed"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:m1",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a1",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": true,
+      "settled_local_head": "wrong",
+      "settled_remote_head": "r",
+      "terminal_error": "settled HEAD mismatch: local=wrong remote=r target=m1",
+      "terminal_kind": "settled_head_mismatch",
+      "terminal_reason": "settled_head_mismatch",
+      "terminal_stage": "reconciliation"
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:m1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "m1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n:r:main:m1",
+      "lineage_orchestrator_attempt_id": "a1"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n:r:main:m1",
+      "last_failed_orchestrator_attempt_id": "a1",
+      "source_orchestrator_attempt_id": "a1"
+     }
+    ],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "settled-mismatch"
+  },
+  {
+   "result": {
+    "deadline_at": true,
+    "status": "deadline_changed"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:m1",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a1",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": true,
+      "settled_local_head": "wrong",
+      "settled_remote_head": "r",
+      "terminal_error": "settled HEAD mismatch: local=wrong remote=r target=m1",
+      "terminal_kind": "settled_head_mismatch",
+      "terminal_reason": "settled_head_mismatch",
+      "terminal_stage": "reconciliation"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": null,
+      "deploy_id": "n2:r:main:m2",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a2",
+      "outcome": "active",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ],
+    "events": [
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n2:r:main:m2",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n2",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "deploying",
+      "target_head": "m2",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:m1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "m1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n:r:main:m1",
+      "lineage_orchestrator_attempt_id": "a1"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n:r:main:m1",
+      "last_failed_orchestrator_attempt_id": "a1",
+      "source_orchestrator_attempt_id": "a1"
+     }
+    ],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "deadline-not-matching"
+  },
+  {
+   "result": {
+    "deploy_id": "n2:r:main:m2",
+    "status": "failed"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:m1",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a1",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": true,
+      "settled_local_head": "wrong",
+      "settled_remote_head": "r",
+      "terminal_error": "settled HEAD mismatch: local=wrong remote=r target=m1",
+      "terminal_kind": "settled_head_mismatch",
+      "terminal_reason": "settled_head_mismatch",
+      "terminal_stage": "reconciliation"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n2:r:main:m2",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a2",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "timeout",
+      "terminal_kind": "attempt_timeout",
+      "terminal_reason": "deploy_result_timeout",
+      "terminal_stage": "deadline"
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n2:r:main:m2",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n2",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "m2",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:m1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "m1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n2:r:main:m2",
+      "lineage_orchestrator_attempt_id": "a2"
+     },
+     {
+      "deploy_id": "n:r:main:m1",
+      "lineage_orchestrator_attempt_id": "a1"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n2:r:main:m2",
+      "last_failed_orchestrator_attempt_id": "a2",
+      "source_orchestrator_attempt_id": "a2"
+     },
+     {
+      "deploy_id": "n:r:main:m1",
+      "last_failed_orchestrator_attempt_id": "a1",
+      "source_orchestrator_attempt_id": "a1"
+     }
+    ],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "deadline-due"
+  },
+  {
+   "result": {
+    "status": "ignored"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:m1",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a1",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": true,
+      "settled_local_head": "wrong",
+      "settled_remote_head": "r",
+      "terminal_error": "settled HEAD mismatch: local=wrong remote=r target=m1",
+      "terminal_kind": "settled_head_mismatch",
+      "terminal_reason": "settled_head_mismatch",
+      "terminal_stage": "reconciliation"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n2:r:main:m2",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a2",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "timeout",
+      "terminal_kind": "attempt_timeout",
+      "terminal_reason": "deploy_result_timeout",
+      "terminal_stage": "deadline"
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n2:r:main:m2",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n2",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "m2",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:m1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "m1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n2:r:main:m2",
+      "lineage_orchestrator_attempt_id": "a2"
+     },
+     {
+      "deploy_id": "n:r:main:m1",
+      "lineage_orchestrator_attempt_id": "a1"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n2:r:main:m2",
+      "last_failed_orchestrator_attempt_id": "a2",
+      "source_orchestrator_attempt_id": "a2"
+     },
+     {
+      "deploy_id": "n:r:main:m1",
+      "last_failed_orchestrator_attempt_id": "a1",
+      "source_orchestrator_attempt_id": "a1"
+     }
+    ],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "renew-after-close-ignored"
+  },
+  {
+   "result": {
+    "deadline_at": true,
+    "expected_budget_sec": 10,
+    "status": "renewed"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:m1",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a1",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": true,
+      "settled_local_head": "wrong",
+      "settled_remote_head": "r",
+      "terminal_error": "settled HEAD mismatch: local=wrong remote=r target=m1",
+      "terminal_kind": "settled_head_mismatch",
+      "terminal_reason": "settled_head_mismatch",
+      "terminal_stage": "reconciliation"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n2:r:main:m2",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a2",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "timeout",
+      "terminal_kind": "attempt_timeout",
+      "terminal_reason": "deploy_result_timeout",
+      "terminal_stage": "deadline"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": null,
+      "deploy_id": "n3:r:main:m3",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "a3",
+      "outcome": "active",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n2:r:main:m2",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n2",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "m2",
+      "updated_at": true
+     },
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n3:r:main:m3",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n3",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "deploying",
+      "target_head": "m3",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:m1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "m1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n2:r:main:m2",
+      "lineage_orchestrator_attempt_id": "a2"
+     },
+     {
+      "deploy_id": "n:r:main:m1",
+      "lineage_orchestrator_attempt_id": "a1"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n2:r:main:m2",
+      "last_failed_orchestrator_attempt_id": "a2",
+      "source_orchestrator_attempt_id": "a2"
+     },
+     {
+      "deploy_id": "n:r:main:m1",
+      "last_failed_orchestrator_attempt_id": "a1",
+      "source_orchestrator_attempt_id": "a1"
+     }
+    ],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "renew"
+  }
+ ],
+ "s07_mode_mismatch_and_recovery": [
+  {
+   "result": {
+    "deploy_id": "n:r:main:rec",
+    "status": "failed"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:rec",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "source",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "ManifestRecoveryEvidence is forbidden for execute mode",
+      "terminal_kind": "execution_mode_mismatch",
+      "terminal_reason": "evidence_forbidden_for_mode",
+      "terminal_stage": "message_validation"
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:rec",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "rec",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n:r:main:rec",
+      "lineage_orchestrator_attempt_id": "source"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n:r:main:rec",
+      "last_failed_orchestrator_attempt_id": "source",
+      "source_orchestrator_attempt_id": "source"
+     }
+    ],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "evidence-in-execute-mode"
+  },
+  {
+   "result": {
+    "attempt": {
+     "affected_services_json": "[\"svc\"]",
+     "approved_by": "director",
+     "branch": "main",
+     "commits_json": "[\"c\"]",
+     "completed_at": null,
+     "connection_generation": "g2",
+     "deadline_at": true,
+     "deploy_id": "n:r:main:rec",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "execution_mode": "evidence_recovery",
+     "expected_budget_sec": null,
+     "journal_attempt_id": "journal-1",
+     "journal_completed_at": "2026-08-01T00:01:00Z",
+     "journal_target_head": "rec",
+     "manifest_digest": "digest",
+     "manifest_identity": "release.json",
+     "node_id": "n",
+     "orchestrator_attempt_id": "recovery",
+     "original_previous_head": null,
+     "outcome": "active",
+     "probe_id": "rp",
+     "proposal_fingerprint": "rfp",
+     "repo": "r",
+     "result_error": null,
+     "result_status": null,
+     "settled_at": null,
+     "settled_local_head": null,
+     "settled_remote_head": null,
+     "source": "manual_single",
+     "source_orchestrator_attempt_id": "source",
+     "started_at": true,
+     "target_head": "rec",
+     "terminal_error": null,
+     "terminal_kind": null,
+     "terminal_reason": null,
+     "terminal_stage": null
+    },
+    "status": "begun"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": null,
+      "deploy_id": "n:r:main:rec",
+      "duration_ms": null,
+      "execution_mode": "evidence_recovery",
+      "orchestrator_attempt_id": "recovery",
+      "outcome": "active",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     },
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:rec",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "source",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "ManifestRecoveryEvidence is forbidden for execute mode",
+      "terminal_kind": "execution_mode_mismatch",
+      "terminal_reason": "evidence_forbidden_for_mode",
+      "terminal_stage": "message_validation"
+     }
+    ],
+    "events": [
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n:r:main:rec",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "deploying",
+      "target_head": "rec",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n:r:main:rec",
+      "lineage_orchestrator_attempt_id": "source"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n:r:main:rec",
+      "last_failed_orchestrator_attempt_id": "source",
+      "source_orchestrator_attempt_id": "source"
+     }
+    ],
+    "node_attempts": [],
+    "probes": [
+     {
+      "deploy_id": "n:r:main:rec",
+      "mode": "evidence_recovery",
+      "probe_id": "rp",
+      "status": "begun",
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ]
+   },
+   "step": "begin-recovery"
+  },
+  {
+   "result": {
+    "deploy_id": "n:r:main:rec",
+    "status": "failed"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:rec",
+      "duration_ms": null,
+      "execution_mode": "evidence_recovery",
+      "orchestrator_attempt_id": "recovery",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "raw DeployResult is forbidden for evidence_recovery mode",
+      "terminal_kind": "execution_mode_mismatch",
+      "terminal_reason": "result_forbidden_for_mode",
+      "terminal_stage": "message_validation"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:rec",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "source",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "ManifestRecoveryEvidence is forbidden for execute mode",
+      "terminal_kind": "execution_mode_mismatch",
+      "terminal_reason": "evidence_forbidden_for_mode",
+      "terminal_stage": "message_validation"
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:rec",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "rec",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n:r:main:rec",
+      "lineage_orchestrator_attempt_id": "recovery"
+     },
+     {
+      "deploy_id": "n:r:main:rec",
+      "lineage_orchestrator_attempt_id": "source"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n:r:main:rec",
+      "last_failed_orchestrator_attempt_id": "recovery",
+      "source_orchestrator_attempt_id": "source"
+     }
+    ],
+    "node_attempts": [],
+    "probes": [
+     {
+      "deploy_id": "n:r:main:rec",
+      "mode": "evidence_recovery",
+      "probe_id": "rp",
+      "status": "begun",
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ]
+   },
+   "step": "raw-result-in-recovery-mode"
+  },
+  {
+   "result": [
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": "director",
+     "attempt_outcome": "failed",
+     "branch": "main",
+     "canonical_deploy_id": "n:r:main:rec",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "attempt:recovery",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": "raw DeployResult is forbidden for evidence_recovery mode",
+     "node_id": "n",
+     "repo": "r",
+     "status": "failed",
+     "terminal_error": "raw DeployResult is forbidden for evidence_recovery mode",
+     "terminal_kind": "execution_mode_mismatch",
+     "terminal_reason": "result_forbidden_for_mode",
+     "terminal_stage": "message_validation",
+     "updated_at": true
+    },
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": "director",
+     "attempt_outcome": "failed",
+     "branch": "main",
+     "canonical_deploy_id": "n:r:main:rec",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "attempt:source",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": "ManifestRecoveryEvidence is forbidden for execute mode",
+     "node_id": "n",
+     "repo": "r",
+     "status": "failed",
+     "terminal_error": "ManifestRecoveryEvidence is forbidden for execute mode",
+     "terminal_kind": "execution_mode_mismatch",
+     "terminal_reason": "evidence_forbidden_for_mode",
+     "terminal_stage": "message_validation",
+     "updated_at": true
+    },
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": null,
+     "branch": "main",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "n:r:main:rec",
+     "deployment_kind": "manifest",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": null,
+     "expected_manifest_digest": "digest",
+     "expected_manifest_identity": "release.json",
+     "is_self_update": false,
+     "node_id": "n",
+     "postponed_until": null,
+     "reject_reason": null,
+     "repo": "r",
+     "status": "pending",
+     "target_head": "rec",
+     "terminal_error": null,
+     "terminal_kind": null,
+     "terminal_reason": null,
+     "terminal_stage": null,
+     "updated_at": true
+    }
+   ],
+   "step": "history"
+  }
+ ],
+ "s08_recovery_invalid": [
+  {
+   "result": {
+    "deploy_id": "n:r:main:rec2",
+    "status": "failed"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:rec2",
+      "duration_ms": null,
+      "execution_mode": "evidence_recovery",
+      "orchestrator_attempt_id": "recovery",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "recovery evidence mismatch: journal identity",
+      "terminal_kind": "recovery_evidence_invalid",
+      "terminal_reason": "recovery_evidence_invalid",
+      "terminal_stage": "evidence_validation"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:rec2",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "source",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "lost",
+      "terminal_kind": "attempt_timeout",
+      "terminal_reason": "lost",
+      "terminal_stage": "deadline"
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:rec2",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "rec2",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n:r:main:rec2",
+      "lineage_orchestrator_attempt_id": "recovery"
+     },
+     {
+      "deploy_id": "n:r:main:rec2",
+      "lineage_orchestrator_attempt_id": "source"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n:r:main:rec2",
+      "last_failed_orchestrator_attempt_id": "recovery",
+      "source_orchestrator_attempt_id": "source"
+     }
+    ],
+    "node_attempts": [],
+    "probes": [
+     {
+      "deploy_id": "n:r:main:rec2",
+      "mode": "evidence_recovery",
+      "probe_id": "rp",
+      "status": "begun",
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ]
+   },
+   "step": "invalid-evidence-fails"
+  },
+  {
+   "result": [
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": "director",
+     "attempt_outcome": "failed",
+     "branch": "main",
+     "canonical_deploy_id": "n:r:main:rec2",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "attempt:recovery",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": "recovery evidence mismatch: journal identity",
+     "node_id": "n",
+     "repo": "r",
+     "status": "failed",
+     "terminal_error": "recovery evidence mismatch: journal identity",
+     "terminal_kind": "recovery_evidence_invalid",
+     "terminal_reason": "recovery_evidence_invalid",
+     "terminal_stage": "evidence_validation",
+     "updated_at": true
+    },
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": "director",
+     "attempt_outcome": "failed",
+     "branch": "main",
+     "canonical_deploy_id": "n:r:main:rec2",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "attempt:source",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": "lost",
+     "node_id": "n",
+     "repo": "r",
+     "status": "failed",
+     "terminal_error": "lost",
+     "terminal_kind": "attempt_timeout",
+     "terminal_reason": "lost",
+     "terminal_stage": "deadline",
+     "updated_at": true
+    },
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": null,
+     "branch": "main",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "n:r:main:rec2",
+     "deployment_kind": "manifest",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": null,
+     "expected_manifest_digest": "digest",
+     "expected_manifest_identity": "release.json",
+     "is_self_update": false,
+     "node_id": "n",
+     "postponed_until": null,
+     "reject_reason": null,
+     "repo": "r",
+     "status": "pending",
+     "target_head": "rec2",
+     "terminal_error": null,
+     "terminal_kind": null,
+     "terminal_reason": null,
+     "terminal_stage": null,
+     "updated_at": true
+    }
+   ],
+   "step": "history"
+  }
+ ],
+ "s09_recovery_success": [
+  {
+   "result": {
+    "deploy_id": "n:r:main:rec3",
+    "status": "success"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:rec3",
+      "duration_ms": null,
+      "execution_mode": "evidence_recovery",
+      "orchestrator_attempt_id": "recovery",
+      "outcome": "evidence_recovered_success",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     },
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r:main:rec3",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "source",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "lost",
+      "terminal_kind": "attempt_timeout",
+      "terminal_reason": "lost",
+      "terminal_stage": "deadline"
+     }
+    ],
+    "events": [
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n:r:main:rec3",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "success",
+      "target_head": "rec3",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": [
+     {
+      "deploy_id": "n:r:main:rec3",
+      "mode": "evidence_recovery",
+      "probe_id": "rp",
+      "status": "begun",
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ]
+   },
+   "step": "recovery-success"
+  },
+  {
+   "result": [
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": "director",
+     "attempt_outcome": "failed",
+     "branch": "main",
+     "canonical_deploy_id": "n:r:main:rec3",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "attempt:source",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": "lost",
+     "node_id": "n",
+     "repo": "r",
+     "status": "failed",
+     "terminal_error": "lost",
+     "terminal_kind": "attempt_timeout",
+     "terminal_reason": "lost",
+     "terminal_stage": "deadline",
+     "updated_at": true
+    },
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": "director",
+     "attempt_outcome": "evidence_recovered_success",
+     "branch": "main",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "n:r:main:rec3",
+     "deployment_kind": "manifest",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": null,
+     "execution_mode": "evidence_recovery",
+     "expected_manifest_digest": "digest",
+     "expected_manifest_identity": "release.json",
+     "is_self_update": false,
+     "journal_attempt_id": "journal-1",
+     "node_id": "n",
+     "orchestrator_attempt_id": "recovery",
+     "postponed_until": null,
+     "reject_reason": null,
+     "repo": "r",
+     "status": "success",
+     "target_head": "rec3",
+     "terminal_error": null,
+     "terminal_kind": null,
+     "terminal_reason": null,
+     "terminal_stage": null,
+     "updated_at": true
+    }
+   ],
+   "step": "history"
+  }
+ ],
+ "s10_node_reports": [
+  {
+   "result": {
+    "cancelled_orchestrator_attempt_ids": [],
+    "canonical_status": "pending",
+    "deploy_id": "n:r:main:np",
+    "status": "started"
+   },
+   "rows": {
+    "attempts": [],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:np",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "np",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [
+     {
+      "deploy_id": "n:r:main:np",
+      "duration_ms": null,
+      "error": null,
+      "node_attempt_id": "na1",
+      "outcome": "active",
+      "terminal_local_head": null
+     }
+    ],
+    "probes": []
+   },
+   "step": "started"
+  },
+  {
+   "result": {
+    "cancelled_orchestrator_attempt_ids": [],
+    "canonical_status": "pending",
+    "deploy_id": "n:r:main:np",
+    "status": "failed"
+   },
+   "rows": {
+    "attempts": [],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:np",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "np",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [
+     {
+      "deploy_id": "n:r:main:np",
+      "duration_ms": 25,
+      "error": "verify failed",
+      "node_attempt_id": "na1",
+      "outcome": "failed",
+      "terminal_local_head": "np"
+     }
+    ],
+    "probes": []
+   },
+   "step": "failed-on-pending"
+  },
+  {
+   "result": {
+    "cancelled_orchestrator_attempt_ids": [],
+    "canonical_status": "success",
+    "deploy_id": "n:r:main:np",
+    "status": "success"
+   },
+   "rows": {
+    "attempts": [],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:np",
+      "duration_ms": 25,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "success",
+      "target_head": "np",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [
+     {
+      "deploy_id": "n:r:main:np",
+      "duration_ms": 25,
+      "error": "verify failed",
+      "node_attempt_id": "na1",
+      "outcome": "failed",
+      "terminal_local_head": "np"
+     },
+     {
+      "deploy_id": "n:r:main:np",
+      "duration_ms": 25,
+      "error": null,
+      "node_attempt_id": "na2",
+      "outcome": "success",
+      "terminal_local_head": "np"
+     }
+    ],
+    "probes": []
+   },
+   "step": "succeeded-on-pending"
+  },
+  {
+   "result": {
+    "cancelled_orchestrator_attempt_ids": [],
+    "deploy_id": "n:r:main:np",
+    "status": "ignored"
+   },
+   "rows": {
+    "attempts": [],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:np",
+      "duration_ms": 25,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "success",
+      "target_head": "np",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [
+     {
+      "deploy_id": "n:r:main:np",
+      "duration_ms": 25,
+      "error": "verify failed",
+      "node_attempt_id": "na1",
+      "outcome": "failed",
+      "terminal_local_head": "np"
+     },
+     {
+      "deploy_id": "n:r:main:np",
+      "duration_ms": 25,
+      "error": null,
+      "node_attempt_id": "na2",
+      "outcome": "success",
+      "terminal_local_head": "np"
+     }
+    ],
+    "probes": []
+   },
+   "step": "report-after-close-ignored"
+  },
+  {
+   "result": {
+    "cancelled_orchestrator_attempt_ids": [],
+    "canonical_status": "deploying",
+    "deploy_id": "n2:r:main:nd",
+    "status": "failed"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": null,
+      "deploy_id": "n2:r:main:nd",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa1",
+      "outcome": "active",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ],
+    "events": [
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n2:r:main:nd",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n2",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "deploying",
+      "target_head": "nd",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:np",
+      "duration_ms": 25,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "success",
+      "target_head": "np",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [
+     {
+      "deploy_id": "n:r:main:np",
+      "duration_ms": 25,
+      "error": "verify failed",
+      "node_attempt_id": "na1",
+      "outcome": "failed",
+      "terminal_local_head": "np"
+     },
+     {
+      "deploy_id": "n:r:main:np",
+      "duration_ms": 25,
+      "error": null,
+      "node_attempt_id": "na2",
+      "outcome": "success",
+      "terminal_local_head": "np"
+     },
+     {
+      "deploy_id": "n2:r:main:nd",
+      "duration_ms": 25,
+      "error": "own failure",
+      "node_attempt_id": "nb1",
+      "outcome": "failed",
+      "terminal_local_head": "nd"
+     }
+    ],
+    "probes": []
+   },
+   "step": "failed-with-active-attempt"
+  },
+  {
+   "result": {
+    "cancelled_orchestrator_attempt_ids": [
+     "oa1"
+    ],
+    "canonical_status": "success",
+    "deploy_id": "n2:r:main:nd",
+    "status": "success"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n2:r:main:nd",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa1",
+      "outcome": "superseded",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "superseded by node-owned deployment",
+      "terminal_kind": "node_deploy_succeeded",
+      "terminal_reason": "out_of_band_success",
+      "terminal_stage": "node_deploy_report"
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n2:r:main:nd",
+      "duration_ms": 25,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n2",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "success",
+      "target_head": "nd",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:np",
+      "duration_ms": 25,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "success",
+      "target_head": "np",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [
+     {
+      "deploy_id": "n:r:main:np",
+      "duration_ms": 25,
+      "error": "verify failed",
+      "node_attempt_id": "na1",
+      "outcome": "failed",
+      "terminal_local_head": "np"
+     },
+     {
+      "deploy_id": "n:r:main:np",
+      "duration_ms": 25,
+      "error": null,
+      "node_attempt_id": "na2",
+      "outcome": "success",
+      "terminal_local_head": "np"
+     },
+     {
+      "deploy_id": "n2:r:main:nd",
+      "duration_ms": 25,
+      "error": "own failure",
+      "node_attempt_id": "nb1",
+      "outcome": "failed",
+      "terminal_local_head": "nd"
+     },
+     {
+      "deploy_id": "n2:r:main:nd",
+      "duration_ms": 25,
+      "error": null,
+      "node_attempt_id": "nb2",
+      "outcome": "success",
+      "terminal_local_head": "nd"
+     }
+    ],
+    "probes": []
+   },
+   "step": "succeeded-supersedes-attempt"
+  },
+  {
+   "result": {
+    "cancelled_orchestrator_attempt_ids": [],
+    "canonical_status": "pending",
+    "deploy_id": "n3:r:main:ne",
+    "status": "failed"
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n2:r:main:nd",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa1",
+      "outcome": "superseded",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "superseded by node-owned deployment",
+      "terminal_kind": "node_deploy_succeeded",
+      "terminal_reason": "out_of_band_success",
+      "terminal_stage": "node_deploy_report"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n3:r:main:ne",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa3",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "x",
+      "terminal_kind": "approval_revalidation_failed",
+      "terminal_reason": "approval_revalidation_failed",
+      "terminal_stage": "approval_revalidation"
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n2:r:main:nd",
+      "duration_ms": 25,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n2",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "success",
+      "target_head": "nd",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n3:r:main:ne",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n3",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "ne",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:np",
+      "duration_ms": 25,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "success",
+      "target_head": "np",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n3:r:main:ne",
+      "lineage_orchestrator_attempt_id": "oa3"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n3:r:main:ne",
+      "last_failed_orchestrator_attempt_id": "oa3",
+      "source_orchestrator_attempt_id": "oa3"
+     }
+    ],
+    "node_attempts": [
+     {
+      "deploy_id": "n:r:main:np",
+      "duration_ms": 25,
+      "error": "verify failed",
+      "node_attempt_id": "na1",
+      "outcome": "failed",
+      "terminal_local_head": "np"
+     },
+     {
+      "deploy_id": "n:r:main:np",
+      "duration_ms": 25,
+      "error": null,
+      "node_attempt_id": "na2",
+      "outcome": "success",
+      "terminal_local_head": "np"
+     },
+     {
+      "deploy_id": "n2:r:main:nd",
+      "duration_ms": 25,
+      "error": "own failure",
+      "node_attempt_id": "nb1",
+      "outcome": "failed",
+      "terminal_local_head": "nd"
+     },
+     {
+      "deploy_id": "n2:r:main:nd",
+      "duration_ms": 25,
+      "error": null,
+      "node_attempt_id": "nb2",
+      "outcome": "success",
+      "terminal_local_head": "nd"
+     },
+     {
+      "deploy_id": "n3:r:main:ne",
+      "duration_ms": 25,
+      "error": "node own failure",
+      "node_attempt_id": "nc1",
+      "outcome": "failed",
+      "terminal_local_head": "ne"
+     }
+    ],
+    "probes": []
+   },
+   "step": "failed-on-retry-pending-keeps-marker"
+  },
+  {
+   "result": [
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": "director",
+     "attempt_outcome": "failed",
+     "branch": "main",
+     "canonical_deploy_id": "n3:r:main:ne",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "attempt:oa3",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": "x",
+     "node_id": "n3",
+     "repo": "r",
+     "status": "failed",
+     "terminal_error": "x",
+     "terminal_kind": "approval_revalidation_failed",
+     "terminal_reason": "approval_revalidation_failed",
+     "terminal_stage": "approval_revalidation",
+     "updated_at": true
+    },
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": null,
+     "attempt_outcome": "success",
+     "branch": "main",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "n2:r:main:nd",
+     "deployment_kind": "legacy",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": 25,
+     "error": null,
+     "expected_manifest_digest": null,
+     "expected_manifest_identity": null,
+     "is_self_update": false,
+     "journal_attempt_id": "journal-nb2",
+     "node_attempt_id": "nb2",
+     "node_deploy_trigger": "local",
+     "node_id": "n2",
+     "postponed_until": null,
+     "reject_reason": null,
+     "repo": "r",
+     "status": "success",
+     "target_head": "nd",
+     "terminal_error": null,
+     "terminal_kind": null,
+     "terminal_reason": null,
+     "terminal_stage": null,
+     "updated_at": true
+    },
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": null,
+     "branch": "main",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "n3:r:main:ne",
+     "deployment_kind": "legacy",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": null,
+     "error": null,
+     "expected_manifest_digest": null,
+     "expected_manifest_identity": null,
+     "is_self_update": false,
+     "node_id": "n3",
+     "postponed_until": null,
+     "reject_reason": null,
+     "repo": "r",
+     "status": "pending",
+     "target_head": "ne",
+     "terminal_error": null,
+     "terminal_kind": null,
+     "terminal_reason": null,
+     "terminal_stage": null,
+     "updated_at": true
+    },
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": null,
+     "attempt_outcome": "success",
+     "branch": "main",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "n:r:main:np",
+     "deployment_kind": "legacy",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": 25,
+     "error": null,
+     "expected_manifest_digest": null,
+     "expected_manifest_identity": null,
+     "is_self_update": false,
+     "journal_attempt_id": "journal-na2",
+     "node_attempt_id": "na2",
+     "node_deploy_trigger": "local",
+     "node_id": "n",
+     "postponed_until": null,
+     "reject_reason": null,
+     "repo": "r",
+     "status": "success",
+     "target_head": "np",
+     "terminal_error": null,
+     "terminal_kind": null,
+     "terminal_reason": null,
+     "terminal_stage": null,
+     "updated_at": true
+    },
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": null,
+     "attempt_outcome": "failed",
+     "branch": "main",
+     "canonical_deploy_id": "n:r:main:np",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "node-attempt:na1",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": 25,
+     "error": "verify failed",
+     "journal_attempt_id": "journal-na1",
+     "node_attempt_id": "na1",
+     "node_id": "n",
+     "repo": "r",
+     "status": "failed",
+     "terminal_error": "verify failed",
+     "terminal_kind": "node_deploy_failed",
+     "terminal_reason": "out_of_band_failure",
+     "terminal_stage": "local",
+     "updated_at": true
+    },
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": null,
+     "attempt_outcome": "failed",
+     "branch": "main",
+     "canonical_deploy_id": "n2:r:main:nd",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "node-attempt:nb1",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": 25,
+     "error": "own failure",
+     "journal_attempt_id": "journal-nb1",
+     "node_attempt_id": "nb1",
+     "node_id": "n2",
+     "repo": "r",
+     "status": "failed",
+     "terminal_error": "own failure",
+     "terminal_kind": "node_deploy_failed",
+     "terminal_reason": "out_of_band_failure",
+     "terminal_stage": "local",
+     "updated_at": true
+    },
+    {
+     "affected_services": [
+      "svc"
+     ],
+     "approved_by": null,
+     "attempt_outcome": "failed",
+     "branch": "main",
+     "canonical_deploy_id": "n3:r:main:ne",
+     "commits": [
+      "c"
+     ],
+     "created_at": true,
+     "deploy_id": "node-attempt:nc1",
+     "detected_at": true,
+     "diff_stat": "1 file",
+     "duration_ms": 25,
+     "error": "node own failure",
+     "journal_attempt_id": "journal-nc1",
+     "node_attempt_id": "nc1",
+     "node_id": "n3",
+     "repo": "r",
+     "status": "failed",
+     "terminal_error": "node own failure",
+     "terminal_kind": "node_deploy_failed",
+     "terminal_reason": "out_of_band_failure",
+     "terminal_stage": "local",
+     "updated_at": true
+    }
+   ],
+   "step": "history"
+  }
+ ],
+ "s11_observation": [
+  {
+   "result": {
+    "broadcasts": []
+   },
+   "rows": {
+    "attempts": [],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:o1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "o1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "heads-differ-keeps-pending"
+  },
+  {
+   "result": {
+    "broadcasts": [
+     {
+      "deploy_id": "n:r:main:o1",
+      "node_id": "n",
+      "status": "success",
+      "type": "status_change"
+     }
+    ]
+   },
+   "rows": {
+    "attempts": [],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:o1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "success",
+      "target_head": "o1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "closes-plain-pending"
+  },
+  {
+   "result": {
+    "broadcasts": []
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r2:main:o2",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "boom",
+      "terminal_kind": "failed",
+      "terminal_reason": "x",
+      "terminal_stage": "execution"
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r2:main:o2",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r2",
+      "status": "pending",
+      "target_head": "o2",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:o1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "success",
+      "target_head": "o1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n:r2:main:o2",
+      "lineage_orchestrator_attempt_id": "oa"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n:r2:main:o2",
+      "last_failed_orchestrator_attempt_id": "oa",
+      "source_orchestrator_attempt_id": "oa"
+     }
+    ],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "retry-marker-blocks-regular-close"
+  },
+  {
+   "result": {
+    "broadcasts": []
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r2:main:o2",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "boom",
+      "terminal_kind": "failed",
+      "terminal_reason": "x",
+      "terminal_stage": "execution"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": null,
+      "deploy_id": "n:r3:main:o3",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa3",
+      "outcome": "active",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r2:main:o2",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r2",
+      "status": "pending",
+      "target_head": "o2",
+      "updated_at": true
+     },
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n:r3:main:o3",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r3",
+      "status": "deploying",
+      "target_head": "o3",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:o1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "success",
+      "target_head": "o1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n:r2:main:o2",
+      "lineage_orchestrator_attempt_id": "oa"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n:r2:main:o2",
+      "last_failed_orchestrator_attempt_id": "oa",
+      "source_orchestrator_attempt_id": "oa"
+     }
+    ],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "active-attempt-blocks-close"
+  },
+  {
+   "result": {
+    "broadcasts": []
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r2:main:o2",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "boom",
+      "terminal_kind": "failed",
+      "terminal_reason": "x",
+      "terminal_stage": "execution"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": null,
+      "deploy_id": "n:r3:main:o3",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa3",
+      "outcome": "active",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r2:main:o2",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r2",
+      "status": "pending",
+      "target_head": "o2",
+      "updated_at": true
+     },
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n:r3:main:o3",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r3",
+      "status": "deploying",
+      "target_head": "o3",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r4:main:o4",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r4",
+      "status": "pending",
+      "target_head": "o4",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:o1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "success",
+      "target_head": "o1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n:r2:main:o2",
+      "lineage_orchestrator_attempt_id": "oa"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n:r2:main:o2",
+      "last_failed_orchestrator_attempt_id": "oa",
+      "source_orchestrator_attempt_id": "oa"
+     }
+    ],
+    "node_attempts": [
+     {
+      "deploy_id": "n:r4:main:o4",
+      "duration_ms": 25,
+      "error": "e",
+      "node_attempt_id": "nf",
+      "outcome": "failed",
+      "terminal_local_head": "o4"
+     }
+    ],
+    "probes": []
+   },
+   "step": "failed-node-attempt-blocks-close"
+  },
+  {
+   "result": {
+    "broadcasts": [
+     {
+      "deploy_id": "n:haniel:main:old-head",
+      "node_id": "n",
+      "status": "success",
+      "type": "status_change"
+     }
+    ]
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r2:main:o2",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "boom",
+      "terminal_kind": "failed",
+      "terminal_reason": "x",
+      "terminal_stage": "execution"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": null,
+      "deploy_id": "n:r3:main:o3",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa3",
+      "outcome": "active",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:haniel:main:old-head",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 1,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "haniel",
+      "status": "success",
+      "target_head": "newer-head",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r2:main:o2",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r2",
+      "status": "pending",
+      "target_head": "o2",
+      "updated_at": true
+     },
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n:r3:main:o3",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r3",
+      "status": "deploying",
+      "target_head": "o3",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r4:main:o4",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r4",
+      "status": "pending",
+      "target_head": "o4",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:o1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "success",
+      "target_head": "o1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n:r2:main:o2",
+      "lineage_orchestrator_attempt_id": "oa"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n:r2:main:o2",
+      "last_failed_orchestrator_attempt_id": "oa",
+      "source_orchestrator_attempt_id": "oa"
+     }
+    ],
+    "node_attempts": [
+     {
+      "deploy_id": "n:r4:main:o4",
+      "duration_ms": 25,
+      "error": "e",
+      "node_attempt_id": "nf",
+      "outcome": "failed",
+      "terminal_local_head": "o4"
+     }
+    ],
+    "probes": []
+   },
+   "step": "self-update-closed-by-newer-observation"
+  },
+  {
+   "result": {
+    "broadcasts": []
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r2:main:o2",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "boom",
+      "terminal_kind": "failed",
+      "terminal_reason": "x",
+      "terminal_stage": "execution"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": null,
+      "deploy_id": "n:r3:main:o3",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa3",
+      "outcome": "active",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     },
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r5:main:o5",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa5",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "boom",
+      "terminal_kind": "failed",
+      "terminal_reason": "x",
+      "terminal_stage": "execution"
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:haniel:main:old-head",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 1,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "haniel",
+      "status": "success",
+      "target_head": "newer-head",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r2:main:o2",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r2",
+      "status": "pending",
+      "target_head": "o2",
+      "updated_at": true
+     },
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n:r3:main:o3",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r3",
+      "status": "deploying",
+      "target_head": "o3",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r4:main:o4",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r4",
+      "status": "pending",
+      "target_head": "o4",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r5:main:o5",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r5",
+      "status": "pending",
+      "target_head": "t5",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:o1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "success",
+      "target_head": "o1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n:r2:main:o2",
+      "lineage_orchestrator_attempt_id": "oa"
+     },
+     {
+      "deploy_id": "n:r5:main:o5",
+      "lineage_orchestrator_attempt_id": "oa5"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n:r2:main:o2",
+      "last_failed_orchestrator_attempt_id": "oa",
+      "source_orchestrator_attempt_id": "oa"
+     },
+     {
+      "deploy_id": "n:r5:main:o5",
+      "last_failed_orchestrator_attempt_id": "oa5",
+      "source_orchestrator_attempt_id": "oa5"
+     }
+    ],
+    "node_attempts": [
+     {
+      "deploy_id": "n:r4:main:o4",
+      "duration_ms": 25,
+      "error": "e",
+      "node_attempt_id": "nf",
+      "outcome": "failed",
+      "terminal_local_head": "o4"
+     }
+    ],
+    "probes": []
+   },
+   "step": "regular-retry-not-closed-by-other-observation"
+  },
+  {
+   "result": {
+    "broadcasts": [
+     {
+      "deploy_id": "n:haniel2:main:s2",
+      "node_id": "n",
+      "status": "success",
+      "type": "status_change"
+     }
+    ]
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r2:main:o2",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "boom",
+      "terminal_kind": "failed",
+      "terminal_reason": "x",
+      "terminal_stage": "execution"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": null,
+      "deploy_id": "n:r3:main:o3",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa3",
+      "outcome": "active",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     },
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r5:main:o5",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa5",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "boom",
+      "terminal_kind": "failed",
+      "terminal_reason": "x",
+      "terminal_stage": "execution"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:haniel2:main:s2",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa6",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "boom",
+      "terminal_kind": "failed",
+      "terminal_reason": "x",
+      "terminal_stage": "execution"
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:haniel2:main:s2",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 1,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "haniel2",
+      "status": "success",
+      "target_head": "s2",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:haniel:main:old-head",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 1,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "haniel",
+      "status": "success",
+      "target_head": "newer-head",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r2:main:o2",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r2",
+      "status": "pending",
+      "target_head": "o2",
+      "updated_at": true
+     },
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n:r3:main:o3",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r3",
+      "status": "deploying",
+      "target_head": "o3",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r4:main:o4",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r4",
+      "status": "pending",
+      "target_head": "o4",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r5:main:o5",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r5",
+      "status": "pending",
+      "target_head": "t5",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:o1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "success",
+      "target_head": "o1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n:r2:main:o2",
+      "lineage_orchestrator_attempt_id": "oa"
+     },
+     {
+      "deploy_id": "n:r5:main:o5",
+      "lineage_orchestrator_attempt_id": "oa5"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n:r2:main:o2",
+      "last_failed_orchestrator_attempt_id": "oa",
+      "source_orchestrator_attempt_id": "oa"
+     },
+     {
+      "deploy_id": "n:r5:main:o5",
+      "last_failed_orchestrator_attempt_id": "oa5",
+      "source_orchestrator_attempt_id": "oa5"
+     }
+    ],
+    "node_attempts": [
+     {
+      "deploy_id": "n:r4:main:o4",
+      "duration_ms": 25,
+      "error": "e",
+      "node_attempt_id": "nf",
+      "outcome": "failed",
+      "terminal_local_head": "o4"
+     }
+    ],
+    "probes": []
+   },
+   "step": "self-update-with-marker-closed"
+  },
+  {
+   "result": {
+    "broadcasts": []
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r2:main:o2",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "boom",
+      "terminal_kind": "failed",
+      "terminal_reason": "x",
+      "terminal_stage": "execution"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": null,
+      "deploy_id": "n:r3:main:o3",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa3",
+      "outcome": "active",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     },
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r5:main:o5",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa5",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "boom",
+      "terminal_kind": "failed",
+      "terminal_reason": "x",
+      "terminal_stage": "execution"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:haniel2:main:s2",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa6",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "boom",
+      "terminal_kind": "failed",
+      "terminal_reason": "x",
+      "terminal_stage": "execution"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": null,
+      "deploy_id": "n:haniel3:main:s3",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa7",
+      "outcome": "active",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:haniel2:main:s2",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 1,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "haniel2",
+      "status": "success",
+      "target_head": "s2",
+      "updated_at": true
+     },
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n:haniel3:main:s3",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 1,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "haniel3",
+      "status": "deploying",
+      "target_head": "s3",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:haniel:main:old-head",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 1,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "haniel",
+      "status": "success",
+      "target_head": "newer-head",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r2:main:o2",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r2",
+      "status": "pending",
+      "target_head": "o2",
+      "updated_at": true
+     },
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n:r3:main:o3",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r3",
+      "status": "deploying",
+      "target_head": "o3",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r4:main:o4",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r4",
+      "status": "pending",
+      "target_head": "o4",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r5:main:o5",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r5",
+      "status": "pending",
+      "target_head": "t5",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:o1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "success",
+      "target_head": "o1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n:r2:main:o2",
+      "lineage_orchestrator_attempt_id": "oa"
+     },
+     {
+      "deploy_id": "n:r5:main:o5",
+      "lineage_orchestrator_attempt_id": "oa5"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n:r2:main:o2",
+      "last_failed_orchestrator_attempt_id": "oa",
+      "source_orchestrator_attempt_id": "oa"
+     },
+     {
+      "deploy_id": "n:r5:main:o5",
+      "last_failed_orchestrator_attempt_id": "oa5",
+      "source_orchestrator_attempt_id": "oa5"
+     }
+    ],
+    "node_attempts": [
+     {
+      "deploy_id": "n:r4:main:o4",
+      "duration_ms": 25,
+      "error": "e",
+      "node_attempt_id": "nf",
+      "outcome": "failed",
+      "terminal_local_head": "o4"
+     }
+    ],
+    "probes": []
+   },
+   "step": "self-update-active-attempt-blocks"
+  }
+ ],
+ "s12_postponed_revival": [
+  {
+   "result": null,
+   "rows": {
+    "attempts": [],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:haniel:main:p1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 1,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": "postponed",
+      "repo": "haniel",
+      "status": "rejected",
+      "target_head": "p1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "rejected"
+  },
+  {
+   "result": false,
+   "rows": {
+    "attempts": [],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:haniel:main:p1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 1,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": "postponed",
+      "repo": "haniel",
+      "status": "rejected",
+      "target_head": "p1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "revive-without-postponement"
+  },
+  {
+   "result": false,
+   "rows": {
+    "attempts": [],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:haniel:main:p1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 1,
+      "node_id": "n",
+      "postponed_until": true,
+      "reject_reason": "postponed",
+      "repo": "haniel",
+      "status": "rejected",
+      "target_head": "p1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "revive-before-deadline"
+  },
+  {
+   "result": false,
+   "rows": {
+    "attempts": [],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:haniel:main:p1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 1,
+      "node_id": "n",
+      "postponed_until": true,
+      "reject_reason": "postponed",
+      "repo": "haniel",
+      "status": "rejected",
+      "target_head": "p1",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:haniel:main:p2",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 1,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "haniel",
+      "status": "pending",
+      "target_head": "p2",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "revive-blocked-by-other-pending"
+  }
+ ],
+ "s13_postponed_revival_clear": [
+  {
+   "result": true,
+   "rows": {
+    "attempts": [],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:haniel:main:q1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 1,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "haniel",
+      "status": "pending",
+      "target_head": "q1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "revive-due"
+  },
+  {
+   "result": false,
+   "rows": {
+    "attempts": [],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:haniel:main:q1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 1,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "haniel",
+      "status": "pending",
+      "target_head": "q1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "revive-again-no-op"
+  }
+ ],
+ "s14_branch_supersede_and_renamed": [
+  {
+   "result": [
+    "n:r:main:b0"
+   ],
+   "rows": {
+    "attempts": [],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:b0",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": "superseded by n:r:main:b1",
+      "repo": "r",
+      "status": "rejected",
+      "target_head": "b0",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:b1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "b1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "supersede-pending-for-branch"
+  },
+  {
+   "result": [
+    "old-node:r:main:x1"
+   ],
+   "rows": {
+    "attempts": [],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:b0",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": "superseded by n:r:main:b1",
+      "repo": "r",
+      "status": "rejected",
+      "target_head": "b0",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:b1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "b1",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "old-node:r:main:x1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "old-node",
+      "postponed_until": null,
+      "reject_reason": "node renamed to new-node",
+      "repo": "r9",
+      "status": "rejected",
+      "target_head": "x1",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "other-node:r:main:x2",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "other-node",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r9",
+      "status": "pending",
+      "target_head": "x2",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "node-renamed"
+  }
+ ],
+ "s15_startup_supersede": [
+  {
+   "result": [
+    "n:r:main:z0",
+    "n:r:main:z00"
+   ],
+   "rows": {
+    "attempts": [],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:z0",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": "superseded by n:r:main:z1",
+      "repo": "r",
+      "status": "rejected",
+      "target_head": "z",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:z00",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": "superseded by n:r:main:z1",
+      "repo": "r",
+      "status": "rejected",
+      "target_head": "z",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:z1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "pending",
+      "target_head": "z1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [],
+    "markers": [],
+    "node_attempts": [],
+    "probes": []
+   },
+   "step": "startup-supersede"
+  }
+ ]
+}
