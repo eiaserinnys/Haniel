@@ -1,5 +1,6 @@
 """Tests for haniel log capture and management."""
 
+import re
 import time
 from io import StringIO
 
@@ -42,6 +43,21 @@ class TestLogCapture:
             assert "Second line" in content
             assert "[stdout]" in content
             assert "[stderr]" in content
+        finally:
+            capture.stop()
+
+    def test_write_line_has_date_in_prefix(self, tmp_path):
+        """Each file line starts with [YYYY-MM-DD HH:MM:SS] [source]."""
+        capture = LogCapture("test-service", tmp_path)
+        capture.start()
+        try:
+            capture.write_line("Hello, world!")
+            first = capture.log_path.read_text().splitlines()
+            line = next(ln for ln in first if "Hello, world!" in ln)
+            assert re.match(
+                r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[stdout\] Hello, world!$",
+                line,
+            )
         finally:
             capture.stop()
 
