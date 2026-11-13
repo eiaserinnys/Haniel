@@ -7,6 +7,8 @@ from typing import Any
 from . import event_store_mutations, event_store_nodes, node_deploy_store
 from .event_store_rows import decode_deploy_row, now_iso, row_to_dict
 from .protocol import DeployStatus
+from .statechart import steps
+from .statechart.restore import NoTransition
 
 
 class EventStoreLifecycleMixin:
@@ -68,44 +70,37 @@ class EventStoreLifecycleMixin:
         )
         return results[:limit]
 
-    async def update_deploy_status(
-        self,
-        deploy_id: str,
-        status: DeployStatus,
-        approved_by: str | None = None,
-        reject_reason: str | None = None,
-        error: str | None = None,
-        duration_ms: int | None = None,
-    ) -> None:
-        """Update event status and optional fields. Only non-None args are SET."""
+    async def reject_deploy(self, deploy_id: str, reason: str | None = None) -> bool:
+        """Reject one request through the reject step.
+
+        The step is unconditional by design today (어긋남 8): any current state
+        goes to rejected. Returns False when the row is unknown or has no leaf,
+        which the old unconditional UPDATE also silently skipped.
+        """
         async with self._mutation_lock:
             try:
-                await self._update_deploy_status_unlocked(
-                    deploy_id, status, approved_by, reject_reason, error, duration_ms
+                try:
+                    await steps.step_request(
+                        self._db, deploy_id, "reject", data={"reason": reason}
+                    )
+                except NoTransition:
+                    await self._db.commit()
+                    return False
+                await self._db.execute(
+                    """UPDATE deploy_plan_probes
+                       SET status = 'terminal', terminal_kind = 'preflight_stale',
+                           terminal_stage = 'canonical_status_update',
+                           terminal_reason = 'canonical_terminal',
+                           terminal_error = ?, completed_at = ?
+                       WHERE deploy_id = ? AND status IN ('active','proposed')""",
+                    (
+                        f"canonical became {DeployStatus.REJECTED.value} during preflight",
+                        now_iso(),
+                        deploy_id,
+                    ),
                 )
-                if status in (DeployStatus.REJECTED, DeployStatus.SUCCESS):
-                    await self._db.execute(
-                        "DELETE FROM deploy_retry_requirements WHERE deploy_id = ?",
-                        (deploy_id,),
-                    )
-                    await self._db.execute(
-                        "DELETE FROM deploy_retry_source_attempts WHERE deploy_id = ?",
-                        (deploy_id,),
-                    )
-                    await self._db.execute(
-                        """UPDATE deploy_plan_probes
-                           SET status = 'terminal', terminal_kind = 'preflight_stale',
-                               terminal_stage = 'canonical_status_update',
-                               terminal_reason = 'canonical_terminal',
-                               terminal_error = ?, completed_at = ?
-                           WHERE deploy_id = ? AND status IN ('active','proposed')""",
-                        (
-                            f"canonical became {status.value} during preflight",
-                            now_iso(),
-                            deploy_id,
-                        ),
-                    )
                 await self._db.commit()
+                return True
             except Exception:
                 await self._db.rollback()
                 raise
@@ -116,46 +111,13 @@ class EventStoreLifecycleMixin:
         """Record when a postponed self-update may return to pending."""
         async with self._mutation_lock:
             try:
-                await self._db.execute(
-                    "UPDATE deploy_events SET postponed_until = ?, updated_at = ? "
-                    "WHERE deploy_id = ?",
-                    (postponed_until, now_iso(), deploy_id),
+                await steps.set_postponed_until(
+                    self._db, deploy_id, postponed_until, now_iso()
                 )
                 await self._db.commit()
             except Exception:
                 await self._db.rollback()
                 raise
-
-    async def _update_deploy_status_unlocked(
-        self,
-        deploy_id: str,
-        status: DeployStatus,
-        approved_by: str | None = None,
-        reject_reason: str | None = None,
-        error: str | None = None,
-        duration_ms: int | None = None,
-    ) -> None:
-        updates = ["status = ?", "updated_at = ?"]
-        params: list[Any] = [status.value, now_iso()]
-
-        if approved_by is not None:
-            updates.append("approved_by = ?")
-            params.append(approved_by)
-        if reject_reason is not None:
-            updates.append("reject_reason = ?")
-            params.append(reject_reason)
-        if error is not None:
-            updates.append("error = ?")
-            params.append(error)
-        if duration_ms is not None:
-            updates.append("duration_ms = ?")
-            params.append(duration_ms)
-
-        params.append(deploy_id)
-        await self._db.execute(
-            f"UPDATE deploy_events SET {', '.join(updates)} WHERE deploy_id = ?",
-            params,
-        )
 
     async def get_deploying_events_for_node(self, node_id: str) -> list[dict[str, Any]]:
         """Get events in DEPLOYING state for diagnostics."""

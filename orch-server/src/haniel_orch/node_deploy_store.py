@@ -9,13 +9,18 @@ import aiosqlite
 
 from .event_store_rows import now_iso
 from .protocol import DeployStatus, NodeDeployReport
+from .statechart import steps
+from .statechart.columns import LEAF_COLUMNS
+from .statechart.restore import NoTransition
 
 
 def _rows(
     cursor: aiosqlite.Cursor, rows: list[tuple[Any, ...]]
 ) -> list[dict[str, Any]]:
     columns = [column[0] for column in cursor.description or ()]
-    return [dict(zip(columns, row)) for row in rows]
+    return [
+        {k: v for k, v in zip(columns, row) if k not in LEAF_COLUMNS} for row in rows
+    ]
 
 
 async def _attempt(
@@ -155,37 +160,16 @@ async def record(db: aiosqlite.Connection, report: NodeDeployReport) -> dict[str
     active_orchestrator_ids = [row[0] for row in await active_cursor.fetchall()]
 
     if report.phase == "succeeded":
-        await db.execute(
-            """UPDATE deploy_attempts
-               SET outcome = 'superseded', terminal_kind = 'node_deploy_succeeded',
-                   terminal_stage = 'node_deploy_report',
-                   terminal_reason = 'out_of_band_success',
-                   terminal_error = 'superseded by node-owned deployment',
-                   completed_at = ?
-               WHERE deploy_id = ? AND outcome = 'active'""",
-            (now, report.deploy_id),
-        )
-        await db.execute(
-            """UPDATE deploy_events
-               SET status = ?, approved_by = NULL, error = NULL, duration_ms = ?,
-                   updated_at = ?
-               WHERE deploy_id = ? AND status IN (?, ?)""",
-            (
-                DeployStatus.SUCCESS.value,
-                report.duration_ms,
-                now,
-                report.deploy_id,
-                DeployStatus.PENDING.value,
-                DeployStatus.DEPLOYING.value,
-            ),
-        )
-        await db.execute(
-            "DELETE FROM deploy_retry_requirements WHERE deploy_id = ?",
-            (report.deploy_id,),
-        )
-        await db.execute(
-            "DELETE FROM deploy_retry_source_attempts WHERE deploy_id = ?",
-            (report.deploy_id,),
+        for attempt_id in active_orchestrator_ids:
+            await steps.step_attempt(
+                db, attempt_id, "superseded_by_node", now=now
+            )
+        await steps.step_request(
+            db,
+            report.deploy_id,
+            "node_succeeded",
+            data={"duration_ms": report.duration_ms},
+            now=now,
         )
         await db.execute(
             """UPDATE deploy_plan_probes
@@ -201,18 +185,11 @@ async def record(db: aiosqlite.Connection, report: NodeDeployReport) -> dict[str
     elif active_orchestrator_ids:
         canonical_status = DeployStatus.DEPLOYING.value
     else:
-        await db.execute(
-            """UPDATE deploy_events
-               SET status = ?, approved_by = NULL, error = NULL, duration_ms = NULL,
-                   updated_at = ?
-               WHERE deploy_id = ? AND status = ?""",
-            (
-                DeployStatus.PENDING.value,
-                now,
-                report.deploy_id,
-                DeployStatus.DEPLOYING.value,
-            ),
-        )
+        try:
+            await steps.step_request(db, report.deploy_id, "node_failed", now=now)
+        except NoTransition:
+            # 요청이 배포 중이 아니면(대기) 지금도 0건 갱신으로 넘어간다
+            pass
         canonical_status = DeployStatus.PENDING.value
 
     return {

@@ -12,6 +12,8 @@ import aiosqlite
 from .deploy_attempt_generation_store import DeployAttemptGenerationStore
 from .deploy_attempt_progress_store import DeployAttemptProgressStore
 from .deploy_attempt_store_support import DeployAttemptStoreSupport
+from .statechart import steps
+from .statechart.restore import NoTransition
 from .protocol import (
     DeployAttemptTerminal,
     DeployPlanProposal,
@@ -280,6 +282,26 @@ class DeployAttemptStore(
                 await self._db.rollback()
                 raise
 
+    async def _record_evidence_unlocked(
+        self,
+        attempt: dict[str, Any],
+        event: str,
+        data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """성공 쪽 증거 사건 하나를 넣고, 성공으로 끝났으면 요청 줄도 닫는다."""
+        try:
+            step = await steps.step_attempt(
+                self._db,
+                attempt["orchestrator_attempt_id"],
+                event,
+                data=data,
+            )
+        except NoTransition:
+            return {"status": "ignored"}
+        if step.leaf == "ev_both":
+            return await self._close_request_after_success(attempt)
+        return {"status": "recorded"}
+
     async def record_result(
         self,
         *,
@@ -306,26 +328,24 @@ class DeployAttemptStore(
                         error="raw DeployResult is forbidden for evidence_recovery mode",
                     )
                 elif status == "failed":
-                    await self._db.execute(
-                        "UPDATE deploy_attempts SET result_status = ?, result_error = ?, "
-                        "duration_ms = ? WHERE orchestrator_attempt_id = ?",
-                        (status, error, duration_ms, orchestrator_attempt_id),
-                    )
                     result = await self._fail_attempt_unlocked(
                         attempt={**attempt, "duration_ms": duration_ms},
                         kind="deploy_result_failed",
                         stage="execution",
                         reason="deploy_result_failed",
                         error=error or "deployment operation failed",
+                        extra={
+                            "result_status": status,
+                            "result_error": error,
+                            "duration_ms": duration_ms,
+                        },
                     )
                 else:
-                    await self._db.execute(
-                        "UPDATE deploy_attempts SET result_status = 'success', result_error = NULL, "
-                        "duration_ms = ? WHERE orchestrator_attempt_id = ?",
-                        (duration_ms, orchestrator_attempt_id),
+                    result = await self._record_evidence_unlocked(
+                        attempt,
+                        "result_ok",
+                        data={"duration_ms": duration_ms},
                     )
-                    attempt = await self._attempt(orchestrator_attempt_id)
-                    result = await self._finalize_normal_if_ready(attempt)
                 await self._db.commit()
                 return result
             except Exception:
@@ -348,14 +368,11 @@ class DeployAttemptStore(
                 )
                 if attempt is None:
                     return {"status": "ignored"}
-                await self._db.execute(
-                    "UPDATE deploy_attempts SET settled_local_head = ?, settled_remote_head = ?, "
-                    "settled_at = ? WHERE orchestrator_attempt_id = ?",
-                    (local_head, remote_head, _now_iso(), orchestrator_attempt_id),
-                )
-                attempt = await self._attempt(orchestrator_attempt_id)
+                settled_data = {"local_head": local_head, "remote_head": remote_head}
                 if attempt["execution_mode"] != "execute":
-                    result = {"status": "recorded"}
+                    result = await self._record_evidence_unlocked(
+                        attempt, "settled_noted", data=settled_data
+                    )
                 elif local_head != attempt["target_head"]:
                     result = await self._fail_attempt_unlocked(
                         attempt=attempt,
@@ -364,9 +381,16 @@ class DeployAttemptStore(
                         reason="settled_head_mismatch",
                         error="settled HEAD mismatch: "
                         f"local={local_head} remote={remote_head} target={attempt['target_head']}",
+                        extra={
+                            "settled_local_head": local_head,
+                            "settled_remote_head": remote_head,
+                            "settled_at": _now_iso(),
+                        },
                     )
                 else:
-                    result = await self._finalize_normal_if_ready(attempt)
+                    result = await self._record_evidence_unlocked(
+                        attempt, "settled_ok", data=settled_data
+                    )
                 await self._db.commit()
                 return result
             except Exception:
@@ -404,8 +428,8 @@ class DeployAttemptStore(
                             error=error,
                         )
                     else:
-                        result = await self._success_unlocked(
-                            attempt, "evidence_recovered_success"
+                        result = await self._record_evidence_unlocked(
+                            attempt, "recovered"
                         )
                 await self._db.commit()
                 return result

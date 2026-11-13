@@ -14,6 +14,8 @@ from .deploy_attempt_store import DeployAttemptStore
 from .event_store_lifecycle import EventStoreLifecycleMixin
 from .event_store_rows import decode_deploy_row, now_iso
 from .protocol import DeployStatus, NodeDeployReport
+from .statechart import steps
+from .statechart.restore import NoTransition
 
 _CREATE_TABLES = """
 CREATE TABLE IF NOT EXISTS deploy_events (
@@ -108,34 +110,24 @@ class EventStore(EventStoreLifecycleMixin):
         async with self._mutation_lock:
             now = now_iso()
             try:
-                cursor = await self._db.execute(
-                    """INSERT OR IGNORE INTO deploy_events
-                       (deploy_id, node_id, repo, branch, status,
-                        commits_json, affected_services_json, diff_stat, detected_at,
-                        created_at, updated_at, target_head, deployment_kind,
-                        expected_manifest_identity, expected_manifest_digest,
-                        is_self_update)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        deploy_id,
-                        node_id,
-                        repo,
-                        branch,
-                        DeployStatus.PENDING.value,
-                        json.dumps(commits),
-                        json.dumps(affected_services),
-                        diff_stat,
-                        detected_at,
-                        now,
-                        now,
-                        target_head or deploy_id.rsplit(":", 1)[-1],
-                        deployment_kind,
-                        expected_manifest_identity,
-                        expected_manifest_digest,
-                        int(is_self_update),
-                    ),
+                inserted = await steps.create_request(
+                    self._db,
+                    deploy_id=deploy_id,
+                    node_id=node_id,
+                    repo=repo,
+                    branch=branch,
+                    commits_json=json.dumps(commits),
+                    affected_services_json=json.dumps(affected_services),
+                    diff_stat=diff_stat,
+                    detected_at=detected_at,
+                    target_head=target_head or deploy_id.rsplit(":", 1)[-1],
+                    deployment_kind=deployment_kind,
+                    expected_manifest_identity=expected_manifest_identity,
+                    expected_manifest_digest=expected_manifest_digest,
+                    is_self_update=is_self_update,
+                    now=now,
                 )
-                if cursor.rowcount > 0:
+                if inserted:
                     latest_cursor = await self._db.execute(
                         "SELECT deploy_id FROM deploy_events WHERE node_id = ? "
                         "AND repo = ? AND branch = ? AND deploy_id NOT LIKE 'attempt:%' "
@@ -158,24 +150,12 @@ class EventStore(EventStoreLifecycleMixin):
                         ),
                     )
                     for (old_id,) in await pending_cursor.fetchall():
-                        await self._db.execute(
-                            "UPDATE deploy_events SET status = ?, reject_reason = ?, updated_at = ? "
-                            "WHERE deploy_id = ? AND status = ?",
-                            (
-                                DeployStatus.REJECTED.value,
-                                f"superseded by {latest_id}",
-                                now,
-                                old_id,
-                                DeployStatus.PENDING.value,
-                            ),
-                        )
-                        await self._db.execute(
-                            "DELETE FROM deploy_retry_requirements WHERE deploy_id = ?",
-                            (old_id,),
-                        )
-                        await self._db.execute(
-                            "DELETE FROM deploy_retry_source_attempts WHERE deploy_id = ?",
-                            (old_id,),
+                        await steps.step_request(
+                            self._db,
+                            old_id,
+                            "newer_commit",
+                            data={"reason": f"superseded by {latest_id}"},
+                            now=now,
                         )
                         await self._db.execute(
                             """UPDATE deploy_plan_probes
@@ -191,25 +171,7 @@ class EventStore(EventStoreLifecycleMixin):
                             ),
                         )
                 await self._db.commit()
-                return cursor.rowcount > 0
-            except Exception:
-                await self._db.rollback()
-                raise
-
-    async def transition_deploy_status(
-        self,
-        deploy_id: str,
-        expected: DeployStatus,
-        target: DeployStatus,
-    ) -> bool:
-        """Perform one guarded lifecycle transition."""
-        async with self._mutation_lock:
-            try:
-                transitioned = await event_store_mutations.transition_deploy_status(
-                    self._db, deploy_id, expected, target
-                )
-                await self._db.commit()
-                return transitioned
+                return inserted
             except Exception:
                 await self._db.rollback()
                 raise
@@ -247,38 +209,34 @@ class EventStore(EventStoreLifecycleMixin):
         async with self._mutation_lock:
             try:
                 now = now_iso()
+                closed_id: str | None = None
                 cursor = await self._db.execute(
-                    """UPDATE deploy_events SET status = ?, updated_at = ?
+                    """SELECT deploy_id, target_head FROM deploy_events
                        WHERE deploy_id = ? AND node_id = ? AND repo = ? AND branch = ?
-                         AND status = ? AND target_head = ? AND ? = ?
-                         AND NOT EXISTS (
-                           SELECT 1 FROM deploy_retry_requirements r
-                           WHERE r.deploy_id = deploy_events.deploy_id
-                         )
-                         AND NOT EXISTS (
-                           SELECT 1 FROM deploy_attempts a
-                           WHERE a.deploy_id = deploy_events.deploy_id
-                             AND a.outcome = 'active'
-                         )
-                         AND NOT EXISTS (
-                           SELECT 1 FROM node_deploy_attempts n
-                           WHERE n.deploy_id = deploy_events.deploy_id
-                             AND n.outcome = 'failed'
-                         )""",
-                    (
-                        DeployStatus.SUCCESS.value,
-                        now,
-                        deploy_id,
-                        node_id,
-                        repo,
-                        branch,
-                        DeployStatus.PENDING.value,
-                        local_head,
-                        local_head,
-                        remote_head,
-                    ),
+                         AND status = ?""",
+                    (deploy_id, node_id, repo, branch, DeployStatus.PENDING.value),
                 )
-                closed_id: str | None = deploy_id if cursor.rowcount == 1 else None
+                row = await cursor.fetchone()
+                if row is not None:
+                    try:
+                        await steps.step_request(
+                            self._db,
+                            deploy_id,
+                            "observed",
+                            facts={
+                                "heads_equal": row[1] == local_head == remote_head,
+                                "no_active_attempt": not await self._has_active_attempt(
+                                    deploy_id
+                                ),
+                                "no_failed_node_attempt": not await self._has_failed_node_attempt(
+                                    deploy_id
+                                ),
+                            },
+                            now=now,
+                        )
+                        closed_id = deploy_id
+                    except NoTransition:
+                        closed_id = None
                 if closed_id is None:
                     closed_id = await self._close_observed_self_update(
                         node_id=node_id,
@@ -292,6 +250,21 @@ class EventStore(EventStoreLifecycleMixin):
             except Exception:
                 await self._db.rollback()
                 raise
+
+    async def _has_active_attempt(self, deploy_id: str) -> bool:
+        cursor = await self._db.execute(
+            "SELECT 1 FROM deploy_attempts WHERE deploy_id = ? AND outcome = 'active'",
+            (deploy_id,),
+        )
+        return await cursor.fetchone() is not None
+
+    async def _has_failed_node_attempt(self, deploy_id: str) -> bool:
+        cursor = await self._db.execute(
+            "SELECT 1 FROM node_deploy_attempts "
+            "WHERE deploy_id = ? AND outcome = 'failed'",
+            (deploy_id,),
+        )
+        return await cursor.fetchone() is not None
 
     async def _close_observed_self_update(
         self,
@@ -325,26 +298,20 @@ class EventStore(EventStoreLifecycleMixin):
         if row is None:
             return None
         closed_id = row[0]
-        updated = await self._db.execute(
-            """UPDATE deploy_events SET status = ?, updated_at = ?
-               WHERE deploy_id = ? AND status = ? AND is_self_update = 1
-                 AND target_head = ?
-                 AND NOT EXISTS (
-                   SELECT 1 FROM deploy_attempts a
-                   WHERE a.deploy_id = deploy_events.deploy_id
-                     AND a.outcome = 'active'
-                 )""",
-            (
-                DeployStatus.SUCCESS.value,
-                now,
+        try:
+            await steps.step_request(
+                self._db,
                 closed_id,
-                DeployStatus.PENDING.value,
-                local_head,
-            ),
-        )
-        if updated.rowcount != 1:
+                "observed_self_update",
+                facts={
+                    "self_update": True,
+                    "heads_equal": True,
+                    "no_active_attempt": True,
+                },
+                now=now,
+            )
+        except NoTransition:
             return None
-        await event_store_mutations._cleanup_retry_rows(self._db, [closed_id])
         return closed_id
 
     async def reopen_postponed_self_update(self, deploy_id: str) -> bool:
@@ -357,31 +324,44 @@ class EventStore(EventStoreLifecycleMixin):
             try:
                 now = now_iso()
                 cursor = await self._db.execute(
-                    """UPDATE deploy_events SET status = ?, reject_reason = NULL,
-                           postponed_until = NULL, approved_by = NULL, error = NULL,
-                           updated_at = ?
-                       WHERE deploy_id = ? AND is_self_update = 1 AND status = ?
-                         AND postponed_until IS NOT NULL AND postponed_until <= ?
-                         AND NOT EXISTS (
-                           SELECT 1 FROM deploy_events other
-                           WHERE other.node_id = deploy_events.node_id
-                             AND other.repo = deploy_events.repo
-                             AND other.branch = deploy_events.branch
-                             AND other.deploy_id != deploy_events.deploy_id
-                             AND other.status IN (?, ?)
-                         )""",
-                    (
-                        DeployStatus.PENDING.value,
-                        now,
-                        deploy_id,
-                        DeployStatus.REJECTED.value,
-                        now,
-                        DeployStatus.PENDING.value,
-                        DeployStatus.DEPLOYING.value,
-                    ),
+                    "SELECT node_id, repo, branch, is_self_update, postponed_until "
+                    "FROM deploy_events WHERE deploy_id = ?",
+                    (deploy_id,),
                 )
+                row = await cursor.fetchone()
+                reopened = False
+                if row is not None:
+                    node_id, repo, branch, is_self_update, postponed_until = row
+                    other_cursor = await self._db.execute(
+                        "SELECT 1 FROM deploy_events WHERE node_id = ? AND repo = ? "
+                        "AND branch = ? AND deploy_id != ? AND status IN (?, ?)",
+                        (
+                            node_id,
+                            repo,
+                            branch,
+                            deploy_id,
+                            DeployStatus.PENDING.value,
+                            DeployStatus.DEPLOYING.value,
+                        ),
+                    )
+                    try:
+                        await steps.step_request(
+                            self._db,
+                            deploy_id,
+                            "reopen",
+                            facts={
+                                "self_update": bool(is_self_update),
+                                "postponed_due": postponed_until is not None
+                                and postponed_until <= now,
+                                "no_other_open": await other_cursor.fetchone() is None,
+                            },
+                            now=now,
+                        )
+                        reopened = True
+                    except NoTransition:
+                        reopened = False
                 await self._db.commit()
-                return cursor.rowcount == 1
+                return reopened
             except Exception:
                 await self._db.rollback()
                 raise

@@ -137,9 +137,7 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
             )
 
         reason = body.get("reason", "rejected by dashboard")
-        await store.update_deploy_status(
-            deploy_id, DeployStatus.REJECTED, reject_reason=reason
-        )
+        await store.reject_deploy(deploy_id, reason)
         if event["is_self_update"]:
             postponed_until = datetime.now(timezone.utc) + timedelta(
                 seconds=hub.self_update_postpone_sec

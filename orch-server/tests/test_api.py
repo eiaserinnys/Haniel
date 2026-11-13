@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from state_support import set_legacy_status, to_deploying
 from haniel_orch.api import create_api_routes
 from haniel_orch.event_store import EventStore
 from haniel_orch.hub import WebSocketHub
@@ -163,10 +164,8 @@ class TestGetPending:
         await _seed_pending(store, "d_pending")
         await _seed_pending(store, "d_deploying", branch="dev")
         await _seed_pending(store, "d_rejected", branch="feature")
-        await store.update_deploy_status("d_deploying", DeployStatus.DEPLOYING)
-        await store.update_deploy_status(
-            "d_rejected", DeployStatus.REJECTED, reject_reason="not ready"
-        )
+        await to_deploying(store, "d_deploying")
+        await store.reject_deploy("d_rejected", "not ready")
 
         from starlette.applications import Starlette
         from starlette.testclient import TestClient
@@ -301,11 +300,7 @@ class TestGetHistory:
         rows so the dashboard's HistoryView is not drowned by them."""
         for did in ("d_old", "d_new"):
             await _seed_pending(store, did)
-        await store.update_deploy_status(
-            "d_old",
-            DeployStatus.REJECTED,
-            reject_reason="superseded by d_new",
-        )
+        await store.reject_deploy("d_old", "superseded by d_new")
 
         from starlette.applications import Starlette
         from starlette.testclient import TestClient
@@ -324,11 +319,7 @@ class TestGetHistory:
         rows so the operator can audit chains."""
         for did in ("d_old", "d_new"):
             await _seed_pending(store, did)
-        await store.update_deploy_status(
-            "d_old",
-            DeployStatus.REJECTED,
-            reject_reason="superseded by d_new",
-        )
+        await store.reject_deploy("d_old", "superseded by d_new")
 
         from starlette.applications import Starlette
         from starlette.testclient import TestClient
@@ -527,7 +518,7 @@ class TestApproveDeploy:
 
     async def test_approve_already_approved(self, hub, store, routes):
         await _seed_pending(store, "d1")
-        await store.update_deploy_status("d1", DeployStatus.APPROVED)
+        await set_legacy_status(store, "d1", "approved")
 
         from starlette.applications import Starlette
         from starlette.testclient import TestClient
@@ -683,7 +674,7 @@ class TestRejectDeploy:
 
     async def test_reject_not_pending(self, hub, store, routes):
         await _seed_pending(store, "d1")
-        await store.update_deploy_status("d1", DeployStatus.DEPLOYING)
+        await to_deploying(store, "d1")
 
         from starlette.applications import Starlette
         from starlette.testclient import TestClient

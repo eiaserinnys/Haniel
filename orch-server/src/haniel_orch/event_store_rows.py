@@ -8,6 +8,8 @@ from typing import Any
 
 import aiosqlite
 
+from .statechart.columns import LEAF_COLUMNS
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -15,7 +17,11 @@ def now_iso() -> str:
 
 def row_to_dict(cursor: aiosqlite.Cursor, row: tuple) -> dict[str, Any]:
     """Convert a row tuple to a dict using cursor.description."""
-    return {col[0]: val for col, val in zip(cursor.description, row)}
+    return {
+        col[0]: val
+        for col, val in zip(cursor.description, row)
+        if col[0] not in LEAF_COLUMNS
+    }
 
 
 def decode_deploy_row(cursor: aiosqlite.Cursor, row: tuple) -> dict[str, Any]:

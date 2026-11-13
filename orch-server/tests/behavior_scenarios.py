@@ -196,6 +196,14 @@ async def _reject(store: EventStore, deploy_id: str, reason: str) -> None:
     )
 
 
+async def _reload_foreign_rows(store: EventStore) -> None:
+    """옛 서버가 넣고 간 줄은 기동 때 한 번 훑는 스키마 초기화가 맞춘다(기준 커밋에서는 아무 일도 없다)."""
+    from haniel_orch.deploy_attempt_schema import initialize_attempt_schema
+
+    await initialize_attempt_schema(store._db)
+    await store._db.commit()
+
+
 async def _step(out: list, name: str, store: EventStore, result: Any) -> None:
     out.append({"step": name, "result": _norm(result), "rows": await snapshot(store)})
 
@@ -939,6 +947,7 @@ async def s14_branch_supersede_and_renamed(store: EventStore) -> list:
         "'2026-07-01T00:00:00Z','2026-07-01T00:00:00Z','b0')"
     )
     await store._db.commit()
+    await _reload_foreign_rows(store)
     await _step(
         out,
         "supersede-pending-for-branch",
@@ -970,6 +979,7 @@ async def s15_startup_supersede(store: EventStore) -> list:
             (deploy_id, detected, detected, detected),
         )
     await store._db.commit()
+    await _reload_foreign_rows(store)
     await _step(out, "startup-supersede", store, await store.supersede_stale_pending_deploys())
     return out
 

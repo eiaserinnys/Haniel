@@ -860,9 +860,7 @@ class TestRetryMarkerCleanup:
             "a1", kind="failed", stage="execution", reason="test_failure", error="boom"
         )
 
-        await store.update_deploy_status(
-            "n:r:main:target", DeployStatus.REJECTED, reject_reason="operator"
-        )
+        await store.reject_deploy("n:r:main:target", "operator")
 
         assert not await attempts.has_retry_requirement("n:r:main:target")
 

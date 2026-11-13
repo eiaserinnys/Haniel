@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from state_support import set_legacy_status, to_deploying, to_success
 from haniel_orch.connection_lifecycle import ActiveConnection, ConnectionLease
 from haniel_orch.deploy_attempt_coordinator import (
     DeployAttemptCoordinator,
@@ -191,7 +192,7 @@ class TestSelfUpdatePriority:
             is_self_update=True,
         )
         if status is DeployStatus.DEPLOYING:
-            await store.update_deploy_status(self_event["deploy_id"], status)
+            await to_deploying(store, self_event["deploy_id"])
         regular = await seed_named(
             store, deploy_id="regular", node_id="n", repo="soulstream"
         )
@@ -224,7 +225,12 @@ class TestSelfUpdatePriority:
             repo="haniel",
             is_self_update=True,
         )
-        await store.update_deploy_status("self", terminal)
+        if terminal is DeployStatus.REJECTED:
+            await store.reject_deploy("self")
+        elif terminal is DeployStatus.SUCCESS:
+            await to_success(store, "self")
+        else:
+            await set_legacy_status(store, "self", terminal.value)
         regular = await seed_named(
             store, deploy_id="regular", node_id="n", repo="soulstream"
         )
@@ -310,7 +316,7 @@ class TestAutoSelfUpdateGate:
             is_self_update=True,
         )
         if status is DeployStatus.DEPLOYING:
-            await store.update_deploy_status("self", status)
+            await to_deploying(store, "self")
         await seed_named(
             store, deploy_id="n:soulstream:main:target", node_id="n", repo="soulstream"
         )
@@ -1059,9 +1065,7 @@ class TestManualRetryPreflightContinuation:
                 )
             )
             await wait_for_send(harness)
-            await store.update_deploy_status(
-                event["deploy_id"], DeployStatus.REJECTED, reject_reason="operator"
-            )
+            await store.reject_deploy(event["deploy_id"], "operator")
 
             await harness.coordinator.resolve_terminal_canonicals(
                 {event["deploy_id"]}, message="deploy was rejected during preflight"
