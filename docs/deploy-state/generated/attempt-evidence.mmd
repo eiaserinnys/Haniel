@@ -1,0 +1,34 @@
+stateDiagram-v2
+    direction TB
+    classDef breaks fill:#ffecee,stroke:#e72e3b
+    classDef mayBreak fill:#fff3e6,stroke:#e8730c
+    state "종결 증거" as ev {
+        ev_none: 증거 아직 없음
+        ev_result: 성공 결과만 옴
+        ev_settled: 체크아웃 대조만 옴
+        ev_both: 성공으로 종결
+        ev_failed: 실패로 종결
+        ev_superseded: 노드의 배포 성공에 밀려 종결
+        [*] --> ev_none: 시도를 시작한다
+        ev_none --> ev_result: 성공 결과가 온다 [execute 방식] (PR 2에서 바뀜)
+        ev_none --> ev_settled: 목표와 같은 대조가 온다 [execute 방식] (PR 2에서 바뀜)
+        ev_none --> ev_settled: 대조가 온다 [execute 방식 아님] (PR 2에서 바뀜)
+        ev_none --> ev_failed: 실패로 닫는다
+        ev_none --> ev_both: 증거 회수가 검증을 통과한다 [증거 회수 방식] (PR 2에서 바뀜)
+        ev_none --> ev_superseded: 노드의 배포 성공이 밀어낸다 (PR 2에서 바뀜)
+        ev_result --> ev_result: 성공 결과가 온다 [execute 방식] (PR 2에서 바뀜)
+        ev_result --> ev_both: 목표와 같은 대조가 온다 [execute 방식] (PR 2에서 바뀜)
+        ev_result --> ev_failed: 실패로 닫는다
+        ev_result --> ev_both: 증거 회수가 검증을 통과한다 [증거 회수 방식] (PR 2에서 바뀜)
+        ev_result --> ev_superseded: 노드의 배포 성공이 밀어낸다 (PR 2에서 바뀜)
+        ev_settled --> ev_both: 성공 결과가 온다 [execute 방식] (PR 2에서 바뀜)
+        ev_settled --> ev_settled: 목표와 같은 대조가 온다 [execute 방식] (PR 2에서 바뀜)
+        ev_settled --> ev_settled: 대조가 온다 [execute 방식 아님] (PR 2에서 바뀜)
+        ev_settled --> ev_failed: 실패로 닫는다
+        ev_settled --> ev_both: 증거 회수가 검증을 통과한다 [증거 회수 방식] (PR 2에서 바뀜)
+        ev_settled --> ev_superseded: 노드의 배포 성공이 밀어낸다 (PR 2에서 바뀜)
+    }
+    class ev_both mayBreak
+    class ev_result mayBreak
+    class ev_settled mayBreak
+    class ev_superseded mayBreak

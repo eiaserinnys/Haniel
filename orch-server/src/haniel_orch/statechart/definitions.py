@@ -198,6 +198,45 @@ REQUIRED_FACTS: dict[type, dict[str, tuple[str, ...]]] = {
     },
 }
 
+# 설계 정의(fable_r4_product.py의 OrchReq, AttemptEvidence)와 다른 전이의 표시. 지금 동작 그대로 옮긴 것이다.
+# 키는 (정의 이름, 출발 잎, 사건, 도착 잎). 값은 (종류, 그림에 쓰는 글).
+# breaks는 설계가 어긋남으로 적은 것(번호), changes는 PR 2에서 설계대로 바뀌거나 다시 정할 것이다.
+BREAKS = "breaks"
+CHANGES = "changes"
+_PR2 = "PR 2에서 바뀜"
+DIVERGENCE: dict[tuple[str, str, str, str], tuple[str, str]] = {
+    # 조건 없는 거절(W6): 설계는 대기에서만 거절한다
+    ("OrchRequest", "deploying", "reject", "rejected"): (BREAKS, "어긋남 8"),
+    ("OrchRequest", "success", "reject", "rejected"): (BREAKS, "어긋남 8"),
+    ("OrchRequest", "rejected", "reject", "rejected"): (BREAKS, "어긋남 8"),
+    ("OrchRequest", "superseded", "reject", "rejected"): (BREAKS, "어긋남 8"),
+    # 도는 시도 없는 노드 실패 보고(W17): 설계에는 이 전이가 없다
+    ("OrchRequest", "deploying", "node_failed", "retry"): (CHANGES, _PR2),
+    ("OrchRequest", "deploying", "node_failed", "pending"): (CHANGES, _PR2),
+    # 자기 갱신 관측이 고른 다른 줄을 닫음(W4): 표시 줄이 있어도 닫는다
+    ("OrchRequest", "pending", "observed_self_update", "success"): (CHANGES, _PR2),
+    ("OrchRequest", "retry", "observed_self_update", "success"): (CHANGES, _PR2),
+    # 보류 자기 갱신 되살림(W5): 닫힘에서 열림으로 돌아간다
+    ("OrchRequest", "rejected", "reopen", "pending"): (CHANGES, _PR2),
+    # 실행 방식 조건: 설계 증거 정의에는 실행 방식 사실이 없다
+    ("AttemptEvidence", "ev_none", "result_ok", "ev_result"): (CHANGES, _PR2),
+    ("AttemptEvidence", "ev_result", "result_ok", "ev_result"): (CHANGES, _PR2),
+    ("AttemptEvidence", "ev_settled", "result_ok", "ev_both"): (CHANGES, _PR2),
+    ("AttemptEvidence", "ev_none", "settled_ok", "ev_settled"): (CHANGES, _PR2),
+    ("AttemptEvidence", "ev_settled", "settled_ok", "ev_settled"): (CHANGES, _PR2),
+    ("AttemptEvidence", "ev_result", "settled_ok", "ev_both"): (CHANGES, _PR2),
+    ("AttemptEvidence", "ev_none", "settled_noted", "ev_settled"): (CHANGES, _PR2),
+    ("AttemptEvidence", "ev_settled", "settled_noted", "ev_settled"): (CHANGES, _PR2),
+    # 증거 회수 성공(A5): 설계에는 증거 한 글로 성공하는 사건이 없다
+    ("AttemptEvidence", "ev_none", "recovered", "ev_both"): (CHANGES, _PR2),
+    ("AttemptEvidence", "ev_result", "recovered", "ev_both"): (CHANGES, _PR2),
+    ("AttemptEvidence", "ev_settled", "recovered", "ev_both"): (CHANGES, _PR2),
+    # 노드가 스스로 한 배포의 성공이 도는 시도를 밀어냄(A7): 설계 증거 정의에 해당 잎이 없다
+    ("AttemptEvidence", "ev_none", "superseded_by_node", "ev_superseded"): (CHANGES, _PR2),
+    ("AttemptEvidence", "ev_result", "superseded_by_node", "ev_superseded"): (CHANGES, _PR2),
+    ("AttemptEvidence", "ev_settled", "superseded_by_node", "ev_superseded"): (CHANGES, _PR2),
+}
+
 # 잎이 닫힘인 요청 상태와 끝난 시도 증거
 REQUEST_CLOSED = frozenset({"success", "rejected", "superseded"})
 ATTEMPT_TERMINAL = frozenset({"ev_both", "ev_failed", "ev_superseded"})

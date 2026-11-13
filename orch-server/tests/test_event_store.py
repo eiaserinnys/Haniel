@@ -14,7 +14,7 @@ from state_support import (
     to_success,
 )
 from haniel_orch.event_store import EventStore
-from haniel_orch.protocol import DeployStatus, NodeDeployReport
+from haniel_orch.protocol import NodeDeployReport
 
 
 def node_report(

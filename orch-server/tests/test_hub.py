@@ -20,7 +20,6 @@ from haniel_orch.protocol import (
     DeployProgress,
     DeployReportAck,
     DeployResult,
-    DeployStatus,
     NodeHello,
     NodeDeployReport,
     NodeStatus,

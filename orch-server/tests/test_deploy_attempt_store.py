@@ -8,7 +8,6 @@ from haniel_orch.event_store import EventStore
 from haniel_orch.protocol import (
     DeployAttemptTerminal,
     DeployPlanProposal,
-    DeployStatus,
     ManifestRecoveryEvidence,
 )
 

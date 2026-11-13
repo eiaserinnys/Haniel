@@ -12,7 +12,7 @@ from haniel_orch.api import create_api_routes
 from haniel_orch.event_store import EventStore
 from haniel_orch.hub import WebSocketHub
 from haniel_orch.node_registry import NodeRegistry
-from haniel_orch.protocol import DeployStatus, NodeHello
+from haniel_orch.protocol import NodeHello
 
 
 @pytest.fixture
