@@ -85,6 +85,8 @@ class MixedSystem(MixedBase):
         # 새 오케스트레이터
         if msg in ("acked", "started", "declined"):
             if k != c.cur:
+                if msg == "started":
+                    return [c._replace(sm=tuple(sorted(set(c.sm) | {k})))]
                 return [c]
             r = self.orch(c, msg, hole="받은 글")
             if not r:
@@ -254,7 +256,7 @@ class MixedSystem(MixedBase):
         auto_idle = (
             not any(i[0] == ASK or i[1] in ("queued", "running") or i[2] == "r_owed" for i in c.inst)
             if self.node_ver == "old"
-            else not c.inst
+            else all(i[1] == "failed" for i in c.inst)
         )
         if (
             self.auto and auto_idle and not c.boot and not c.tgt

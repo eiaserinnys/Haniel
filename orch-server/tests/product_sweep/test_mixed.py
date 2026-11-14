@@ -60,3 +60,25 @@ def test_own_start_does_not_send_orchestrator_progress():
     system = MixedSystem(orch_ver="new", node_ver="new")
     node = system.node(system.initial(), 0, "own_start")
     assert node.inst == ((0, "running", "r_none", False),) and node.qno == ()
+
+
+def test_closed_progress_is_recorded_only_by_the_new_orchestrator():
+    from .mixed_system import MixedSystem
+
+    new = MixedSystem(orch_ver="new", node_ver="new")
+    state = new.initial()._replace(st="again", opened=2, ev=("ev_result", "ev_none"))
+    started = new.orch_recv(state, "started", 2)[0]
+    assert started.sm == (2,) and started.st == "again"
+    assert new.orch_recv(started, "set", 1)[0].st == "again"
+
+    old = MixedSystem(orch_ver="old", node_ver="old")
+    old_state = old.initial()._replace(st="retry", opened=2)
+    assert old.orch_recv(old_state, "started", 2)[0] == old_state
+
+
+def test_new_node_can_request_an_automatic_deploy_while_failure_is_owed():
+    from .mixed_system import MixedSystem
+
+    system = MixedSystem(orch_ver="new", node_ver="new", auto=True)
+    state = system.initial()._replace(opened=1, inst=((1, "failed", "r_owed", False),))
+    assert any(label == "노드가 자동 배포를 청한다" for label, _, _ in system.successors(state))

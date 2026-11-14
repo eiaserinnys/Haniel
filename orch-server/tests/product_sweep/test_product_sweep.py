@@ -150,3 +150,14 @@ def test_failure_debt_is_acknowledged_after_own_success():
     assert success.st == "success" and success.ev[0] == "ev_none"
     failed = system.orch_recv(success, "fail", 1)[0]
     assert failed.ev[0] == "ev_failed" and ("tack", 1) in failed.qon
+
+
+def test_closed_attempt_progress_is_kept_for_late_success():
+    system = System()
+    state = system.initial()._replace(
+        st="again", opened=2, ev=("ev_result", "ev_none"),
+    )
+    started = system.orch_recv(state, "started", 2)[0]
+    assert started.sm == (2,) and started.st == "again"
+    settled = system.orch_recv(started, "set", 1)[0]
+    assert settled.st == "again" and settled.ev[0] == "ev_both"

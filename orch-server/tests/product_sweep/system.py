@@ -273,7 +273,9 @@ class System:
             return [c2]
         if msg in ("acked", "started", "declined"):
             if k != c.cur:
-                return [c]              # 닫힌 시도의 글. 되살리지 않는다
+                if msg == "started":
+                    return [c._replace(sm=tuple(sorted(set(c.sm) | {k})))]
+                return [c]
             r = self.orch(c, msg, hole="받은 글")
             if not r:
                 return [c]
