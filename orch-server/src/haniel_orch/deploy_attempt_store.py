@@ -19,6 +19,7 @@ from .deploy_attempt_late_evidence import DeployAttemptLateEvidence
 from .deploy_attempt_progress_store import DeployAttemptProgressStore
 from .deploy_attempt_report_store import DeployAttemptReportStore
 from .deploy_attempt_store_support import DeployAttemptStoreSupport
+from .deploy_attempt_validation import DeployAttemptValidation
 from .protocol import DeployPlanProposal, DeployStatus
 
 
@@ -36,6 +37,7 @@ class DeployAttemptStore(
     DeployAttemptReportStore,
     DeployAttemptLateEvidence,
     DeployAttemptHistory,
+    DeployAttemptValidation,
     DeployAttemptStoreSupport,
 ):
     """One-lock transaction boundary for probes, attempts, and retry markers."""
