@@ -1,6 +1,7 @@
 """Transactional deploy-attempt state machine behind :class:`EventStore`.
 
-노드 보고를 적는 조각은 `deploy_attempt_report_store`, 이력은 `deploy_attempt_history`에 있다.
+노드 보고를 적는 조각은 `deploy_attempt_report_store`, 닫힌 시도의 늦은 증거는 `deploy_attempt_late_evidence`,
+이력은 `deploy_attempt_history`에 있다.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import aiosqlite
 
 from .deploy_attempt_generation_store import DeployAttemptGenerationStore
 from .deploy_attempt_history import DeployAttemptHistory
+from .deploy_attempt_late_evidence import DeployAttemptLateEvidence
 from .deploy_attempt_progress_store import DeployAttemptProgressStore
 from .deploy_attempt_report_store import DeployAttemptReportStore
 from .deploy_attempt_store_support import DeployAttemptStoreSupport
@@ -32,6 +34,7 @@ class DeployAttemptStore(
     DeployAttemptGenerationStore,
     DeployAttemptProgressStore,
     DeployAttemptReportStore,
+    DeployAttemptLateEvidence,
     DeployAttemptHistory,
     DeployAttemptStoreSupport,
 ):
