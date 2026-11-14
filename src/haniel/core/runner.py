@@ -963,14 +963,17 @@ class ServiceRunner:
     ) -> tuple[list[str], list[_StartupLane]]:
         """Split startup work into the immediate group and updated-repo lanes.
 
-        A service joins a lane when it shares an updated repository, depends on
-        a lane service through ``after``, or is a deployment target of an
-        updated release-manifest repository. Everything else starts immediately.
+        A service joins a lane when it shares an updated repository, is a
+        deployment target of an updated release-manifest repository, or depends
+        on a lane service through ``after``. Services that a lane service
+        depends on are not pulled in: an unchanged prerequisite starts with the
+        immediate group before any lane runs.
         """
         updated_repos = set(self._startup_updated_repos) | set(
             self._startup_manifest_updates
         )
         adjacency: dict[str, set[str]] = {}
+        dependents: dict[str, list[str]] = {}
 
         def link(left: str, right: str) -> None:
             adjacency.setdefault(left, set()).add(right)
@@ -987,13 +990,14 @@ class ServiceRunner:
                 link(service_node, f"repo:{service.repo}")
             for dependency in service.after:
                 if dependency in enabled_services:
-                    link(service_node, f"service:{dependency}")
+                    dependents.setdefault(dependency, []).append(service_name)
 
         for repo_name in self._startup_manifest_updates:
             for service_name in self._startup_manifest_affected_services(
                 repo_name, enabled_services, startup_order
             ):
-                link(f"repo:{repo_name}", f"service:{service_name}")
+                if service_name in enabled_services:
+                    link(f"repo:{repo_name}", f"service:{service_name}")
 
         groups: list[set[str]] = []
         remaining = set(adjacency)
@@ -1009,6 +1013,37 @@ class ServiceRunner:
                         group.add(neighbor)
                         stack.append(neighbor)
             groups.append(group)
+
+        # Pull dependents into the lane of the service they wait for. A
+        # dependent that reaches two lanes merges them, because one service may
+        # only start once.
+        owner: dict[str, int] = {}
+        for index, group in enumerate(groups):
+            for node in group:
+                owner[node] = index
+        pending = [
+            node.split(":", 1)[1]
+            for group in groups
+            if any(node.startswith("repo:") for node in group)
+            for node in group
+            if node.startswith("service:")
+        ]
+        while pending:
+            service_name = pending.pop()
+            target = owner[f"service:{service_name}"]
+            for dependent in dependents.get(service_name, ()):
+                source = owner[f"service:{dependent}"]
+                if source == target:
+                    continue
+                for node in groups[source]:
+                    owner[node] = target
+                    groups[target].add(node)
+                groups[source] = set()
+                pending.extend(
+                    node.split(":", 1)[1]
+                    for node in groups[target]
+                    if node.startswith("service:")
+                )
 
         order_index = {name: index for index, name in enumerate(startup_order)}
         immediate: list[str] = []
@@ -1156,21 +1191,24 @@ class ServiceRunner:
                 blocked_repos,
                 startup_report_errors,
             )
-            for repo_name in sorted(
-                self._startup_updated_repos.intersection(lane.repos)
-            ):
-                node_report = self._startup_node_deploy_reports.pop(repo_name, None)
-                if node_report is None:
-                    continue
-                errors = startup_report_errors.get(repo_name, [])
-                self._finish_node_deploy_report(
-                    node_report,
-                    local_head=get_head(
-                        self.config_dir
-                        / self._snapshot_repo_runtime(repo_name).config.path
-                    ),
-                    error="; ".join(errors) if errors else None,
-                )
+            # A stop request leaves startup reports to start_services so the
+            # finalizer closes them as not reaching a terminal state.
+            if not self._stop_event.is_set():
+                for repo_name in sorted(
+                    self._startup_updated_repos.intersection(lane.repos)
+                ):
+                    node_report = self._startup_node_deploy_reports.pop(repo_name, None)
+                    if node_report is None:
+                        continue
+                    errors = startup_report_errors.get(repo_name, [])
+                    self._finish_node_deploy_report(
+                        node_report,
+                        local_head=get_head(
+                            self.config_dir
+                            / self._snapshot_repo_runtime(repo_name).config.path
+                        ),
+                        error="; ".join(errors) if errors else None,
+                    )
         finally:
             logger.info(
                 "Startup lane complete: repos=%s services=%s",

@@ -210,6 +210,84 @@ def test_service_depending_on_updated_repo_service_waits_for_that_service(
     assert started == ["a", "c"]
 
 
+def test_unchanged_prerequisite_starts_without_waiting_for_dependent_lanes(
+    tmp_path: Path,
+) -> None:
+    """갱신 안 된 U를 A·B가 after로 기대면 U가 먼저 뜨고 A·B는 서로 다른 갈래로 끝난다."""
+    _repo_paths(tmp_path, "repo-a", "repo-b", "repo-c")
+    config = HanielConfig(
+        repos={
+            "repo-a": RepoConfig(url="git@test/a", path="./repo-a"),
+            "repo-b": RepoConfig(url="git@test/b", path="./repo-b"),
+            "repo-c": RepoConfig(url="git@test/c", path="./repo-c"),
+        },
+        services={
+            "u": ServiceConfig(run="echo u", repo="repo-c"),
+            "a": ServiceConfig(
+                run="echo a",
+                repo="repo-a",
+                after=["u"],
+                hooks=HooksConfig(post_pull="echo build"),
+            ),
+            "b": ServiceConfig(
+                run="echo b",
+                repo="repo-b",
+                after=["u"],
+                hooks=HooksConfig(post_pull="echo build"),
+            ),
+        },
+    )
+    runner = _runner(config, tmp_path)
+    runner._startup_updated_repos = {"repo-a", "repo-b"}
+
+    a_hook_entered = threading.Event()
+    allow_a_hook = threading.Event()
+    b_hook_entered = threading.Event()
+    allow_b_hook = threading.Event()
+    u_started = threading.Event()
+    b_started = threading.Event()
+    started: list[str] = []
+    lock = threading.Lock()
+
+    def execute_hook(service_name: str, hook_name: str) -> bool:
+        if (service_name, hook_name) == ("a", "post_pull"):
+            a_hook_entered.set()
+            assert allow_a_hook.wait(timeout=10)
+        elif (service_name, hook_name) == ("b", "post_pull"):
+            b_hook_entered.set()
+            assert allow_b_hook.wait(timeout=10)
+        return True
+
+    def start_service(name: str) -> bool:
+        result = _record_start(name, started, lock)
+        if name == "u":
+            u_started.set()
+        elif name == "b":
+            b_started.set()
+        return result
+
+    with (
+        patch.object(runner, "execute_hook", side_effect=execute_hook),
+        patch.object(runner, "_start_service", side_effect=start_service),
+        patch("haniel.core.runner.sync_disk"),
+    ):
+        thread = threading.Thread(target=runner.start_services)
+        thread.start()
+        assert a_hook_entered.wait(timeout=5)
+        assert b_hook_entered.wait(timeout=5)
+        # 의존 대상 U는 두 갈래의 post_pull이 막혀 있는 동안 먼저 시작된다.
+        assert u_started.wait(timeout=5)
+        allow_b_hook.set()
+        # A를 막아 둔 채 B의 갈래만 자기 서비스까지 시작한다.
+        assert b_started.wait(timeout=5)
+        assert "a" not in started
+        allow_a_hook.set()
+        thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert started == ["u", "b", "a"]
+
+
 def test_manifest_deployment_does_not_wait_for_other_repo_post_pull(
     tmp_path: Path,
 ) -> None:
