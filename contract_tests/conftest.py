@@ -135,6 +135,7 @@ class HeldDeployment:
 
     def handle(self, approval: dict, _progress) -> None:
         self.approvals.append(approval)
+        _progress("preparing")
         self.entered.set()
         if not self.release.wait(timeout=60):
             raise TimeoutError("held deployment was never released")
@@ -161,6 +162,7 @@ def settled_snapshot(
 @dataclass
 class NodeFactory:
     orchestrator: Orchestrator
+    config_dir: Path
     clients: list[OrchestratorClient] = field(default_factory=list)
 
     def start(
@@ -186,6 +188,7 @@ class NodeFactory:
             service_command_handler=service_command_handler,
             deploy_approval_handler=approval_handler,
             repo_snapshot_handler=settled_snapshot,
+            config_dir=self.config_dir,
         )
         self.clients.append(client)
         client.start()
@@ -193,8 +196,8 @@ class NodeFactory:
 
 
 @pytest.fixture
-async def nodes(orchestrator: Orchestrator):
-    factory = NodeFactory(orchestrator)
+async def nodes(orchestrator: Orchestrator, tmp_path: Path):
+    factory = NodeFactory(orchestrator, tmp_path / "node")
     yield factory
     for client in factory.clients:
         await asyncio.to_thread(client.stop)

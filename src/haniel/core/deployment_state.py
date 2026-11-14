@@ -177,6 +177,7 @@ class DeploymentStateStore:
         expected_operation: str,
         branch: str,
         node_id: str | None = None,
+        orchestrator_attempt_id: str | None = None,
         config_digest: str | None = None,
     ) -> str:
         """Commit rollback identity before target fetch or staging starts."""
@@ -200,6 +201,15 @@ class DeploymentStateStore:
                 if existing.get(key) != value
             ]
             stored_node_id = existing.get("node_id")
+            stored_attempt = existing.get("orchestrator_attempt_id")
+            if (
+                stored_attempt is not None
+                and orchestrator_attempt_id is not None
+                and stored_attempt != orchestrator_attempt_id
+            ):
+                conflicts.append(
+                    ("orchestrator_attempt_id", stored_attempt, orchestrator_attempt_id)
+                )
             if (
                 stored_node_id is not None
                 and node_id is not None
@@ -214,6 +224,9 @@ class DeploymentStateStore:
                         for key, stored, provided in conflicts
                     )
                 )
+            if stored_attempt is None and orchestrator_attempt_id is not None:
+                existing["orchestrator_attempt_id"] = orchestrator_attempt_id
+                self._write(repo_name, existing)
             if stored_node_id is None and node_id is not None:
                 existing["node_id"] = node_id
                 self._write(repo_name, existing)
@@ -226,6 +239,7 @@ class DeploymentStateStore:
             "handover-target-pending",
             branch=branch,
             node_id=node_id,
+            orchestrator_attempt_id=orchestrator_attempt_id,
             manifest_identity=manifest_identity,
             request_id=request_id,
             expected_operation=expected_operation,

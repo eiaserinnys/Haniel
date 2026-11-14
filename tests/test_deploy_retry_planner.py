@@ -45,6 +45,33 @@ class TestDeployRetryPlanner:
             journal_store=DeploymentStateStore(tmp_path / "journals"),
         )
 
+    @pytest.mark.parametrize(
+        ("state", "expected"),
+        [
+            ("success", "evidence_recovery"),
+            ("failed", "execute"),
+            ("verification_failed", "execute"),
+        ],
+    )
+    def test_earlier_lineage_journal_is_accepted(
+        self, tmp_path, monkeypatch, state, expected
+    ):
+        planner = self.planner(tmp_path, monkeypatch)
+        planner.journal_store.begin(
+            "r",
+            "previous",
+            "target",
+            "release",
+            orchestrator_attempt_id="earlier",
+            node_id="n",
+            branch="main",
+            manifest_identity="release.json",
+            manifest_digest=hashlib.sha256(b"manifest").hexdigest(),
+        )
+        planner.journal_store.transition("r", state)
+        assert planner.plan(probe(retry_lineage=["earlier", "source"])).mode == expected
+        assert planner.plan(probe(retry_lineage=["source"])).mode == "fail_closed"
+
     def test_success_journal_selects_evidence_recovery(self, tmp_path, monkeypatch):
         planner = self.planner(tmp_path, monkeypatch)
         store = planner.journal_store
@@ -203,6 +230,53 @@ class TestDeployRetryPlanner:
 
 
 class TestDeployAttemptGate:
+    def test_disconnect_after_accepted_ack_keeps_permission(self):
+        gate = DeployAttemptGate()
+        gate.observe_generation("g1")
+        gate.register("a1", "d1")
+        gate.accept_ack(
+            {
+                "type": "deploy_attempt_ack",
+                "accepted": True,
+                "requested_orchestrator_attempt_id": "a1",
+                "begun_orchestrator_attempt_id": "a1",
+                "deploy_id": "d1",
+                "connection_generation": "g1",
+                "probe_id": "p1",
+                "execution_mode": "execute",
+                "preflight_fingerprint": "fp",
+            }
+        )
+        gate.reset_connection()
+        assert gate.wait("a1", 1)["accepted"] is True
+
+    def test_ack_at_timeout_boundary_is_not_lost(self):
+        gate = DeployAttemptGate()
+        gate.observe_generation("g1")
+        gate.register("a1", "d1")
+        ack = {
+            "type": "deploy_attempt_ack",
+            "accepted": True,
+            "requested_orchestrator_attempt_id": "a1",
+            "begun_orchestrator_attempt_id": "a1",
+            "deploy_id": "d1",
+            "connection_generation": "g1",
+            "probe_id": "p1",
+            "execution_mode": "execute",
+            "preflight_fingerprint": "fp",
+        }
+
+        class BoundaryEvent:
+            def wait(self, _timeout):
+                assert gate.accept_ack(ack)
+                return False
+
+            def set(self):
+                pass
+
+        gate._pending["a1"].event = BoundaryEvent()
+        assert gate.wait("a1", 1)["accepted"] is True
+
     def test_accepted_ack_is_the_only_execution_permission(self):
         gate = DeployAttemptGate()
         gate.observe_generation("g1")

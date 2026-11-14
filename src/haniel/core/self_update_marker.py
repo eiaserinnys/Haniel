@@ -51,7 +51,9 @@ def _marker_path(config_dir: Path) -> Path:
     return config_dir / MARKER_RELPATH
 
 
-def read_and_consume(config_dir: Path) -> SelfUpdateResult | None:
+def read_and_consume(
+    config_dir: Path, *, consume: bool = True
+) -> SelfUpdateResult | None:
     """Read marker if present, validate, delete it, return parsed result.
 
     On any I/O or schema error: warn, attempt deletion, return None.
@@ -99,10 +101,11 @@ def read_and_consume(config_dir: Path) -> SelfUpdateResult | None:
         logger.warning("Self-update marker malformed at %s: %s", path, e)
         result = None
     # Always delete (consume) — even on parse error so we don't loop on a bad file
-    try:
-        path.unlink()
-    except Exception as e:
-        logger.warning("Failed to delete marker %s: %s", path, e)
+    if consume:
+        try:
+            path.unlink()
+        except Exception as e:
+            logger.warning("Failed to delete marker %s: %s", path, e)
     return result
 
 

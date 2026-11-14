@@ -6,6 +6,10 @@ with exponential backoff reconnection.
 
 If the orchestrator is unreachable, all operations degrade gracefully
 — the node continues to operate independently.
+
+The existing client exceeds 500 lines because connection lifecycle, message
+dispatch and its single event loop are coupled here. Node execution state and
+durable storage live in separate modules.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import json
 import logging
 import platform
 import threading
+from pathlib import Path
 from uuid import uuid4
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
@@ -30,6 +35,7 @@ from .deploy_reporting import (
 )
 from .deploy_attempt_gate import DeployAttemptGate
 from ..core.thread_shutdown import join_thread_with_timeout
+from ..core.node_run_registry import NodeRunRegistry
 
 if TYPE_CHECKING:
     from ..config.model import OrchestratorClientConfig
@@ -84,6 +90,8 @@ class OrchestratorClient:
             "Callable[[str, str, str], RepoReconciliationSnapshot] | None"
         ) = None,
         expected_budget_handler: "Callable[[str], int | None] | None" = None,
+        config_dir: Path | None = None,
+        deploy_prepare_handler: "Callable[[dict[str, Any]], Any] | None" = None,
     ) -> None:
         self._config = config
         self._haniel_version = haniel_version
@@ -96,6 +104,7 @@ class OrchestratorClient:
         #                startup via enqueue_deploy_result.
         #   Exception  — failure; we send DeployResult{failed, error=str(e)}.
         self._deploy_approval_handler = deploy_approval_handler
+        self._deploy_prepare_handler = deploy_prepare_handler
         self._deploy_plan_probe_handler = deploy_plan_probe_handler
         self._repo_snapshot_handler = repo_snapshot_handler
         self._expected_budget_handler = expected_budget_handler
@@ -109,6 +118,7 @@ class OrchestratorClient:
         # Used for self-update results that survive runner restart.
         self._pending_deploy_results: list[dict] = []
         self._pending_lock = threading.Lock()
+        self._registry = NodeRunRegistry(config_dir) if config_dir is not None else None
         self._flush_lock: asyncio.Lock | None = None
         self._flush_lock_loop: asyncio.AbstractEventLoop | None = None
         self._deploy_attempt_gate = DeployAttemptGate()
@@ -238,16 +248,52 @@ class OrchestratorClient:
         The pair goes through the ordered reconnect buffer, so a report that
         finishes while the socket is down leaves on the next connection.
         """
-        self._enqueue_buffered_deploy_messages(
-            settled_result_messages(
+        letters = settled_result_messages(
+            self._config.node_id,
+            snapshot,
+            operation_error,
+            duration_ms,
+            permit["begun_orchestrator_attempt_id"],
+            permit["connection_generation"],
+        )
+        if self._registry is not None:
+            self._registry.finish(
+                permit["begun_orchestrator_attempt_id"],
+                letters,
+                success=not self._registry._failed({"letters": letters}),
+            )
+            self._schedule_report(self._flush_pending_deploy_results, wait=False)
+        else:
+            self._enqueue_buffered_deploy_messages(letters)
+
+    def report_auto_recovery(self, permit, evidence):
+        if self._registry is not None:
+            self._registry.finish(
+                permit["begun_orchestrator_attempt_id"], [evidence], success=True
+            )
+            self._schedule_report(self._flush_pending_deploy_results, wait=False)
+        else:
+            self._enqueue_buffered_deploy_messages([evidence])
+
+    def report_auto_failure(self, permit, error, duration_ms):
+        letters = [
+            deploy_result_message(
                 self._config.node_id,
-                snapshot,
-                operation_error,
-                duration_ms,
+                permit["deploy_id"],
                 permit["begun_orchestrator_attempt_id"],
                 permit["connection_generation"],
+                "failed",
+                error=error,
+                duration_ms=duration_ms,
             )
-        )
+        ]
+        if self._registry is not None:
+            self._registry.finish(
+                permit["begun_orchestrator_attempt_id"], letters, success=False
+            )
+            self._schedule_report(self._flush_pending_deploy_results, wait=False)
+        else:
+            self._enqueue_buffered_deploy_messages(letters)
 
     def start_deploy_progress(self, permit: dict[str, Any]) -> DeployProgressEmitter:
         """Start the bounded-lifetime heartbeat source for an auto attempt."""
@@ -285,13 +331,20 @@ class OrchestratorClient:
         """Request and wait for an explicit generation-bound execution ACK."""
         requested = uuid4().hex
         self._deploy_attempt_gate.register(requested, snapshot.deploy_id)
+        if self._registry is not None:
+            self._registry.ask(snapshot.deploy_id, requested)
         self.notify_repo_reconciliation(
             snapshot,
             "attempt_started",
             orchestrator_attempt_id=requested,
             wait=True,
         )
-        return self._deploy_attempt_gate.wait(requested, self._config.ping_timeout)
+        try:
+            return self._deploy_attempt_gate.wait(requested, self._config.ping_timeout)
+        except Exception:
+            if self._registry is not None:
+                self._registry.give_up(requested)
+            raise
 
     def _schedule_report(
         self,
@@ -330,6 +383,11 @@ class OrchestratorClient:
             "arch": platform.machine(),
             "haniel_version": self._haniel_version,
             "services": services,
+            **(
+                {"deploy_protocol": 1, "held_attempts": self._registry.held()}
+                if self._registry
+                else {}
+            ),
         }
 
     def enqueue_deploy_result(
@@ -367,7 +425,7 @@ class OrchestratorClient:
                     connection_generation=connection_generation,
                 )
             )
-        self._enqueue_buffered_deploy_messages(messages)
+        return self._enqueue_buffered_deploy_messages(messages)
 
     def enqueue_node_deploy_report(
         self,
@@ -405,8 +463,37 @@ class OrchestratorClient:
             ]
         )
 
-    def _enqueue_buffered_deploy_messages(self, messages: list[dict[str, Any]]) -> None:
+    def _enqueue_buffered_deploy_messages(self, messages: list[dict[str, Any]]) -> bool:
         """Append messages atomically and kick the single ordered flush."""
+        if (
+            self._registry is not None
+            and messages[0].get("type") == "node_deploy_report"
+        ):
+            msg = messages[0]
+            key = "n:" + msg["node_attempt_id"]
+            if msg["phase"] == "started":
+                if "started" not in self._registry.own_start(
+                    msg["node_attempt_id"], msg["deploy_id"]
+                ):
+                    return True
+            else:
+                if key not in self._registry.runs:
+                    self._registry.own_start(msg["node_attempt_id"], msg["deploy_id"])
+                self._registry.finish(
+                    key, messages, success=msg["phase"] == "succeeded"
+                )
+                if self._connected and self._loop is not None:
+                    asyncio.run_coroutine_threadsafe(
+                        self._flush_pending_deploy_results(), self._loop
+                    )
+                return key in self._registry.outbox.entries
+        if self._registry is not None and messages[0].get("phase") != "started":
+            persisted = self._registry.enqueue_owed(messages)
+            if self._connected and self._loop is not None:
+                asyncio.run_coroutine_threadsafe(
+                    self._flush_pending_deploy_results(), self._loop
+                )
+            return persisted
         with self._pending_lock:
             self._pending_deploy_results.extend(messages)
         if self._connected and self._loop is not None:
@@ -416,6 +503,7 @@ class OrchestratorClient:
                 )
             except Exception as e:
                 logger.debug(f"Failed to schedule deploy result flush: {e}")
+        return True
 
     async def _deliver_deploy_messages(self, messages: list[dict[str, Any]]) -> None:
         """Send attempt-closing messages through the one ordered buffer.
@@ -426,6 +514,36 @@ class OrchestratorClient:
         bytes left may be repeated; the orchestrator answers a repeat
         with deploy_report_ack.
         """
+        if (
+            self._registry is not None
+            and messages[0].get("type") == "deploy_attempt_terminal"
+        ):
+            try:
+                await self._send_json(messages[0])
+                await self._flush_pending_deploy_results()
+            except Exception as exc:
+                logger.warning("Failed to send execution refusal: %s", exc)
+            return
+        if (
+            self._registry is not None
+            and messages[0].get("type") != "deploy_attempt_terminal"
+        ):
+            msg = messages[0]
+            attempt_id = msg.get("orchestrator_attempt_id")
+            if (
+                attempt_id in self._registry.runs
+                and self._registry.runs[attempt_id]["row"]["exec_"] == "running"
+            ):
+                self._registry.finish(
+                    attempt_id,
+                    messages,
+                    success=not self._registry._failed({"letters": messages}),
+                )
+            else:
+                self._registry.enqueue_owed(messages)
+            if self._connected and self._ws is not None:
+                await self._flush_pending_deploy_results()
+            return
         with self._pending_lock:
             self._pending_deploy_results.extend(messages)
         if self._connected and self._ws is not None:
@@ -434,6 +552,14 @@ class OrchestratorClient:
     async def _flush_pending_deploy_results(self) -> None:
         """Send the buffered prefix while preserving the complete unsent suffix."""
         async with self._flush_lock_for_running_loop():
+            if self._registry is not None:
+                for bundle in self._registry.outbox.letters():
+                    for msg in bundle:
+                        try:
+                            await self._send_json(msg)
+                        except Exception as exc:
+                            logger.warning("Failed to send outbox bundle: %s", exc)
+                            return
             while True:
                 with self._pending_lock:
                     if not self._pending_deploy_results:
@@ -491,6 +617,9 @@ class OrchestratorClient:
                         f"Reconnecting in {self._reconnect_delay:.1f}s"
                     )
                 finally:
+                    if self._registry is not None:
+                        self._registry.connection(False)
+                    self._deploy_attempt_gate.reset_connection()
                     self._connected = False
                     self._ws = None
 
@@ -556,6 +685,15 @@ class OrchestratorClient:
             self._reset_backoff()
             logger.info(f"Connected to orchestrator at {self._config.url}")
 
+            if self._registry is not None:
+                for approval, todo in self._registry.connection(True):
+                    if approval is None:
+                        continue
+                    if "acked" in todo:
+                        await self._send_received(approval)
+                    elif "started" in todo:
+                        await self._send_started(approval)
+
             # Flush any DeployResults buffered during the previous startup
             # (e.g. self-update results). Order matters: must complete before
             # listener/heartbeat tasks start so the result reaches the server
@@ -615,7 +753,10 @@ class OrchestratorClient:
         msg_type = msg.get("type")
         if msg_type == "deploy_approval":
             self._deploy_attempt_gate.observe_generation(msg["connection_generation"])
-            self._sequencer.submit(msg)
+            if self._registry is None:
+                self._sequencer.submit(msg)
+            else:
+                await self._admit_approval(msg)
         elif msg_type == "deploy_plan_probe":
             self._spawn_background(
                 self._handle_deploy_plan_probe(msg),
@@ -623,7 +764,10 @@ class OrchestratorClient:
             )
         elif msg_type == "deploy_attempt_ack":
             self._deploy_attempt_gate.observe_generation(msg["connection_generation"])
-            self._deploy_attempt_gate.accept_ack(msg)
+            if self._registry is None:
+                self._deploy_attempt_gate.accept_ack(msg)
+            else:
+                await self._receive_auto_ack(msg)
         elif msg_type == "deploy_report_ack":
             logger.warning(
                 "Orchestrator ignored deploy report attempt_id=%s report_type=%s "
@@ -633,6 +777,9 @@ class OrchestratorClient:
                 msg.get("reason"),
                 msg.get("attempt_outcome") or "missing",
             )
+        elif msg_type == "deploy_terminal_received":
+            if self._registry is not None:
+                self._registry.acknowledge(msg)
         elif msg_type == "deploy_reject":
             logger.info(
                 f"Deploy rejected: {msg.get('deploy_id')} "
@@ -648,7 +795,185 @@ class OrchestratorClient:
 
     async def _handle_deploy_approval(self, msg: dict) -> None:
         """Execute one approval (called by the sequencer, one at a time)."""
+        if self._registry is not None:
+            try:
+                if self._deploy_prepare_handler is not None:
+                    prepared = await asyncio.to_thread(
+                        self._deploy_prepare_handler, msg
+                    )
+                    msg = {**msg, "_prepared_probe": prepared, "_prepared": True}
+            except Exception as exc:
+                logger.warning(
+                    "Approval revalidation failed for %s: %s", msg["deploy_id"], exc
+                )
+                self._registry.start(
+                    msg["orchestrator_attempt_id"],
+                    reason="approval_revalidation_failed",
+                )
+                await self._send_json(
+                    {
+                        "type": "deploy_attempt_terminal",
+                        "kind": "approval_revalidation_failed",
+                        "stage": "approval_revalidation",
+                        "reason": "approval_revalidation_failed",
+                        "deploy_id": msg["deploy_id"],
+                        "orchestrator_attempt_id": msg["orchestrator_attempt_id"],
+                        "connection_generation": msg["connection_generation"],
+                        "error": str(exc),
+                    }
+                )
+                return
+
+            def before_start():
+                todo = self._registry.start(msg["orchestrator_attempt_id"])
+                if "declined" in todo:
+                    return self._registry.runs[msg["orchestrator_attempt_id"]]["reason"]
+                self._remember_attempt(msg)
+                return None
+
+            def on_prestart_failure(reason):
+                run = self._registry.runs[msg["orchestrator_attempt_id"]]
+                if run["row"]["exec_"] == "queued":
+                    self._registry.start(msg["orchestrator_attempt_id"], reason=reason)
+
+            await self._deploy_reporter.handle_approval(
+                msg, before_start=before_start, on_prestart_failure=on_prestart_failure
+            )
+            return
         await self._deploy_reporter.handle_approval(msg)
+
+    async def _admit_approval(
+        self, msg: dict, *, auto: bool = False, waiting: bool = True
+    ) -> None:
+        attempt = msg["orchestrator_attempt_id"]
+        duplicate = attempt in self._registry.runs
+        symbol, reason = self._registry.permit(
+            msg["deploy_id"], attempt, auto=auto, waiting=waiting
+        )
+        self._registry.runs[attempt]["approval"] = msg
+        if symbol == "acked":
+            if not duplicate:
+                self._sequencer.submit(msg)
+            await self._send_received(msg)
+        elif symbol == "declined":
+            await self._send_declined(msg, reason)
+            await self._flush_pending_deploy_results()
+        elif symbol == "bundle":
+            run = self._registry.runs[attempt]
+            if run["row"]["report"] == "r_acked":
+                for letter in run.get("letters", []):
+                    await self._send_json(letter)
+            else:
+                await self._flush_pending_deploy_results()
+        elif symbol == "started":
+            await self._send_started(msg)
+
+    async def _receive_auto_ack(self, ack):
+        approval = {
+            **ack,
+            "orchestrator_attempt_id": ack.get("begun_orchestrator_attempt_id")
+            or ack["requested_orchestrator_attempt_id"],
+        }
+
+        def before_signal(value):
+            if not value["accepted"]:
+                self._registry.give_up(value["requested_orchestrator_attempt_id"])
+                return None
+            symbol, reason = self._registry.permit(
+                value["deploy_id"],
+                approval["orchestrator_attempt_id"],
+                auto=True,
+                waiting=True,
+            )
+            self._registry.runs[approval["orchestrator_attempt_id"]]["approval"] = (
+                approval
+            )
+            if symbol == "acked":
+                asyncio.create_task(self._send_received(approval))
+            elif symbol == "started":
+                asyncio.create_task(self._send_started(approval))
+            elif symbol == "bundle":
+                asyncio.create_task(self._flush_pending_deploy_results())
+            elif symbol == "declined":
+                asyncio.create_task(self._send_declined(approval, reason))
+                asyncio.create_task(self._flush_pending_deploy_results())
+            return reason
+
+        matched = self._deploy_attempt_gate.accept_ack(ack, before_signal=before_signal)
+        if not matched and ack.get("accepted"):
+            await self._admit_approval(approval, auto=True, waiting=False)
+
+    def begin_auto(self, permit, *, reason=None):
+        if self._registry is None:
+            return True
+        attempt = permit["begun_orchestrator_attempt_id"]
+        todo = self._registry.start(attempt, reason=reason)
+        if "declined" in todo:
+            msg = {**permit, "orchestrator_attempt_id": attempt}
+            refusal = self._registry.runs[attempt]["reason"]
+            self._schedule_report(lambda: self._send_declined(msg, refusal), wait=True)
+            self._schedule_report(self._flush_pending_deploy_results, wait=False)
+            return False
+        self._remember_attempt({**permit, "orchestrator_attempt_id": attempt})
+        return True
+
+    def _remember_attempt(self, msg):
+        parsed = parse_deploy_id(msg["deploy_id"])
+        if parsed is not None:
+            self._registry.outbox.remember(
+                parsed[1],
+                "o:" + msg["orchestrator_attempt_id"],
+                msg["connection_generation"],
+            )
+
+    async def _send_received(self, msg):
+        await self._send_json(
+            {
+                "type": "deploy_attempt_received",
+                "node_id": self._config.node_id,
+                "deploy_id": msg["deploy_id"],
+                "orchestrator_attempt_id": msg["orchestrator_attempt_id"],
+                "connection_generation": msg["connection_generation"],
+            }
+        )
+
+    async def _send_started(self, msg):
+        if msg.get("execution_mode") == "evidence_recovery":
+            return
+        await self._send_json(
+            {
+                "type": "deploy_progress",
+                "node_id": self._config.node_id,
+                "deploy_id": msg["deploy_id"],
+                "orchestrator_attempt_id": msg["orchestrator_attempt_id"],
+                "connection_generation": msg["connection_generation"],
+                "stage": "preparing",
+            }
+        )
+
+    async def _send_declined(self, msg, reason):
+        kind = (
+            "approval_revalidation_failed"
+            if reason == "approval_revalidation_failed"
+            else "not_executed"
+        )
+        stage = (
+            "approval_revalidation"
+            if kind == "approval_revalidation_failed"
+            else "admission"
+        )
+        await self._send_json(
+            {
+                "type": "deploy_attempt_terminal",
+                "kind": kind,
+                "stage": stage,
+                "reason": reason,
+                "deploy_id": msg["deploy_id"],
+                "orchestrator_attempt_id": msg["orchestrator_attempt_id"],
+                "connection_generation": msg["connection_generation"],
+                "error": reason,
+            }
+        )
 
     async def _handle_deploy_plan_probe(self, msg: dict) -> None:
         """Run the read-only planner and answer on the socket that asked.

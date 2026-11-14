@@ -38,22 +38,24 @@ class DeployAttemptGate:
         with self._lock:
             if self._generation is not None and self._generation != generation:
                 for pending in self._pending.values():
-                    pending.response = {
-                        "accepted": False,
-                        "error": "connection_generation_changed",
-                    }
-                    pending.event.set()
+                    if pending.response is None:
+                        pending.response = {
+                            "accepted": False,
+                            "error": "connection_generation_changed",
+                        }
+                        pending.event.set()
             self._generation = generation
 
     def reset_connection(self) -> None:
         """Close old waiters and forget the server generation on reconnect."""
         with self._lock:
             for pending in self._pending.values():
-                pending.response = {
-                    "accepted": False,
-                    "error": "connection_generation_changed",
-                }
-                pending.event.set()
+                if pending.response is None:
+                    pending.response = {
+                        "accepted": False,
+                        "error": "connection_generation_changed",
+                    }
+                    pending.event.set()
             self._generation = None
 
     def register(self, requested_orchestrator_attempt_id: str, deploy_id: str) -> None:
@@ -64,7 +66,7 @@ class DeployAttemptGate:
                 deploy_id=deploy_id, event=threading.Event()
             )
 
-    def accept_ack(self, ack: dict[str, Any]) -> bool:
+    def accept_ack(self, ack: dict[str, Any], before_signal=None) -> bool:
         requested = ack.get("requested_orchestrator_attempt_id")
         if not isinstance(requested, str):
             raise DeployPermissionError("ACK lacks requested_orchestrator_attempt_id")
@@ -81,8 +83,13 @@ class DeployAttemptGate:
             ):
                 return False
             if pending.response is not None:
+                if before_signal is not None:
+                    before_signal(ack)
                 return True
-            pending.response = dict(ack)
+            reason = before_signal(ack) if before_signal is not None else None
+            pending.response = (
+                {"accepted": False, "error": reason} if reason else dict(ack)
+            )
             pending.event.set()
             return True
 
@@ -95,8 +102,9 @@ class DeployAttemptGate:
             raise DeployPermissionError("unknown orchestrator attempt request")
         if not pending.event.wait(timeout):
             with self._lock:
-                self._pending.pop(requested_orchestrator_attempt_id, None)
-            raise DeployPermissionError("deploy attempt ACK timeout")
+                if pending.response is None:
+                    self._pending.pop(requested_orchestrator_attempt_id, None)
+                    raise DeployPermissionError("deploy attempt ACK timeout")
         with self._lock:
             completed = self._pending.pop(requested_orchestrator_attempt_id, pending)
         response = completed.response or {"accepted": False, "error": "ACK lost"}

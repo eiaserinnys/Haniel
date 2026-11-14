@@ -9,6 +9,8 @@ Mermaid `stateDiagram-v2`를 쓴다. 표시 이름이 없는 상태, 사건, 조
 Pele는 층을 건너는 화살표가 있으면 하위 상태를 선언한 상자 밖으로 끌어내므로 열림과 닫힘 묶음은
 상자로 그리지 않고 잎 이름 뒤에 「(열림)」 꼴로 붙인다. 한 묶음의 모든 잎에서 같은 사건과 조건으로 같은
 곳에 가는 화살표는 묶음 이름의 합류 막대 하나로 모아 한 줄만 그린다.
+
+노드의 표시 이름은 봉인된 변경 범위에 맞춰 이 생성기에 두므로 500줄을 넘는다.
 """
 
 from __future__ import annotations
@@ -32,12 +34,86 @@ from .definitions import (
     OrchRequest,
 )
 from .divergence import design_line_for, mark_for
-from .labels import COND_LABELS, EVENT_LABELS, STATE_LABELS, effect_for
+from .labels import (
+    COND_LABELS,
+    EVENT_LABELS,
+    STATE_LABELS,
+    effect_for as _orch_effect_for,
+)
 from .restore import initial_row, regions
 
+# The orch-only CI installs no node package; read the node definition from this checkout.
+_root = Path(__file__).resolve().parents[4]
+if str(_root / "src") not in sys.path:
+    sys.path.insert(0, str(_root / "src"))
+from haniel.core.node_run import NodeRun  # noqa: E402
+
+STATE_LABELS = {
+    **STATE_LABELS,
+    "NodeRun": {
+        "run": "노드 실행",
+        "exec_": "실행",
+        "arrived": "허가 도착",
+        "asking": "자동 허가를 기다림",
+        "queued": "줄 서 있음",
+        "running": "실행 중",
+        "done": "끝남",
+        "ok": "성공",
+        "failed": "실패",
+        "declined": "실행하지 않음",
+        "report": "보고",
+        "r_none": "빚 없음",
+        "r_owed": "묶음을 빚짐",
+        "r_acked": "종결을 받음",
+    },
+}
+EVENT_LABELS = {
+    **EVENT_LABELS,
+    "NodeRun": {
+        "ask": "자동 허가를 청한다",
+        "give_up": "허가 기다리기를 포기한다",
+        "permit": "허가가 온다",
+        "own_start": "스스로 실행한다",
+        "slot_free": "순서기가 자리를 준다",
+        "finish_ok": "성공으로 끝난다",
+        "finish_fail": "실패로 끝난다",
+        "terminal_ack": "종결을 받았다는 답이 온다",
+        "link_up": "연결이 붙는다",
+        "link_down": "연결이 끊긴다",
+    },
+}
+COND_LABELS = {
+    **COND_LABELS,
+    "NodeRun": {
+        "refuse": "가드나 승인 재검증이 거절함",
+        "not_refuse": "가드와 승인 재검증 통과",
+        "slot_is_free": "실행 자리가 남",
+        "is_running": "실행 중",
+    },
+}
+
+
+def effect_for(name, event, target, source):
+    if name == "NodeRun":
+        return {
+            "ask": "자동 요청 기호",
+            "permit": "받았다, 시작, 거절 또는 묶음 기호",
+            "own_start": "자체 배포 시작 기호",
+            "slot_free": "시작 또는 거절 기호",
+            "finish_ok": "종결 묶음 기호",
+            "finish_fail": "종결 묶음 기호",
+            "link_up": "현재 아는 글 기호",
+        }.get(event, "상태를 갱신한다")
+    return _orch_effect_for(name, event, target, source)
+
+
 MAX_ARROWS = 25  # 스킬 규약: 한 장의 화살표는 20개 안팎, 생성기 상한 25개
-DEFINITIONS = (OrchRequest, AttemptEvidence)
-START_LABEL = {OrchRequest: "요청이 들어온다", AttemptEvidence: "시도를 시작한다"}
+DEFINITIONS = (OrchRequest, AttemptEvidence, NodeRun)
+START_LABEL = {
+    OrchRequest: "요청이 들어온다",
+    AttemptEvidence: "시도를 시작한다",
+    NodeRun: "노드 시도가 들어온다",
+}
 SVG_STAMP = "statechart-source-sha256"
 
 
@@ -166,7 +242,9 @@ class View:
     marked: bool | None
     region: str | None = None
     events: frozenset[str] | None = None
-    self_arrows: bool | None = None  # None이면 모두, False면 자리를 옮기는 화살표만, True면 제자리 화살표만
+    self_arrows: bool | None = (
+        None  # None이면 모두, False면 자리를 옮기는 화살표만, True면 제자리 화살표만
+    )
 
 
 # 요청 상태 영역의 사건 묶음 넷: 승인과 종결, 노드 스스로 한 배포와 늦은 증거, 닫힘 일곱, 자동 요청과 계획 묻기
@@ -182,15 +260,34 @@ _STATUS_MAIN = frozenset(
         "reopen",
     }
 )
-_STATUS_NODE = frozenset({"node_succeeded", "node_failed", "success_evidence", "late_failed"})
+_STATUS_NODE = frozenset(
+    {"node_succeeded", "node_failed", "success_evidence", "late_failed"}
+)
 _STATUS_CLOSINGS = frozenset(
-    {"send_failed", "declined", "ack_deadline", "lease_deadline", "grace_deadline", "hello_missing"}
+    {
+        "send_failed",
+        "declined",
+        "ack_deadline",
+        "lease_deadline",
+        "grace_deadline",
+        "hello_missing",
+    }
 )
 _STATUS_AUTO = frozenset({"auto_request", "plan_failed_journal"})
 # 믿음 영역의 사건 묶음 셋: 허가와 노드의 답, 계획 묻기의 닫힘, 시도의 닫힘
-_BELIEF_OPEN = frozenset({"begin_attempt", "open_probe", "auto_request", "acked", "started", "hello_holds"})
+_BELIEF_OPEN = frozenset(
+    {"begin_attempt", "open_probe", "auto_request", "acked", "started", "hello_holds"}
+)
 _BELIEF_PROBE = frozenset(
-    {"plan_failed_journal", "plan_closed", "plan_rejected", "probe_deadline", "link_down", "reject", "newer_commit"}
+    {
+        "plan_failed_journal",
+        "plan_closed",
+        "plan_rejected",
+        "probe_deadline",
+        "link_down",
+        "reject",
+        "newer_commit",
+    }
 )
 _BELIEF_CLOSE = frozenset(
     {
@@ -208,6 +305,31 @@ _BELIEF_CLOSE = frozenset(
 )
 
 VIEWS = (
+    View(
+        "node-execution",
+        NodeRun,
+        None,
+        "exec_",
+        frozenset(
+            {
+                "ask",
+                "give_up",
+                "permit",
+                "own_start",
+                "slot_free",
+                "finish_ok",
+                "finish_fail",
+            }
+        ),
+    ),
+    View(
+        "node-execution-link",
+        NodeRun,
+        None,
+        "exec_",
+        frozenset({"link_up", "link_down"}),
+    ),
+    View("node-report", NodeRun, None, "report"),
     View("request-status", OrchRequest, False, "status", _STATUS_MAIN),
     View("request-status-node", OrchRequest, False, "status", _STATUS_NODE),
     View("request-status-closings", OrchRequest, False, "status", _STATUS_CLOSINGS),
@@ -246,10 +368,14 @@ def _view_arrows(view: View) -> list[Arrow]:
 
 
 def _mark(arrow: Arrow):
-    return mark_for(arrow.definition, arrow.source, arrow.event, arrow.target, arrow.conds)
+    return mark_for(
+        arrow.definition, arrow.source, arrow.event, arrow.target, arrow.conds
+    )
 
 
-def _fold(cls: type, arrows: list[Arrow]) -> tuple[list[Arrow], list[tuple[list[str], Arrow]]]:
+def _fold(
+    cls: type, arrows: list[Arrow]
+) -> tuple[list[Arrow], list[tuple[list[str], Arrow]]]:
     """같은 사건, 조건, 도착, 표시의 화살표를 묶음 단위로 접는다.
 
     한 묶음(열림, 닫힘)의 모든 잎이 출발인 화살표는 합류 막대 하나로 모은다. 접히지 않은 화살표와
@@ -260,7 +386,9 @@ def _fold(cls: type, arrows: list[Arrow]) -> tuple[list[Arrow], list[tuple[list[
     folded: list[tuple[list[str], Arrow]] = []
     buckets: dict[tuple, list[Arrow]] = {}
     for arrow in arrows:
-        buckets.setdefault((arrow.event, arrow.conds, arrow.target, _mark(arrow)), []).append(arrow)
+        buckets.setdefault(
+            (arrow.event, arrow.conds, arrow.target, _mark(arrow)), []
+        ).append(arrow)
     for items in buckets.values():
         sources = [a.source for a in items]
         covered: list[str] = []
@@ -322,7 +450,7 @@ def mermaid(view: View) -> str:
     lines.append("    }")
     # 색은 이 그림에 그린 화살표와 이름으로 적어 둔 설계 밖 잎만으로 정한다
     breaks = {a.target for a in arrows if (_mark(a) or ("",))[0] == BREAKS}
-    not_in_design = set(LEAVES_NOT_IN_DESIGN[cls]) - breaks
+    not_in_design = set(LEAVES_NOT_IN_DESIGN.get(cls, ())) - breaks
     for state_id in sorted(breaks & touched):
         lines.append(f"    class {state_id} breaks")
     for state_id in sorted(not_in_design & touched):
@@ -343,7 +471,9 @@ def table(cls: type) -> str:
     for arrow in arrows:
         effect = effect_for(name, arrow.event, arrow.target, arrow.source)
         mark = _mark(arrow)
-        line = design_line_for(name, arrow.source, arrow.event, arrow.target, arrow.conds)
+        line = design_line_for(
+            name, arrow.source, arrow.event, arrow.target, arrow.conds
+        )
         mark_text = "-" if not mark else (f"{mark[1]} ({line})" if line else mark[1])
         conds = " 그리고 ".join(COND_LABELS[name][c] for c in arrow.conds) or "-"
         rows.append(
@@ -387,7 +517,9 @@ def stamp_svg(svg_path: Path, mmd_text: str) -> None:
 def svg_is_current(svg_path: Path, mmd_text: str) -> bool:
     if not svg_path.exists():
         return False
-    return f"<!-- {SVG_STAMP}: {_sha(mmd_text)} -->" in svg_path.read_text(encoding="utf-8")
+    return f"<!-- {SVG_STAMP}: {_sha(mmd_text)} -->" in svg_path.read_text(
+        encoding="utf-8"
+    )
 
 
 def render_svgs(out_dir: Path) -> None:
@@ -418,15 +550,26 @@ def check(out_dir: Path) -> list[str]:
             problems.append(f"{filename}: 정의에서 만든 것과 다르다")
     for view in VIEWS:
         if not svg_is_current(out_dir / f"{view.stem}.svg", mermaid(view)):
-            problems.append(f"{view.stem}.svg: 없거나 .mmd와 다르다(--render로 다시 만든다)")
+            problems.append(
+                f"{view.stem}.svg: 없거나 .mmd와 다르다(--render로 다시 만든다)"
+            )
     return problems
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m haniel_orch.statechart.docs")
-    parser.add_argument("--check", action="store_true", help="쓰지 않고 다르면 1로 끝낸다")
-    parser.add_argument("--render", action="store_true", help="쓴 뒤 render.py로 .svg도 만든다")
-    parser.add_argument("--out", type=Path, default=None, help="생성물 폴더(기본: docs/deploy-state/generated)")
+    parser.add_argument(
+        "--check", action="store_true", help="쓰지 않고 다르면 1로 끝낸다"
+    )
+    parser.add_argument(
+        "--render", action="store_true", help="쓴 뒤 render.py로 .svg도 만든다"
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="생성물 폴더(기본: docs/deploy-state/generated)",
+    )
     args = parser.parse_args(argv)
     out_dir = args.out or default_out_dir()
     try:

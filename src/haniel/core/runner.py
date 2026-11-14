@@ -115,11 +115,11 @@ from .self_update_marker import (
 )
 from .orch_pending_deploy import (
     discard as _discard_orch_pending_deploy,
-    read_and_consume as _read_orch_pending_deploy,
+    read as _read_orch_pending_deploy,
     write as _write_orch_pending_deploy,
 )
 from .self_update_prestage import SelfUpdatePrestager, SelfUpdatePrestageResult
-from ..integrations.deploy_reporting import ApprovalRevalidationError
+from ..integrations.deploy_reporting import AdmissionRefused, ApprovalRevalidationError
 from ..integrations.deploy_attempt_gate import DeployPermissionError
 from .thread_shutdown import join_thread_with_timeout
 
@@ -1877,7 +1877,10 @@ class ServiceRunner:
 
         # Consume self-update result from previous wrapper iteration (if any).
         # Done before MCP server starts so ws_handler.setup(loop) can broadcast it.
-        self._last_self_update_result = _read_self_update_marker(self.config_dir)
+        pending_self_report = _read_orch_pending_deploy(self.config_dir) is not None
+        self._last_self_update_result = _read_self_update_marker(
+            self.config_dir, consume=not pending_self_report
+        )
         if self._last_self_update_result is not None:
             logger.info(
                 "Loaded self-update result: ok=%s err=%s",
@@ -2057,12 +2060,22 @@ class ServiceRunner:
                 deploy_plan_probe_handler=self._handle_deploy_plan_probe,
                 repo_snapshot_handler=self._capture_orchestrator_repo_snapshot,
                 expected_budget_handler=self._expected_deployment_budget_sec,
+                config_dir=self.config_dir,
+                deploy_prepare_handler=self._prepare_deploy_approval,
             )
             # Map any self-update result from the previous wrapper iteration
             # into a buffered DeployResult before the client connects. The
             # buffer is flushed on the first successful WS connection so the
             # orch-server gets a definitive result instead of a stuck DEPLOYING.
             self._enqueue_pending_self_deploy_result()
+            enqueue_startup_retro_reports(
+                config=self._snapshot_config_state().config,
+                config_dir=self.config_dir,
+                orchestrator_client=self._orch_client,
+                journal_store=self._deployment_state_store(),
+                get_local_head=get_head,
+                prune_correlations=True,
+            )
             self._orch_client.start()
             logger.info("Orchestrator client started")
         except Exception as e:
@@ -2131,6 +2144,31 @@ class ServiceRunner:
             )
         return services
 
+    def _prepare_deploy_approval(
+        self, approval: dict
+    ) -> tuple[dict | None, object | None]:
+        """Consume and revalidate the approval before the first progress event."""
+        deploy_id = approval["deploy_id"]
+        _node, repo, branch, target = deploy_id.split(":", 3)
+        _config, runtime = self._snapshot_repo_and_config(repo)
+        if branch != runtime.config.branch:
+            raise ApprovalRevalidationError("approval branch changed")
+        probe = self._orchestrated_deploys.consume_approval(approval)
+        plan = None
+        if probe is not None:
+            plan = validate_approved_plan(
+                self._deploy_retry_planner(repo), probe, approval
+            )
+        elif (
+            approval.get("probe_id") is not None
+            or approval.get("execution_mode") != "execute"
+        ):
+            raise ApprovalRevalidationError(
+                "approval references a missing or invalid preflight probe"
+            )
+        assert_remote_target(self, repo, target)
+        return probe, plan
+
     def _handle_deploy_approval(
         self,
         approval: dict,
@@ -2148,10 +2186,19 @@ class ServiceRunner:
                 f"branch {configured_branch!r} for {repo!r}"
             )
 
-        probe = self._orchestrated_deploys.consume_approval(approval)
+        prepared = approval.get("_prepared", False)
+        probe, prepared_plan = (
+            approval.get("_prepared_probe", (None, None))
+            if prepared
+            else (self._orchestrated_deploys.consume_approval(approval), None)
+        )
         planner = self._deploy_retry_planner(repo)
         if probe is not None:
-            plan = validate_approved_plan(planner, probe, approval)
+            plan = (
+                prepared_plan
+                if prepared
+                else validate_approved_plan(planner, probe, approval)
+            )
             if plan.mode == "evidence_recovery":
                 return build_recovery_evidence(approval, probe, plan)
 
@@ -2166,7 +2213,8 @@ class ServiceRunner:
             # separate daemon thread after a small delay (gives the
             # caller coroutine time to return "deferred" and let the
             # orch_client coroutine finish cleanly).
-            assert_remote_target(self, repo, _target)
+            if not prepared:
+                assert_remote_target(self, repo, _target)
             # Mark self-update pending so approve_self_update() proceeds
             # even if the polling loop hasn't yet detected the change.
             with self._state_lock:
@@ -2202,6 +2250,11 @@ class ServiceRunner:
             probe,
             planner,
             progress_callback=progress_callback,
+            **(
+                {"prevalidated": True, "validated_plan": prepared_plan}
+                if prepared
+                else {}
+            ),
         )
 
     def _handle_deploy_plan_probe(self, probe: dict) -> dict:
@@ -2454,13 +2507,18 @@ class ServiceRunner:
                 "missing — sending failed for deploy_id=%s",
                 pending.deploy_id,
             )
-            self._orch_client.enqueue_deploy_result(
+            persisted = self._orch_client.enqueue_deploy_result(
                 pending.deploy_id,
                 status="failed",
                 error="self-update result marker missing after restart",
                 orchestrator_attempt_id=pending.orchestrator_attempt_id,
                 connection_generation=pending.connection_generation,
             )
+            if persisted:
+                _discard_orch_pending_deploy(
+                    self.config_dir, expected_deploy_id=pending.deploy_id
+                )
+                _read_self_update_marker(self.config_dir)
             return
 
         duration_ms: int | None = None
@@ -2481,7 +2539,7 @@ class ServiceRunner:
             config_snapshot, self_runtime = self._snapshot_repo_and_config(self_repo)
         else:
             self_runtime = None
-        self._orch_client.enqueue_deploy_result(
+        persisted = self._orch_client.enqueue_deploy_result(
             pending.deploy_id,
             status=status,
             error=error,
@@ -2496,6 +2554,11 @@ class ServiceRunner:
             if self_repo is not None and self_runtime is not None
             else None,
         )
+        if persisted:
+            _discard_orch_pending_deploy(
+                self.config_dir, expected_deploy_id=pending.deploy_id
+            )
+            _read_self_update_marker(self.config_dir)
         logger.info(
             "Enqueued DeployResult for self-update: deploy_id=%s status=%s",
             pending.deploy_id,
@@ -2671,6 +2734,9 @@ class ServiceRunner:
                 logger.info("No pending changes for %s, skipping", repo_name)
                 return
 
+            if orchestrator_attempt_id is not None and progress_callback is not None:
+                progress_callback("preparing")
+
             # _pull_repo() clears state.pending_changes → capture before any ops
             captured_changes = runtime.pending_changes
 
@@ -2734,6 +2800,7 @@ class ServiceRunner:
                         expected_operation="upgrade",
                         branch=resolved_branch,
                         node_id=reporting_node_id,
+                        orchestrator_attempt_id=orchestrator_attempt_id,
                         config_digest=(
                             reload_plan.config_digest
                             if reload_plan is not None
@@ -4284,36 +4351,80 @@ class ServiceRunner:
             return
         before = self._capture_orchestrator_repo_snapshot(repo, configured_branch)
         permit = self._orch_client.request_auto_attempt(before)
-        progress = self._orch_client.start_deploy_progress(permit)
+        approval = {
+            "deploy_id": permit["deploy_id"],
+            "orchestrator_attempt_id": permit["begun_orchestrator_attempt_id"],
+            "execution_mode": permit["execution_mode"],
+            "probe_id": permit["probe_id"],
+            "connection_generation": permit["connection_generation"],
+            "preflight_fingerprint": permit["preflight_fingerprint"],
+        }
+        try:
+            probe, plan = self._prepare_deploy_approval(approval)
+        except Exception:
+            self._orch_client.begin_auto(permit, reason="approval_revalidation_failed")
+            raise
+        progress = None
+        execution_started = False
+
+        def start_progress(stage):
+            nonlocal execution_started, progress
+            if not execution_started:
+                if not self._orch_client.begin_auto(permit):
+                    raise AdmissionRefused("automatic permission refused by node guard")
+                execution_started = True
+                if permit["execution_mode"] != "evidence_recovery":
+                    progress = self._orch_client.start_deploy_progress(permit)
+            if progress is not None and stage != "preparing":
+                progress.transition(stage)
+
         started = time.monotonic()
         operation_error: str | None = None
         caught_error: Exception | None = None
+        result = None
         try:
-            approval = {
-                "deploy_id": permit["deploy_id"],
-                "orchestrator_attempt_id": permit["begun_orchestrator_attempt_id"],
-                "execution_mode": permit["execution_mode"],
-                "probe_id": permit["probe_id"],
-                "connection_generation": permit["connection_generation"],
-                "preflight_fingerprint": permit["preflight_fingerprint"],
-            }
-            probe = self._orchestrated_deploys.consume_approval(approval)
-            execute_approved_plan(
+            result = execute_approved_plan(
                 self,
                 approval,
                 probe,
                 self._deploy_retry_planner(repo),
-                progress_callback=progress.transition,
+                progress_callback=start_progress,
+                prevalidated=True,
+                validated_plan=plan,
             )
+            if not execution_started:
+                start_progress("preparing")
         except Exception as exc:
+            if not execution_started:
+                if not isinstance(exc, AdmissionRefused):
+                    self._orch_client.begin_auto(
+                        permit, reason="approval_revalidation_failed"
+                    )
+                raise
             operation_error = str(exc)
             caught_error = exc
         finally:
-            progress.stop()
-        settled = self._capture_orchestrator_repo_snapshot(
-            repo, configured_branch, before.deploy_id
-        )
+            if progress is not None:
+                progress.stop()
+        if (
+            isinstance(result, dict)
+            and result.get("type") == "manifest_recovery_evidence"
+        ):
+            self._orch_client.report_auto_recovery(permit, result)
+            return
         duration_ms = int((time.monotonic() - started) * 1000)
+        try:
+            settled = self._capture_orchestrator_repo_snapshot(
+                repo, configured_branch, before.deploy_id
+            )
+        except Exception as exc:
+            error = (
+                f"{operation_error}; snapshot failed: {exc}"
+                if operation_error
+                else f"snapshot failed: {exc}"
+            )
+            self._orch_client.report_auto_failure(permit, error, duration_ms)
+            raise
         if self._orch_client:
             self._orch_client.report_deploy_attempt(
                 settled, operation_error, duration_ms, permit

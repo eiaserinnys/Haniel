@@ -11,6 +11,7 @@ from haniel.core.orch_pending_deploy import (
     OrchPendingDeploy,
     discard,
     read_and_consume,
+    read,
     write,
 )
 
@@ -47,6 +48,11 @@ class TestWriteAndRead:
         self._write(tmp_path, "a:b:c:d", "t")
         read_and_consume(tmp_path)
         assert not (tmp_path / MARKER_RELPATH).exists()
+
+    def test_read_preserves_marker_for_durable_transfer(self, tmp_path: Path) -> None:
+        self._write(tmp_path, "a:b:c:d", "t")
+        assert read(tmp_path).deploy_id == "a:b:c:d"
+        assert (tmp_path / MARKER_RELPATH).exists()
 
     def test_discard_only_removes_matching_deploy(self, tmp_path: Path) -> None:
         self._write(tmp_path, "node:repo:main:approved", "t")

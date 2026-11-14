@@ -42,11 +42,14 @@ def execute_approved_plan(
     planner: "DeployRetryPlanner",
     *,
     progress_callback: ProgressCallback | None = None,
+    prevalidated: bool = False,
+    validated_plan: "RetryPlan | None" = None,
 ) -> str | dict[str, Any] | None:
     """Revalidate then enter exactly the mode fixed by the server."""
     deploy_id = approval["deploy_id"]
     _node_id, repo, branch, _target = deploy_id.split(":", 3)
-    assert_remote_target(runner, repo, _target)
+    if not prevalidated:
+        assert_remote_target(runner, repo, _target)
     if probe is None:
         if approval.get("probe_id") is not None:
             raise ApprovalRevalidationError(
@@ -65,7 +68,13 @@ def execute_approved_plan(
             progress_callback=progress_callback,
         )
         return None
-    plan = validate_approved_plan(planner, probe, approval)
+    plan = (
+        validated_plan
+        if prevalidated
+        else validate_approved_plan(planner, probe, approval)
+    )
+    if plan is None:
+        raise ApprovalRevalidationError("validated plan is missing")
     if plan.mode == "evidence_recovery":
         return build_recovery_evidence(approval, probe, plan)
     _execute_retry(
@@ -254,6 +263,8 @@ def _redeploy_at_target(
                 "approved target changed before manifest retry execution"
             )
         if state.config.release_manifest is None:
+            if progress_callback is not None:
+                progress_callback("preparing")
             affected = list(state.affected_services)
             suppressed = affected
             runner._suppress_pending_restarts(suppressed)
@@ -275,11 +286,13 @@ def _redeploy_at_target(
         suppressed = (
             list(reload_plan.quiesce_services) if reload_plan is not None else affected
         )
-        runner._suppress_pending_restarts(suppressed)
         if not previous_head:
             raise ApprovalRevalidationError(
                 "manifest retry has no durable original previous_head"
             )
+        if progress_callback is not None:
+            progress_callback("preparing")
+        runner._suppress_pending_restarts(suppressed)
         progress_kwargs = (
             {"progress_callback": progress_callback}
             if progress_callback is not None
