@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from .statechart import steps
+from .statechart import attempt_steps
 
 
 class DeployAttemptProgressStore:
@@ -30,7 +30,7 @@ class DeployAttemptProgressStore:
                 declared_budget_sec = attempt["expected_budget_sec"]
                 if declared_budget_sec is None:
                     declared_budget_sec = expected_budget_sec
-                await steps.renew_deadline(
+                await attempt_steps.renew_deadline(
                     self._db, orchestrator_attempt_id, deadline_at, declared_budget_sec
                 )
                 await self._db.commit()

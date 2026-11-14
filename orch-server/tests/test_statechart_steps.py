@@ -8,7 +8,7 @@ from state_support import fire, set_legacy_status, to_deploying
 from behavior_scenarios import SCENARIOS
 
 from haniel_orch.event_store import EventStore
-from haniel_orch.statechart import steps
+from haniel_orch.statechart import attempt_steps, backfill, steps
 from haniel_orch.statechart.columns import (
     ATTEMPT_OUTCOMES,
     attempt_leaf_from_columns,
@@ -232,7 +232,7 @@ async def test_attempt_leaf_and_outcome_move_together(store: EventStore):
     assert await state() == ("success", "ev_both")
     # 끝난 시도에는 더 받을 사건이 없다
     with pytest.raises(NoTransition):
-        await steps.step_attempt(store._db, "a1", "fail", data={"kind": "k", "stage": "s", "reason": "r", "error": "e"})
+        await attempt_steps.step_attempt(store._db, "a1", "fail", data={"kind": "k", "stage": "s", "reason": "r", "error": "e"})
 
 
 @pytest.mark.parametrize("name", sorted(SCENARIOS))
@@ -375,7 +375,7 @@ async def test_startup_fixes_a_leaf_that_disagrees_with_the_outer_column(tmp_pat
             "a": "success",
             "b": "deploying",
         }
-        fixed = await steps.backfill_leaves(store._db)
+        fixed = await backfill.backfill_leaves(store._db)
         assert fixed == {"requests": 0, "locks": 0, "attempts": 0}
     finally:
         await store.close()

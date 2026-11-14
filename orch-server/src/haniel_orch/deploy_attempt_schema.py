@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import aiosqlite
 
-from .statechart.steps import backfill_leaves
+from .statechart.backfill import backfill_leaves
 
 
 ATTEMPT_TABLES_SQL = """

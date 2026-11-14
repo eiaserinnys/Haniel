@@ -2,7 +2,7 @@
 
 orch-server/src의 문자열 상수에서 INSERT, UPDATE, DELETE 문을 찾는다.
 - 네 표(deploy_events, deploy_attempts, deploy_retry_requirements, deploy_retry_source_attempts)는
-  한 걸음 모듈(statechart/steps.py)과 스키마 초기화(deploy_attempt_schema.py) 밖에 있으면 실패한다.
+  한 걸음 모듈(statechart/steps.py, attempt_steps.py, backfill.py)과 스키마 초기화(deploy_attempt_schema.py) 밖에 있으면 실패한다.
 - 다른 표의 쓰기는 까닭을 단 아래 명시 목록과 견준다. 새로 생기거나 사라지면 실패한다.
 """
 
@@ -19,7 +19,9 @@ PROTECTED = {
     "deploy_retry_source_attempts",
 }
 PROTECTED_WRITERS = {
-    "statechart/steps.py": "한 걸음 모듈: 모든 상태 쓰기가 여기를 거친다",
+    "statechart/steps.py": "한 걸음 모듈(요청 줄): 요청 표와 딸린 표의 상태 쓰기가 여기를 거친다",
+    "statechart/attempt_steps.py": "한 걸음 모듈(시도 줄): 시도 표의 상태 쓰기가 여기를 거친다",
+    "statechart/backfill.py": "기동 때 다시 계산: 잎이 비었거나 어긋난 줄만 옛 칸에서 채운다",
     "deploy_attempt_schema.py": "스키마 초기화: 칸을 더할 때 한 번 도는 옛 줄 표시(is_self_update)",
 }
 
@@ -63,8 +65,9 @@ def test_protected_tables_are_written_only_by_the_step_module_and_schema_init():
     assert outside == [], f"한 걸음 모듈 밖에서 상태 표에 쓴다: {outside}"
 
 
-def test_step_module_really_writes_every_protected_table():
-    written = {table for file, table in _sql_writes() if file == "statechart/steps.py"}
+def test_step_modules_really_write_every_protected_table():
+    step_modules = {"statechart/steps.py", "statechart/attempt_steps.py"}
+    written = {table for file, table in _sql_writes() if file in step_modules}
     assert PROTECTED <= written
 
 

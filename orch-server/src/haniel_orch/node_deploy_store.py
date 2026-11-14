@@ -9,7 +9,7 @@ import aiosqlite
 
 from .event_store_rows import now_iso
 from .protocol import DeployStatus, NodeDeployReport
-from .statechart import steps
+from .statechart import attempt_steps, steps
 from .statechart.columns import LEAF_COLUMNS
 from .statechart.restore import NoTransition
 
@@ -161,7 +161,7 @@ async def record(db: aiosqlite.Connection, report: NodeDeployReport) -> dict[str
 
     if report.phase == "succeeded":
         for attempt_id in active_orchestrator_ids:
-            await steps.step_attempt(
+            await attempt_steps.step_attempt(
                 db, attempt_id, "superseded_by_node", now=now
             )
         await steps.step_request(
