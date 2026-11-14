@@ -1,0 +1,13 @@
+stateDiagram-v2
+    direction TB
+    classDef breaks fill:#ffecee,stroke:#e72e3b
+    classDef notInDesign fill:#fff3e6,stroke:#e8730c
+    state "점검 필요" as lock {
+        l_off: 점검 필요 없음
+        l_on: 점검 필요
+        [*] --> l_off: 요청이 들어온다
+        l_off --> l_on: 시도가 실패로 끝난다
+        l_off --> l_on: 허가가 노드에 닿지 못해 시도를 닫는다 (PR 2에서 바뀜)
+        l_off --> l_on: 노드가 자기 배포의 실패를 알린다 [요청이 열려 있음]
+        l_on --> l_off: 승인해서 시도를 시작한다 [승인 원천이 단건 승인]
+    }

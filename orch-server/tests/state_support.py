@@ -31,14 +31,29 @@ async def fire(
             raise
 
 
-async def to_deploying(store: EventStore, deploy_id: str, by: str = "dashboard") -> None:
-    """승인해서 배포 중으로(시도 줄 없이 요청 줄만). 옛 `update_deploy_status(DEPLOYING)`와 같은 뜻."""
-    await fire(store, deploy_id, "begin_attempt", data={"approved_by": by})
+async def to_deploying(
+    store: EventStore,
+    deploy_id: str,
+    by: str = "dashboard",
+    *,
+    manual_single: bool = False,
+) -> None:
+    """승인해서 배포 중으로(시도 줄 없이 요청 줄만). 옛 `update_deploy_status(DEPLOYING)`와 같은 뜻.
+
+    점검 필요가 켜진 줄을 열려면 manual_single=True(원천이 단건 승인)여야 한다.
+    """
+    await fire(
+        store,
+        deploy_id,
+        "begin_attempt",
+        facts={"manual_single": manual_single},
+        data={"approved_by": by},
+    )
 
 
 async def to_pending_again(store: EventStore, deploy_id: str) -> None:
-    """배포 중에서 표시 줄 없이 대기로. 옛 `update_deploy_status(PENDING)`와 같은 뜻."""
-    await fire(store, deploy_id, "node_failed")
+    """배포 중에서 도는 시도 없이 대기로. 노드 실패 보고처럼 점검 필요가 켜진 표시 줄 있는 대기가 된다."""
+    await fire(store, deploy_id, "node_failed", facts={"no_active_attempt": True})
 
 
 async def to_success(

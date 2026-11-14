@@ -11,16 +11,18 @@ stateDiagram-v2
         rejected: 거절 (닫힘)
         superseded: 새 커밋에 밀림 (닫힘)
         [*] --> pending: 요청이 들어온다
-        pending --> deploying: 승인해서 시도를 시작한다
+        pending --> deploying: 승인해서 시도를 시작한다 [점검 필요가 없거나 승인 원천이 단건 승인]
         pending --> rejected: 거절한다
         pending --> superseded: 더 새 커밋이 들어온다
+        pending --> retry: 노드가 자기 배포의 실패를 알린다
         pending --> success: 목표 커밋에 와 있다고 관측한다 [머리 셋이 같음 그리고 도는 시도 없음 그리고 실패한 노드 보고 없음]
-        retry --> deploying: 승인해서 시도를 시작한다
+        retry --> deploying: 승인해서 시도를 시작한다 [점검 필요가 없거나 승인 원천이 단건 승인]
         retry --> rejected: 거절한다
         retry --> superseded: 더 새 커밋이 들어온다
         deploying --> success: 시도가 성공으로 끝난다
         deploying --> superseded: 시도가 실패로 끝난다 [더 새 커밋이 있음]
         deploying --> retry: 시도가 실패로 끝난다 [더 새 커밋이 없음]
+        deploying --> superseded: 허가가 노드에 닿지 못해 시도를 닫는다 [더 새 커밋이 있음]
         pending --> join1
         retry --> join1
         deploying --> join1

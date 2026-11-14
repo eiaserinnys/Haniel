@@ -361,7 +361,9 @@
      "error": null,
      "expected_manifest_digest": null,
      "expected_manifest_identity": null,
+     "inspection_required": false,
      "is_self_update": false,
+     "last_failure": null,
      "node_id": "n",
      "postponed_until": null,
      "reject_reason": null,
@@ -669,7 +671,9 @@
      "error": null,
      "expected_manifest_digest": null,
      "expected_manifest_identity": null,
+     "inspection_required": false,
      "is_self_update": true,
+     "last_failure": null,
      "node_id": "n",
      "postponed_until": null,
      "reject_reason": null,
@@ -696,7 +700,9 @@
      "error": null,
      "expected_manifest_digest": null,
      "expected_manifest_identity": null,
+     "inspection_required": false,
      "is_self_update": false,
+     "last_failure": null,
      "node_id": "n",
      "postponed_until": null,
      "reject_reason": null,
@@ -3606,7 +3612,13 @@
      }
     ],
     "lineage": [],
-    "markers": [],
+    "markers": [
+     {
+      "deploy_id": "n:r:main:np",
+      "last_failed_orchestrator_attempt_id": null,
+      "source_orchestrator_attempt_id": null
+     }
+    ],
     "node_attempts": [
      {
       "deploy_id": "n:r:main:np",
@@ -3781,7 +3793,13 @@
      }
     ],
     "lineage": [],
-    "markers": [],
+    "markers": [
+     {
+      "deploy_id": "n2:r:main:nd",
+      "last_failed_orchestrator_attempt_id": null,
+      "source_orchestrator_attempt_id": null
+     }
+    ],
     "node_attempts": [
      {
       "deploy_id": "n:r:main:np",
@@ -4650,6 +4668,11 @@
       "deploy_id": "n:r2:main:o2",
       "last_failed_orchestrator_attempt_id": "oa",
       "source_orchestrator_attempt_id": "oa"
+     },
+     {
+      "deploy_id": "n:r4:main:o4",
+      "last_failed_orchestrator_attempt_id": null,
+      "source_orchestrator_attempt_id": null
      }
     ],
     "node_attempts": [
@@ -4804,6 +4827,11 @@
       "deploy_id": "n:r2:main:o2",
       "last_failed_orchestrator_attempt_id": "oa",
       "source_orchestrator_attempt_id": "oa"
+     },
+     {
+      "deploy_id": "n:r4:main:o4",
+      "last_failed_orchestrator_attempt_id": null,
+      "source_orchestrator_attempt_id": null
      }
     ],
     "node_attempts": [
@@ -4988,6 +5016,11 @@
       "deploy_id": "n:r2:main:o2",
       "last_failed_orchestrator_attempt_id": "oa",
       "source_orchestrator_attempt_id": "oa"
+     },
+     {
+      "deploy_id": "n:r4:main:o4",
+      "last_failed_orchestrator_attempt_id": null,
+      "source_orchestrator_attempt_id": null
      },
      {
       "deploy_id": "n:r5:main:o5",
@@ -5217,6 +5250,11 @@
       "deploy_id": "n:r2:main:o2",
       "last_failed_orchestrator_attempt_id": "oa",
       "source_orchestrator_attempt_id": "oa"
+     },
+     {
+      "deploy_id": "n:r4:main:o4",
+      "last_failed_orchestrator_attempt_id": null,
+      "source_orchestrator_attempt_id": null
      },
      {
       "deploy_id": "n:r5:main:o5",
@@ -5472,6 +5510,11 @@
       "deploy_id": "n:r2:main:o2",
       "last_failed_orchestrator_attempt_id": "oa",
       "source_orchestrator_attempt_id": "oa"
+     },
+     {
+      "deploy_id": "n:r4:main:o4",
+      "last_failed_orchestrator_attempt_id": null,
+      "source_orchestrator_attempt_id": null
      },
      {
       "deploy_id": "n:r5:main:o5",
@@ -5900,9 +5943,9 @@
       "is_self_update": 0,
       "node_id": "n",
       "postponed_until": null,
-      "reject_reason": "raced reject",
+      "reject_reason": null,
       "repo": "r",
-      "status": "rejected",
+      "status": "deploying",
       "target_head": "t1",
       "updated_at": true
      }
@@ -5943,7 +5986,7 @@
     ],
     "events": [
      {
-      "approved_by": "director",
+      "approved_by": null,
       "branch": "race-a",
       "deploy_id": "n:r:race-a:t1",
       "duration_ms": null,
@@ -5951,9 +5994,9 @@
       "is_self_update": 0,
       "node_id": "n",
       "postponed_until": null,
-      "reject_reason": "raced reject",
+      "reject_reason": null,
       "repo": "r",
-      "status": "rejected",
+      "status": "pending",
       "target_head": "t1",
       "updated_at": true
      }
@@ -6019,7 +6062,7 @@
     ],
     "events": [
      {
-      "approved_by": "director",
+      "approved_by": null,
       "branch": "race-a",
       "deploy_id": "n:r:race-a:t1",
       "duration_ms": null,
@@ -6027,9 +6070,9 @@
       "is_self_update": 0,
       "node_id": "n",
       "postponed_until": null,
-      "reject_reason": "raced reject",
+      "reject_reason": null,
       "repo": "r",
-      "status": "rejected",
+      "status": "pending",
       "target_head": "t1",
       "updated_at": true
      },
@@ -6042,9 +6085,9 @@
       "is_self_update": 0,
       "node_id": "n",
       "postponed_until": null,
-      "reject_reason": "raced reject",
+      "reject_reason": null,
       "repo": "r",
-      "status": "rejected",
+      "status": "deploying",
       "target_head": "t1",
       "updated_at": true
      },
@@ -6129,7 +6172,7 @@
     ],
     "events": [
      {
-      "approved_by": "director",
+      "approved_by": null,
       "branch": "race-a",
       "deploy_id": "n:r:race-a:t1",
       "duration_ms": null,
@@ -6137,9 +6180,9 @@
       "is_self_update": 0,
       "node_id": "n",
       "postponed_until": null,
-      "reject_reason": "raced reject",
+      "reject_reason": null,
       "repo": "r",
-      "status": "rejected",
+      "status": "pending",
       "target_head": "t1",
       "updated_at": true
      },
@@ -6255,7 +6298,7 @@
     ],
     "events": [
      {
-      "approved_by": "director",
+      "approved_by": null,
       "branch": "race-a",
       "deploy_id": "n:r:race-a:t1",
       "duration_ms": null,
@@ -6263,9 +6306,9 @@
       "is_self_update": 0,
       "node_id": "n",
       "postponed_until": null,
-      "reject_reason": "raced reject",
+      "reject_reason": null,
       "repo": "r",
-      "status": "rejected",
+      "status": "pending",
       "target_head": "t1",
       "updated_at": true
      },
@@ -6308,9 +6351,9 @@
       "is_self_update": 0,
       "node_id": "n",
       "postponed_until": null,
-      "reject_reason": "raced reject",
+      "reject_reason": null,
       "repo": "r",
-      "status": "rejected",
+      "status": "deploying",
       "target_head": "t1",
       "updated_at": true
      }
@@ -6397,7 +6440,7 @@
     ],
     "events": [
      {
-      "approved_by": "director",
+      "approved_by": null,
       "branch": "race-a",
       "deploy_id": "n:r:race-a:t1",
       "duration_ms": null,
@@ -6405,9 +6448,9 @@
       "is_self_update": 0,
       "node_id": "n",
       "postponed_until": null,
-      "reject_reason": "raced reject",
+      "reject_reason": null,
       "repo": "r",
-      "status": "rejected",
+      "status": "pending",
       "target_head": "t1",
       "updated_at": true
      },
@@ -6445,14 +6488,14 @@
       "approved_by": "director",
       "branch": "race-c",
       "deploy_id": "n:r:race-c:t1",
-      "duration_ms": null,
+      "duration_ms": 11,
       "error": null,
       "is_self_update": 0,
       "node_id": "n",
       "postponed_until": null,
-      "reject_reason": "raced reject",
+      "reject_reason": null,
       "repo": "r",
-      "status": "rejected",
+      "status": "success",
       "target_head": "t1",
       "updated_at": true
      }
@@ -6533,7 +6576,7 @@
      "affected_services": [
       "svc"
      ],
-     "approved_by": "director",
+     "approved_by": null,
      "branch": "race-a",
      "commits": [
       "c"
@@ -6550,9 +6593,9 @@
      "is_self_update": false,
      "node_id": "n",
      "postponed_until": null,
-     "reject_reason": "raced reject",
+     "reject_reason": null,
      "repo": "r",
-     "status": "rejected",
+     "status": "pending",
      "target_head": "t1",
      "terminal_error": null,
      "terminal_kind": null,
@@ -6627,6 +6670,7 @@
       "svc"
      ],
      "approved_by": "director",
+     "attempt_outcome": "success",
      "branch": "race-c",
      "commits": [
       "c"
@@ -6636,16 +6680,19 @@
      "deployment_kind": "legacy",
      "detected_at": true,
      "diff_stat": "1 file",
-     "duration_ms": null,
+     "duration_ms": 11,
      "error": null,
+     "execution_mode": "execute",
      "expected_manifest_digest": null,
      "expected_manifest_identity": null,
      "is_self_update": false,
+     "journal_attempt_id": null,
      "node_id": "n",
+     "orchestrator_attempt_id": "rc1",
      "postponed_until": null,
-     "reject_reason": "raced reject",
+     "reject_reason": null,
      "repo": "r",
-     "status": "rejected",
+     "status": "success",
      "target_head": "t1",
      "terminal_error": null,
      "terminal_kind": null,

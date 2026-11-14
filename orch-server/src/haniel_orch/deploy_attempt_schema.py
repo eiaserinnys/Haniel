@@ -83,10 +83,11 @@ ON deploy_attempts(node_id, repo, branch) WHERE outcome = 'active';
 
 CREATE TABLE IF NOT EXISTS deploy_retry_requirements (
     deploy_id TEXT PRIMARY KEY,
-    source_orchestrator_attempt_id TEXT NOT NULL,
-    last_failed_orchestrator_attempt_id TEXT NOT NULL,
+    source_orchestrator_attempt_id TEXT,
+    last_failed_orchestrator_attempt_id TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    inspection_required INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS deploy_retry_source_attempts (
@@ -127,6 +128,8 @@ CANONICAL_COLUMNS = {
     "postponed_until": "TEXT",
     # 요청 상태의 잎(statechart.definitions.OrchRequest). 정본이고 status는 바깥 칸이다
     "sm_status": "TEXT",
+    # 점검 필요의 잎(같은 정의의 lock 영역). 바깥 칸은 표시 줄의 inspection_required다
+    "sm_lock": "TEXT",
 }
 
 ATTEMPT_COLUMNS = {
@@ -151,6 +154,58 @@ async def _ensure_columns(
     return added
 
 
+# 표시 줄의 두 시도 번호 칸 NOT NULL을 풀고 inspection_required를 더하려면 표를 다시 만들어야 한다(SQLite는 ALTER로
+# NOT NULL을 풀지 못한다). 옛 줄은 모두 inspection_required=1(옛 뜻: 표시 줄이 있으면 점검 필요)이 된다.
+_NEW_RETRY_TABLE_SQL = """CREATE TABLE deploy_retry_requirements_new (
+    deploy_id TEXT PRIMARY KEY,
+    source_orchestrator_attempt_id TEXT,
+    last_failed_orchestrator_attempt_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    inspection_required INTEGER NOT NULL DEFAULT 1
+)"""
+
+
+async def _retry_table_is_migrated(db: aiosqlite.Connection) -> bool:
+    cursor = await db.execute("PRAGMA table_info(deploy_retry_requirements)")
+    not_null = {row[1]: row[3] for row in await cursor.fetchall()}
+    return (
+        "inspection_required" in not_null
+        and not not_null["source_orchestrator_attempt_id"]
+        and not not_null["last_failed_orchestrator_attempt_id"]
+    )
+
+
+async def _migrate_retry_requirements(db: aiosqlite.Connection) -> None:
+    """표시 줄 표를 한 트랜잭션으로 다시 만든다. 이미 바뀌었으면 아무것도 하지 않는다(두 번 돌아도 같다)."""
+    if await _retry_table_is_migrated(db):
+        return
+    if db.in_transaction:
+        await db.commit()
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        await db.execute("DROP TABLE IF EXISTS deploy_retry_requirements_new")
+        await db.execute(_NEW_RETRY_TABLE_SQL)
+        await db.execute(
+            """INSERT INTO deploy_retry_requirements_new
+               (deploy_id, source_orchestrator_attempt_id,
+                last_failed_orchestrator_attempt_id, created_at, updated_at,
+                inspection_required)
+               SELECT deploy_id, source_orchestrator_attempt_id,
+                      last_failed_orchestrator_attempt_id, created_at, updated_at, 1
+               FROM deploy_retry_requirements"""
+        )
+        await db.execute("DROP TABLE deploy_retry_requirements")
+        await db.execute(
+            "ALTER TABLE deploy_retry_requirements_new "
+            "RENAME TO deploy_retry_requirements"
+        )
+        await db.execute("COMMIT")
+    except BaseException:
+        await db.execute("ROLLBACK")
+        raise
+
+
 async def initialize_attempt_schema(db: aiosqlite.Connection) -> None:
     """Add v16 tables without reopening historical FAILED rows or journals."""
     canonical_added = await _ensure_columns(db, "deploy_events", CANONICAL_COLUMNS)
@@ -160,6 +215,7 @@ async def initialize_attempt_schema(db: aiosqlite.Connection) -> None:
                WHERE lower(repo) = 'haniel' AND status IN ('pending', 'deploying')"""
         )
     await db.executescript(ATTEMPT_TABLES_SQL)
+    await _migrate_retry_requirements(db)
     await _ensure_columns(db, "deploy_attempts", ATTEMPT_COLUMNS)
     # 잎이 비었거나 바깥 칸과 어긋난 줄만 옛 칸에서 다시 계산한다
     await backfill_leaves(db)

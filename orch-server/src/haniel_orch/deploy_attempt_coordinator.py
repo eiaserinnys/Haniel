@@ -1,4 +1,7 @@
-"""Server authority for generation-bound deploy planning and finalization."""
+"""Server authority for generation-bound deploy planning and finalization.
+
+500줄을 넘는다(모듈 크기 제한 예외): PR 1 때부터 넘었고 PR 2a는 점검 필요만 더했다. 믿음과 새 글을 더하는 PR 2b 전에 나누면 같은 자리를 두 번 옮기게 되어 뒤로 미룬다.
+"""
 
 from __future__ import annotations
 
@@ -152,8 +155,10 @@ class DeployAttemptCoordinator(
                     },
                 )
             generation = self._require_generation(event["node_id"])
-            retry_required = await self.attempts.has_retry_requirement(
-                event["deploy_id"]
+            # 실행했을 수 있는 시도(source)가 있는 표시 줄만 계획부터 묻는다. source가 빈 표시 줄은 첫 승인 길이다
+            retry = await self.attempts.get_retry_requirement(event["deploy_id"])
+            retry_required = (
+                retry is not None and retry["source_orchestrator_attempt_id"] is not None
             )
             if not retry_required:
                 orchestrator_attempt_id = uuid4().hex
@@ -184,9 +189,12 @@ class DeployAttemptCoordinator(
                         approved_by=approved_by,
                     )
                     sent = await self._send(event["node_id"], generation, approval)
-                    self._schedule_attempt(orchestrator_attempt_id, deadline)
                     if not sent:
+                        await self._close_unsent_attempt(
+                            event["node_id"], orchestrator_attempt_id
+                        )
                         raise PlanRejected("node not connected", 503)
+                    self._schedule_attempt(orchestrator_attempt_id, deadline)
                     await self._broadcast_status(event, "deploying")
                     return orchestrator_attempt_id
 
@@ -232,12 +240,20 @@ class DeployAttemptCoordinator(
                 )
                 if active_self_update is not None:
                     await self._send_auto_rejection(
-                        msg, requested, generation, "self_update_pending"
+                        msg.node_id,
+                        msg.deploy_id,
+                        requested,
+                        generation,
+                        "self_update_pending",
                     )
                     return
-            if await self.attempts.has_retry_requirement(msg.deploy_id):
+            if await self.attempts.inspection_required(msg.deploy_id):
                 await self._send_auto_rejection(
-                    msg, requested, generation, "retry_requires_manual_approval"
+                    msg.node_id,
+                    msg.deploy_id,
+                    requested,
+                    generation,
+                    "retry_requires_manual_approval",
                 )
                 return
             probe_id = uuid4().hex
@@ -253,7 +269,11 @@ class DeployAttemptCoordinator(
             except PermissionError as exc:
                 if str(exc) == "retry_requires_manual_approval":
                     await self._send_auto_rejection(
-                        msg, requested, generation, "retry_requires_manual_approval"
+                        msg.node_id,
+                        msg.deploy_id,
+                        requested,
+                        generation,
+                        "retry_requires_manual_approval",
                     )
                 return
             except ValueError:
@@ -322,6 +342,18 @@ class DeployAttemptCoordinator(
                     proposal.probe_id,
                     PlanRejected(result.get("kind", "preflight rejected"), 422),
                 )
+                if (
+                    source == "auto"
+                    and result.get("reason") == "retry_requires_manual_approval"
+                ):
+                    # 탐침을 만든 뒤 점검 필요가 섰다. 노드가 시간 초과까지 기다리지 않게 거절 답을 보낸다
+                    await self._send_auto_rejection(
+                        probe["node_id"],
+                        probe["deploy_id"],
+                        probe["requested_orchestrator_attempt_id"],
+                        probe["connection_generation"],
+                        "retry_requires_manual_approval",
+                    )
                 return
             attempt = result["attempt"]
             if source == "auto":
@@ -350,8 +382,13 @@ class DeployAttemptCoordinator(
             )
             self._cancel_timer(f"probe:{proposal.probe_id}")
             self._probe_context.pop(proposal.probe_id, None)
-            self._schedule_attempt(orchestrator_attempt_id, deadline)
-            await self._broadcast_status(attempt, "deploying")
+            if sent:
+                self._schedule_attempt(orchestrator_attempt_id, deadline)
+                await self._broadcast_status(attempt, "deploying")
+            else:
+                await self._close_unsent_attempt(
+                    attempt["node_id"], orchestrator_attempt_id
+                )
             if future is not None and not future.done():
                 if sent:
                     future.set_result(orchestrator_attempt_id)
@@ -481,20 +518,28 @@ class DeployAttemptCoordinator(
             ],
         )
 
+    async def _close_unsent_attempt(
+        self, node_id: str, orchestrator_attempt_id: str
+    ) -> None:
+        """허가가 노드에 닿지 못하면 시도를 그 자리에서 실패로 닫는다(어긋남 9)."""
+        result = await self.attempts.fail_attempt_not_sent(orchestrator_attempt_id)
+        await self._after_store_terminal(node_id, orchestrator_attempt_id, result)
+
     async def _send_auto_rejection(
         self,
-        msg: RepoReconciliation,
+        node_id: str,
+        deploy_id: str,
         requested: str,
         generation: str,
         error: Literal["retry_requires_manual_approval", "self_update_pending"],
     ) -> None:
         await self._send(
-            msg.node_id,
+            node_id,
             generation,
             RejectedDeployAttemptAck(
                 accepted=False,
                 requested_orchestrator_attempt_id=requested,
-                deploy_id=msg.deploy_id,
+                deploy_id=deploy_id,
                 connection_generation=generation,
                 error=error,
             ),

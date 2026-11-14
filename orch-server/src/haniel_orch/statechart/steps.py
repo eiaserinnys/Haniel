@@ -5,10 +5,13 @@ deploy_retry_source_attempts)에 쓰는 SQL이 있는 유일한 곳(스키마 �
 1. 줄(잎 칸)과 걸음마다 읽는 사실을 읽는다.
 2. `restore`로 새 인스턴스를 되살리고 사건 하나를 넣는다. 전이가 없으면 `NoTransition`이고
    줄에는 아무것도 쓰이지 않는다.
-3. 결과 잎과 바깥 칸(status, reject_reason, outcome 등)과 딸린 줄(표시 줄, 계보 줄)을
-   같은 트랜잭션에 쓴다. SQL의 `WHERE`는 마지막 쓰기 재확인으로 남는다.
+3. 결과 잎(요청 상태와 점검 필요)과 바깥 칸(status, reject_reason, outcome, 표시 줄의
+   inspection_required 등)과 딸린 줄(표시 줄, 계보 줄)을 같은 트랜잭션에 쓴다. SQL의 `WHERE`는
+   마지막 쓰기 재확인으로 남는다.
 
-방송, 푸시, 타이머 같은 할 일은 커밋 뒤에 호출부가 돌린다(할 일 기호의 저장은 PR 2).
+방송, 푸시, 타이머 같은 할 일은 커밋 뒤에 호출부가 돌린다(할 일 기호의 저장은 PR 2b).
+
+500줄을 넘는다(모듈 크기 제한 예외): PR 1 때부터 넘었고 PR 2a는 점검 필요만 더했다. 믿음과 새 글을 더하는 PR 2b 전에 나누면 같은 자리를 두 번 옮기게 되어 뒤로 미룬다.
 """
 
 from __future__ import annotations
@@ -21,9 +24,13 @@ import aiosqlite
 
 from .columns import (
     ATTEMPT_REGION,
+    LOCK_OFF,
+    LOCK_ON,
+    LOCK_REGION,
     REQUEST_REGION,
     attempt_leaf_from_columns,
     attempt_leaf_is_consistent,
+    lock_leaf_from_columns,
     request_leaf_from_columns,
     request_leaf_is_consistent,
 )
@@ -61,11 +68,11 @@ class AttemptStep(NamedTuple):
 # ---------------------------------------------------------------- 요청 줄
 
 _INSERT_REQUEST = """INSERT OR IGNORE INTO deploy_events
-    (deploy_id, node_id, repo, branch, status, sm_status,
+    (deploy_id, node_id, repo, branch, status, sm_status, sm_lock,
      commits_json, affected_services_json, diff_stat, detected_at,
      created_at, updated_at, target_head, deployment_kind,
      expected_manifest_identity, expected_manifest_digest, is_self_update)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
 
 async def create_request(
@@ -87,7 +94,8 @@ async def create_request(
     now: str,
 ) -> bool:
     """요청 줄을 처음 대기로 만든다. 같은 deploy_id가 있으면 아무것도 쓰지 않고 False."""
-    leaf = initial_row(OrchRequest)[REQUEST_REGION]
+    initial = initial_row(OrchRequest)
+    leaf = initial[REQUEST_REGION]
     cursor = await db.execute(
         _INSERT_REQUEST,
         (
@@ -97,6 +105,7 @@ async def create_request(
             branch,
             REQUEST_OUTER_STATUS[leaf],
             leaf,
+            initial[LOCK_REGION],
             commits_json,
             affected_services_json,
             diff_stat,
@@ -116,7 +125,7 @@ async def create_request(
 def _request_columns(
     event: str, previous: str, leaf: str, data: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """사건과 출발, 결과 잎에서 바깥 칸에 쓸 값을 정한다."""
+    """사건과 출발, 결과 잎에서 요청 상태가 옮겨질 때 바깥 칸에 쓸 값을 정한다."""
     if event == "newer_commit":
         return {"reject_reason": data["reason"]}
     if event == "reject":
@@ -126,12 +135,9 @@ def _request_columns(
         return {"approved_by": data["approved_by"]}
     if event == "attempt_succeeded":
         return {"error": None, "duration_ms": data.get("duration_ms")}
-    if event == "attempt_failed":
+    if event in ("attempt_failed", "send_failed"):
         if leaf == "superseded":
             return {"reject_reason": "superseded by newer canonical"}
-        if previous != "deploying":
-            # 배포 중이 아닌 요청: 지금도 요청 줄의 다른 칸은 건드리지 않고 표시 줄과 계보 줄만 쓴다
-            return {}
         return {"approved_by": None, "error": None, "duration_ms": None}
     if event == "node_succeeded":
         return {
@@ -140,6 +146,8 @@ def _request_columns(
             "duration_ms": data.get("duration_ms"),
         }
     if event == "node_failed":
+        if previous != "deploying":
+            return {}
         return {"approved_by": None, "error": None, "duration_ms": None}
     if event in ("observed", "observed_self_update"):
         return {}
@@ -153,11 +161,15 @@ def _request_columns(
     raise KeyError(f"요청 사건에 쓸 칸이 정해지지 않았다: {event}")
 
 
-async def _has_marker(db: aiosqlite.Connection, deploy_id: str) -> bool:
-    cursor = await db.execute(
-        "SELECT 1 FROM deploy_retry_requirements WHERE deploy_id = ?", (deploy_id,)
-    )
-    return await cursor.fetchone() is not None
+_UPSERT_MARKER = """INSERT INTO deploy_retry_requirements
+   (deploy_id, source_orchestrator_attempt_id, last_failed_orchestrator_attempt_id,
+    created_at, updated_at, inspection_required)
+   VALUES (?, ?, ?, ?, ?, 1)
+   ON CONFLICT(deploy_id) DO UPDATE SET
+     source_orchestrator_attempt_id=excluded.source_orchestrator_attempt_id,
+     last_failed_orchestrator_attempt_id=excluded.last_failed_orchestrator_attempt_id,
+     updated_at=excluded.updated_at,
+     inspection_required=1"""
 
 
 async def step_request(
@@ -173,7 +185,7 @@ async def step_request(
     data = data or {}
     now = now or now_iso()
     cursor = await db.execute(
-        "SELECT status, sm_status FROM deploy_events WHERE deploy_id = ?",
+        "SELECT status, sm_status, sm_lock FROM deploy_events WHERE deploy_id = ?",
         (deploy_id,),
     )
     row = await cursor.fetchone()
@@ -185,69 +197,72 @@ async def step_request(
             REASON_NO_ROW,
             deploy_id,
         )
-    status, leaf = row
-    if leaf is None or REQUEST_OUTER_STATUS.get(leaf) != status:
+    status, leaf, lock = row
+    if leaf is None or lock is None or REQUEST_OUTER_STATUS.get(leaf) != status:
         raise NoTransition(
             OrchRequest.__name__,
-            {"status": status, "sm_status": leaf},
+            {"status": status, "sm_status": leaf, "sm_lock": lock},
             event,
             REASON_STATE_MISMATCH,
             deploy_id,
         )
-    given = dict(facts or {})
-    if "marked" not in given:
-        given["marked"] = await _has_marker(db, deploy_id)
     try:
-        new_leaf = advance(OrchRequest, {REQUEST_REGION: leaf}, event, given)[
-            REQUEST_REGION
-        ]
+        after = advance(
+            OrchRequest,
+            {REQUEST_REGION: leaf, LOCK_REGION: lock},
+            event,
+            dict(facts or {}),
+        )
     except NoTransition as exc:
         exc.key = deploy_id
         raise
+    new_leaf, new_lock = after[REQUEST_REGION], after[LOCK_REGION]
+    moved = new_leaf != leaf
+    lock_changed = new_lock != lock
 
-    # 배포 중이 아닌 요청에 닿은 시도 실패(더 새 커밋이 없을 때)는 요청 줄의 다른 칸을 건드리지 않는다
-    quiet = event == "attempt_failed" and leaf != "deploying" and new_leaf != "superseded"
-    columns = {
-        "status": REQUEST_OUTER_STATUS[new_leaf],
-        "sm_status": new_leaf,
-        **_request_columns(event, leaf, new_leaf, data),
-    }
-    if not quiet:
-        columns["updated_at"] = now
+    # 요청 상태가 옮겨질 때만 바깥 칸과 updated_at을 쓴다. 점검 필요만 바뀌면(닫힌 요청에 닿은 시도 실패,
+    # 도는 시도가 있는 배포 중의 노드 실패 보고) 요청 줄의 다른 칸은 건드리지 않는다
+    columns: dict[str, Any] = {}
+    if moved:
+        columns = {
+            "status": REQUEST_OUTER_STATUS[new_leaf],
+            "sm_status": new_leaf,
+            **_request_columns(event, leaf, new_leaf, data),
+            "updated_at": now,
+        }
+    if lock_changed:
+        columns["sm_lock"] = new_lock
     assignments = ", ".join(f"{name} = ?" for name in columns)
     updated = await db.execute(
         f"UPDATE deploy_events SET {assignments} "
-        "WHERE deploy_id = ? AND status = ? AND sm_status = ?",
-        (*columns.values(), deploy_id, status, leaf),
+        "WHERE deploy_id = ? AND status = ? AND sm_status = ? AND sm_lock = ?",
+        (*columns.values(), deploy_id, status, leaf, lock),
     )
     if updated.rowcount != 1:
         raise NoTransition(
             OrchRequest.__name__,
-            {"status": status, "sm_status": leaf},
+            {"status": status, "sm_status": leaf, "sm_lock": lock},
             event,
             REASON_UPDATE_ZERO,
             deploy_id,
         )
 
-    marker_stays = event == "attempt_failed" and not given["newer"]
-    if new_leaf in REQUEST_CLOSED and not marker_stays:
+    if new_leaf in REQUEST_CLOSED:
+        if moved:
+            await db.execute(
+                "DELETE FROM deploy_retry_requirements WHERE deploy_id = ?",
+                (deploy_id,),
+            )
+            await db.execute(
+                "DELETE FROM deploy_retry_source_attempts WHERE deploy_id = ?",
+                (deploy_id,),
+            )
+        return RequestStep(previous=leaf, leaf=new_leaf)
+
+    if event in ("attempt_failed", "send_failed") and moved:
+        # 닫힌 시도는 언제나 계보에 더한다. source는 호출부가 정한다(보내기 실패는 옮기지 않는다)
         await db.execute(
-            "DELETE FROM deploy_retry_requirements WHERE deploy_id = ?", (deploy_id,)
-        )
-        await db.execute(
-            "DELETE FROM deploy_retry_source_attempts WHERE deploy_id = ?",
-            (deploy_id,),
-        )
-    if marker_stays:
-        await db.execute(
-            """INSERT INTO deploy_retry_requirements
-               (deploy_id, source_orchestrator_attempt_id,
-                last_failed_orchestrator_attempt_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(deploy_id) DO UPDATE SET
-                 source_orchestrator_attempt_id=excluded.source_orchestrator_attempt_id,
-                 last_failed_orchestrator_attempt_id=excluded.last_failed_orchestrator_attempt_id,
-                 updated_at=excluded.updated_at""",
+            _UPSERT_MARKER,
             (
                 deploy_id,
                 data["stable_source"],
@@ -259,6 +274,21 @@ async def step_request(
         await db.execute(
             "INSERT OR IGNORE INTO deploy_retry_source_attempts VALUES (?, ?, ?)",
             (deploy_id, data["failed_attempt_id"], now),
+        )
+    elif event == "node_failed" or (event == "reopen" and new_leaf == "retry"):
+        # 노드가 스스로 한 배포의 실패와 잠긴 채 되살아난 줄은 두 시도 번호 칸이 빈 표시 줄을 만든다
+        await db.execute(
+            "INSERT OR IGNORE INTO deploy_retry_requirements "
+            "(deploy_id, created_at, updated_at, inspection_required) "
+            "VALUES (?, ?, ?, 1)",
+            (deploy_id, now, now),
+        )
+    if lock_changed:
+        # 점검 필요의 바깥 칸은 표시 줄의 inspection_required다. 잎과 같은 걸음에 맞춘다
+        await db.execute(
+            "UPDATE deploy_retry_requirements SET inspection_required = ?, updated_at = ? "
+            "WHERE deploy_id = ?",
+            (1 if new_lock == LOCK_ON else 0, now, deploy_id),
         )
     return RequestStep(previous=leaf, leaf=new_leaf)
 
@@ -472,26 +502,48 @@ async def backfill_leaves(db: aiosqlite.Connection) -> dict[str, int]:
     """잎이 비었거나 바깥 칸과 어긋난 줄만 옛 칸에서 다시 계산한다.
 
     되돌렸다 다시 올려 옛 코드가 바깥 칸만 고쳐 둔 줄도 이것으로 맞춰진다.
-    정의에 잎이 없는 옛 값(approved, failed)은 잎을 비워 둔다.
+    정의에 잎이 없는 옛 값(approved, failed)은 요청 상태 잎을 비워 둔다.
+    점검 필요 잎은 비어 있는 줄에만 채운다. 어긋남 고침은 한 방향뿐이다: 대기(pending, retry)인데
+    표시 줄이 있고 점검 필요가 꺼져 있으면 켠다(PR 1 코드로 되돌렸다 다시 올린 줄). 그 밖의 켜짐은 내리지 않는다.
     """
-    fixed = {"requests": 0, "attempts": 0}
+    fixed = {"requests": 0, "locks": 0, "attempts": 0}
     cursor = await db.execute(
-        """SELECT e.deploy_id, e.status, e.reject_reason, e.sm_status,
+        """SELECT e.deploy_id, e.status, e.reject_reason, e.sm_status, e.sm_lock,
                   EXISTS (SELECT 1 FROM deploy_retry_requirements r
-                          WHERE r.deploy_id = e.deploy_id)
+                          WHERE r.deploy_id = e.deploy_id),
+                  (SELECT r.inspection_required FROM deploy_retry_requirements r
+                   WHERE r.deploy_id = e.deploy_id)
            FROM deploy_events e"""
     )
-    for deploy_id, status, reason, leaf, marked in await cursor.fetchall():
-        if request_leaf_is_consistent(leaf, status, bool(marked)):
-            continue
-        expected = request_leaf_from_columns(status, reason, bool(marked))
-        if expected == leaf:
-            continue
-        await db.execute(
-            "UPDATE deploy_events SET sm_status = ? WHERE deploy_id = ?",
-            (expected, deploy_id),
-        )
-        fixed["requests"] += 1
+    for deploy_id, status, reason, leaf, lock, marked, inspection in await cursor.fetchall():
+        if not request_leaf_is_consistent(leaf, status, bool(marked)):
+            expected = request_leaf_from_columns(status, reason, bool(marked))
+            if expected != leaf:
+                await db.execute(
+                    "UPDATE deploy_events SET sm_status = ? WHERE deploy_id = ?",
+                    (expected, deploy_id),
+                )
+                fixed["requests"] += 1
+        if lock not in (LOCK_ON, LOCK_OFF):
+            await db.execute(
+                "UPDATE deploy_events SET sm_lock = ? WHERE deploy_id = ?",
+                (
+                    lock_leaf_from_columns(status, bool(marked), bool(inspection)),
+                    deploy_id,
+                ),
+            )
+            fixed["locks"] += 1
+        elif status == "pending" and marked and lock == LOCK_OFF:
+            await db.execute(
+                "UPDATE deploy_events SET sm_lock = ? WHERE deploy_id = ?",
+                (LOCK_ON, deploy_id),
+            )
+            await db.execute(
+                "UPDATE deploy_retry_requirements SET inspection_required = 1 "
+                "WHERE deploy_id = ?",
+                (deploy_id,),
+            )
+            fixed["locks"] += 1
     cursor = await db.execute(
         "SELECT orchestrator_attempt_id, outcome, result_status, settled_at, "
         "sm_evidence FROM deploy_attempts"
