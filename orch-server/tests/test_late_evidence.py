@@ -1,7 +1,7 @@
 """닫힌 시도의 늦은 글, 시도 순서, 실행 시작 시각, 닫힌 뒤 적용 꼬리표(카드 #1259 PR 2b-1).
 
 시도의 닫힘(outcome)과 증거 종결(sm_evidence)은 따로 움직인다. 오케스트레이터가 스스로 닫은 시도(실행 임대 마감,
-보내기 실패)에 뒤늦게 닿은 결과와 정착은 그 시도의 증거로 적힌다. 증거가 성공으로 종결되면 「뒤 시도를 연 적이 없을 때만」
+보내기 실패)에 뒤늦게 닿은 결과와 정착은 그 시도의 증거로 적힌다. 판 없는 시도는 성공 증거가 종결되고 뒤 시도를 연 적이 없을 때만
 요청을 성공으로 닫고(완화 A), 실패로 종결되면 점검 필요를 켠다. 거절이나 밀림으로 닫힌 요청에 성공 증거가 닿으면
 「닫힌 뒤 적용」 꼬리표를 남긴다.
 
@@ -192,9 +192,9 @@ def iso(moment: datetime) -> str:
         (("retry", "l_on", "t_off"), {"no_later": True}, ("success", "l_on", "t_off")),
         (("pending", "l_off", "t_off"), {"no_later": False}, None),
         (("retry", "l_on", "t_off"), {"no_later": False}, None),
-        # 배포 중: 그대로(도는 시도가 있으면 사실은 거짓이다)
+        # 배포 중: 판 1은 뒤 시도가 아직 실행을 시작하지 않았으면 성공으로 닫는다
         (("deploying", "l_off", "t_off"), {"no_later": False}, None),
-        (("deploying", "l_off", "t_off"), {"no_later": True}, None),
+        (("deploying", "l_off", "t_off"), {"no_later": True}, ("success", "l_off", "t_off")),
         # 거절과 밀림: 상태는 그대로 두고 꼬리표를 남긴다. 한 번 서면 내리지 않는다
         (("rejected", "l_on", "t_off"), {"no_later": False}, ("rejected", "l_on", "t_on")),
         (("superseded", "l_off", "t_off"), {"no_later": True}, ("superseded", "l_off", "t_on")),
@@ -313,8 +313,8 @@ async def test_repro_late_success_after_a_later_attempt_was_opened_and_closed_is
     assert (await marker_of(store))[:2] == ("a2", "a2")  # 표시 줄도 그대로
 
 
-async def test_late_success_where_no_later_is_true_on_a_deploying_row_only_warns(store: EventStore, caplog):
-    """배포 중인데 도는 시도가 없는 줄(옛 모양)에 「뒤 시도 없음」이 참으로 들어오면 경고만 남기고 요청은 그대로다."""
+async def test_late_success_where_no_later_is_true_on_a_deploying_row_closes(store: EventStore, caplog):
+    """배포 중에도 뒤 시도가 없으면 늦은 성공으로 닫고 no_later 경고를 남기지 않는다."""
     await seed(store)
     await begin(store)
     await lease_close(store)
@@ -324,9 +324,9 @@ async def test_late_success_where_no_later_is_true_on_a_deploying_row_only_warns
     await late_result(store)
     result = await late_settled(store)
 
-    assert result["status"] == "late_evidence" and result["request_changed"] is False
-    assert (await leaf_of(store))[:2] == ("deploying", "deploying")
-    assert any("no_later" in r.getMessage() and DEPLOY_ID in r.getMessage() for r in caplog.records)
+    assert result["status"] == "success"
+    assert (await leaf_of(store))[:2] == ("success", "success")
+    assert not any("no_later" in r.getMessage() and DEPLOY_ID in r.getMessage() for r in caplog.records)
 
 
 async def test_late_success_settled_first_then_result_closes_the_same_way(store: EventStore):

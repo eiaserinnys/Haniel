@@ -552,6 +552,69 @@ async def test_a_late_success_that_closes_the_request_is_answered_as_closed_now(
         await harness.close()
 
 
+async def test_late_success_supersedes_an_unstarted_attempt_before_its_decline(store: EventStore):
+    await seed(store)
+    harness = p1(Harness(store))
+    try:
+        await begin(store, "a1")
+        await expire(store, "a1")
+        await begin_via_probe(store, "a2")
+        harness.coordinator._schedule_attempt("a2", future_deadline())
+        assert "attempt:a2" in harness.coordinator._timers
+
+        await harness.coordinator.handle_result(result("a1"))
+        assert await leaf4(store) == ("deploying", "deploying", "b_unknown", "l_off")
+        await harness.coordinator.handle_settled(settled("a1"))
+
+        assert await leaf4(store) == ("success", "success", "b_none", "l_off")
+        row = (await raw(store, "SELECT outcome, sm_evidence, execution_started_at FROM deploy_attempts WHERE orchestrator_attempt_id = ?", "a2"))[0]
+        assert row == ("superseded", "ev_superseded", None)
+        assert "attempt:a2" not in harness.coordinator._timers
+        assert [answer.outcome for answer in sent_of(harness, DeployTerminalReceived)] == ["closed_now"]
+        assert (await store.attempts.record_node_terminal(terminal("a2")))["status"] == "ignored"
+        assert await leaf4(store) == ("success", "success", "b_none", "l_off")
+    finally:
+        await harness.close()
+
+
+async def test_late_success_closes_after_the_unstarted_later_attempt_declines(store: EventStore):
+    await seed(store)
+    await begin(store, "a1")
+    await expire(store, "a1")
+    await begin_via_probe(store, "a2")
+    assert (await store.attempts.record_node_terminal(terminal("a2")))["event"] == "declined"
+    assert await leaf4(store) == ("pending", "again", "b_none", "l_off")
+    assert (await raw(store, "SELECT execution_started_at FROM deploy_attempts WHERE orchestrator_attempt_id = ?", "a2"))[0] == (None,)
+
+    await store.attempts.record_result(
+        deploy_id=DEPLOY_ID, orchestrator_attempt_id="a1", connection_generation="g1", status="success", error=None, duration_ms=5,
+    )
+    late = await store.attempts.record_settled(
+        deploy_id=DEPLOY_ID, orchestrator_attempt_id="a1", connection_generation="g1", local_head="target", remote_head="target",
+    )
+    assert late["status"] == "success"
+    assert await leaf4(store) == ("success", "success", "b_none", "l_off")
+
+
+async def test_late_success_is_evidence_only_after_a_later_attempt_starts(store: EventStore):
+    await seed(store)
+    await begin(store, "a1")
+    await expire(store, "a1")
+    await begin_via_probe(store, "a2")
+    await progress(store, "a2")
+    assert (await raw(store, "SELECT execution_started_at FROM deploy_attempts WHERE orchestrator_attempt_id = ?", "a2"))[0][0] is not None
+
+    await store.attempts.record_result(
+        deploy_id=DEPLOY_ID, orchestrator_attempt_id="a1", connection_generation="g1", status="success", error=None, duration_ms=5,
+    )
+    late = await store.attempts.record_settled(
+        deploy_id=DEPLOY_ID, orchestrator_attempt_id="a1", connection_generation="g1", local_head="target", remote_head="target",
+    )
+    assert late["status"] == "late_evidence" and late["request_changed"] is False
+    assert await leaf4(store) == ("deploying", "deploying", "b_running", "l_off")
+    assert (await raw(store, "SELECT sm_evidence, late_evidence FROM deploy_attempts WHERE orchestrator_attempt_id = ?", "a1"))[0] == ("ev_both", "success")
+
+
 async def test_a_late_recovery_evidence_is_recorded_and_answered(store: EventStore):
     """2b-1이 미룬 닫힌 시도의 늦은 증거 회수: 늦은 결과와 같은 규칙으로 증거에 적고(성공이면 success_evidence) 답한다."""
     await store.create_deploy_event(

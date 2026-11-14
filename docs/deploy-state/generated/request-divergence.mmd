@@ -3,6 +3,7 @@ stateDiagram-v2
     classDef breaks fill:#ffecee,stroke:#e72e3b
     classDef notInDesign fill:#fff3e6,stroke:#e8730c
     state "요청 상태" as status {
+        state join1 <<join>>
         pending: 처음 대기 (열림)
         again: 다시 대기 (열림)
         success: 성공 (닫힘)
@@ -10,11 +11,8 @@ stateDiagram-v2
         rejected: 거절 (닫힘)
         deploying: 배포 중 (열림)
         superseded: 새 커밋에 밀림 (닫힘)
-        pending --> success: 지금 시도가 아닌 실행의 성공 증거가 닿는다 [뒤 시도를 연 적이 없음] (PR 2에서 바뀜)
         pending --> success: 더 새 관측이 자기 갱신을 닫는다 [자기 갱신 그리고 머리 셋이 같음 그리고 도는 시도 없음] (PR 2에서 바뀜)
-        again --> success: 지금 시도가 아닌 실행의 성공 증거가 닿는다 [뒤 시도를 연 적이 없음] (PR 2에서 바뀜)
         again --> success: 더 새 관측이 자기 갱신을 닫는다 [자기 갱신 그리고 머리 셋이 같음 그리고 도는 시도 없음] (PR 2에서 바뀜)
-        retry --> success: 지금 시도가 아닌 실행의 성공 증거가 닿는다 [뒤 시도를 연 적이 없음] (PR 2에서 바뀜)
         retry --> success: 더 새 관측이 자기 갱신을 닫는다 [자기 갱신 그리고 머리 셋이 같음 그리고 도는 시도 없음] (PR 2에서 바뀜)
         rejected --> retry: 보류 시한이 지나 되살린다 [자기 갱신 그리고 보류 시한 지남 그리고 다른 열린 줄 없음 그리고 점검 필요 켜짐] (설계에 없음)
         rejected --> pending: 보류 시한이 지나 되살린다 [자기 갱신 그리고 보류 시한 지남 그리고 다른 열린 줄 없음 그리고 점검 필요 꺼짐] (설계에 없음)
@@ -22,4 +20,9 @@ stateDiagram-v2
         deploying --> retry: 노드가 자기 배포의 실패를 알린다 [도는 시도 없음] (PR 2에서 바뀜)
         superseded --> retry: 보류 시한이 지나 되살린다 [자기 갱신 그리고 보류 시한 지남 그리고 다른 열린 줄 없음 그리고 점검 필요 켜짐] (설계에 없음)
         superseded --> pending: 보류 시한이 지나 되살린다 [자기 갱신 그리고 보류 시한 지남 그리고 다른 열린 줄 없음 그리고 점검 필요 꺼짐] (설계에 없음)
+        pending --> join1
+        again --> join1
+        retry --> join1
+        deploying --> join1
+        join1 --> success: 지금 시도가 아닌 실행의 성공 증거가 닿는다 [판 1은 뒤 시도가 실행을 시작하지 않음, 판 없음은 뒤 시도를 연 적이 없음] (PR 2에서 바뀜)
     }

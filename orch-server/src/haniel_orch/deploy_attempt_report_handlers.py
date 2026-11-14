@@ -151,6 +151,8 @@ class DeployAttemptReportHandlers:
             message="attempt lineage changed during preflight",
         )
         self._cancel_timer(f"attempt:{orchestrator_attempt_id}")
+        for cancelled_id in result.get("cancelled_orchestrator_attempt_ids") or ():
+            self._cancel_timer(f"attempt:{cancelled_id}")
         status = (
             "success"
             if result["status"] == "success"
