@@ -3354,9 +3354,7 @@ class TestServiceRunnerCollectServicesInfo:
     ready 3필드로 분리하여 process 상태와 readiness가 한 문자열로 섞이지 않도록
     보장한다. design-principles §3 (정본 하나)."""
 
-    def _make_runner(
-        self, tmp_path: Path, ready: str | None = None
-    ) -> ServiceRunner:
+    def _make_runner(self, tmp_path: Path, ready: str | None = None) -> ServiceRunner:
         config = HanielConfig(
             poll_interval=5,
             repos={},
