@@ -1,0 +1,21 @@
+name: Orchestrator product sweep
+
+on:
+  schedule:
+    - cron: '17 17 * * *'
+  workflow_dispatch:
+
+jobs:
+  product-sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install orchestrator
+        run: python -m pip install -e 'orch-server[dev]'
+      - name: Run the full product sweep
+        working-directory: orch-server
+        run: python -m pytest -q -s -o addopts= --timeout=1200 tests/product_sweep
