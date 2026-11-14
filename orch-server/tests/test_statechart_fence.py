@@ -45,18 +45,41 @@ def test_library_version_is_pinned_in_runtime_dependencies():
     assert importlib.metadata.version("python-statemachine") == "3.2.2"
 
 
+def forbidden_library_features(cls) -> list[str]:
+    """울타리가 막는 기능(이력 상태, final, invoke, 내부 제자리 전이, delay)을 쓴 곳을 모은다."""
+    found: list[str] = []
+    for state in cls.states_map.values():
+        if state.is_history:
+            found.append(f"{cls.__name__}.{state.id}: 이력 상태")
+        if state.final:
+            found.append(f"{cls.__name__}.{state.id}: final")
+        if [spec for spec in list(state.invoke) if not spec.is_convention]:
+            found.append(f"{cls.__name__}.{state.id}: invoke")
+        for transition in state.transitions:
+            if transition.internal:
+                found.append(f"{cls.__name__}.{state.id}: 내부 제자리 전이")
+            if getattr(transition, "delay", 0):
+                found.append(f"{cls.__name__}.{state.id}: delay")
+    return found
+
+
 @pytest.mark.parametrize("cls", DEFINITIONS)
 def test_definitions_use_no_forbidden_library_features(cls):
-    for state in cls.states_map.values():
-        assert not state.is_history, f"{cls.__name__}.{state.id}: 이력 상태"
-        assert not state.final, f"{cls.__name__}.{state.id}: final"
-        explicit = [
-            spec for spec in list(state.invoke) if not spec.is_convention
-        ]
-        assert not explicit, f"{cls.__name__}.{state.id}: invoke"
-        for transition in state.transitions:
-            assert not transition.internal, f"{cls.__name__}.{state.id}: 내부 제자리 전이"
-            assert not getattr(transition, "delay", 0), f"{state.id}: delay"
+    assert forbidden_library_features(cls) == []
+
+
+def test_the_fence_check_catches_an_internal_self_transition():
+    """음성 대조: 내부 제자리 전이를 가진 정의를 넣으면 울타리 검사가 실패해야 한다."""
+
+    class WithInternal(StateChart):
+        class top(State.Compound):
+            a = State(initial=True)
+            b = State()
+
+        go = top.a.to(top.b)
+        stay = top.a.to.itself(internal=True)
+
+    assert forbidden_library_features(WithInternal) == ["WithInternal.a: 내부 제자리 전이"]
 
 
 @pytest.mark.parametrize("cls", DEFINITIONS)

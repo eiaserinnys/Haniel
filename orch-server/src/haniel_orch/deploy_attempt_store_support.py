@@ -174,9 +174,10 @@ class DeployAttemptStoreSupport:
                 data={"duration_ms": closed["duration_ms"]},
                 now=closed["completed_at"],
             )
-        except NoTransition:
-            # 요청이 배포 중이 아니면 지금도 0건 갱신으로 넘어간다
-            pass
+        except NoTransition as exc:
+            # 요청이 배포 중이 아니면(배포 중에 거절된 뒤 시도가 성공하는 경쟁) 지금도 요청 줄 갱신은
+            # 상태 조건에 걸려 0건이다. 거절이 이미 표시 줄과 계보 줄을 지웠으므로 그 뒤 지울 것도 없다
+            exc.warn("attempt_succeeded")
         await self._terminalize_sibling_probes_unlocked(
             attempt["deploy_id"],
             "canonical succeeded before this probe began",
@@ -208,7 +209,8 @@ class DeployAttemptStoreSupport:
                 },
                 now=now,
             )
-        except NoTransition:
+        except NoTransition as exc:
+            exc.warn("fail")
             return {"status": "ignored"}
         event = await self._event(attempt["deploy_id"])
         if event is None:
@@ -235,9 +237,10 @@ class DeployAttemptStoreSupport:
                 },
                 now=now,
             )
-        except NoTransition:
-            # 요청이 배포 중이 아니면 지금도 요청 줄 갱신은 0건으로 넘어간다
-            pass
+        except NoTransition as exc:
+            # 요청 줄이 없거나 정의에 잎이 없는 옛 값(approved, failed)일 때만 닿는다. 배포 중이 아닌
+            # 요청은 정의의 전이(어긋남 8)가 지금처럼 처리한다
+            exc.warn("attempt_failed")
         if newer:
             await self._terminalize_sibling_probes_unlocked(
                 attempt["deploy_id"],

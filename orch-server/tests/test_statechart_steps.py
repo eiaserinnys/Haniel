@@ -228,6 +228,10 @@ async def test_leaves_stay_consistent_with_outer_columns_after_every_scenario(na
             "EXISTS(SELECT 1 FROM deploy_retry_requirements r WHERE r.deploy_id = e.deploy_id) "
             "FROM deploy_events e",
         ):
+            if status in ("failed", "approved"):
+                # 정의에 잎이 없는 옛 값은 잎을 비워 둔다(s17)
+                assert leaf is None, (_id, status, leaf)
+                continue
             assert request_leaf_is_consistent(leaf, status, bool(marked)), (_id, status, leaf, marked)
             assert request_leaf_from_columns(status, reason, bool(marked)) == leaf or leaf == "rejected"
         for _id, outcome, result_status, settled_at, leaf in await _raw(

@@ -187,9 +187,9 @@ async def record(db: aiosqlite.Connection, report: NodeDeployReport) -> dict[str
     else:
         try:
             await steps.step_request(db, report.deploy_id, "node_failed", now=now)
-        except NoTransition:
+        except NoTransition as exc:
             # 요청이 배포 중이 아니면(대기) 지금도 0건 갱신으로 넘어간다
-            pass
+            exc.warn("node_failed")
         canonical_status = DeployStatus.PENDING.value
 
     return {

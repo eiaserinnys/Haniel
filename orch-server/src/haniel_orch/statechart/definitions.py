@@ -1,7 +1,7 @@
 """배포 요청과 시도의 상태 정의. 지금 동작을 그대로 적는다(카드 #1259 PR 1).
 
 설계 정의(fable_r4_product.py의 OrchReq, AttemptEvidence)와 다른 전이는
-`labels.DIVERGENCE`에 표시를 달고 그림에도 드러낸다. 이 정의의 전이는 모두
+`DIVERGENCE`에 표시를 달고 그림에도 드러낸다. 이 정의의 전이는 모두
 저장소 변경 잠금 안의 한 걸음(`steps`)으로만 일어난다.
 
 울타리(설계 4절): 내부 제자리 전이, 이력 상태, delay, invoke를 쓰지 않고,
@@ -53,7 +53,19 @@ class OrchRequest(_Base):
     attempt_succeeded = req.status.open_.deploying.to(req.status.closed.success)
     attempt_failed = (
         req.status.open_.deploying.to(req.status.closed.superseded, cond="newer")
-        | req.status.open_.deploying.to(req.status.open_.retry)
+        | req.status.open_.deploying.to(req.status.open_.retry, cond="not_newer")
+        # 요청이 배포 중이 아닌데 시도가 실패하는 길(배포 중에 거절된 뒤 시도가 실패하는 경쟁).
+        # 지금 코드는 상태를 보지 않고 거절로 덮거나(더 새 커밋이 있을 때) 표시 줄과 계보 줄만 쓴다. 어긋남 8
+        | req.status.open_.pending.to(req.status.closed.superseded, cond="newer")
+        | req.status.open_.retry.to(req.status.closed.superseded, cond="newer")
+        | req.status.closed.success.to(req.status.closed.superseded, cond="newer")
+        | req.status.closed.rejected.to(req.status.closed.superseded, cond="newer")
+        | req.status.closed.superseded.to(req.status.closed.superseded, cond="newer")
+        | req.status.open_.pending.to(req.status.open_.retry, cond="not_newer")
+        | req.status.open_.retry.to(req.status.open_.retry, cond="not_newer")
+        | req.status.closed.success.to(req.status.closed.success, cond="not_newer")
+        | req.status.closed.rejected.to(req.status.closed.rejected, cond="not_newer")
+        | req.status.closed.superseded.to(req.status.closed.superseded, cond="not_newer")
     )
     reject = (
         req.status.open_.pending.to(req.status.closed.rejected)
@@ -93,10 +105,17 @@ class OrchRequest(_Base):
     reopen = req.status.closed.rejected.to(
         req.status.open_.pending,
         cond=["self_update", "postponed_due", "no_other_open"],
+    ) | req.status.closed.superseded.to(
+        # 바깥 status가 rejected이면 사유와 상관없이 되살린다(지금 코드). 잎 superseded는 사유 접두에서 온 구분이다
+        req.status.open_.pending,
+        cond=["self_update", "postponed_due", "no_other_open"],
     )
 
     def newer(self) -> bool:
         return self.fact("newer")
+
+    def not_newer(self) -> bool:
+        return not self.fact("newer")
 
     def marked(self) -> bool:
         return self.fact("marked")
@@ -127,41 +146,44 @@ class AttemptEvidence(_Base):
     """시도 한 건의 종결 증거. 결과 글과 체크아웃 대조(정착) 글이 다 와야 성공이다."""
 
     class ev(State.Compound):
-        ev_none = State(initial=True)  # 아직 없음
-        ev_result = State()  # 성공 결과만 옴
-        ev_settled = State()  # 체크아웃 대조만 옴
-        ev_both = State()  # 성공으로 종결(결과와 대조, 또는 증거 회수)
-        ev_failed = State()  # 실패로 종결
-        ev_superseded = State()  # 노드가 스스로 한 배포의 성공에 밀려 닫힘
+        class open_(State.Compound):
+            ev_none = State(initial=True)  # 아직 없음
+            ev_result = State()  # 성공 결과만 옴
+            ev_settled = State()  # 체크아웃 대조만 옴
+
+        class closed(State.Compound):
+            ev_both = State(initial=True)  # 성공으로 종결(결과와 대조, 또는 증거 회수)
+            ev_failed = State()  # 실패로 종결
+            ev_superseded = State()  # 노드가 스스로 한 배포의 성공에 밀려 닫힘
 
     result_ok = (
-        ev.ev_none.to(ev.ev_result, cond="execute_mode")
-        | ev.ev_result.to(ev.ev_result, cond="execute_mode")
-        | ev.ev_settled.to(ev.ev_both, cond="execute_mode")
+        ev.open_.ev_none.to(ev.open_.ev_result, cond="execute_mode")
+        | ev.open_.ev_result.to(ev.open_.ev_result, cond="execute_mode")
+        | ev.open_.ev_settled.to(ev.closed.ev_both, cond="execute_mode")
     )
     settled_ok = (
-        ev.ev_none.to(ev.ev_settled, cond="execute_mode")
-        | ev.ev_settled.to(ev.ev_settled, cond="execute_mode")
-        | ev.ev_result.to(ev.ev_both, cond="execute_mode")
+        ev.open_.ev_none.to(ev.open_.ev_settled, cond="execute_mode")
+        | ev.open_.ev_settled.to(ev.open_.ev_settled, cond="execute_mode")
+        | ev.open_.ev_result.to(ev.closed.ev_both, cond="execute_mode")
     )
     settled_noted = (
-        ev.ev_none.to(ev.ev_settled, cond="not_execute_mode")
-        | ev.ev_settled.to(ev.ev_settled, cond="not_execute_mode")
+        ev.open_.ev_none.to(ev.open_.ev_settled, cond="not_execute_mode")
+        | ev.open_.ev_settled.to(ev.open_.ev_settled, cond="not_execute_mode")
     )
     fail = (
-        ev.ev_none.to(ev.ev_failed)
-        | ev.ev_result.to(ev.ev_failed)
-        | ev.ev_settled.to(ev.ev_failed)
+        ev.open_.ev_none.to(ev.closed.ev_failed)
+        | ev.open_.ev_result.to(ev.closed.ev_failed)
+        | ev.open_.ev_settled.to(ev.closed.ev_failed)
     )
     recovered = (
-        ev.ev_none.to(ev.ev_both, cond="recovery_mode")
-        | ev.ev_result.to(ev.ev_both, cond="recovery_mode")
-        | ev.ev_settled.to(ev.ev_both, cond="recovery_mode")
+        ev.open_.ev_none.to(ev.closed.ev_both, cond="recovery_mode")
+        | ev.open_.ev_result.to(ev.closed.ev_both, cond="recovery_mode")
+        | ev.open_.ev_settled.to(ev.closed.ev_both, cond="recovery_mode")
     )
     superseded_by_node = (
-        ev.ev_none.to(ev.ev_superseded)
-        | ev.ev_result.to(ev.ev_superseded)
-        | ev.ev_settled.to(ev.ev_superseded)
+        ev.open_.ev_none.to(ev.closed.ev_superseded)
+        | ev.open_.ev_result.to(ev.closed.ev_superseded)
+        | ev.open_.ev_settled.to(ev.closed.ev_superseded)
     )
 
     def execute_mode(self) -> bool:
@@ -198,43 +220,59 @@ REQUIRED_FACTS: dict[type, dict[str, tuple[str, ...]]] = {
     },
 }
 
-# 설계 정의(fable_r4_product.py의 OrchReq, AttemptEvidence)와 다른 전이의 표시. 지금 동작 그대로 옮긴 것이다.
+# 설계(design.md와 fable_r4_product.py의 OrchReq, AttemptEvidence)와 다른 전이의 표시. 지금 동작 그대로 옮긴 것이다.
 # 키는 (정의 이름, 출발 잎, 사건, 도착 잎). 값은 (종류, 그림에 쓰는 글).
-# breaks는 설계가 어긋남으로 적은 것(번호), changes는 PR 2에서 설계대로 바뀌거나 다시 정할 것이다.
+# BREAKS는 설계가 어긋남으로 적은 것(번호), CHANGES는 설계 글이 PR 2에서 바꾼다고 적은 것(근거 줄을 DESIGN_LINES에 둔다),
+# ABSENT는 설계에 없는 전이다. 바뀐다는 근거 줄이 없으면 CHANGES를 달지 않는다.
+# 증거 정의의 실행 방식 조건, 증거 회수, 노드 성공이 시도를 밀어냄은 설계 글이 받치므로 표시가 없다.
 BREAKS = "breaks"
 CHANGES = "changes"
+ABSENT = "absent"
 _PR2 = "PR 2에서 바뀜"
+_ABSENT = "설계에 없음"
+_BREAK8 = (BREAKS, "어긋남 8")
 DIVERGENCE: dict[tuple[str, str, str, str], tuple[str, str]] = {
     # 조건 없는 거절(W6): 설계는 대기에서만 거절한다
-    ("OrchRequest", "deploying", "reject", "rejected"): (BREAKS, "어긋남 8"),
-    ("OrchRequest", "success", "reject", "rejected"): (BREAKS, "어긋남 8"),
-    ("OrchRequest", "rejected", "reject", "rejected"): (BREAKS, "어긋남 8"),
-    ("OrchRequest", "superseded", "reject", "rejected"): (BREAKS, "어긋남 8"),
-    # 도는 시도 없는 노드 실패 보고(W17): 설계에는 이 전이가 없다
+    ("OrchRequest", "deploying", "reject", "rejected"): _BREAK8,
+    ("OrchRequest", "success", "reject", "rejected"): _BREAK8,
+    ("OrchRequest", "rejected", "reject", "rejected"): _BREAK8,
+    ("OrchRequest", "superseded", "reject", "rejected"): _BREAK8,
+    # 배포 중이 아닌 요청에 시도의 실패가 닿는 길: 설계는 도는 시도의 실패만 요청을 옮긴다
+    ("OrchRequest", "pending", "attempt_failed", "superseded"): _BREAK8,
+    ("OrchRequest", "retry", "attempt_failed", "superseded"): _BREAK8,
+    ("OrchRequest", "success", "attempt_failed", "superseded"): _BREAK8,
+    ("OrchRequest", "rejected", "attempt_failed", "superseded"): _BREAK8,
+    ("OrchRequest", "superseded", "attempt_failed", "superseded"): _BREAK8,
+    ("OrchRequest", "pending", "attempt_failed", "retry"): _BREAK8,
+    ("OrchRequest", "retry", "attempt_failed", "retry"): _BREAK8,
+    ("OrchRequest", "success", "attempt_failed", "success"): _BREAK8,
+    ("OrchRequest", "rejected", "attempt_failed", "rejected"): _BREAK8,
+    ("OrchRequest", "superseded", "attempt_failed", "superseded"): _BREAK8,
+    # 도는 시도 없는 노드 실패 보고(W17): design.md 125줄이 점검 필요를 세워 실패 뒤 대기로 보낸다고 바꾼다
     ("OrchRequest", "deploying", "node_failed", "retry"): (CHANGES, _PR2),
     ("OrchRequest", "deploying", "node_failed", "pending"): (CHANGES, _PR2),
-    # 자기 갱신 관측이 고른 다른 줄을 닫음(W4): 표시 줄이 있어도 닫는다
+    # 자기 갱신 관측이 고른 다른 줄을 닫음(W4): design.md 382줄은 처음 대기이고 점검 필요가 없을 때만 닫는다
     ("OrchRequest", "pending", "observed_self_update", "success"): (CHANGES, _PR2),
     ("OrchRequest", "retry", "observed_self_update", "success"): (CHANGES, _PR2),
-    # 보류 자기 갱신 되살림(W5): 닫힘에서 열림으로 돌아간다
-    ("OrchRequest", "rejected", "reopen", "pending"): (CHANGES, _PR2),
-    # 실행 방식 조건: 설계 증거 정의에는 실행 방식 사실이 없다
-    ("AttemptEvidence", "ev_none", "result_ok", "ev_result"): (CHANGES, _PR2),
-    ("AttemptEvidence", "ev_result", "result_ok", "ev_result"): (CHANGES, _PR2),
-    ("AttemptEvidence", "ev_settled", "result_ok", "ev_both"): (CHANGES, _PR2),
-    ("AttemptEvidence", "ev_none", "settled_ok", "ev_settled"): (CHANGES, _PR2),
-    ("AttemptEvidence", "ev_settled", "settled_ok", "ev_settled"): (CHANGES, _PR2),
-    ("AttemptEvidence", "ev_result", "settled_ok", "ev_both"): (CHANGES, _PR2),
-    ("AttemptEvidence", "ev_none", "settled_noted", "ev_settled"): (CHANGES, _PR2),
-    ("AttemptEvidence", "ev_settled", "settled_noted", "ev_settled"): (CHANGES, _PR2),
-    # 증거 회수 성공(A5): 설계에는 증거 한 글로 성공하는 사건이 없다
-    ("AttemptEvidence", "ev_none", "recovered", "ev_both"): (CHANGES, _PR2),
-    ("AttemptEvidence", "ev_result", "recovered", "ev_both"): (CHANGES, _PR2),
-    ("AttemptEvidence", "ev_settled", "recovered", "ev_both"): (CHANGES, _PR2),
-    # 노드가 스스로 한 배포의 성공이 도는 시도를 밀어냄(A7): 설계 증거 정의에 해당 잎이 없다
-    ("AttemptEvidence", "ev_none", "superseded_by_node", "ev_superseded"): (CHANGES, _PR2),
-    ("AttemptEvidence", "ev_result", "superseded_by_node", "ev_superseded"): (CHANGES, _PR2),
-    ("AttemptEvidence", "ev_settled", "superseded_by_node", "ev_superseded"): (CHANGES, _PR2),
+    # 보류 자기 갱신 되살림(W5): 닫힘에서 열림으로 돌아가는 전이는 설계에 없다. 자기 갱신 영역은 둘째 걸음(design.md 489줄)
+    ("OrchRequest", "rejected", "reopen", "pending"): (ABSENT, _ABSENT),
+    ("OrchRequest", "superseded", "reopen", "pending"): (ABSENT, _ABSENT),
+}
+
+# 바뀐다는 표시(CHANGES)와 설계에 없다는 표시(ABSENT)의 근거: design.md 줄 번호
+DESIGN_LINES: dict[tuple[str, str, str, str], str] = {
+    ("OrchRequest", "deploying", "node_failed", "retry"): "design.md:125",
+    ("OrchRequest", "deploying", "node_failed", "pending"): "design.md:125",
+    ("OrchRequest", "pending", "observed_self_update", "success"): "design.md:382, 489",
+    ("OrchRequest", "retry", "observed_self_update", "success"): "design.md:382, 489",
+    ("OrchRequest", "rejected", "reopen", "pending"): "design.md:489",
+    ("OrchRequest", "superseded", "reopen", "pending"): "design.md:489",
+}
+
+# 설계 증거 정의(design.md 「종결 증거」의 다섯 상태)에 없는 잎. 그림에서 주황으로 칠한다.
+LEAVES_NOT_IN_DESIGN: dict[type, frozenset[str]] = {
+    OrchRequest: frozenset(),
+    AttemptEvidence: frozenset({"ev_superseded"}),
 }
 
 # 잎이 닫힘인 요청 상태와 끝난 시도 증거

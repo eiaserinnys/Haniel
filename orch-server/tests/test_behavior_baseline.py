@@ -8,7 +8,14 @@ import json
 
 import pytest
 
-from behavior_scenarios import FIXTURE, SCENARIOS, run_rest_scenarios, run_scenario, _norm
+from behavior_scenarios import (
+    FIXTURE,
+    SCENARIOS,
+    run_rest_legacy_scenario,
+    run_rest_scenarios,
+    run_scenario,
+    _norm,
+)
 
 BASELINE = json.loads(FIXTURE.read_text(encoding="utf-8"))
 
@@ -26,6 +33,10 @@ async def test_rest_reject_matches_baseline():
     assert _plain(await run_rest_scenarios()) == BASELINE["rest_reject"]
 
 
+async def test_rest_on_legacy_rows_matches_baseline():
+    assert _plain(await run_rest_legacy_scenario()) == BASELINE["rest_legacy"]
+
+
 def test_baseline_covers_every_scenario():
-    assert set(BASELINE) == set(SCENARIOS) | {"rest_reject"}
+    assert set(BASELINE) == set(SCENARIOS) | {"rest_reject", "rest_legacy"}
     assert _norm({"completed_at": "x", "k": 1}) == {"completed_at": True, "k": 1}

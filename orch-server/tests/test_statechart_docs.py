@@ -27,13 +27,69 @@ def test_request_views_split_by_the_divergence_mark_and_cover_every_transition()
     divergence = docs.mermaid(docs.VIEWS[1])
     assert "(어긋남 8)" not in status and "(PR 2에서 바뀜)" not in status
     assert "(어긋남 8)" in divergence and "(PR 2에서 바뀜)" in divergence
-    total = len(docs.transitions(OrchRequest))
-    count = lambda text: len([line for line in text.splitlines() if "-->" in line and "[*]" not in line])
-    assert count(status) + count(divergence) == total
+    # 접힌 화살표(합류 막대)는 그림에서 한 줄이므로 정의의 전이 전부가 두 그림 가운데 한 곳에 든다는 것으로 견준다
+    drawn_status = {a for a in docs._view_arrows(docs.VIEWS[0])}
+    drawn_divergence = {a for a in docs._view_arrows(docs.VIEWS[1])}
+    assert drawn_status | drawn_divergence == set(docs.transitions(OrchRequest))
+    assert not drawn_status & drawn_divergence
 
 
-def test_divergence_marks_use_only_the_two_agreed_texts():
-    assert {mark[1] for mark in DIVERGENCE.values()} == {"어긋남 8", "PR 2에서 바뀜"}
+def test_divergence_marks_use_only_the_agreed_texts():
+    assert {mark[1] for mark in DIVERGENCE.values()} == {"어긋남 8", "PR 2에서 바뀜", "설계에 없음"}
+
+
+def test_attempt_evidence_has_no_divergence_mark():
+    """실행 방식 조건, 증거 회수, 노드 성공이 시도를 밀어냄은 설계 글(design.md)이 받친다."""
+    assert not [key for key in DIVERGENCE if key[0] == "AttemptEvidence"]
+
+
+def test_every_pr2_or_absent_mark_names_a_design_line():
+    from haniel_orch.statechart.definitions import CHANGES, ABSENT, DESIGN_LINES
+
+    for key, (kind, _) in DIVERGENCE.items():
+        if kind in (CHANGES, ABSENT):
+            assert key in DESIGN_LINES and DESIGN_LINES[key].startswith("design.md:"), key
+    assert set(DESIGN_LINES) <= set(DIVERGENCE)
+
+
+def test_state_colors_follow_what_the_picture_draws():
+    status = docs.mermaid(docs.VIEWS[0])
+    divergence = docs.mermaid(docs.VIEWS[1])
+    evidence = docs.mermaid(docs.VIEWS[2])
+    # 어긋남 화살표가 없는 그림에는 빨강이 없다
+    assert "class " not in status.split("\n    }\n", 1)[1]
+    assert "class rejected breaks" in divergence
+    # 주황은 이름으로 적어 둔 설계 밖 잎 하나뿐이다
+    assert [line for line in evidence.splitlines() if line.startswith("    class ")] == [
+        "    class ev_superseded notInDesign"
+    ]
+
+
+def test_a_folded_arrow_is_drawn_once_through_a_join_bar():
+    status = docs.mermaid(docs.VIEWS[0])
+    assert status.count("노드가 자기 배포의 성공을 알린다") == 1
+    assert "join1 --> success" in status
+    evidence = docs.mermaid(docs.VIEWS[2])
+    assert evidence.count("증거 회수가 검증을 통과한다") == 1
+    assert evidence.count("실패로 닫는다") == 1
+
+
+def test_generated_files_use_no_middle_dot_or_horizontal_bar():
+    banned = ("\u00b7", "\u2015")
+    texts = {name: text for name, text in docs.outputs().items()}
+    readme = docs.repo_root() / "docs" / "deploy-state" / "README.md"
+    texts["README.md"] = readme.read_text(encoding="utf-8")
+    for svg in docs.default_out_dir().glob("*.svg"):
+        texts[svg.name] = svg.read_text(encoding="utf-8")
+    for name, text in texts.items():
+        for char in banned:
+            assert char not in text, f"{name}: U+{ord(char):04X}"
+
+
+def test_a_leaf_inside_the_region_box_shows_its_group_after_the_name():
+    request = docs.mermaid(docs.VIEWS[0])
+    assert "pending: 처음 대기 (열림)" in request
+    assert " \u00b7 " not in request
 
 
 def test_a_state_without_a_display_name_fails(monkeypatch):

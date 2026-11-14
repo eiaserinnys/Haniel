@@ -21,6 +21,8 @@ STATE_LABELS: dict[str, dict[str, str]] = {
     },
     "AttemptEvidence": {
         "ev": "종결 증거",
+        "open_": "열림",
+        "closed": "닫힘",
         "ev_none": "증거 아직 없음",
         "ev_result": "성공 결과만 옴",
         "ev_settled": "체크아웃 대조만 옴",
@@ -56,6 +58,7 @@ EVENT_LABELS: dict[str, dict[str, str]] = {
 COND_LABELS: dict[str, dict[str, str]] = {
     "OrchRequest": {
         "newer": "더 새 커밋이 있음",
+        "not_newer": "더 새 커밋이 없음",
         "marked": "표시 줄 있음",
         "unmarked": "표시 줄 없음",
         "heads_equal": "머리 셋이 같음",
@@ -72,13 +75,17 @@ COND_LABELS: dict[str, dict[str, str]] = {
     },
 }
 
-# 전이와 함께 같은 트랜잭션에 쓰는 것(표의 「함께 쓰는 것」 칸). 사건 이름과 도착 잎으로 고른다.
-EFFECTS: dict[str, dict[tuple[str, str | None], str]] = {
+# 전이와 함께 같은 트랜잭션에 쓰는 것(표의 「함께 쓰는 것」 칸).
+# 키는 (사건, 도착 잎, 출발 잎), (사건, 도착 잎), (사건, None) 순으로 찾는다.
+EFFECTS: dict[str, dict[tuple, str]] = {
     "OrchRequest": {
         ("begin_attempt", None): "approved_by를 적는다. 시도 줄은 같은 걸음에서 만든다",
         ("attempt_succeeded", None): "error를 지우고 duration_ms를 적는다. 표시 줄과 계보 줄을 지운다",
-        ("attempt_failed", "superseded"): "reject_reason을 `superseded by newer canonical`로 적는다. 표시 줄과 계보 줄을 지운다",
-        ("attempt_failed", "retry"): "approved_by, error, duration_ms를 지운다. 표시 줄을 세우고 계보 줄을 더한다",
+        ("attempt_failed", "superseded"): "reject_reason을 `superseded by newer canonical`로 적는다(바깥 status는 rejected가 된다). 표시 줄과 계보 줄을 지운다",
+        ("attempt_failed", "retry", "deploying"): "approved_by, error, duration_ms를 지운다. 표시 줄을 세우고 계보 줄을 더한다",
+        ("attempt_failed", "retry"): "요청 줄의 다른 칸은 그대로 두고 표시 줄을 세우고 계보 줄을 더한다",
+        ("attempt_failed", "success"): "요청 줄의 상태는 그대로 두고 표시 줄과 계보 줄만 쓴다",
+        ("attempt_failed", "rejected"): "요청 줄의 상태는 그대로 두고 표시 줄과 계보 줄만 쓴다",
         ("reject", None): "reject_reason을 적는다. 표시 줄과 계보 줄을 지운다",
         ("newer_commit", None): "reject_reason을 `superseded by <끝 줄>`로 적는다. 표시 줄과 계보 줄을 지운다",
         ("node_succeeded", None): "approved_by와 error를 지우고 duration_ms를 적는다. 표시 줄과 계보 줄을 지운다. 도는 시도는 같은 걸음에서 밀어낸다",
@@ -96,3 +103,12 @@ EFFECTS: dict[str, dict[tuple[str, str | None], str]] = {
         ("superseded_by_node", None): "outcome을 superseded로 닫고 terminal 네 칸을 적는다",
     },
 }
+
+
+def effect_for(name: str, event: str, target: str, source: str) -> str | None:
+    """전이에 딸린 쓰기의 설명. 없으면 None."""
+    effects = EFFECTS[name]
+    for key in ((event, target, source), (event, target), (event, None)):
+        if key in effects:
+            return effects[key]
+    return None

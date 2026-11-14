@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 
 from statemachine.exceptions import TransitionNotAllowed
@@ -14,14 +15,46 @@ from statemachine.orderedset import OrderedSet
 from .definitions import REQUIRED_FACTS, Facts
 
 
+# 전이가 없던 사유. 줄에는 아무것도 쓰이지 않는 점은 같고, 호출부가 삼킬 때 로그에 남긴다.
+REASON_NO_ROW = "no_row"  # 줄이 없다
+REASON_STATE_MISMATCH = "state_mismatch"  # 잎이 비었거나(옛 값) 바깥 칸과 어긋난다
+REASON_NO_TRANSITION = "no_transition"  # 지금 잎에 이 사건의 전이가 없거나 조건이 맞지 않는다
+REASON_UPDATE_ZERO = "update_zero"  # 전이는 있었으나 마지막 쓰기 재확인(UPDATE)이 0줄이었다
+
+logger = logging.getLogger("haniel_orch.statechart")
+
+
 class NoTransition(Exception):
     """지금 칸에 이 사건의 전이가 없다. 줄에는 아무것도 쓰이지 않는다."""
 
-    def __init__(self, definition: str, row: Mapping[str, str], event: str) -> None:
-        super().__init__(f"{definition}: {dict(row)} 에서 '{event}' 사건의 전이가 없다")
+    def __init__(
+        self,
+        definition: str,
+        row: Mapping[str, str],
+        event: str,
+        reason: str = REASON_NO_TRANSITION,
+        key: str | None = None,
+    ) -> None:
+        super().__init__(
+            f"{definition}: {dict(row)} 에서 '{event}' 사건의 전이가 없다 ({reason})"
+        )
         self.definition = definition
         self.row = dict(row)
         self.event = event
+        self.reason = reason
+        self.key = key  # deploy_id 또는 orchestrator_attempt_id. 걸음이 채운다
+
+    def warn(self, where: str) -> None:
+        """호출부가 이 예외를 삼키는 자리마다 부른다. 동작은 그대로고 사유만 남긴다."""
+        logger.warning(
+            "전이 없음을 넘김: 자리=%s 정의=%s 사건=%s 사유=%s id=%s 줄=%s",
+            where,
+            self.definition,
+            self.event,
+            self.reason,
+            self.key,
+            self.row,
+        )
 
 
 _REGIONS: dict[type, dict] = {}

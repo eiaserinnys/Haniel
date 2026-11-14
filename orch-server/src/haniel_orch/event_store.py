@@ -15,7 +15,7 @@ from .event_store_lifecycle import EventStoreLifecycleMixin
 from .event_store_rows import decode_deploy_row, now_iso
 from .protocol import DeployStatus, NodeDeployReport
 from .statechart import steps
-from .statechart.restore import NoTransition
+from .statechart.restore import REASON_NO_TRANSITION, NoTransition
 
 _CREATE_TABLES = """
 CREATE TABLE IF NOT EXISTS deploy_events (
@@ -235,7 +235,8 @@ class EventStore(EventStoreLifecycleMixin):
                             now=now,
                         )
                         closed_id = deploy_id
-                    except NoTransition:
+                    except NoTransition as exc:
+                        exc.warn("observed")
                         closed_id = None
                 if closed_id is None:
                     closed_id = await self._close_observed_self_update(
@@ -282,37 +283,33 @@ class EventStore(EventStoreLifecycleMixin):
         active orchestrator attempt still does.
         """
         cursor = await self._db.execute(
-            """SELECT deploy_id FROM deploy_events
-               WHERE node_id = ? AND repo = ? AND branch = ?
-                 AND is_self_update = 1 AND status = ? AND target_head = ?
-                 AND NOT EXISTS (
-                   SELECT 1 FROM deploy_attempts a
-                   WHERE a.deploy_id = deploy_events.deploy_id
-                     AND a.outcome = 'active'
-                 )
-               ORDER BY detected_at DESC, created_at DESC, deploy_id DESC
-               LIMIT 1""",
-            (node_id, repo, branch, DeployStatus.PENDING.value, local_head),
+            """SELECT deploy_id, is_self_update, target_head FROM deploy_events
+               WHERE node_id = ? AND repo = ? AND branch = ? AND status = ?
+               ORDER BY detected_at DESC, created_at DESC, deploy_id DESC""",
+            (node_id, repo, branch, DeployStatus.PENDING.value),
         )
-        row = await cursor.fetchone()
-        if row is None:
-            return None
-        closed_id = row[0]
-        try:
-            await steps.step_request(
-                self._db,
-                closed_id,
-                "observed_self_update",
-                facts={
-                    "self_update": True,
-                    "heads_equal": True,
-                    "no_active_attempt": True,
-                },
-                now=now,
-            )
-        except NoTransition:
-            return None
-        return closed_id
+        # 가장 새 줄부터 보고, 조건을 처음 맞춘 줄을 닫는다(조건은 정의가 판단한다)
+        for candidate_id, is_self_update, target_head in await cursor.fetchall():
+            try:
+                await steps.step_request(
+                    self._db,
+                    candidate_id,
+                    "observed_self_update",
+                    facts={
+                        "self_update": bool(is_self_update),
+                        "heads_equal": target_head == local_head,
+                        "no_active_attempt": not await self._has_active_attempt(
+                            candidate_id
+                        ),
+                    },
+                    now=now,
+                )
+            except NoTransition as exc:
+                if exc.reason != REASON_NO_TRANSITION:
+                    exc.warn("observed_self_update")
+                continue
+            return candidate_id
+        return None
 
     async def reopen_postponed_self_update(self, deploy_id: str) -> bool:
         """Return one due postponed self-update to pending.
@@ -358,7 +355,8 @@ class EventStore(EventStoreLifecycleMixin):
                             now=now,
                         )
                         reopened = True
-                    except NoTransition:
+                    except NoTransition as exc:
+                        exc.warn("reopen")
                         reopened = False
                 await self._db.commit()
                 return reopened

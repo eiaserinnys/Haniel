@@ -984,6 +984,176 @@ async def s15_startup_supersede(store: EventStore) -> list:
     return out
 
 
+async def s16_reject_race_then_attempt_ends(store: EventStore) -> list:
+    """배포 중에 거절이 닿은 뒤 시도가 끝나는 경쟁.
+
+    REST 거절의 대기 확인(`api.py`)이 잠금 밖이라 승인이 먼저 닿은 요청에도 거절이 닿는다.
+    기준 커밋은 그 뒤 시도의 실패를 요청 상태와 상관없이 쓴다(더 새 커밋이 있으면 거절로 덮고,
+    없으면 표시 줄과 계보 줄만 쓴다). 시도의 성공은 배포 중일 때만 요청을 닫는다.
+    """
+    out: list = []
+    attempts = store.attempts
+
+    def terminal(deploy: str, attempt: str, error: str) -> DeployAttemptTerminal:
+        return DeployAttemptTerminal(
+            deploy_id=deploy,
+            orchestrator_attempt_id=attempt,
+            connection_generation="g1",
+            kind="approval_revalidation_failed",
+            reason="approval_revalidation_failed",
+            error=error,
+        )
+
+    # 가장 새 커밋일 때: 요청은 거절인 채로, 표시 줄과 계보 줄만 쓰인다
+    a = "n:r:race-a:t1"
+    await _create(store, a, branch="race-a")
+    await _begin(store, "ra1", a)
+    await _reject(store, a, "raced reject")
+    await _step(out, "a-rejected-while-deploying", store, None)
+    await _step(
+        out, "a-attempt-fails", store, await attempts.record_node_terminal(terminal(a, "ra1", "boom"))
+    )
+
+    # 더 새 커밋이 있을 때: 거절 사유가 밀림으로 덮인다
+    b = "n:r:race-b:t1"
+    await _create(store, b, branch="race-b", detected="2026-08-01T00:00:00Z")
+    await _begin(store, "rb1", b)
+    await _reject(store, b, "raced reject")
+    await _create(store, "n:r:race-b:t2", branch="race-b", detected="2026-08-02T00:00:00Z")
+    await _step(out, "b-newer-arrives", store, None)
+    await _step(
+        out, "b-attempt-fails", store, await attempts.record_node_terminal(terminal(b, "rb1", "boom"))
+    )
+
+    # 시도가 성공하면: 요청은 배포 중이 아니므로 거절인 채로 남는다
+    c = "n:r:race-c:t1"
+    await _create(store, c, branch="race-c")
+    await _begin(store, "rc1", c)
+    await _reject(store, c, "raced reject")
+    await _step(
+        out,
+        "c-result",
+        store,
+        await attempts.record_result(
+            deploy_id=c,
+            orchestrator_attempt_id="rc1",
+            connection_generation="g1",
+            status="success",
+            error=None,
+            duration_ms=11,
+        ),
+    )
+    await _step(
+        out,
+        "c-settled",
+        store,
+        await attempts.record_settled(
+            deploy_id=c,
+            orchestrator_attempt_id="rc1",
+            connection_generation="g1",
+            local_head="t1",
+            remote_head="t1",
+        ),
+    )
+    out.append({"step": "history", "result": await history(store)})
+    return out
+
+
+LEGACY_ROWS = (
+    # deploy_id, repo, status, reject_reason, error, is_self_update, postponed_until
+    ("n:r1:main:lf1", "r1", "failed", None, "build failed", 0, None),
+    ("n:r2:main:lf2", "r2", "failed", None, None, 0, None),
+    ("n:r3:main:la1", "r3", "approved", None, None, 0, None),
+    ("n:r4:main:lr0", "r4", "rejected", None, None, 0, None),
+    ("n:r5:main:lr1", "r5", "rejected", "operator said no", None, 0, None),
+    ("n:r6:main:lr2", "r6", "rejected", "superseded by n:r6:main:new", None, 0, None),
+    ("n:r7:main:lr3", "r7", "rejected", "rejected by dashboard", None, 1, "2026-01-01T00:00:00+00:00"),
+    ("n:r8:main:lr4", "r8", "rejected", "superseded by n:r8:main:new", None, 1, "2026-01-01T00:00:00+00:00"),
+)
+
+
+async def _insert_legacy_rows(store: EventStore) -> None:
+    """운영 DB의 옛 줄 모양: status가 failed, approved이고 시도 짝이 없는 줄과 사유가 제각각인 거절 줄.
+
+    잎 칸이 없는 옛 서버가 넣고 간 것처럼 바깥 칸만 직접 적는다(2026-05~08의 옛 줄).
+    """
+    for index, (deploy_id, repo, status, reason, error, self_update, postponed) in enumerate(
+        LEGACY_ROWS
+    ):
+        detected = f"2026-0{5 + index % 4}-0{1 + index}T00:00:00Z"
+        await store._db.execute(
+            "INSERT INTO deploy_events (deploy_id,node_id,repo,branch,status,reject_reason,error,"
+            "commits_json,affected_services_json,detected_at,created_at,updated_at,target_head,"
+            "is_self_update,postponed_until) "
+            "VALUES (?,'n',?,'main',?,?,?,'[]','[]',?,?,?,?,?,?)",
+            (
+                deploy_id,
+                repo,
+                status,
+                reason,
+                error,
+                detected,
+                detected,
+                detected,
+                deploy_id.rsplit(":", 1)[-1],
+                self_update,
+                postponed,
+            ),
+        )
+    await store._db.commit()
+    await _reload_foreign_rows(store)
+
+
+async def s17_legacy_rows(store: EventStore) -> list:
+    """옛 모양의 줄이 든 DB로 기동한 뒤의 대기 목록, 이력, 노드 보고, 관측, 보류 되살림."""
+    out: list = []
+    await _create(store, "n:live:main:p1", repo="live", detected="2026-08-10T00:00:00Z")
+    await _insert_legacy_rows(store)
+    await _step(
+        out,
+        "startup",
+        store,
+        {"pending": await store.get_pending_deploys(), "history": await history(store)},
+    )
+    for index, (deploy_id, repo, *_rest) in enumerate(LEGACY_ROWS):
+        tag = deploy_id.rsplit(":", 1)[-1]
+        for phase in ("started", "failed", "succeeded"):
+            report = _node_report(
+                phase,
+                deploy_id,
+                attempt=f"nl-{tag}-{phase}",
+                repo=repo,
+                error="legacy failure" if phase == "failed" else None,
+            )
+            await _step(
+                out,
+                f"node-{phase}-on-{tag}",
+                store,
+                await store.record_node_deploy_report(report),
+            )
+        await _step(
+            out,
+            f"observed-on-{tag}",
+            store,
+            await store.resolve_observed_pending(
+                deploy_id=deploy_id,
+                node_id="n",
+                repo=repo,
+                branch="main",
+                local_head=tag,
+                remote_head=tag,
+            ),
+        )
+        await _step(
+            out,
+            f"reopen-on-{tag}",
+            store,
+            await store.reopen_postponed_self_update(deploy_id),
+        )
+    out.append({"step": "history", "result": await history(store)})
+    return out
+
+
 SCENARIOS = {
     "s01_create_supersedes_older_pending": s01_create_supersedes_older_pending,
     "s02_normal_success": s02_normal_success,
@@ -1000,6 +1170,8 @@ SCENARIOS = {
     "s13_postponed_revival_clear": s13_postponed_revival_clear,
     "s14_branch_supersede_and_renamed": s14_branch_supersede_and_renamed,
     "s15_startup_supersede": s15_startup_supersede,
+    "s16_reject_race_then_attempt_ends": s16_reject_race_then_attempt_ends,
+    "s17_legacy_rows": s17_legacy_rows,
 }
 
 
@@ -1062,11 +1234,53 @@ async def run_rest_scenarios() -> dict[str, Any]:
         await store.close()
 
 
+async def run_rest_legacy_scenario() -> dict[str, Any]:
+    """옛 모양의 줄이 든 DB의 REST 응답: 대기 목록, 이력, 각 옛 줄에 온 거절."""
+    from starlette.applications import Starlette
+    from starlette.testclient import TestClient
+
+    from haniel_orch.api import create_api_routes
+    from haniel_orch.hub import WebSocketHub
+    from haniel_orch.node_registry import NodeRegistry
+
+    store = EventStore(":memory:")
+    await store.initialize()
+    try:
+        registry = NodeRegistry(store)
+        hub = WebSocketHub(registry, store, token="test-token")
+        sent: list[dict] = []
+
+        async def capture(message: dict) -> None:
+            sent.append(message)
+
+        hub.broadcast_to_dashboards = capture  # type: ignore[method-assign]
+        client = TestClient(Starlette(routes=create_api_routes(hub, store)))
+        await _create(store, "n:live:main:p1", repo="live", detected="2026-08-10T00:00:00Z")
+        await _insert_legacy_rows(store)
+        out: dict[str, Any] = {
+            "pending": _norm(client.get("/api/orch/pending").json()),
+            "history": _norm(client.get("/api/orch/history").json()),
+        }
+        for deploy_id, *_rest in LEGACY_ROWS:
+            response = client.post("/api/orch/reject", json={"deploy_id": deploy_id})
+            out[f"reject-{deploy_id}"] = {
+                "status_code": response.status_code,
+                "body": _norm(response.json()),
+            }
+        out["broadcasts"] = _norm(sent)
+        out["history-after"] = _norm(client.get("/api/orch/history").json())
+        out["rows"] = await snapshot(store)
+        return out
+    finally:
+        await store.close()
+
+
 async def run_all() -> dict[str, Any]:
     result: dict[str, Any] = {}
     for name in SCENARIOS:
         result[name] = await run_scenario(name)
     result["rest_reject"] = await run_rest_scenarios()
+    result["rest_legacy"] = await run_rest_legacy_scenario()
     return json.loads(json.dumps(result, default=str))
 
 

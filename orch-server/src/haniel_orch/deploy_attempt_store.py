@@ -296,7 +296,8 @@ class DeployAttemptStore(
                 event,
                 data=data,
             )
-        except NoTransition:
+        except NoTransition as exc:
+            exc.warn(event)
             return {"status": "ignored"}
         if step.leaf == "ev_both":
             return await self._close_request_after_success(attempt)

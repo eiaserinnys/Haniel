@@ -83,7 +83,8 @@ class EventStoreLifecycleMixin:
                     await steps.step_request(
                         self._db, deploy_id, "reject", data={"reason": reason}
                     )
-                except NoTransition:
+                except NoTransition as exc:
+                    exc.warn("reject")
                     await self._db.commit()
                     return False
                 await self._db.execute(

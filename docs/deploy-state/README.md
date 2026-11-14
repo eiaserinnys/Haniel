@@ -21,13 +21,24 @@
 | 그림 | 내용 |
 |---|---|
 | [request-status](generated/request-status.svg) | 요청 상태. 설계 정의와 같은 전이 |
-| [request-divergence](generated/request-divergence.svg) | 요청 상태 가운데 설계와 다른 전이(어긋남 8, PR 2에서 바뀜) |
+| [request-divergence](generated/request-divergence.svg) | 요청 상태 가운데 설계와 다른 전이(어긋남 8, PR 2에서 바뀜, 설계에 없음) |
 | [attempt-evidence](generated/attempt-evidence.svg) | 시도 종결 증거 전체 |
 | [transitions.md](generated/transitions.md) | 두 정의의 전이 표(함께 쓰는 것, 설계와 다른 점) |
 
-범례: 빨강 상태(`거절`)는 어긋남 8(조건 없는 거절)이 닿는 곳이다. 주황 상태(`노드의 배포 성공에 밀려 종결`)는
-설계 정의에 없는 잎이다. 화살표 끝의 `(PR 2에서 바뀜)`은 지금 동작을 그대로 옮겼으나 설계 정의에는 없는 전이다.
-열림과 닫힘 묶음은 Pele가 층을 건너는 화살표 때문에 상자를 깨뜨리므로 상태 이름 앞에 단다.
+범례(색은 그 그림에 그린 화살표와 이름으로 적어 둔 잎만으로 정한다):
+
+| 표시 | 뜻 |
+|---|---|
+| 빨강 상태 | 그 그림에 그린 `(어긋남 8)` 화살표가 닿는 상태. 설계가 어긋남으로 적은 동작이다 |
+| 주황 상태 | 설계 증거 정의의 다섯 상태에 없는 잎(`definitions.LEAVES_NOT_IN_DESIGN`, 지금은 노드의 배포 성공에 밀려 종결 하나) |
+| `(어긋남 8)` | 설계가 어긋남 8로 적은 동작(배포 중이 아닌 요청에 닿는 거절과 시도의 실패) |
+| `(PR 2에서 바뀜)` | 설계 글의 줄이 PR 2에서 바꾼다고 적은 동작. 줄 번호는 전이 표 「설계와 다른 점」에 적는다(W17은 design.md:125, W4는 design.md:382와 489) |
+| `(설계에 없음)` | 설계에 그 전이가 없는 동작(W5 보류 되살림. 자기 갱신 영역은 둘째 걸음, design.md:489) |
+| 가로 막대 | 한 묶음(열림, 닫힘)의 모든 잎에서 같은 사건과 조건으로 같은 곳에 가는 화살표를 한 줄로 모은 합류 막대 |
+
+표시가 없는 전이는 설계 글이 받친다. 증거 정의의 실행 방식 조건(결과와 대조의 방식별 종결, design.md:79-80), 증거 회수 성공(design.md:80),
+노드의 배포 성공이 도는 시도를 밀어냄(design.md:124)이 여기 든다.
+열림과 닫힘 묶음은 Pele가 층을 건너는 화살표 때문에 상자를 깨뜨리므로 상자로 그리지 않고 잎 이름 뒤에 「(열림)」 꼴로 붙인다.
 
 ## 다시 만들기
 
@@ -38,6 +49,7 @@
 .venv/bin/python -m haniel_orch.statechart.docs --check    # 쓰지 않고 정의와 다르면 0이 아닌 코드
 ```
 
-`--render`는 `AGENT_COMMON_FILES_DIR/skills/statechart/scripts/render.py`(없으면 `STATECHART_RENDER`)를 부르고,
-각 `.svg` 끝에 원본 `.mmd`의 해시를 적는다. `--check`는 이 해시로 `.svg`가 `.mmd`와 같은지 본다.
+`--render`는 환경변수 `STATECHART_RENDER`가 가리키는 `render.py`를 먼저 찾고, 없으면
+`AGENT_COMMON_FILES_DIR/skills/statechart/scripts/render.py`를 부르고,
+각 `.svg` 끝에 원본 `.mmd`의 해시를 적는다(코드와 같은 순서). `--check`는 이 해시로 `.svg`가 `.mmd`와 같은지 본다.
 표시 이름이 없는 상태, 사건, 조건이 있으면 생성이 실패한다(`statechart/labels.py`).

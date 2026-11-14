@@ -34,7 +34,14 @@ from .definitions import (
     AttemptEvidence,
     OrchRequest,
 )
-from .restore import NoTransition, advance, initial_row
+from .restore import (
+    REASON_NO_ROW,
+    REASON_STATE_MISMATCH,
+    REASON_UPDATE_ZERO,
+    NoTransition,
+    advance,
+    initial_row,
+)
 
 
 def now_iso() -> str:
@@ -107,9 +114,9 @@ async def create_request(
 
 
 def _request_columns(
-    event: str, leaf: str, data: Mapping[str, Any]
+    event: str, previous: str, leaf: str, data: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """사건과 결과 잎에서 바깥 칸에 쓸 값을 정한다."""
+    """사건과 출발, 결과 잎에서 바깥 칸에 쓸 값을 정한다."""
     if event == "newer_commit":
         return {"reject_reason": data["reason"]}
     if event == "reject":
@@ -122,6 +129,9 @@ def _request_columns(
     if event == "attempt_failed":
         if leaf == "superseded":
             return {"reject_reason": "superseded by newer canonical"}
+        if previous != "deploying":
+            # 배포 중이 아닌 요청: 지금도 요청 줄의 다른 칸은 건드리지 않고 표시 줄과 계보 줄만 쓴다
+            return {}
         return {"approved_by": None, "error": None, "duration_ms": None}
     if event == "node_succeeded":
         return {
@@ -168,25 +178,42 @@ async def step_request(
     )
     row = await cursor.fetchone()
     if row is None:
-        raise NoTransition(OrchRequest.__name__, {"deploy_id": deploy_id}, event)
+        raise NoTransition(
+            OrchRequest.__name__,
+            {"deploy_id": deploy_id},
+            event,
+            REASON_NO_ROW,
+            deploy_id,
+        )
     status, leaf = row
     if leaf is None or REQUEST_OUTER_STATUS.get(leaf) != status:
         raise NoTransition(
-            OrchRequest.__name__, {"status": status, "sm_status": leaf}, event
+            OrchRequest.__name__,
+            {"status": status, "sm_status": leaf},
+            event,
+            REASON_STATE_MISMATCH,
+            deploy_id,
         )
     given = dict(facts or {})
     if "marked" not in given:
         given["marked"] = await _has_marker(db, deploy_id)
-    new_leaf = advance(OrchRequest, {REQUEST_REGION: leaf}, event, given)[
-        REQUEST_REGION
-    ]
+    try:
+        new_leaf = advance(OrchRequest, {REQUEST_REGION: leaf}, event, given)[
+            REQUEST_REGION
+        ]
+    except NoTransition as exc:
+        exc.key = deploy_id
+        raise
 
+    # 배포 중이 아닌 요청에 닿은 시도 실패(더 새 커밋이 없을 때)는 요청 줄의 다른 칸을 건드리지 않는다
+    quiet = event == "attempt_failed" and leaf != "deploying" and new_leaf != "superseded"
     columns = {
         "status": REQUEST_OUTER_STATUS[new_leaf],
         "sm_status": new_leaf,
-        **_request_columns(event, new_leaf, data),
-        "updated_at": now,
+        **_request_columns(event, leaf, new_leaf, data),
     }
+    if not quiet:
+        columns["updated_at"] = now
     assignments = ", ".join(f"{name} = ?" for name in columns)
     updated = await db.execute(
         f"UPDATE deploy_events SET {assignments} "
@@ -195,10 +222,15 @@ async def step_request(
     )
     if updated.rowcount != 1:
         raise NoTransition(
-            OrchRequest.__name__, {"status": status, "sm_status": leaf}, event
+            OrchRequest.__name__,
+            {"status": status, "sm_status": leaf},
+            event,
+            REASON_UPDATE_ZERO,
+            deploy_id,
         )
 
-    if new_leaf in REQUEST_CLOSED:
+    marker_stays = event == "attempt_failed" and not given["newer"]
+    if new_leaf in REQUEST_CLOSED and not marker_stays:
         await db.execute(
             "DELETE FROM deploy_retry_requirements WHERE deploy_id = ?", (deploy_id,)
         )
@@ -206,7 +238,7 @@ async def step_request(
             "DELETE FROM deploy_retry_source_attempts WHERE deploy_id = ?",
             (deploy_id,),
         )
-    if event == "attempt_failed" and new_leaf == "retry":
+    if marker_stays:
         await db.execute(
             """INSERT INTO deploy_retry_requirements
                (deploy_id, source_orchestrator_attempt_id,
@@ -367,21 +399,33 @@ async def step_attempt(
     row = await cursor.fetchone()
     if row is None:
         raise NoTransition(
-            AttemptEvidence.__name__, {"attempt": orchestrator_attempt_id}, event
+            AttemptEvidence.__name__,
+            {"attempt": orchestrator_attempt_id},
+            event,
+            REASON_NO_ROW,
+            orchestrator_attempt_id,
         )
     outcome, leaf, mode = row
     if leaf is None or not attempt_leaf_is_consistent(leaf, outcome):
         raise NoTransition(
-            AttemptEvidence.__name__, {"outcome": outcome, "sm_evidence": leaf}, event
+            AttemptEvidence.__name__,
+            {"outcome": outcome, "sm_evidence": leaf},
+            event,
+            REASON_STATE_MISMATCH,
+            orchestrator_attempt_id,
         )
     given = {
         "execute_mode": mode == "execute",
         "recovery_mode": mode == "evidence_recovery",
         **dict(facts or {}),
     }
-    new_leaf = advance(AttemptEvidence, {ATTEMPT_REGION: leaf}, event, given)[
-        ATTEMPT_REGION
-    ]
+    try:
+        new_leaf = advance(AttemptEvidence, {ATTEMPT_REGION: leaf}, event, given)[
+            ATTEMPT_REGION
+        ]
+    except NoTransition as exc:
+        exc.key = orchestrator_attempt_id
+        raise
     columns = {
         "sm_evidence": new_leaf,
         **_attempt_columns(event, new_leaf, data, now),
@@ -394,7 +438,11 @@ async def step_attempt(
     )
     if updated.rowcount != 1:
         raise NoTransition(
-            AttemptEvidence.__name__, {"outcome": outcome, "sm_evidence": leaf}, event
+            AttemptEvidence.__name__,
+            {"outcome": outcome, "sm_evidence": leaf},
+            event,
+            REASON_UPDATE_ZERO,
+            orchestrator_attempt_id,
         )
     return AttemptStep(previous=leaf, leaf=new_leaf)
 
