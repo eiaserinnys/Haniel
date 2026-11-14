@@ -568,11 +568,76 @@ async def test_late_success_supersedes_an_unstarted_attempt_before_its_decline(s
 
         assert await leaf4(store) == ("success", "success", "b_none", "l_off")
         row = (await raw(store, "SELECT outcome, sm_evidence, execution_started_at FROM deploy_attempts WHERE orchestrator_attempt_id = ?", "a2"))[0]
-        assert row == ("superseded", "ev_superseded", None)
+        assert row == ("superseded", "ev_none", None)
         assert "attempt:a2" not in harness.coordinator._timers
         assert [answer.outcome for answer in sent_of(harness, DeployTerminalReceived)] == ["closed_now"]
         assert (await store.attempts.record_node_terminal(terminal("a2")))["status"] == "ignored"
         assert await leaf4(store) == ("success", "success", "b_none", "l_off")
+    finally:
+        await harness.close()
+
+
+@pytest.mark.parametrize("superseded_by", ["node", "late_success"])
+async def test_superseded_attempts_acknowledge_late_failure_and_its_duplicate(store: EventStore, superseded_by):
+    await seed(store)
+    harness = p1(Harness(store))
+    try:
+        await begin(store, "a1")
+        if superseded_by == "node":
+            hello = await store.attempts.reconcile_hello("n", {"a1"})
+            assert hello[0]["event"] == "hello_holds"
+            own = await store.record_node_deploy_report(node_report("succeeded", node_attempt_id="own"))
+            assert own["cancelled_orchestrator_attempt_ids"] == ["a1"]
+            attempt_id = "a1"
+        else:
+            await expire(store, "a1")
+            await begin_via_probe(store, "a2")
+            await harness.coordinator.handle_result(result("a1"))
+            await harness.coordinator.handle_settled(settled("a1"))
+            attempt_id = "a2"
+
+        row = (await raw(store, "SELECT outcome, sm_evidence FROM deploy_attempts WHERE orchestrator_attempt_id = ?", attempt_id))[0]
+        assert row == ("superseded", "ev_none")
+        await harness.coordinator.handle_result(result(attempt_id, status="failed"))
+        row = (await raw(store, "SELECT outcome, sm_evidence, late_evidence FROM deploy_attempts WHERE orchestrator_attempt_id = ?", attempt_id))[0]
+        assert row == ("superseded", "ev_failed", "failed")
+        duplicate = await store.attempts.record_result(
+            deploy_id=DEPLOY_ID, orchestrator_attempt_id=attempt_id, connection_generation="g1", status="failed", error="boom", duration_ms=5,
+        )
+        assert duplicate["status"] == "duplicate"
+        await harness.coordinator.handle_result(result(attempt_id, status="failed"))
+        answers = [a for a in sent_of(harness, DeployTerminalReceived) if a.orchestrator_attempt_id == attempt_id]
+        assert [a.outcome for a in answers] == ["already_closed", "already_closed"]
+        assert sent_of(harness, DeployReportAck) == []
+    finally:
+        await harness.close()
+
+
+@pytest.mark.parametrize("first", ["result", "settled"])
+async def test_superseded_attempt_keeps_partial_success_evidence_and_acknowledges_completion(store: EventStore, first):
+    await seed(store)
+    harness = p1(Harness(store))
+    try:
+        await begin(store, "a1")
+        if first == "result":
+            await harness.coordinator.handle_result(result("a1"))
+            expected_leaf = "ev_result"
+        else:
+            await harness.coordinator.handle_settled(settled("a1"))
+            expected_leaf = "ev_settled"
+        await store.record_node_deploy_report(node_report("succeeded", node_attempt_id="own"))
+        row = (await raw(store, "SELECT outcome, sm_evidence FROM deploy_attempts WHERE orchestrator_attempt_id = ?", "a1"))[0]
+        assert row == ("superseded", expected_leaf)
+
+        if first == "result":
+            await harness.coordinator.handle_settled(settled("a1"))
+            await harness.coordinator.handle_settled(settled("a1"))
+        else:
+            await harness.coordinator.handle_result(result("a1"))
+            await harness.coordinator.handle_result(result("a1"))
+        row = (await raw(store, "SELECT outcome, sm_evidence, late_evidence FROM deploy_attempts WHERE orchestrator_attempt_id = ?", "a1"))[0]
+        assert row == ("superseded", "ev_both", "success")
+        assert [a.outcome for a in sent_of(harness, DeployTerminalReceived)] == ["already_closed", "already_closed"]
     finally:
         await harness.close()
 

@@ -135,14 +135,14 @@ def attempt_leaf_from_columns(
 
 
 # 잎과 함께 설 수 있는 outcome(시도의 닫힘) 값. 닫힘과 증거 종결은 따로 움직인다(design.md:79).
-# 오케스트레이터가 스스로 닫은 시도(실행 임대 마감, 보내기 실패)는 outcome이 failed인 채로 증거 잎이 열려 있을 수 있고,
+# 오케스트레이터가 스스로 닫은 시도는 outcome이 failed 또는 superseded인 채로 증거 잎이 열려 있을 수 있고,
 # 그 뒤 늦은 글이 증거를 ev_both나 ev_failed로 종결한다. 노드 글로 닫힌 시도는 닫힘과 증거가 한 걸음에 끝난다.
 ATTEMPT_OUTCOMES = {
-    "ev_none": ("active", "failed"),
-    "ev_result": ("active", "failed"),
-    "ev_settled": ("active", "failed"),
-    "ev_both": ("success", "evidence_recovered_success", "failed"),
-    "ev_failed": ("failed",),
+    "ev_none": ("active", "failed", "superseded"),
+    "ev_result": ("active", "failed", "superseded"),
+    "ev_settled": ("active", "failed", "superseded"),
+    "ev_both": ("success", "evidence_recovered_success", "failed", "superseded"),
+    "ev_failed": ("failed", "superseded"),
     "ev_superseded": ("superseded",),
 }
 

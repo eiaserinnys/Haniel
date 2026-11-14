@@ -5,7 +5,7 @@
 
 시도의 닫힘(outcome, terminal 네 칸, closure, completed_at)과 증거 종결(sm_evidence 잎)은 따로 움직인다(design.md:79).
 - 노드 글로 닫히는 것(실패 결과, deploy_attempt_terminal 등)은 `step_attempt`의 fail 사건이 닫힘과 증거를 한 걸음에 쓴다.
-- 오케스트레이터가 스스로 내는 닫힘(마감, 보내기 실패, hello 목록에 없음)은 `close_attempt`가 닫힘만 쓰고 증거 잎은 두지 않는다.
+- 오케스트레이터가 스스로 내는 닫힘(마감, 보내기 실패, hello 목록에 없음, 다른 성공에 밀림)은 닫힘만 쓰고 증거 잎은 두지 않는다.
 - 닫힌 시도에 닿은 늦은 글은 `step_attempt`가 증거 잎과 증거 칸만 옮기고 닫힘은 바꾸지 않는다(design.md:118).
 - 이미 종결된 증거에 같은 글이 또 오면(dup) 아무 칸도 쓰지 않고 기호만 돌려준다(design.md:81).
 """
@@ -251,6 +251,20 @@ async def close_attempt(
         "terminal_reason = ?, terminal_error = ?, closure = ?, completed_at = ? "
         "WHERE orchestrator_attempt_id = ? AND outcome = 'active'",
         (kind, stage, reason, error, closure, now, orchestrator_attempt_id),
+    )
+    return updated.rowcount == 1
+
+
+async def supersede_attempt(
+    db: aiosqlite.Connection, orchestrator_attempt_id: str, *, now: str
+) -> bool:
+    """다른 성공에 밀린 도는 시도를 닫되, 늦은 보고를 받을 증거 잎은 그대로 둔다."""
+    updated = await db.execute(
+        "UPDATE deploy_attempts SET outcome = 'superseded', "
+        "terminal_kind = 'node_deploy_succeeded', terminal_stage = 'node_deploy_report', "
+        "terminal_reason = 'out_of_band_success', terminal_error = 'superseded by node-owned deployment', "
+        "completed_at = ? WHERE orchestrator_attempt_id = ? AND outcome = 'active'",
+        (now, orchestrator_attempt_id),
     )
     return updated.rowcount == 1
 
