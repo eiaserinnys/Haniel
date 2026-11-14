@@ -223,9 +223,7 @@ async def record(db: aiosqlite.Connection, report: NodeDeployReport) -> dict[str
 
     if report.phase == "succeeded":
         for attempt_id in active_orchestrator_ids:
-            await attempt_steps.step_attempt(
-                db, attempt_id, "superseded_by_node", now=now
-            )
+            await attempt_steps.supersede_attempt(db, attempt_id, now=now)
         await steps.step_request(
             db,
             report.deploy_id,

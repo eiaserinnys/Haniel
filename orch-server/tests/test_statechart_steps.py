@@ -294,8 +294,8 @@ async def test_leaves_stay_consistent_with_outer_columns_after_every_scenario(na
             if outcome == "active":
                 assert attempt_leaf_from_columns(outcome, result_status, settled_at) == leaf
             else:
-                # 닫힌 시도의 증거 잎은 닫힘과 따로 움직인다(2b-1). 스스로 닫은 시도는 증거 잎이 열린 채 남는다
-                assert attempt_leaf_from_columns(outcome, result_status, settled_at) in {leaf, "ev_failed"}
+                # 스스로 실패로 닫거나 다른 성공에 밀린 시도는 증거 잎이 열린 채 남을 수 있다.
+                assert attempt_leaf_from_columns(outcome, result_status, settled_at) in {leaf, "ev_failed", "ev_superseded"}
     finally:
         await store.close()
 

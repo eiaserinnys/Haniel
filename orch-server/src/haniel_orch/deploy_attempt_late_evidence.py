@@ -67,7 +67,7 @@ class DeployAttemptLateEvidence:
                     )
                     active_ids = [row[0] for row in await cursor.fetchall()]
                     for active_id in active_ids:
-                        await attempt_steps.step_attempt(self._db, active_id, "superseded_by_node", now=now)
+                        await attempt_steps.supersede_attempt(self._db, active_id, now=now)
                     await self._terminalize_sibling_probes_unlocked(
                         deploy_id, "canonical succeeded through late evidence"
                     )
