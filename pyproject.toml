@@ -44,6 +44,7 @@ dev = [
     "pytest-cov>=4.0.0",
     "pytest-asyncio>=1.0.0",
     "pytest-timeout>=2.0.0",
+    "ruff==0.15.7",
 ]
 
 [project.scripts]

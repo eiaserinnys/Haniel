@@ -83,7 +83,8 @@ def test_start_services_routes_manifest_repo_once_in_global_order(
 
     runner.start_services()
 
-    assert events == ["start:before", "deploy", "start:after"]
+    # 서비스가 갱신되지 않은 before/after는 곧바로 무리에 속해 manifest 갈래보다 먼저 뜬다.
+    assert events == ["start:before", "start:after", "deploy"]
     mock_deploy.assert_called_once_with(
         runner,
         "soulstream",
@@ -222,8 +223,14 @@ def test_startup_repo_lease_conflict_is_isolated_and_next_repo_runs(
     ):
         runner._apply_startup_updates()
 
-    assert mock_fetch.call_count == 1
-    assert mock_fetch.call_args.kwargs["path"] == tmp_path / "after"
+    # 미리 받기는 임차 획득 전에 병렬로 돌므로 두 리포 모두 한 번씩 받는다.
+    assert mock_fetch.call_count == 2
+    assert {call.kwargs["path"] for call in mock_fetch.call_args_list} == {
+        tmp_path / "blocked",
+        tmp_path / "after",
+    }
+    assert runner._repo_states["after"].last_fetch is not None
+    assert runner._repo_states["blocked"].last_fetch is None
 
 
 @patch("haniel.core.runner.fetch_repo", side_effect=RuntimeError("programming defect"))
