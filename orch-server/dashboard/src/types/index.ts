@@ -31,7 +31,9 @@ export interface Deploy {
 //   health_status:  HealthManager state value
 //                   ('ready' | 'running' | 'starting' | 'stopping' |
 //                    'crashed' | 'stopped' | 'circuit_open').
-//   ready:          process_status === 'running' && health_status === 'ready'.
+//   ready:          process_status === 'running' && (health_status === 'ready' ||
+//                   (health_status === 'running' && the service has no ready
+//                   condition)).
 export interface NodeService {
   name: string;
   port: number | null;

@@ -2083,7 +2083,12 @@ class ServiceRunner:
         - ``health_status``: ``HealthManager`` state value
           (``ready`` / ``running`` / ``starting`` / ``stopping`` /
           ``crashed`` / ``stopped`` / ``circuit_open``).
-        - ``ready``: True iff process is running AND health state is ready.
+        - ``ready``: True iff process is running AND (health state is
+          ready, OR health state is running and the service has no ready
+          condition configured). A service without a ready condition is
+          recorded as ``running`` (never ``ready``) by the process manager,
+          so ``running`` is its normal steady state. A service with a ready
+          condition that stays ``running`` (condition unresolved) is not ready.
 
         The legacy ``status`` key is removed; orch-server's dashboard now
         consumes ``process_status`` (action buttons) and ``health_status``
@@ -2104,6 +2109,10 @@ class ServiceRunner:
             pid = self.process_manager.get_pid(name)
             process_status = "running" if pid is not None else "stopped"
             health_status = health.state.value
+            ready = process_status == "running" and (
+                health_status == "ready"
+                or (health_status == "running" and not svc_config.ready)
+            )
             services.append(
                 {
                     "name": name,
@@ -2111,7 +2120,7 @@ class ServiceRunner:
                     "pid": pid,
                     "process_status": process_status,
                     "health_status": health_status,
-                    "ready": (process_status == "running" and health_status == "ready"),
+                    "ready": ready,
                     "role": svc_config.repo or "",
                     "uptime_ms": int(health.get_uptime() * 1000)
                     if health.get_uptime()
