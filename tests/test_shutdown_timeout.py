@@ -49,6 +49,8 @@ def test_slack_stop_bounds_socket_thread_join() -> None:
 def test_orchestrator_stop_bounds_connection_thread_join() -> None:
     client = object.__new__(OrchestratorClient)
     client._stop_event = threading.Event()
+    client._loop = None
+    client._ws = None
     client._thread = _stuck_thread()
 
     client.stop()

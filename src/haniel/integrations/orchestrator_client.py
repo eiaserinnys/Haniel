@@ -20,7 +20,14 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 
 from .deploy_progress import DeployProgressEmitter, ProgressCallback
-from .deploy_reporting import DeployReporter, parse_deploy_id
+from .deploy_execution_sequencer import DeployExecutionSequencer
+from .deploy_reporting import (
+    DeployReporter,
+    deploy_result_message,
+    parse_deploy_id,
+    reconciliation_message,
+    settled_result_messages,
+)
 from .deploy_attempt_gate import DeployAttemptGate
 from ..core.thread_shutdown import join_thread_with_timeout
 
@@ -111,7 +118,15 @@ class OrchestratorClient:
             snapshot_handler=repo_snapshot_handler,
             expected_budget_handler=expected_budget_handler,
             send_json=lambda message: self._send_json(message),
+            deliver=lambda messages: self._deliver_deploy_messages(messages),
         )
+        # Approvals execute one at a time, in arrival order, for the client's
+        # whole lifetime; the receive loop only lines them up.
+        self._sequencer = DeployExecutionSequencer(self._handle_deploy_approval)
+        # Plan probes and service commands run as loop tasks outside _listen.
+        self._background_tasks: set[asyncio.Task[None]] = set()
+        # Counts sockets; a proposal is only sent on the socket that asked.
+        self._connection_serial = 0
 
     def start(self) -> None:
         """Start the background WebSocket connection thread."""
@@ -129,6 +144,13 @@ class OrchestratorClient:
     def stop(self) -> None:
         """Stop the background thread and close the connection."""
         self._stop_event.set()
+        loop = self._loop
+        ws = self._ws
+        if loop is not None and ws is not None and loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(ws.close(), loop)
+            except Exception as exc:
+                logger.debug("Failed to close orchestrator connection: %s", exc)
         join_thread_with_timeout(
             self._thread,
             name="orchestrator client thread",
@@ -211,16 +233,20 @@ class OrchestratorClient:
         duration_ms: int,
         permit: dict[str, Any],
     ) -> None:
-        """Send DeployResult followed by settled reconciliation."""
-        self._schedule_report(
-            lambda: self._deploy_reporter.send_settled_result(
+        """Queue DeployResult then settled reconciliation. Thread-safe.
+
+        The pair goes through the ordered reconnect buffer, so a report that
+        finishes while the socket is down leaves on the next connection.
+        """
+        self._enqueue_buffered_deploy_messages(
+            settled_result_messages(
+                self._config.node_id,
                 snapshot,
                 operation_error,
                 duration_ms,
                 permit["begun_orchestrator_attempt_id"],
                 permit["connection_generation"],
-            ),
-            wait=False,
+            )
         )
 
     def start_deploy_progress(self, permit: dict[str, Any]) -> DeployProgressEmitter:
@@ -321,31 +347,25 @@ class OrchestratorClient:
         Used by runner.start() to report self-update results that completed
         during the previous wrapper iteration. Thread-safe.
         """
-        msg = {
-            "type": "deploy_result",
-            "deploy_id": deploy_id,
-            "node_id": self._config.node_id,
-            "status": status,
-            "error": error,
-            "duration_ms": duration_ms,
-            "orchestrator_attempt_id": orchestrator_attempt_id,
-            "connection_generation": connection_generation,
-        }
-        messages = [msg]
+        messages = [
+            deploy_result_message(
+                self._config.node_id,
+                deploy_id,
+                orchestrator_attempt_id,
+                connection_generation,
+                status,
+                error=error,
+                duration_ms=duration_ms,
+            )
+        ]
         if settled_snapshot is not None:
             messages.append(
-                {
-                    "type": "repo_reconciliation",
-                    "phase": "settled",
-                    "deploy_id": settled_snapshot.deploy_id,
-                    "node_id": settled_snapshot.node_id,
-                    "repo": settled_snapshot.repo,
-                    "branch": settled_snapshot.branch,
-                    "local_head": settled_snapshot.local_head,
-                    "remote_head": settled_snapshot.remote_head,
-                    "orchestrator_attempt_id": orchestrator_attempt_id,
-                    "connection_generation": connection_generation,
-                }
+                reconciliation_message(
+                    settled_snapshot,
+                    "settled",
+                    orchestrator_attempt_id=orchestrator_attempt_id,
+                    connection_generation=connection_generation,
+                )
             )
         self._enqueue_buffered_deploy_messages(messages)
 
@@ -397,6 +417,20 @@ class OrchestratorClient:
             except Exception as e:
                 logger.debug(f"Failed to schedule deploy result flush: {e}")
 
+    async def _deliver_deploy_messages(self, messages: list[dict[str, Any]]) -> None:
+        """Send attempt-closing messages through the one ordered buffer.
+
+        They queue behind anything already waiting; the buffer is flushed now
+        when a socket is up. Whatever cannot be sent stays for the next
+        connection instead of being dropped. A send that timed out after the
+        bytes left may be repeated; the orchestrator answers a repeat
+        with deploy_report_ack.
+        """
+        with self._pending_lock:
+            self._pending_deploy_results.extend(messages)
+        if self._connected and self._ws is not None:
+            await self._flush_pending_deploy_results()
+
     async def _flush_pending_deploy_results(self) -> None:
         """Send the buffered prefix while preserving the complete unsent suffix."""
         async with self._flush_lock_for_running_loop():
@@ -438,31 +472,65 @@ class OrchestratorClient:
             self._loop = None
 
     async def _run(self) -> None:
-        """Main loop: connect → listen → reconnect with backoff."""
+        """Main loop: connect → listen → reconnect with backoff.
 
-        while not self._stop_event.is_set():
-            try:
-                await self._connect_and_listen()
-            except Exception as e:
+        The approval sequencer and the detached answer tasks belong to this
+        loop, not to one connection: they keep running across reconnects and
+        stop only here, when the client stops.
+        """
+        self._sequencer.start()
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    await self._connect_and_listen()
+                except Exception as e:
+                    if self._stop_event.is_set():
+                        break
+                    logger.warning(
+                        f"Orchestrator connection failed: {e}. "
+                        f"Reconnecting in {self._reconnect_delay:.1f}s"
+                    )
+                finally:
+                    self._connected = False
+                    self._ws = None
+
                 if self._stop_event.is_set():
                     break
-                logger.warning(
-                    f"Orchestrator connection failed: {e}. "
-                    f"Reconnecting in {self._reconnect_delay:.1f}s"
-                )
-            finally:
-                self._connected = False
-                self._ws = None
 
-            if self._stop_event.is_set():
-                break
+                # Backoff wait (interruptible)
+                delay = self._next_backoff()
+                for _ in range(int(delay * 10)):
+                    if self._stop_event.is_set():
+                        return
+                    await asyncio.sleep(0.1)
+        finally:
+            await self._sequencer.close()
+            await self._cancel_background_tasks()
 
-            # Backoff wait (interruptible)
-            delay = self._next_backoff()
-            for _ in range(int(delay * 10)):
-                if self._stop_event.is_set():
-                    return
-                await asyncio.sleep(0.1)
+    def _spawn_background(self, coroutine, name: str) -> asyncio.Task[None]:
+        """Run one answer outside the receive loop, bound to the client's loop."""
+        task = asyncio.get_running_loop().create_task(
+            self._guard_background(coroutine, name), name=name
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
+
+    @staticmethod
+    async def _guard_background(coroutine, name: str) -> None:
+        try:
+            await coroutine
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Orchestrator task %s failed: %s", name, exc)
+
+    async def _cancel_background_tasks(self) -> None:
+        tasks = list(self._background_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _connect_and_listen(self) -> None:
         """Connect to orchestrator, send NodeHello, and listen for messages."""
@@ -476,6 +544,7 @@ class OrchestratorClient:
             close_timeout=self._config.ping_timeout,
         ) as ws:
             self._ws = ws
+            self._connection_serial += 1
             self._deploy_attempt_gate.reset_connection()
 
             # Send NodeHello
@@ -502,20 +571,24 @@ class OrchestratorClient:
                     [listener, heartbeat],
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+            except asyncio.CancelledError:
+                # The client itself is being cancelled: take both socket tasks
+                # down with it and let the cancellation reach _run.
+                pending, done = {listener, heartbeat}, set()
+                raise
+            finally:
                 for task in pending:
                     task.cancel()
                     try:
                         await task
                     except asyncio.CancelledError:
                         pass
-                # Re-raise if listener had an exception
-                for task in done:
-                    task.result()
-            except asyncio.CancelledError:
-                pass
+            # Re-raise if listener had an exception
+            for task in done:
+                task.result()
 
     async def _listen(self, ws) -> None:
-        """Listen for server messages on the WebSocket."""
+        """Read, validate, hand off, read again; never wait for an execution."""
         async for raw in ws:
             if self._stop_event.is_set():
                 break
@@ -542,9 +615,12 @@ class OrchestratorClient:
         msg_type = msg.get("type")
         if msg_type == "deploy_approval":
             self._deploy_attempt_gate.observe_generation(msg["connection_generation"])
-            await self._handle_deploy_approval(msg)
+            self._sequencer.submit(msg)
         elif msg_type == "deploy_plan_probe":
-            await self._handle_deploy_plan_probe(msg)
+            self._spawn_background(
+                self._handle_deploy_plan_probe(msg),
+                f"deploy-plan-probe:{msg.get('probe_id')}",
+            )
         elif msg_type == "deploy_attempt_ack":
             self._deploy_attempt_gate.observe_generation(msg["connection_generation"])
             self._deploy_attempt_gate.accept_ack(msg)
@@ -563,17 +639,26 @@ class OrchestratorClient:
                 f"reason: {msg.get('reason', 'unknown')}"
             )
         elif msg_type == "service_command":
-            await self._handle_service_command(msg)
+            self._spawn_background(
+                self._handle_service_command(msg),
+                f"service-command:{msg.get('command_id')}",
+            )
         else:
             logger.debug(f"Unknown orchestrator message type: {msg_type}")
 
     async def _handle_deploy_approval(self, msg: dict) -> None:
-        """Delegate manual execution and result ordering to DeployReporter."""
+        """Execute one approval (called by the sequencer, one at a time)."""
         await self._deploy_reporter.handle_approval(msg)
 
     async def _handle_deploy_plan_probe(self, msg: dict) -> None:
-        """Run the read-only planner and return its proposal."""
+        """Run the read-only planner and answer on the socket that asked.
+
+        A probe is bound to its connection generation; once that socket is
+        gone the orchestrator has already closed the probe, so the proposal
+        is dropped rather than sent through a newer connection.
+        """
         self._deploy_attempt_gate.observe_generation(msg["connection_generation"])
+        asked_on = self._connection_serial
         if self._deploy_plan_probe_handler is None:
             proposal = {
                 "type": "deploy_plan_proposal",
@@ -611,19 +696,31 @@ class OrchestratorClient:
                     "manifest_digest": None,
                     "journal_completed_at": None,
                 }
-        await self._send_json(
-            {
-                **proposal,
-                "type": "deploy_plan_proposal",
-                "probe_id": msg["probe_id"],
-                "connection_generation": msg["connection_generation"],
-                "deploy_id": msg["deploy_id"],
-                "node_id": msg["node_id"],
-                "repo": msg["repo"],
-                "branch": msg["branch"],
-                "target_head": msg["target_head"],
-            }
-        )
+        if asked_on != self._connection_serial:
+            logger.info(
+                "Dropping deploy plan proposal probe=%s: the connection that asked "
+                "is gone",
+                msg["probe_id"],
+            )
+            return
+        try:
+            await self._send_json(
+                {
+                    **proposal,
+                    "type": "deploy_plan_proposal",
+                    "probe_id": msg["probe_id"],
+                    "connection_generation": msg["connection_generation"],
+                    "deploy_id": msg["deploy_id"],
+                    "node_id": msg["node_id"],
+                    "repo": msg["repo"],
+                    "branch": msg["branch"],
+                    "target_head": msg["target_head"],
+                }
+            )
+        except Exception as exc:
+            logger.warning(
+                "Dropping deploy plan proposal probe=%s: %s", msg["probe_id"], exc
+            )
 
     @staticmethod
     def _parse_deploy_id(
@@ -639,7 +736,9 @@ class OrchestratorClient:
         return parse_deploy_id(deploy_id)
 
     async def _handle_service_command(self, msg: dict) -> None:
-        """Handle a service_command message: execute and send result back."""
+        """Execute one service command off the loop and answer on the socket
+        that is up when it finishes; without one the answer is logged and
+        dropped (the orchestrator has already timed the command out)."""
         command_id = msg.get("command_id", "")
         service_name = msg.get("service_name", "")
         action = msg.get("action", "")
@@ -674,7 +773,18 @@ class OrchestratorClient:
             "error": error,
             "result": result_data,
         }
-        await self._send_json(result)
+        try:
+            await self._send_json(result)
+        except Exception as exc:
+            logger.warning(
+                "Dropping service command result cmd=%s (%s %s, success=%s): "
+                "no connection to answer on: %s",
+                command_id,
+                action,
+                service_name,
+                success,
+                exc,
+            )
 
     async def _send_json(self, data: dict) -> None:
         """Send a JSON message to the orchestrator."""
