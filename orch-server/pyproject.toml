@@ -30,6 +30,11 @@ packages = ["src/haniel_orch"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+timeout = 60
 filterwarnings = [
     "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning",
 ]
+markers = [
+    "sweep_full: extended product exploration run on schedule or by hand",
+]
+addopts = '-m "not sweep_full"'
