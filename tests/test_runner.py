@@ -2918,11 +2918,14 @@ class TestStartupUpdates:
         self, mock_fetch, mock_pull, mock_head, runner_with_repos
     ):
         """Failure in one repo should not block others."""
-        # First repo fails, second succeeds
-        mock_fetch.side_effect = [
-            GitError("Network error"),
-            True,
-        ]
+
+        # 미리 받기가 실패한 리포는 직렬 단계에서 다시 받으므로 경로로 결과를 가른다.
+        def fetch(*, path: Path, branch: str, timeout: int) -> bool:
+            if path.name == "service-repo":
+                raise GitError("Network error")
+            return True
+
+        mock_fetch.side_effect = fetch
 
         runner_with_repos._apply_startup_updates()
 
@@ -2945,14 +2948,19 @@ class TestStartupUpdates:
         self, mock_fetch, mock_pull, runner_with_repos
     ):
         """A timed-out repo is recorded and startup continues with the next repo."""
-        mock_fetch.side_effect = [
-            GitTimeoutError("Fetch timed out", timeout=17),
-            False,
-        ]
+
+        # 미리 받기가 실패한 리포는 직렬 단계에서 다시 받으므로 경로로 결과를 가른다.
+        def fetch(*, path: Path, branch: str, timeout: int) -> bool:
+            if path.name == "service-repo":
+                raise GitTimeoutError("Fetch timed out", timeout=17)
+            return False
+
+        mock_fetch.side_effect = fetch
 
         runner_with_repos._apply_startup_updates()
 
-        assert mock_fetch.call_count == 2
+        # 실패한 리포는 미리 받기와 직렬 재시도에서 각각 한 번씩 받는다.
+        assert mock_fetch.call_count == 3
         mock_pull.assert_not_called()
         assert any(
             state.fetch_error and "Fetch timed out" in state.fetch_error

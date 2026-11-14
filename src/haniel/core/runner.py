@@ -22,6 +22,7 @@ import shlex
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -358,6 +359,14 @@ class RunnerState:
     self_update_pending: bool = False
 
 
+@dataclass(frozen=True)
+class _StartupLane:
+    """Updated repositories that build and start together with their services."""
+
+    repos: tuple[str, ...]
+    services: tuple[str, ...]
+
+
 class ServiceRunner:
     """Manages the poll → pull → restart cycle.
 
@@ -489,6 +498,8 @@ class ServiceRunner:
         self._startup_deployment_leases: dict[str, DeploymentLease] = {}
         self._startup_repo_locks: set[str] = set()
         self._startup_pull_locks: dict[str, threading.Lock] = {}
+        # Lanes merge completed legacy builds into one marker file concurrently.
+        self._startup_marker_lock = threading.Lock()
 
         # Self-update (see ADR-0002)
         self._self_repo: str | None = (
@@ -889,6 +900,10 @@ class ServiceRunner:
         were actually updated during the startup pull pass. Restarting Haniel is
         a controlled downtime window for pulling all repos, but unchanged repos
         should not pay rebuild cost.
+
+        Services that do not need an updated repository start first. Each group
+        of services tied to an updated repository then builds and starts on its
+        own lane, so one slow post_pull build cannot hold the rest down.
         """
         config_snapshot = self._snapshot_config_state()
         enabled_services = config_snapshot.enabled_services
@@ -900,241 +915,508 @@ class ServiceRunner:
             logger.info("Skipping service startup because shutdown was requested")
             return
 
-        # Run legacy post_pull hooks on first start only for repos updated at startup.
-        blocked_repos: set[str] = set()
-        if not self._post_pull_executed:
-            self._post_pull_executed = True
-            hook_failures: dict[str, list[str]] = {}
-            for name in startup_order:
-                if self._stop_event.is_set():
-                    logger.info("Stopping startup hooks because shutdown was requested")
-                    return
-                service = enabled_services[name]
-                if service.repo in self._startup_updated_repos:
-                    if not self.execute_hook(name, "post_pull"):
-                        hook_failures.setdefault(service.repo, []).append(name)
-                        startup_report_errors.setdefault(service.repo, []).append(
-                            f"post_pull hook failed for {name}"
-                        )
-
-            blocked_repos, recovered = self._resolve_startup_post_pull_failures(
-                hook_failures,
-                startup_order,
-                enabled_services,
-                startup_report_errors,
-            )
-            sync_disk()
-            completed: dict[str, str] = dict(recovered)
-            marker_repos = self._legacy_post_pull_marker_repos(config_snapshot)
-            for repo_name in sorted(self._startup_updated_repos):
-                if (
-                    repo_name not in marker_repos
-                    or repo_name in hook_failures
-                    or repo_name in blocked_repos
-                ):
-                    continue
-                try:
-                    runtime = self._snapshot_repo_runtime(repo_name)
-                    completed[repo_name] = get_head(
-                        self.config_dir / runtime.config.path
-                    )
-                except (GitError, ValueError) as error:
-                    logger.warning(
-                        "Cannot record completed post_pull for %s: %s",
-                        repo_name,
-                        error,
-                    )
+        run_startup_hooks = not self._post_pull_executed
+        self._post_pull_executed = True
+        updated_repos = set(self._startup_updated_repos) | set(
+            self._startup_manifest_updates
+        )
+        marker_repos = (
+            self._legacy_post_pull_marker_repos(config_snapshot)
+            if run_startup_hooks
+            else set()
+        )
+        if run_startup_hooks:
             # Repos not updated at this startup and never recorded keep their
             # current build: record HEAD as the baseline instead of rebuilding.
-            recorded = read_legacy_post_pull_commits(self.config_dir)
-            for repo_name in sorted(marker_repos - self._startup_updated_repos):
-                if repo_name in recorded:
-                    continue
-                try:
-                    runtime = self._snapshot_repo_runtime(repo_name)
-                    completed[repo_name] = get_head(
-                        self.config_dir / runtime.config.path
-                    )
-                except (GitError, ValueError) as error:
-                    logger.warning(
-                        "Cannot record baseline post_pull commit for %s: %s",
-                        repo_name,
-                        error,
-                    )
-            if self._persist_legacy_build_completions(completed):
-                sync_disk()
+            self._record_startup_legacy_baselines(marker_repos, updated_repos)
 
-        manifest_services: dict[str, list[str]] = {}
+        immediate_services, lanes = self._split_startup_service_groups(
+            enabled_services, startup_order
+        )
+        if immediate_services:
+            logger.info(
+                "Starting services without startup repository updates: %s",
+                immediate_services,
+            )
+        for name in immediate_services:
+            if self._stop_event.is_set():
+                logger.info("Stopping service startup because shutdown was requested")
+                return
+            self._start_startup_service(
+                name, enabled_services, set(), startup_report_errors
+            )
+
+        if lanes:
+            self._run_startup_lanes(
+                lanes,
+                enabled_services,
+                startup_order,
+                startup_report_errors,
+                run_startup_hooks=run_startup_hooks,
+                marker_repos=marker_repos,
+            )
+
+    def _split_startup_service_groups(
+        self,
+        enabled_services: dict[str, ServiceConfig],
+        startup_order: list[str],
+    ) -> tuple[list[str], list[_StartupLane]]:
+        """Split startup work into the immediate group and updated-repo lanes.
+
+        A service joins a lane when it shares an updated repository, depends on
+        a lane service through ``after``, or is a deployment target of an
+        updated release-manifest repository. Everything else starts immediately.
+        """
+        updated_repos = set(self._startup_updated_repos) | set(
+            self._startup_manifest_updates
+        )
+        adjacency: dict[str, set[str]] = {}
+
+        def link(left: str, right: str) -> None:
+            adjacency.setdefault(left, set()).add(right)
+            adjacency.setdefault(right, set()).add(left)
+
+        for repo_name in updated_repos:
+            adjacency.setdefault(f"repo:{repo_name}", set())
+
+        for service_name in startup_order:
+            service = enabled_services[service_name]
+            service_node = f"service:{service_name}"
+            adjacency.setdefault(service_node, set())
+            if service.repo in updated_repos:
+                link(service_node, f"repo:{service.repo}")
+            for dependency in service.after:
+                if dependency in enabled_services:
+                    link(service_node, f"service:{dependency}")
+
         for repo_name in self._startup_manifest_updates:
-            manifest_services[repo_name] = [
-                name
-                for name in startup_order
-                if enabled_services[name].repo == repo_name
-            ]
+            for service_name in self._startup_manifest_affected_services(
+                repo_name, enabled_services, startup_order
+            ):
+                link(f"repo:{repo_name}", f"service:{service_name}")
 
+        groups: list[set[str]] = []
+        remaining = set(adjacency)
+        while remaining:
+            root = remaining.pop()
+            group = {root}
+            stack = [root]
+            while stack:
+                node = stack.pop()
+                for neighbor in adjacency[node]:
+                    if neighbor in remaining:
+                        remaining.discard(neighbor)
+                        group.add(neighbor)
+                        stack.append(neighbor)
+            groups.append(group)
+
+        order_index = {name: index for index, name in enumerate(startup_order)}
+        immediate: list[str] = []
+        lane_entries: list[tuple[int, str, _StartupLane]] = []
+        for group in groups:
+            repos = sorted(
+                node.split(":", 1)[1] for node in group if node.startswith("repo:")
+            )
+            services = sorted(
+                (
+                    node.split(":", 1)[1]
+                    for node in group
+                    if node.startswith("service:")
+                ),
+                key=order_index.__getitem__,
+            )
+            if not repos:
+                immediate.extend(services)
+                continue
+            lane_entries.append(
+                (
+                    order_index[services[0]] if services else len(startup_order),
+                    repos[0],
+                    _StartupLane(repos=tuple(repos), services=tuple(services)),
+                )
+            )
+        immediate.sort(key=order_index.__getitem__)
+        lane_entries.sort(key=lambda entry: (entry[0], entry[1]))
+        return immediate, [entry[2] for entry in lane_entries]
+
+    def _startup_manifest_affected_services(
+        self,
+        repo_name: str,
+        enabled_services: dict[str, ServiceConfig],
+        startup_order: list[str],
+    ) -> list[str]:
+        """Services a startup manifest deployment restarts for one repository."""
+        reload_plan = self._startup_manifest_reload_plans.get(repo_name)
+        if reload_plan is not None:
+            return list(reload_plan.new_affected)
+        return [
+            name for name in startup_order if enabled_services[name].repo == repo_name
+        ]
+
+    def _record_startup_legacy_baselines(
+        self,
+        marker_repos: set[str],
+        updated_repos: set[str],
+    ) -> None:
+        """Record the current HEAD of unmodified marker repos as their baseline."""
+        recorded = read_legacy_post_pull_commits(self.config_dir)
+        baselines: dict[str, str] = {}
+        for repo_name in sorted(marker_repos - updated_repos):
+            if repo_name in recorded:
+                continue
+            try:
+                runtime = self._snapshot_repo_runtime(repo_name)
+                baselines[repo_name] = get_head(self.config_dir / runtime.config.path)
+            except (GitError, ValueError) as error:
+                logger.warning(
+                    "Cannot record baseline post_pull commit for %s: %s",
+                    repo_name,
+                    error,
+                )
+        if self._persist_legacy_build_completions(baselines):
+            sync_disk()
+
+    def _run_startup_lanes(
+        self,
+        lanes: list[_StartupLane],
+        enabled_services: dict[str, ServiceConfig],
+        startup_order: list[str],
+        startup_report_errors: dict[str, list[str]],
+        *,
+        run_startup_hooks: bool,
+        marker_repos: set[str],
+    ) -> None:
+        """Run updated-repository lanes concurrently and merge their reports."""
+        lane_reports: list[dict[str, list[str]]] = []
+        errors: list[BaseException] = []
+        errors_lock = threading.Lock()
+
+        def run_lane(lane: _StartupLane, lane_report: dict[str, list[str]]) -> None:
+            try:
+                self._run_startup_lane(
+                    lane,
+                    enabled_services,
+                    startup_order,
+                    lane_report,
+                    run_startup_hooks=run_startup_hooks,
+                    marker_repos=marker_repos,
+                )
+            except BaseException as error:
+                with errors_lock:
+                    errors.append(error)
+
+        with ThreadPoolExecutor(
+            max_workers=min(4, len(lanes)),
+            thread_name_prefix="startup-lane",
+        ) as executor:
+            futures = []
+            for lane in lanes:
+                lane_report: dict[str, list[str]] = {}
+                lane_reports.append(lane_report)
+                futures.append(executor.submit(run_lane, lane, lane_report))
+            for future in futures:
+                future.result()
+
+        for lane_report in lane_reports:
+            for repo_name, messages in lane_report.items():
+                startup_report_errors.setdefault(repo_name, []).extend(messages)
+        if errors:
+            raise errors[0]
+
+    def _run_startup_lane(
+        self,
+        lane: _StartupLane,
+        enabled_services: dict[str, ServiceConfig],
+        startup_order: list[str],
+        startup_report_errors: dict[str, list[str]],
+        *,
+        run_startup_hooks: bool,
+        marker_repos: set[str],
+    ) -> None:
+        logger.info(
+            "Starting startup lane: repos=%s services=%s",
+            list(lane.repos),
+            list(lane.services),
+        )
+        try:
+            blocked_repos = (
+                self._run_lane_startup_post_pull(
+                    lane,
+                    enabled_services,
+                    startup_report_errors,
+                    marker_repos=marker_repos,
+                )
+                if run_startup_hooks
+                else set()
+            )
+            self._start_lane_services(
+                lane,
+                enabled_services,
+                startup_order,
+                blocked_repos,
+                startup_report_errors,
+            )
+            for repo_name in sorted(
+                self._startup_updated_repos.intersection(lane.repos)
+            ):
+                node_report = self._startup_node_deploy_reports.pop(repo_name, None)
+                if node_report is None:
+                    continue
+                errors = startup_report_errors.get(repo_name, [])
+                self._finish_node_deploy_report(
+                    node_report,
+                    local_head=get_head(
+                        self.config_dir
+                        / self._snapshot_repo_runtime(repo_name).config.path
+                    ),
+                    error="; ".join(errors) if errors else None,
+                )
+        finally:
+            logger.info(
+                "Startup lane complete: repos=%s services=%s",
+                list(lane.repos),
+                list(lane.services),
+            )
+
+    def _run_lane_startup_post_pull(
+        self,
+        lane: _StartupLane,
+        enabled_services: dict[str, ServiceConfig],
+        startup_report_errors: dict[str, list[str]],
+        *,
+        marker_repos: set[str],
+    ) -> set[str]:
+        """Run this lane's startup post_pull hooks and record its build results."""
+        legacy_repos = self._startup_updated_repos.intersection(lane.repos)
+        if not legacy_repos:
+            return set()
+        hook_failures: dict[str, list[str]] = {}
+        for name in lane.services:
+            if self._stop_event.is_set():
+                logger.info("Stopping startup hooks because shutdown was requested")
+                return set()
+            service = enabled_services[name]
+            if service.repo in legacy_repos:
+                if not self.execute_hook(name, "post_pull"):
+                    hook_failures.setdefault(service.repo, []).append(name)
+                    startup_report_errors.setdefault(service.repo, []).append(
+                        f"post_pull hook failed for {name}"
+                    )
+
+        blocked_repos, recovered = self._resolve_startup_post_pull_failures(
+            hook_failures,
+            list(lane.services),
+            enabled_services,
+            startup_report_errors,
+        )
+        sync_disk()
+        completed: dict[str, str] = dict(recovered)
+        for repo_name in sorted(legacy_repos):
+            if (
+                repo_name not in marker_repos
+                or repo_name in hook_failures
+                or repo_name in blocked_repos
+            ):
+                continue
+            try:
+                runtime = self._snapshot_repo_runtime(repo_name)
+                completed[repo_name] = get_head(self.config_dir / runtime.config.path)
+            except (GitError, ValueError) as error:
+                logger.warning(
+                    "Cannot record completed post_pull for %s: %s",
+                    repo_name,
+                    error,
+                )
+        if self._persist_legacy_build_completions(completed):
+            sync_disk()
+        return blocked_repos
+
+    def _start_startup_service(
+        self,
+        name: str,
+        enabled_services: dict[str, ServiceConfig],
+        blocked_repos: set[str],
+        startup_report_errors: dict[str, list[str]],
+    ) -> None:
+        """Start one non-manifest service during startup."""
+        if self.process_manager.is_running(name):
+            logger.info("Service already running after handover: %s", name)
+            return
+        repo_name = enabled_services[name].repo
+        if repo_name in blocked_repos:
+            logger.error(
+                "Not starting %s: repository %s has no completed post_pull build",
+                name,
+                repo_name,
+            )
+            startup_report_errors.setdefault(repo_name, []).append(
+                f"service start skipped for {name}"
+            )
+            return
+        if not self._start_service(name):
+            startup_report_errors.setdefault(repo_name, []).append(
+                f"service start failed for {name}"
+            )
+
+    def _start_lane_services(
+        self,
+        lane: _StartupLane,
+        enabled_services: dict[str, ServiceConfig],
+        startup_order: list[str],
+        blocked_repos: set[str],
+        startup_report_errors: dict[str, list[str]],
+    ) -> None:
+        """Start a lane's services and run its manifest deployments in order."""
+        manifest_services = {
+            repo_name: self._startup_manifest_affected_services(
+                repo_name, enabled_services, startup_order
+            )
+            for repo_name in lane.repos
+            if repo_name in self._startup_manifest_updates
+        }
         handled_manifest_services: set[str] = set()
-        for name in startup_order:
+        for name in lane.services:
             if self._stop_event.is_set():
                 logger.info("Stopping service startup because shutdown was requested")
                 return
             if name in handled_manifest_services:
                 continue
-            if self.process_manager.is_running(name):
-                logger.info("Service already running after handover: %s", name)
-                continue
             repo_name = enabled_services[name].repo
-            if repo_name in blocked_repos:
-                logger.error(
-                    "Not starting %s: repository %s has no completed post_pull build",
-                    name,
-                    repo_name,
+            if repo_name in self._startup_manifest_updates:
+                if self.process_manager.is_running(name):
+                    logger.info("Service already running after handover: %s", name)
+                    continue
+                reload_plan = self._startup_manifest_reload_plans.get(repo_name)
+                affected = (
+                    list(reload_plan.new_affected)
+                    if reload_plan is not None
+                    else manifest_services[repo_name]
                 )
-                startup_report_errors.setdefault(repo_name, []).append(
-                    f"service start skipped for {name}"
-                )
+                handled_manifest_services.update(affected)
+                self._run_startup_manifest_deployment(repo_name, affected, reload_plan)
                 continue
-            if repo_name not in self._startup_manifest_updates:
-                if not self._start_service(name):
-                    startup_report_errors.setdefault(repo_name, []).append(
-                        f"service start failed for {name}"
-                    )
-                continue
-
-            reload_plan = self._startup_manifest_reload_plans.get(repo_name)
-            affected = (
-                list(reload_plan.new_affected)
-                if reload_plan is not None
-                else manifest_services[repo_name]
+            self._start_startup_service(
+                name, enabled_services, blocked_repos, startup_report_errors
             )
-            handled_manifest_services.update(affected)
-            config_kwargs = (
-                {
-                    "quiesce_services": list(reload_plan.quiesce_services),
-                    "config_digest": reload_plan.config_digest,
-                    "service_environment_bindings": (
-                        reload_plan.service_environment_map()
-                    ),
-                }
-                if reload_plan is not None
+
+    def _run_startup_manifest_deployment(
+        self,
+        repo_name: str,
+        affected: list[str],
+        reload_plan: "HandoverReloadPlan | None",
+    ) -> None:
+        """Run one startup manifest deployment and close its node report."""
+        config_kwargs = (
+            {
+                "quiesce_services": list(reload_plan.quiesce_services),
+                "config_digest": reload_plan.config_digest,
+                "service_environment_bindings": (reload_plan.service_environment_map()),
+            }
+            if reload_plan is not None
+            else {}
+        )
+        try:
+            startup_snapshot = self._startup_manifest_config_snapshots.get(repo_name)
+            if startup_snapshot is not None:
+                self._require_config_generation(startup_snapshot)
+            snapshot_kwargs = (
+                {"config_snapshot": startup_snapshot}
+                if startup_snapshot is not None
                 else {}
             )
-            try:
-                startup_snapshot = self._startup_manifest_config_snapshots.get(
-                    repo_name
-                )
-                if startup_snapshot is not None:
-                    self._require_config_generation(startup_snapshot)
-                snapshot_kwargs = (
-                    {"config_snapshot": startup_snapshot}
-                    if startup_snapshot is not None
-                    else {}
-                )
-                run_manifest_deployment(
-                    self,
-                    repo_name,
-                    affected,
-                    self._startup_manifest_updates[repo_name],
-                    desired_running=set(affected),
-                    branch=self._snapshot_repo_runtime(repo_name).config.branch,
-                    expected_operation=self._startup_manifest_operations.get(
-                        repo_name, "upgrade"
-                    ),
-                    request_id=self._startup_manifest_request_ids.get(
-                        repo_name, f"startup-resume-{repo_name}"
-                    ),
-                    **snapshot_kwargs,
-                    **config_kwargs,
-                )
-                node_report = self._startup_node_deploy_reports.pop(repo_name, None)
-                if node_report is not None:
-                    self._finish_node_deploy_report(
-                        node_report,
-                        local_head=get_head(
-                            self.config_dir
-                            / self._snapshot_repo_runtime(repo_name).config.path
-                        ),
-                    )
-            except _OPERATIONAL_DEPLOYMENT_ERRORS as error:
-                code = stable_deployment_error_code(error)
-                request_id = self._startup_manifest_request_ids.get(
+            run_manifest_deployment(
+                self,
+                repo_name,
+                affected,
+                self._startup_manifest_updates[repo_name],
+                desired_running=set(affected),
+                branch=self._snapshot_repo_runtime(repo_name).config.branch,
+                expected_operation=self._startup_manifest_operations.get(
+                    repo_name, "upgrade"
+                ),
+                request_id=self._startup_manifest_request_ids.get(
                     repo_name, f"startup-resume-{repo_name}"
+                ),
+                **snapshot_kwargs,
+                **config_kwargs,
+            )
+            node_report = self._startup_node_deploy_reports.pop(repo_name, None)
+            if node_report is not None:
+                self._finish_node_deploy_report(
+                    node_report,
+                    local_head=get_head(
+                        self.config_dir
+                        / self._snapshot_repo_runtime(repo_name).config.path
+                    ),
                 )
-                try:
-                    self._deployment_state_store().fail_handover_if_current(
-                        repo_name,
-                        request_id,
-                        code,
-                        str(error),
-                    )
-                except Exception as journal_error:
-                    logger.error(
-                        "Failed to persist startup deployment failure for %s [%s]: %s",
-                        repo_name,
-                        code,
-                        journal_error,
-                    )
+        except _OPERATIONAL_DEPLOYMENT_ERRORS as error:
+            code = stable_deployment_error_code(error)
+            request_id = self._startup_manifest_request_ids.get(
+                repo_name, f"startup-resume-{repo_name}"
+            )
+            try:
+                self._deployment_state_store().fail_handover_if_current(
+                    repo_name,
+                    request_id,
+                    code,
+                    str(error),
+                )
+            except Exception as journal_error:
                 logger.error(
-                    "Startup deployment failed for %s [%s]; continuing service "
-                    "lifecycle: %s",
+                    "Failed to persist startup deployment failure for %s [%s]: %s",
                     repo_name,
                     code,
-                    bounded_redact_text(str(error)),
+                    journal_error,
                 )
-                node_report = self._startup_node_deploy_reports.pop(repo_name, None)
-                if node_report is not None:
-                    try:
-                        report_local_head = get_head(
-                            self.config_dir
-                            / self._snapshot_repo_runtime(repo_name).config.path
-                        )
-                    except Exception:
-                        report_local_head = node_report.started_local_head
-                    self._finish_node_deploy_report(
-                        node_report,
-                        local_head=report_local_head,
-                        error=f"{code}: {error}",
-                    )
-                if code == "CONFIG_GENERATION_CHANGED":
-                    current_services = self._snapshot_config_state().enabled_services
-                    for service_name in affected:
-                        if (
-                            service_name in current_services
-                            and not self.process_manager.is_running(service_name)
-                        ):
-                            if not self._start_service(service_name):
-                                raise RuntimeError(
-                                    "failed to restore startup service after "
-                                    f"config generation drift: {service_name}"
-                                )
-            except Exception as error:
-                node_report = self._startup_node_deploy_reports.pop(repo_name, None)
-                if node_report is not None:
-                    try:
-                        report_local_head = get_head(
-                            self.config_dir
-                            / self._snapshot_repo_runtime(repo_name).config.path
-                        )
-                    except Exception:
-                        report_local_head = node_report.started_local_head
-                    self._finish_node_deploy_report(
-                        node_report,
-                        local_head=report_local_head,
-                        error=str(error),
-                    )
-                raise
-
-        for repo_name in tuple(self._startup_updated_repos):
-            node_report = self._startup_node_deploy_reports.pop(repo_name, None)
-            if node_report is None:
-                continue
-            errors = startup_report_errors.get(repo_name, [])
-            self._finish_node_deploy_report(
-                node_report,
-                local_head=get_head(
-                    self.config_dir / self._snapshot_repo_runtime(repo_name).config.path
-                ),
-                error="; ".join(errors) if errors else None,
+            logger.error(
+                "Startup deployment failed for %s [%s]; continuing service "
+                "lifecycle: %s",
+                repo_name,
+                code,
+                bounded_redact_text(str(error)),
             )
+            node_report = self._startup_node_deploy_reports.pop(repo_name, None)
+            if node_report is not None:
+                try:
+                    report_local_head = get_head(
+                        self.config_dir
+                        / self._snapshot_repo_runtime(repo_name).config.path
+                    )
+                except Exception:
+                    report_local_head = node_report.started_local_head
+                self._finish_node_deploy_report(
+                    node_report,
+                    local_head=report_local_head,
+                    error=f"{code}: {error}",
+                )
+            if code == "CONFIG_GENERATION_CHANGED":
+                current_services = self._snapshot_config_state().enabled_services
+                for service_name in affected:
+                    if (
+                        service_name in current_services
+                        and not self.process_manager.is_running(service_name)
+                    ):
+                        if not self._start_service(service_name):
+                            raise RuntimeError(
+                                "failed to restore startup service after "
+                                f"config generation drift: {service_name}"
+                            )
+        except Exception as error:
+            node_report = self._startup_node_deploy_reports.pop(repo_name, None)
+            if node_report is not None:
+                try:
+                    report_local_head = get_head(
+                        self.config_dir
+                        / self._snapshot_repo_runtime(repo_name).config.path
+                    )
+                except Exception:
+                    report_local_head = node_report.started_local_head
+                self._finish_node_deploy_report(
+                    node_report,
+                    local_head=report_local_head,
+                    error=str(error),
+                )
+            raise
 
     def _legacy_post_pull_marker_repos(
         self, snapshot: RunnerConfigSnapshot
@@ -1251,15 +1533,16 @@ class ServiceRunner:
         """Merge completed post_pull commits into the marker file."""
         if not completions:
             return False
-        markers = read_legacy_post_pull_commits(self.config_dir)
-        markers.update(completions)
-        try:
-            write_legacy_post_pull_commits(self.config_dir, markers)
-        except OSError as error:
-            logger.warning(
-                "Failed to record completed legacy post_pull builds: %s", error
-            )
-            return False
+        with self._startup_marker_lock:
+            markers = read_legacy_post_pull_commits(self.config_dir)
+            markers.update(completions)
+            try:
+                write_legacy_post_pull_commits(self.config_dir, markers)
+            except OSError as error:
+                logger.warning(
+                    "Failed to record completed legacy post_pull builds: %s", error
+                )
+                return False
         return True
 
     def _record_legacy_build_completion(self, repo_name: str) -> None:
@@ -2801,6 +3084,57 @@ class ServiceRunner:
         )
         self._last_pending_hash.pop(self_repo, None)
 
+    def _prefetch_startup_repo_updates(
+        self,
+        startup_snapshot: RunnerConfigSnapshot,
+        startup_repo_names: tuple[str, ...],
+    ) -> dict[str, bool]:
+        """Fetch every startup target repo in parallel before the serial pass.
+
+        Repos whose prefetch raises are left out of the result so the serial
+        pass retries them with the existing lease and error handling.
+        """
+        fetch_timeout = startup_snapshot.config.git_fetch_timeout
+        targets: list[tuple[str, Path, str]] = []
+        for name in startup_repo_names:
+            if name == startup_snapshot.self_repo:
+                continue
+            try:
+                runtime = self._snapshot_repo_runtime(name)
+            except ValueError:
+                continue
+            repo_path = self.config_dir / runtime.config.path
+            if not repo_path.exists():
+                continue
+            targets.append((name, repo_path, runtime.config.branch))
+        if not targets:
+            return {}
+
+        prefetched: dict[str, bool] = {}
+        with ThreadPoolExecutor(
+            max_workers=min(8, len(targets)),
+            thread_name_prefix="startup-fetch",
+        ) as executor:
+            futures = {
+                executor.submit(
+                    fetch_repo,
+                    path=repo_path,
+                    branch=branch,
+                    timeout=fetch_timeout,
+                ): name
+                for name, repo_path, branch in targets
+            }
+            for future, name in futures.items():
+                try:
+                    prefetched[name] = future.result()
+                except Exception as error:
+                    logger.debug(
+                        "Startup prefetch failed for %s; retrying in the pull pass: %s",
+                        name,
+                        bounded_redact_text(str(error)),
+                    )
+        return prefetched
+
     def _apply_startup_updates(self) -> None:
         """Fetch and pull all repos that have pending remote changes.
 
@@ -2830,6 +3164,9 @@ class ServiceRunner:
         startup_repo_names = tuple(startup_snapshot.repo_identity)
         marker_repos = self._legacy_post_pull_marker_repos(startup_snapshot)
         markers = read_legacy_post_pull_commits(self.config_dir)
+        prefetched_updates = self._prefetch_startup_repo_updates(
+            startup_snapshot, startup_repo_names
+        )
 
         for name in startup_repo_names:
             if name == self._snapshot_config_state().self_repo:
@@ -2860,11 +3197,13 @@ class ServiceRunner:
                         repo_path,
                     )
                     continue
-                has_updates = fetch_repo(
-                    path=repo_path,
-                    branch=runtime.config.branch,
-                    timeout=startup_snapshot.config.git_fetch_timeout,
-                )
+                has_updates = prefetched_updates.get(name)
+                if has_updates is None:
+                    has_updates = fetch_repo(
+                        path=repo_path,
+                        branch=runtime.config.branch,
+                        timeout=startup_snapshot.config.git_fetch_timeout,
+                    )
                 observed_at = datetime.now()
 
                 activated = self._ensure_release_manifest_activation(name)

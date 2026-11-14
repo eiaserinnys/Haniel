@@ -232,7 +232,7 @@ python -m haniel.config.release_activation check --config /path/to/haniel.yaml -
 python -m haniel.config.release_activation apply --config /path/to/haniel.yaml --repo soulstream --expected-sha256 <sha256-from-check>
 ```
 
-The same state machine is used by an approved pull and by Haniel startup updates. Startup does not rerun legacy `post_pull` or start calls for manifest-owned services; the handover starts and verifies those services exactly once, then the remaining services continue in dependency order. The journal under `.haniel/deployments/` records `build`, `preflight`, `backing_up`, `migrating`, `starting`, `verifying`, `recovering`, and the terminal state. A repeated approval of the same successful target commit and release ID is a no-op. Haniel reports success only after every affected service is ready and every post-start verification succeeds. A recovered deployment still reports failure, preserving the distinction between release success and restored availability.
+The same state machine is used by an approved pull and by Haniel startup updates. Startup updates pull every managed repository regardless of `auto_apply` (a restart is a controlled downtime) and fetch those repositories in parallel. Services whose repositories were not updated start first; each updated repository then builds on its own startup lane, and only that lane's services start after its build and deployment. A slow `post_pull` in one lane therefore does not hold up services in other lanes. Startup does not rerun legacy `post_pull` or start calls for manifest-owned services; the handover starts and verifies those services exactly once. The journal under `.haniel/deployments/` records `build`, `preflight`, `backing_up`, `migrating`, `starting`, `verifying`, `recovering`, and the terminal state. A repeated approval of the same successful target commit and release ID is a no-op. Haniel reports success only after every affected service is ready and every post-start verification succeeds. A recovered deployment still reports failure, preserving the distinction between release success and restored availability.
 
 ### Handover wait note
 
@@ -331,8 +331,12 @@ stop/start and readiness ordering, but their unchanged repositories are not rebu
 
 Non-zero exit codes trigger a webhook notification. Service startup continues regardless.
 
-For startup updates, haniel records the commit whose `post_pull` completed in
-`.haniel/legacy_post_pull.json` and flushes the checkout and marker to disk
+For startup updates, haniel fetches every managed repository in parallel but
+keeps pulls, manifest activation, and build records serialized per repository.
+Services of repositories that were not updated start first; each updated
+repository then runs its `post_pull` build on its own lane and only that lane's
+services start afterwards. haniel records the commit whose `post_pull` completed
+in `.haniel/legacy_post_pull.json` and flushes the checkout and marker to disk
 before starting services. On the next start, a checkout whose HEAD differs from
 that record is treated as an interrupted update and rebuilt once (`force`
 strategy discards tracked changes first). If a startup pull's `post_pull` fails,

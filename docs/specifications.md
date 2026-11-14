@@ -51,7 +51,9 @@ At startup:
 - Loads `haniel.yaml` (all sections: `repos`, `services`, `mcp`, `dashboard`, etc.)
 - Starts the MCP server (Streamable HTTP on port 3200 by default)
 - Mounts the web dashboard if `dashboard.enabled` is true (shares the MCP port)
-- Starts services in dependency order
+- Fetches every managed repository in parallel regardless of `auto_apply`
+- Starts services of unchanged repositories first, then builds each updated
+  repository on its own lane and starts only that lane's services
 - Enters the poll loop
 
 At runtime:
@@ -583,15 +585,15 @@ haniel run
   |    Path exists? -> OK
   |    Path missing? -> git clone (recover from missed install)
   |    Clone failed? -> webhook alert, skip dependent services
-  +- Start services sequentially:
-  |    In YAML order:
-  |      enabled == false? -> skip
-  |      has hooks.pre_start? -> run pre_start command
-  |      has after? -> wait for target service's ready condition
-  |      Create process with run command
-  |      Begin stdout/stderr capture
-  |      If ready condition exists, wait for it (timeout = warning, startup continues)
-  |      Webhook: "Service started"
+  +- Fetch every managed repo in parallel (regardless of auto_apply)
+  |    Pull changed repos, activate manifests, and stage config serially per repo
+  +- Start services:
+  |    Services whose repo was not updated (or that have no repo) start first,
+  |      in YAML order, including pre_start / after / ready handling
+  |    Each updated repository forms a lane with its services and manifest
+  |      deployment targets (plus their after dependents):
+  |        run that repo's legacy post_pull, then start only that lane's services
+  |    Lanes run concurrently; a slow build in one lane does not hold the others
   +- Enter poll loop
 ```
 
