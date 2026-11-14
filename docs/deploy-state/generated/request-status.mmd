@@ -1,0 +1,28 @@
+stateDiagram-v2
+    direction TB
+    classDef breaks fill:#ffecee,stroke:#e72e3b
+    classDef notInDesign fill:#fff3e6,stroke:#e8730c
+    state "요청 상태" as status {
+        state join1 <<join>>
+        pending: 처음 대기 (열림)
+        retry: 표시 줄 있는 대기 (열림)
+        success: 성공 (닫힘)
+        deploying: 배포 중 (열림)
+        rejected: 거절 (닫힘)
+        superseded: 새 커밋에 밀림 (닫힘)
+        [*] --> pending: 요청이 들어온다
+        pending --> deploying: 승인해서 시도를 시작한다
+        pending --> rejected: 거절한다
+        pending --> superseded: 더 새 커밋이 들어온다
+        pending --> success: 목표 커밋에 와 있다고 관측한다 [머리 셋이 같음 그리고 도는 시도 없음 그리고 실패한 노드 보고 없음]
+        retry --> deploying: 승인해서 시도를 시작한다
+        retry --> rejected: 거절한다
+        retry --> superseded: 더 새 커밋이 들어온다
+        deploying --> success: 시도가 성공으로 끝난다
+        deploying --> superseded: 시도가 실패로 끝난다 [더 새 커밋이 있음]
+        deploying --> retry: 시도가 실패로 끝난다 [더 새 커밋이 없음]
+        pending --> join1
+        retry --> join1
+        deploying --> join1
+        join1 --> success: 노드가 자기 배포의 성공을 알린다
+    }

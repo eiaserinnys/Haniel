@@ -9,6 +9,9 @@ from typing import Any
 import aiosqlite
 
 from .protocol import DeployPlanProposal, DeployStatus, ManifestRecoveryEvidence
+from .statechart import steps
+from .statechart.columns import LEAF_COLUMNS
+from .statechart.restore import NoTransition
 
 
 def _now_iso() -> str:
@@ -104,14 +107,6 @@ class DeployAttemptStoreSupport:
             )
         return metadata
 
-    async def cleanup_retry(self, deploy_id: str) -> None:
-        await self._db.execute(
-            "DELETE FROM deploy_retry_requirements WHERE deploy_id = ?", (deploy_id,)
-        )
-        await self._db.execute(
-            "DELETE FROM deploy_retry_source_attempts WHERE deploy_id = ?", (deploy_id,)
-        )
-
     async def _insert_attempt(
         self,
         *,
@@ -126,90 +121,63 @@ class DeployAttemptStoreSupport:
         proposal: DeployPlanProposal | None = None,
     ) -> None:
         now = _now_iso()
-        await self._db.execute(
-            """INSERT INTO deploy_attempts
-               (orchestrator_attempt_id, deploy_id, node_id, repo, branch, target_head,
-                source, execution_mode, approved_by, probe_id, connection_generation,
-                proposal_fingerprint, source_orchestrator_attempt_id, journal_attempt_id,
-                manifest_identity, manifest_digest, journal_target_head,
-                journal_completed_at, original_previous_head, commits_json,
-                affected_services_json, diff_stat, detected_at, started_at, deadline_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                orchestrator_attempt_id,
-                event["deploy_id"],
-                event["node_id"],
-                event["repo"],
-                event["branch"],
-                event["target_head"] or event["deploy_id"].rsplit(":", 1)[-1],
-                source,
-                mode,
-                approved_by,
-                probe and probe["probe_id"],
-                connection_generation,
-                proposal and proposal.fingerprint,
-                probe and probe["source_orchestrator_attempt_id"],
-                proposal and proposal.journal_attempt_id,
-                proposal and proposal.manifest_identity,
-                proposal and proposal.manifest_digest,
-                proposal and proposal.journal_target_head,
-                proposal and proposal.journal_completed_at,
-                proposal and proposal.original_previous_head,
-                event["commits_json"],
-                event["affected_services_json"],
-                event["diff_stat"],
-                event["detected_at"],
-                now,
-                deadline_at,
-            ),
+        await steps.create_attempt(
+            self._db,
+            orchestrator_attempt_id=orchestrator_attempt_id,
+            deploy_id=event["deploy_id"],
+            node_id=event["node_id"],
+            repo=event["repo"],
+            branch=event["branch"],
+            target_head=event["target_head"] or event["deploy_id"].rsplit(":", 1)[-1],
+            source=source,
+            execution_mode=mode,
+            approved_by=approved_by,
+            probe_id=probe and probe["probe_id"],
+            connection_generation=connection_generation,
+            proposal_fingerprint=proposal and proposal.fingerprint,
+            source_orchestrator_attempt_id=probe
+            and probe["source_orchestrator_attempt_id"],
+            journal_attempt_id=proposal and proposal.journal_attempt_id,
+            manifest_identity=proposal and proposal.manifest_identity,
+            manifest_digest=proposal and proposal.manifest_digest,
+            journal_target_head=proposal and proposal.journal_target_head,
+            journal_completed_at=proposal and proposal.journal_completed_at,
+            original_previous_head=proposal and proposal.original_previous_head,
+            commits_json=event["commits_json"],
+            affected_services_json=event["affected_services_json"],
+            diff_stat=event["diff_stat"],
+            detected_at=event["detected_at"],
+            started_at=now,
+            deadline_at=deadline_at,
         )
-        updated = await self._db.execute(
-            "UPDATE deploy_events SET status = ?, approved_by = ?, updated_at = ? "
-            "WHERE deploy_id = ? AND status = ?",
-            (
-                DeployStatus.DEPLOYING.value,
-                approved_by,
-                now,
+        try:
+            await steps.step_request(
+                self._db,
                 event["deploy_id"],
-                DeployStatus.PENDING.value,
-            ),
-        )
-        if updated.rowcount != 1:
-            raise RuntimeError("canonical owner changed during begin")
+                "begin_attempt",
+                data={"approved_by": approved_by},
+                now=now,
+            )
+        except NoTransition as exc:
+            raise RuntimeError("canonical owner changed during begin") from exc
 
-    async def _finalize_normal_if_ready(
+    async def _close_request_after_success(
         self, attempt: dict[str, Any]
     ) -> dict[str, Any]:
-        if (
-            attempt["result_status"] == "success"
-            and attempt["settled_local_head"] == attempt["target_head"]
-        ):
-            return await self._success_unlocked(attempt, "success")
-        return {"status": "recorded"}
-
-    async def _success_unlocked(
-        self, attempt: dict[str, Any], outcome: str
-    ) -> dict[str, Any]:
-        now = _now_iso()
-        changed = await self._db.execute(
-            "UPDATE deploy_attempts SET outcome = ?, completed_at = ? "
-            "WHERE orchestrator_attempt_id = ? AND outcome = 'active'",
-            (outcome, now, attempt["orchestrator_attempt_id"]),
-        )
-        if changed.rowcount != 1:
-            return {"status": "ignored"}
-        await self._db.execute(
-            "UPDATE deploy_events SET status = ?, error = NULL, duration_ms = ?, updated_at = ? "
-            "WHERE deploy_id = ? AND status = ?",
-            (
-                DeployStatus.SUCCESS.value,
-                attempt["duration_ms"],
-                now,
+        """시도가 성공으로 끝난 뒤 요청 줄과 계획 묻기를 닫는다(같은 트랜잭션)."""
+        closed = await self._attempt(attempt["orchestrator_attempt_id"])
+        try:
+            await steps.step_request(
+                self._db,
                 attempt["deploy_id"],
-                DeployStatus.DEPLOYING.value,
-            ),
-        )
-        await self.cleanup_retry(attempt["deploy_id"])
+                "attempt_succeeded",
+                data={"duration_ms": closed["duration_ms"]},
+                now=closed["completed_at"],
+            )
+        except NoTransition as exc:
+            # 요청이 배포 중이 아니면(배포 중에 거절된 뒤 시도가 성공하는 경쟁) 지금도 요청 줄 갱신은
+            # 상태 조건에 걸려 0건이다. 거절이 이미 표시 줄과 계보 줄을 지웠으므로 그 뒤 지울 것도 없다
+            exc.warn("attempt_succeeded")
         await self._terminalize_sibling_probes_unlocked(
             attempt["deploy_id"],
             "canonical succeeded before this probe began",
@@ -224,76 +192,61 @@ class DeployAttemptStoreSupport:
         stage: str,
         reason: str,
         error: str,
+        extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         now = _now_iso()
-        changed = await self._db.execute(
-            "UPDATE deploy_attempts SET outcome = 'failed', terminal_kind = ?, "
-            "terminal_stage = ?, terminal_reason = ?, terminal_error = ?, "
-            "completed_at = ? WHERE orchestrator_attempt_id = ? "
-            "AND outcome = 'active'",
-            (kind, stage, reason, error, now, attempt["orchestrator_attempt_id"]),
-        )
-        if changed.rowcount != 1:
+        try:
+            await steps.step_attempt(
+                self._db,
+                attempt["orchestrator_attempt_id"],
+                "fail",
+                data={
+                    "kind": kind,
+                    "stage": stage,
+                    "reason": reason,
+                    "error": error,
+                    "extra": extra,
+                },
+                now=now,
+            )
+        except NoTransition as exc:
+            exc.warn("fail")
             return {"status": "ignored"}
         event = await self._event(attempt["deploy_id"])
         if event is None:
             return {"status": "failed", "deploy_id": attempt["deploy_id"]}
-        if not await self._is_latest(event):
-            await self._db.execute(
-                "UPDATE deploy_events SET status = ?, reject_reason = ?, updated_at = ? "
-                "WHERE deploy_id = ?",
-                (
-                    DeployStatus.REJECTED.value,
-                    "superseded by newer canonical",
-                    now,
-                    attempt["deploy_id"],
-                ),
-            )
-            await self.cleanup_retry(attempt["deploy_id"])
-            await self._terminalize_sibling_probes_unlocked(
-                attempt["deploy_id"],
-                "canonical was superseded before this probe began",
-            )
-            return {"status": "superseded", "deploy_id": attempt["deploy_id"]}
-        await self._db.execute(
-            "UPDATE deploy_events SET status = ?, approved_by = NULL, error = NULL, "
-            "duration_ms = NULL, "
-            "updated_at = ? WHERE deploy_id = ? AND status = ?",
-            (
-                DeployStatus.PENDING.value,
-                now,
-                attempt["deploy_id"],
-                DeployStatus.DEPLOYING.value,
-            ),
-        )
+        newer = not await self._is_latest(event)
         current_retry = await self._retry_unlocked(attempt["deploy_id"])
         stable_source = (
             current_retry["source_orchestrator_attempt_id"]
             if attempt["execution_mode"] == "evidence_recovery" and current_retry
             else attempt["orchestrator_attempt_id"]
         )
-        created_at = current_retry["created_at"] if current_retry else now
-        await self._db.execute(
-            """INSERT INTO deploy_retry_requirements
-               (deploy_id, source_orchestrator_attempt_id,
-                last_failed_orchestrator_attempt_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(deploy_id) DO UPDATE SET
-                 source_orchestrator_attempt_id=excluded.source_orchestrator_attempt_id,
-                 last_failed_orchestrator_attempt_id=excluded.last_failed_orchestrator_attempt_id,
-                 updated_at=excluded.updated_at""",
-            (
+        try:
+            await steps.step_request(
+                self._db,
                 attempt["deploy_id"],
-                stable_source,
-                attempt["orchestrator_attempt_id"],
-                created_at,
-                now,
-            ),
-        )
-        await self._db.execute(
-            "INSERT OR IGNORE INTO deploy_retry_source_attempts VALUES (?, ?, ?)",
-            (attempt["deploy_id"], attempt["orchestrator_attempt_id"], now),
-        )
+                "attempt_failed",
+                facts={"newer": newer},
+                data={
+                    "failed_attempt_id": attempt["orchestrator_attempt_id"],
+                    "stable_source": stable_source,
+                    "marker_created_at": current_retry["created_at"]
+                    if current_retry
+                    else None,
+                },
+                now=now,
+            )
+        except NoTransition as exc:
+            # 요청 줄이 없거나 정의에 잎이 없는 옛 값(approved, failed)일 때만 닿는다. 배포 중이 아닌
+            # 요청은 정의의 전이(어긋남 8)가 지금처럼 처리한다
+            exc.warn("attempt_failed")
+        if newer:
+            await self._terminalize_sibling_probes_unlocked(
+                attempt["deploy_id"],
+                "canonical was superseded before this probe began",
+            )
+            return {"status": "superseded", "deploy_id": attempt["deploy_id"]}
         await self._terminalize_sibling_probes_unlocked(
             attempt["deploy_id"],
             "attempt failed; a new manual retry probe is required",
@@ -513,6 +466,10 @@ class DeployAttemptStoreSupport:
     @staticmethod
     def _rows(cursor: aiosqlite.Cursor, rows: list[tuple]) -> list[dict[str, Any]]:
         return [
-            {column[0]: value for column, value in zip(cursor.description, row)}
+            {
+                column[0]: value
+                for column, value in zip(cursor.description, row)
+                if column[0] not in LEAF_COLUMNS
+            }
             for row in rows
         ]

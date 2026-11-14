@@ -1,4 +1,8 @@
-"""Private unlocked deploy mutations composed by :mod:`event_store`."""
+"""Private unlocked deploy mutations composed by :mod:`event_store`.
+
+요청 줄의 상태를 바꾸는 쓰기는 모두 `statechart.steps.step_request`를 거친다.
+여기서는 어느 줄에 사건을 넣을지 고르고, 계획 묻기 줄(정의 밖 저장)을 닫는다.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +12,8 @@ from typing import Any
 import aiosqlite
 
 from .protocol import DeployStatus
+from .statechart import steps
+from .statechart.columns import LEAF_COLUMNS
 
 
 def _now_iso() -> str:
@@ -15,21 +21,11 @@ def _now_iso() -> str:
 
 
 def _row_to_dict(cursor: aiosqlite.Cursor, row: tuple) -> dict[str, Any]:
-    return {column[0]: value for column, value in zip(cursor.description, row)}
-
-
-async def transition_deploy_status(
-    db: aiosqlite.Connection,
-    deploy_id: str,
-    expected: DeployStatus,
-    target: DeployStatus,
-) -> bool:
-    cursor = await db.execute(
-        "UPDATE deploy_events SET status = ?, updated_at = ? "
-        "WHERE deploy_id = ? AND status = ?",
-        (target.value, _now_iso(), deploy_id, expected.value),
-    )
-    return cursor.rowcount == 1
+    return {
+        column[0]: value
+        for column, value in zip(cursor.description, row)
+        if column[0] not in LEAF_COLUMNS
+    }
 
 
 async def supersede_stale_pending_deploys(
@@ -50,17 +46,14 @@ async def supersede_stale_pending_deploys(
         if kept is None:
             kept_by_group[key] = deploy_id
             continue
-        await db.execute(
-            "UPDATE deploy_events SET status = ?, reject_reason = ?, "
-            "updated_at = ? WHERE deploy_id = ?",
-            (
-                DeployStatus.REJECTED.value,
-                f"superseded by {kept}",
-                now,
-                deploy_id,
-            ),
+        await steps.step_request(
+            db,
+            deploy_id,
+            "newer_commit",
+            data={"reason": f"superseded by {kept}"},
+            now=now,
         )
-        await _cleanup_retry_rows(db, [deploy_id])
+        await _close_probes(db, [deploy_id])
         superseded.append(deploy_id)
     return superseded
 
@@ -96,18 +89,14 @@ async def supersede_pending_for_branch(
         item["affected_services"] = json.loads(item.pop("affected_services_json"))
         item["reject_reason"] = f"superseded by {latest_id}"
         rejected.append(item)
-        await db.execute(
-            "UPDATE deploy_events SET status = ?, reject_reason = ?, updated_at = ? "
-            "WHERE deploy_id = ? AND status = ?",
-            (
-                DeployStatus.REJECTED.value,
-                item["reject_reason"],
-                now,
-                item["deploy_id"],
-                DeployStatus.PENDING.value,
-            ),
+        await steps.step_request(
+            db,
+            item["deploy_id"],
+            "newer_commit",
+            data={"reason": item["reject_reason"]},
+            now=now,
         )
-    await _cleanup_retry_rows(db, [item["deploy_id"] for item in rejected])
+    await _close_probes(db, [item["deploy_id"] for item in rejected])
     return rejected
 
 
@@ -128,33 +117,24 @@ async def reject_pending_deploys_for_nodes(
         item["affected_services"] = json.loads(item.pop("affected_services_json"))
         rejected.append(item)
     if rejected:
-        await db.execute(
-            f"UPDATE deploy_events SET status = ?, reject_reason = ?, "
-            f"updated_at = ? WHERE status = ? AND node_id IN ({placeholders})",
-            (
-                DeployStatus.REJECTED.value,
-                reject_reason,
-                _now_iso(),
-                DeployStatus.PENDING.value,
-                *node_ids,
-            ),
-        )
-        await _cleanup_retry_rows(db, [item["deploy_id"] for item in rejected])
+        now = _now_iso()
+        for item in rejected:
+            await steps.step_request(
+                db,
+                item["deploy_id"],
+                "reject",
+                data={"reason": reject_reason},
+                now=now,
+            )
+        await _close_probes(db, [item["deploy_id"] for item in rejected])
     return rejected
 
 
-async def _cleanup_retry_rows(db: aiosqlite.Connection, deploy_ids: list[str]) -> None:
+async def _close_probes(db: aiosqlite.Connection, deploy_ids: list[str]) -> None:
+    """닫힌 요청의 열린 계획 묻기를 닫는다(계획 묻기 줄은 정의 밖 저장)."""
     if not deploy_ids:
         return
     placeholders = ", ".join("?" for _ in deploy_ids)
-    await db.execute(
-        f"DELETE FROM deploy_retry_requirements WHERE deploy_id IN ({placeholders})",
-        deploy_ids,
-    )
-    await db.execute(
-        f"DELETE FROM deploy_retry_source_attempts WHERE deploy_id IN ({placeholders})",
-        deploy_ids,
-    )
     now = _now_iso()
     await db.execute(
         f"""UPDATE deploy_plan_probes

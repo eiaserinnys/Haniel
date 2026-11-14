@@ -1,0 +1,40 @@
+stateDiagram-v2
+    direction TB
+    classDef breaks fill:#ffecee,stroke:#e72e3b
+    classDef notInDesign fill:#fff3e6,stroke:#e8730c
+    state "요청 상태" as status {
+        state join1 <<join>>
+        state join2 <<join>>
+        pending: 처음 대기 (열림)
+        retry: 표시 줄 있는 대기 (열림)
+        success: 성공 (닫힘)
+        deploying: 배포 중 (열림)
+        rejected: 거절 (닫힘)
+        superseded: 새 커밋에 밀림 (닫힘)
+        pending --> superseded: 시도가 실패로 끝난다 [더 새 커밋이 있음] (어긋남 8)
+        pending --> retry: 시도가 실패로 끝난다 [더 새 커밋이 없음] (어긋남 8)
+        pending --> success: 더 새 관측이 자기 갱신을 닫는다 [자기 갱신 그리고 머리 셋이 같음 그리고 도는 시도 없음] (PR 2에서 바뀜)
+        retry --> superseded: 시도가 실패로 끝난다 [더 새 커밋이 있음] (어긋남 8)
+        retry --> retry: 시도가 실패로 끝난다 [더 새 커밋이 없음] (어긋남 8)
+        retry --> success: 더 새 관측이 자기 갱신을 닫는다 [자기 갱신 그리고 머리 셋이 같음 그리고 도는 시도 없음] (PR 2에서 바뀜)
+        success --> success: 시도가 실패로 끝난다 [더 새 커밋이 없음] (어긋남 8)
+        deploying --> rejected: 거절한다 (어긋남 8)
+        deploying --> retry: 노드가 자기 배포의 실패를 알린다 [표시 줄 있음] (PR 2에서 바뀜)
+        deploying --> pending: 노드가 자기 배포의 실패를 알린다 [표시 줄 없음] (PR 2에서 바뀜)
+        rejected --> rejected: 시도가 실패로 끝난다 [더 새 커밋이 없음] (어긋남 8)
+        rejected --> pending: 보류 시한이 지나 되살린다 [자기 갱신 그리고 보류 시한 지남 그리고 다른 열린 줄 없음] (설계에 없음)
+        superseded --> superseded: 시도가 실패로 끝난다 [더 새 커밋이 없음] (어긋남 8)
+        superseded --> pending: 보류 시한이 지나 되살린다 [자기 갱신 그리고 보류 시한 지남 그리고 다른 열린 줄 없음] (설계에 없음)
+        success --> join1
+        rejected --> join1
+        superseded --> join1
+        join1 --> superseded: 시도가 실패로 끝난다 [더 새 커밋이 있음] (어긋남 8)
+        success --> join2
+        rejected --> join2
+        superseded --> join2
+        join2 --> rejected: 거절한다 (어긋남 8)
+    }
+    class rejected breaks
+    class retry breaks
+    class success breaks
+    class superseded breaks

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import aiosqlite
 
+from .statechart.steps import backfill_leaves
+
 
 ATTEMPT_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS deploy_plan_probes (
@@ -123,12 +125,16 @@ CANONICAL_COLUMNS = {
     "expected_manifest_digest": "TEXT",
     "is_self_update": "INTEGER NOT NULL DEFAULT 0",
     "postponed_until": "TEXT",
+    # 요청 상태의 잎(statechart.definitions.OrchRequest). 정본이고 status는 바깥 칸이다
+    "sm_status": "TEXT",
 }
 
 ATTEMPT_COLUMNS = {
     "expected_budget_sec": "INTEGER",
     "terminal_stage": "TEXT",
     "terminal_reason": "TEXT",
+    # 시도 종결 증거의 잎(statechart.definitions.AttemptEvidence). outcome은 바깥 칸이다
+    "sm_evidence": "TEXT",
 }
 
 
@@ -155,3 +161,5 @@ async def initialize_attempt_schema(db: aiosqlite.Connection) -> None:
         )
     await db.executescript(ATTEMPT_TABLES_SQL)
     await _ensure_columns(db, "deploy_attempts", ATTEMPT_COLUMNS)
+    # 잎이 비었거나 바깥 칸과 어긋난 줄만 옛 칸에서 다시 계산한다
+    await backfill_leaves(db)

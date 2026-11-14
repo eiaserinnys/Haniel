@@ -7,8 +7,14 @@ import textwrap
 
 import aiosqlite
 
+from state_support import (
+    set_legacy_status,
+    to_deploying,
+    to_pending_again,
+    to_success,
+)
 from haniel_orch.event_store import EventStore
-from haniel_orch.protocol import DeployStatus, NodeDeployReport
+from haniel_orch.protocol import NodeDeployReport
 
 
 def node_report(
@@ -334,7 +340,7 @@ class TestSelfUpdateObservedResolution:
         )
         # Force the canonical back to pending so the active-attempt guard is
         # the only thing left that can prevent the close.
-        await store.update_deploy_status(self.DEPLOY_ID, DeployStatus.PENDING)
+        await to_pending_again(store, self.DEPLOY_ID)
 
         resolved = await store.resolve_observed_pending(
             deploy_id="n1:haniel:main:newer",
@@ -397,9 +403,8 @@ class TestMutationBoundary:
         "initialize",
         "create_deploy_event",
         "record_node_deploy_report",
-        "transition_deploy_status",
         "supersede_stale_pending_deploys",
-        "update_deploy_status",
+        "reject_deploy",
         "reject_pending_deploys_for_nodes",
         "upsert_node",
         "update_node_heartbeat",
@@ -589,9 +594,7 @@ class TestGetPendingDeploys:
                 diff_stat=None,
                 detected_at=f"2026-01-0{i + 1}T00:00:00Z",
             )
-        await store.update_deploy_status(
-            "d2", DeployStatus.APPROVED, approved_by="dash"
-        )
+        await set_legacy_status(store, "d2", "approved", approved_by="dash")
 
         pending = await store.get_pending_deploys()
         assert len(pending) == 2
@@ -702,10 +705,8 @@ class TestGetActiveDeploys:
             diff_stat=None,
             detected_at="2026-01-01T00:00:00Z",
         )
-        await store.update_deploy_status("d_deploying", DeployStatus.DEPLOYING)
-        await store.update_deploy_status(
-            "d_rejected", DeployStatus.REJECTED, reject_reason="not ready"
-        )
+        await to_deploying(store, "d_deploying")
+        await store.reject_deploy("d_rejected", "not ready")
 
         active = await store.get_active_deploys()
         ids = {d["deploy_id"] for d in active}
@@ -872,6 +873,8 @@ class TestGetPendingDeploysForBranch:
             diff_stat=None,
             detected_at="2026-01-01T00:00:00Z",
         )
+        # m1이 배포 중이 된 뒤에 m2가 들어와야 m1이 밀리지 않고 배포 중으로 남는다
+        await to_deploying(store, "m1")
         await store.create_deploy_event(
             deploy_id="m2",
             node_id="n1",
@@ -882,7 +885,6 @@ class TestGetPendingDeploysForBranch:
             diff_stat=None,
             detected_at="2026-01-01T00:00:00Z",
         )
-        await store.update_deploy_status("m1", DeployStatus.DEPLOYING)
 
         result = await store.get_pending_deploys_for_branch("n1", "r", "main")
         assert {d["deploy_id"] for d in result} == {"m2"}
@@ -980,17 +982,9 @@ class TestGetDeployHistory:
                 detected_at="2026-01-01T00:00:00Z",
             )
         # d_old: auto-superseded by d_new
-        await store.update_deploy_status(
-            "d_old",
-            DeployStatus.REJECTED,
-            reject_reason="superseded by d_new",
-        )
+        await store.reject_deploy("d_old", "superseded by d_new")
         # d_manual: rejected by operator (non-supersede)
-        await store.update_deploy_status(
-            "d_manual",
-            DeployStatus.REJECTED,
-            reject_reason="not ready yet",
-        )
+        await store.reject_deploy("d_manual", "not ready yet")
 
         history = await store.get_deploy_history()
         ids = {d["deploy_id"] for d in history}
@@ -1012,11 +1006,7 @@ class TestGetDeployHistory:
                 diff_stat=None,
                 detected_at="2026-01-01T00:00:00Z",
             )
-        await store.update_deploy_status(
-            "d_old",
-            DeployStatus.REJECTED,
-            reject_reason="superseded by d_new",
-        )
+        await store.reject_deploy("d_old", "superseded by d_new")
 
         history = await store.get_deploy_history(include_superseded=True)
         ids = {d["deploy_id"] for d in history}
@@ -1036,20 +1026,18 @@ class TestGetDeployHistory:
             diff_stat=None,
             detected_at="2026-01-01T00:00:00Z",
         )
-        await store.update_deploy_status(
-            "d_man",
-            DeployStatus.REJECTED,
-            reject_reason="rolled back during incident",
-        )
+        await store.reject_deploy("d_man", "rolled back during incident")
 
         history = await store.get_deploy_history()
         assert any(d["deploy_id"] == "d_man" for d in history)
 
 
-class TestUpdateDeployStatus:
-    async def test_update_to_approved(self, store: EventStore):
+class TestRejectDeploy:
+    """`reject_deploy`는 지운 일반 쓰기 API 가운데 src가 쓰던 거절만 한 걸음(reject)으로 옮긴 것이다."""
+
+    async def _seed(self, store: EventStore, deploy_id: str) -> None:
         await store.create_deploy_event(
-            deploy_id="upd1",
+            deploy_id=deploy_id,
             node_id="n1",
             repo="r",
             branch="main",
@@ -1059,90 +1047,66 @@ class TestUpdateDeployStatus:
             detected_at="2026-01-01T00:00:00Z",
         )
 
-        await store.update_deploy_status(
-            "upd1", DeployStatus.APPROVED, approved_by="dashboard"
-        )
+    async def test_reject_with_reason(self, store: EventStore):
+        await self._seed(store, "rej1")
 
-        event = await store.get_deploy_event("upd1")
-        assert event["status"] == "approved"
-        assert event["approved_by"] == "dashboard"
-
-    async def test_update_to_rejected_with_reason(self, store: EventStore):
-        await store.create_deploy_event(
-            deploy_id="rej1",
-            node_id="n1",
-            repo="r",
-            branch="main",
-            commits=["h msg"],
-            affected_services=[],
-            diff_stat=None,
-            detected_at="2026-01-01T00:00:00Z",
-        )
-
-        await store.update_deploy_status(
-            "rej1", DeployStatus.REJECTED, reject_reason="not ready yet"
-        )
+        assert await store.reject_deploy("rej1", "not ready yet") is True
 
         event = await store.get_deploy_event("rej1")
         assert event["status"] == "rejected"
         assert event["reject_reason"] == "not ready yet"
 
-    async def test_update_to_failed_with_error(self, store: EventStore):
-        await store.create_deploy_event(
-            deploy_id="fail1",
-            node_id="n1",
-            repo="r",
-            branch="main",
-            commits=["h msg"],
-            affected_services=[],
-            diff_stat=None,
-            detected_at="2026-01-01T00:00:00Z",
-        )
+    async def test_reject_unknown_row_is_silent_like_the_old_update(
+        self, store: EventStore
+    ):
+        assert await store.reject_deploy("nope", "x") is False
 
-        await store.update_deploy_status(
-            "fail1", DeployStatus.FAILED, error="exit code 1", duration_ms=3400
-        )
+    async def test_reject_is_still_unconditional_from_every_state(
+        self, store: EventStore
+    ):
+        """어긋남 8: 조건 없는 거절을 지금 동작 그대로 옮겼다(PR 2에서 바뀜)."""
+        await self._seed(store, "dep")
+        await to_deploying(store, "dep")
+        await self._seed(store, "suc")
+        await to_success(store, "suc", 8200)
 
-        event = await store.get_deploy_event("fail1")
-        assert event["status"] == "failed"
-        assert event["error"] == "exit code 1"
-        assert event["duration_ms"] == 3400
+        assert await store.reject_deploy("dep", "late") is True
+        assert await store.reject_deploy("suc", "late") is True
 
-    async def test_update_to_success_with_duration(self, store: EventStore):
-        await store.create_deploy_event(
-            deploy_id="suc1",
-            node_id="n1",
-            repo="r",
-            branch="main",
-            commits=["h msg"],
-            affected_services=[],
-            diff_stat=None,
-            detected_at="2026-01-01T00:00:00Z",
-        )
+        assert (await store.get_deploy_event("dep"))["status"] == "rejected"
+        assert (await store.get_deploy_event("suc"))["status"] == "rejected"
 
-        await store.update_deploy_status("suc1", DeployStatus.SUCCESS, duration_ms=8200)
+    async def test_success_keeps_the_reported_duration(self, store: EventStore):
+        await self._seed(store, "suc1")
+
+        await to_success(store, "suc1", 8200)
 
         event = await store.get_deploy_event("suc1")
         assert event["status"] == "success"
         assert event["duration_ms"] == 8200
 
     async def test_updated_at_changes(self, store: EventStore):
-        await store.create_deploy_event(
-            deploy_id="ts1",
-            node_id="n1",
-            repo="r",
-            branch="main",
-            commits=["h msg"],
-            affected_services=[],
-            diff_stat=None,
-            detected_at="2026-01-01T00:00:00Z",
-        )
+        await self._seed(store, "ts1")
 
         event_before = await store.get_deploy_event("ts1")
-        await store.update_deploy_status("ts1", DeployStatus.DEPLOYING)
+        await to_deploying(store, "ts1")
         event_after = await store.get_deploy_event("ts1")
 
         assert event_after["updated_at"] >= event_before["updated_at"]
+        assert event_after["status"] == "deploying"
+
+    async def test_legacy_values_without_a_leaf_are_not_moved_by_events(
+        self, store: EventStore
+    ):
+        """옛 DB의 approved와 failed에는 잎이 없다. 사건은 전이 없음으로 거절된다."""
+        await self._seed(store, "legacy1")
+        await set_legacy_status(store, "legacy1", "approved", approved_by="dashboard")
+        await set_legacy_status(store, "legacy1", "failed", error="exit code 1")
+
+        event = await store.get_deploy_event("legacy1")
+        assert (event["status"], event["error"]) == ("failed", "exit code 1")
+        assert await store.reject_deploy("legacy1", "x") is False
+        assert (await store.get_deploy_event("legacy1"))["status"] == "failed"
 
 
 class TestGetDeployingEventsForNode:
@@ -1180,8 +1144,8 @@ class TestGetDeployingEventsForNode:
         )
 
         # Set dep1 to deploying, dep2 to pending, dep3 to deploying (different node)
-        await store.update_deploy_status("dep1", DeployStatus.DEPLOYING)
-        await store.update_deploy_status("dep3", DeployStatus.DEPLOYING)
+        await to_deploying(store, "dep1")
+        await to_deploying(store, "dep3")
 
         deploying = await store.get_deploying_events_for_node("n1")
         assert len(deploying) == 1

@@ -20,7 +20,6 @@ from haniel_orch.protocol import (
     DeployProgress,
     DeployReportAck,
     DeployResult,
-    DeployStatus,
     NodeHello,
     NodeDeployReport,
     NodeStatus,
@@ -746,9 +745,7 @@ class TestPostponedSelfUpdateRevival:
             target_head="abc1234",
             is_self_update=True,
         )
-        await store.update_deploy_status(
-            self.DEPLOY_ID, DeployStatus.REJECTED, reject_reason="postponed"
-        )
+        await store.reject_deploy(self.DEPLOY_ID, "postponed")
         if postponed_until is not None:
             await store.set_deploy_postponed_until(self.DEPLOY_ID, postponed_until)
 

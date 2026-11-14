@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from .statechart import steps
+
 
 class DeployAttemptProgressStore:
     """Mixin that renews and expires attempt leases under the store lock."""
@@ -28,11 +30,8 @@ class DeployAttemptProgressStore:
                 declared_budget_sec = attempt["expected_budget_sec"]
                 if declared_budget_sec is None:
                     declared_budget_sec = expected_budget_sec
-                await self._db.execute(
-                    "UPDATE deploy_attempts SET deadline_at = ?, "
-                    "expected_budget_sec = ? "
-                    "WHERE orchestrator_attempt_id = ? AND outcome = 'active'",
-                    (deadline_at, declared_budget_sec, orchestrator_attempt_id),
+                await steps.renew_deadline(
+                    self._db, orchestrator_attempt_id, deadline_at, declared_budget_sec
                 )
                 await self._db.commit()
                 return {
