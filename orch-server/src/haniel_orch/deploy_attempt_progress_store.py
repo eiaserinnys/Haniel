@@ -23,9 +23,12 @@ class DeployAttemptProgressStore:
         node_id: str,
         expected_budget_sec: int | None,
         deadline_at: str,
+        now: str,
     ) -> dict[str, Any]:
         """진행 알림을 적는다. 글의 시도가 그 요청의 도는 시도이고 노드가 같을 때만 임대를 늘린다(세대는 보지 않는다).
 
+        `now`는 이 알림이 실행 시작 시각(`execution_started_at`)을 처음 적을 때 쓰는 시각이다. 호출부가 `deadline_at`의
+        상한을 같은 시각에서 재므로 한 값을 넘겨 받는다.
         닫힌 시도에 온 알림은 실행 시작 사실만 적는다(임대를 늘리거나 시도를 되살리지 않는다).
         """
         async with self._mutation_lock:
@@ -38,7 +41,7 @@ class DeployAttemptProgressStore:
                 ):
                     return {"status": "ignored"}
                 await attempt_steps.mark_execution_started(
-                    self._db, orchestrator_attempt_id, _now_iso()
+                    self._db, orchestrator_attempt_id, now
                 )
                 if attempt["outcome"] != "active":
                     await self._db.commit()

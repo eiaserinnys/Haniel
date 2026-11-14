@@ -49,17 +49,18 @@ class DeployAttemptProgress:
             or not isinstance(connection, ActiveConnection)
         ):
             return
-        # 실행 상한은 실제 실행 시작 시각에서 잰다(어긋남 6). 아직 없으면 지금처럼 승인 시각에서 잰다
-        base = datetime.fromisoformat(attempt["execution_started_at"] or attempt["started_at"])
+        # 실행 상한은 실제 실행 시작 시각에서 잰다(어긋남 6). 이 알림이 그 시각을 처음 적는 걸음이면
+        # 방금 적는 시각(now)에서 잰다. 적기 전 값으로 승인 시각(started_at)을 쓰지 않는다
+        now = datetime.now(timezone.utc)
+        started = attempt["execution_started_at"]
+        base = datetime.fromisoformat(started) if started else now
         hard_deadline = base + timedelta(
             seconds=attempt_hard_budget_seconds(
                 self._attempt_timeout_sec,
                 attempt["expected_budget_sec"] or progress.expected_budget_sec,
             )
         )
-        idle_deadline = datetime.now(timezone.utc) + timedelta(
-            seconds=self._attempt_timeout_sec
-        )
+        idle_deadline = now + timedelta(seconds=self._attempt_timeout_sec)
         deadline_at = min(idle_deadline, hard_deadline).isoformat()
         result = await self.attempts.record_progress(
             deploy_id=progress.deploy_id,
@@ -67,6 +68,7 @@ class DeployAttemptProgress:
             node_id=progress.node_id,
             expected_budget_sec=progress.expected_budget_sec,
             deadline_at=deadline_at,
+            now=now.isoformat(),
         )
         if result.get("status") == "renewed":
             self._schedule_attempt(

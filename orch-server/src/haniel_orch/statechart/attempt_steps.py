@@ -248,7 +248,7 @@ async def close_attempt(
 async def mark_execution_started(
     db: aiosqlite.Connection, orchestrator_attempt_id: str, now: str
 ) -> None:
-    """실제 실행이 시작됐다는 첫 증거(진행 알림, 결과, 정착)의 시각을 처음 한 번만 적는다. 닫힌 시도에도 사실만 적는다."""
+    """실제 실행이 시작됐다는 첫 증거(진행 알림, 결과, 실행 방식의 정착)의 시각을 처음 한 번만 적는다. 닫힌 시도에도 사실만 적는다."""
     await db.execute(
         "UPDATE deploy_attempts SET execution_started_at = ? "
         "WHERE orchestrator_attempt_id = ? AND execution_started_at IS NULL",

@@ -137,10 +137,6 @@ class DeployAttemptReportStore:
                 )
                 if attempt is None:
                     return {"status": "ignored"}
-                # 정착도 실제 실행의 증거다. 닫힌 시도에도 사실만 적는다
-                await attempt_steps.mark_execution_started(
-                    self._db, orchestrator_attempt_id, _now_iso()
-                )
                 settled_data = {"local_head": local_head, "remote_head": remote_head}
                 mismatch_error = (
                     "settled HEAD mismatch: "
@@ -152,10 +148,17 @@ class DeployAttemptReportStore:
                     "settled_at": _now_iso(),
                 }
                 if attempt["execution_mode"] != "execute":
+                    # 증거 회수 방식 시도의 정착은 실행 시작으로 적지 않는다(design.md 68)
                     result = await self._record_evidence_unlocked(
                         attempt, "settled_noted", data=settled_data
                     )
-                elif local_head != attempt["target_head"] and attempt["outcome"] == "active":
+                    await self._db.commit()
+                    return result
+                # 실행 방식의 정착은 실제 실행의 증거다. 닫힌 시도에도 사실만 적는다
+                await attempt_steps.mark_execution_started(
+                    self._db, orchestrator_attempt_id, _now_iso()
+                )
+                if local_head != attempt["target_head"] and attempt["outcome"] == "active":
                     result = await self._fail_attempt_unlocked(
                         attempt=attempt,
                         kind="settled_head_mismatch",

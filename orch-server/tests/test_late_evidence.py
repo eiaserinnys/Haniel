@@ -623,6 +623,7 @@ async def test_progress_for_a_closed_attempt_only_notes_the_execution_start(stor
         node_id="n",
         expected_budget_sec=None,
         deadline_at=future_deadline(),
+        now=iso(datetime.now(timezone.utc)),
     )
 
     after = await store.attempts.get_attempt("a1")
@@ -637,8 +638,9 @@ async def test_progress_for_a_closed_attempt_only_notes_the_execution_start(stor
 async def test_repro_hard_deadline_is_measured_from_execution_started_at(store: EventStore):
     """승인 뒤 200초가 지나 첫 알림이 왔다(옛 노드는 앞 배포 동안 승인을 읽지 못한다). 상한은 4분이다(시험 하니스 60초 × 4).
 
-    첫 알림은 실행 시작 시각이 없어 지금처럼 started_at에서 재고(상한 = 승인 + 240초), 둘째 알림부터는
-    execution_started_at에서 재므로 상한이 멀어져 늘 60초 임대가 그대로 들어간다.
+    첫 알림이 execution_started_at을 적는 그 걸음의 상한도 방금 적은 시각에서 잰다(기준본 3항). 그래서 첫 임대부터
+    60초가 그대로 들어가고(승인 시각에서 재면 지금 + 40초로 짧아진다), 둘째 알림도 같은 시작 시각에서 잰다.
+    바꾸기 전 코드(승인 시각 기준)에서는 첫 임대가 지금 + 40초 안쪽으로 떨어져 실패한다.
     """
     await seed(store)
     harness = Harness(store)
@@ -648,13 +650,53 @@ async def test_repro_hard_deadline_is_measured_from_execution_started_at(store: 
         await raw(store, "UPDATE deploy_attempts SET started_at = ? WHERE orchestrator_attempt_id = 'a1'", iso(now - timedelta(seconds=200)))
 
         await harness.coordinator.handle_progress(progress())
-        first = datetime.fromisoformat((await store.attempts.get_attempt("a1"))["deadline_at"])
+        row = await store.attempts.get_attempt("a1")
+        first = datetime.fromisoformat(row["deadline_at"])
+        started = datetime.fromisoformat(row["execution_started_at"])
         await harness.coordinator.handle_progress(progress())
         second = datetime.fromisoformat((await store.attempts.get_attempt("a1"))["deadline_at"])
 
-        assert first <= now + timedelta(seconds=41)  # 승인 + 240초 = 지금 + 40초
-        assert second >= now + timedelta(seconds=59)  # 실행 시작 + 240초가 멀어 60초 임대가 그대로
-        assert (await store.attempts.get_attempt("a1"))["execution_started_at"] is not None
+        assert now <= started <= now + timedelta(seconds=5)  # 승인 시각이 아니라 첫 알림의 시각
+        assert first >= now + timedelta(seconds=59)  # 첫 임대부터 60초 그대로(실행 시작 + 240초가 멀다)
+        assert second >= now + timedelta(seconds=59)
+        assert (await store.attempts.get_attempt("a1"))["execution_started_at"] == row["execution_started_at"]
+    finally:
+        await harness.close()
+
+
+async def test_a_long_wait_before_the_first_progress_does_not_shorten_the_first_lease(store: EventStore):
+    """승인 뒤 상한(240초)보다 오래 기다린 뒤 첫 알림이 와도 첫 임대는 60초다. 승인 시각에서 재면 상한이 이미 지나
+    임대가 과거로 떨어진다."""
+    await seed(store)
+    harness = Harness(store)
+    try:
+        await begin(store, generation=harness.generation)
+        now = datetime.now(timezone.utc)
+        await raw(store, "UPDATE deploy_attempts SET started_at = ? WHERE orchestrator_attempt_id = 'a1'", iso(now - timedelta(seconds=600)))
+
+        await harness.coordinator.handle_progress(progress())
+
+        row = await store.attempts.get_attempt("a1")
+        assert datetime.fromisoformat(row["deadline_at"]) >= now + timedelta(seconds=59)
+        assert datetime.fromisoformat(row["execution_started_at"]) >= now
+    finally:
+        await harness.close()
+
+
+async def test_the_hard_deadline_still_caps_later_leases_from_the_execution_start(store: EventStore):
+    """실행 시작에서 230초가 지난 뒤의 알림은 상한(실행 시작 + 240초)에 걸려 임대가 10초 안쪽으로 잡힌다."""
+    await seed(store)
+    harness = Harness(store)
+    try:
+        await begin(store, generation=harness.generation)
+        now = datetime.now(timezone.utc)
+        await harness.coordinator.handle_progress(progress())
+        await raw(store, "UPDATE deploy_attempts SET execution_started_at = ? WHERE orchestrator_attempt_id = 'a1'", iso(now - timedelta(seconds=230)))
+
+        await harness.coordinator.handle_progress(progress())
+
+        deadline = datetime.fromisoformat((await store.attempts.get_attempt("a1"))["deadline_at"])
+        assert deadline <= now + timedelta(seconds=11)
     finally:
         await harness.close()
 
@@ -686,7 +728,7 @@ async def _send(store: EventStore, kind: str, deploy_id: str, attempt_id: str):
     attempts = store.attempts
     if kind == "progress":
         return await attempts.record_progress(
-            deploy_id=deploy_id, orchestrator_attempt_id=attempt_id, node_id="n", expected_budget_sec=None, deadline_at=future_deadline()
+            deploy_id=deploy_id, orchestrator_attempt_id=attempt_id, node_id="n", expected_budget_sec=None, deadline_at=future_deadline(), now=iso(datetime.now(timezone.utc))
         )
     if kind == "result":
         return await attempts.record_result(
@@ -697,6 +739,11 @@ async def _send(store: EventStore, kind: str, deploy_id: str, attempt_id: str):
             deploy_id=deploy_id, orchestrator_attempt_id=attempt_id, connection_generation="g1", status="failed", error="e", duration_ms=1
         )
     if kind == "settled":
+        return await attempts.record_settled(
+            deploy_id=deploy_id, orchestrator_attempt_id=attempt_id, connection_generation="g1", local_head="target", remote_head="target"
+        )
+    if kind == "recovery_settled":
+        await raw(store, "UPDATE deploy_attempts SET execution_mode = 'evidence_recovery' WHERE orchestrator_attempt_id = ?", attempt_id)
         return await attempts.record_settled(
             deploy_id=deploy_id, orchestrator_attempt_id=attempt_id, connection_generation="g1", local_head="target", remote_head="target"
         )
@@ -747,6 +794,7 @@ async def _send(store: EventStore, kind: str, deploy_id: str, attempt_id: str):
         ("result", True),
         ("failed_result", True),
         ("settled", True),
+        ("recovery_settled", False),
         ("terminal", False),
         ("recovery_evidence", False),
         ("deadline", False),
@@ -754,12 +802,16 @@ async def _send(store: EventStore, kind: str, deploy_id: str, attempt_id: str):
     ],
 )
 async def test_execution_started_at_is_written_only_by_execution_evidence(store: EventStore, kind, written):
+    """적는 글은 진행 알림, 결과, 실행 방식의 정착이다. 증거 회수 방식 시도에 온 정착(design.md 68), terminal, 증거 회수 보고,
+    임대 마감, 보내기 실패는 적지 않는다."""
     deploy_id = f"n:{kind}:main:target"
     await _fresh_attempt(store, deploy_id, kind)
 
-    await _send(store, kind, deploy_id, kind)
+    result = await _send(store, kind, deploy_id, kind)
 
     assert ((await attempt_row(store, kind))[3] is not None) is written, kind
+    if kind == "recovery_settled":
+        assert result["status"] == "recorded" and (await attempt_row(store, kind))[1] == "ev_settled"  # 증거는 적혔다
 
 
 async def test_execution_started_at_is_written_once(store: EventStore):
