@@ -1,0 +1,32 @@
+stateDiagram-v2
+    direction TB
+    classDef breaks fill:#ffecee,stroke:#e72e3b
+    classDef notInDesign fill:#fff3e6,stroke:#e8730c
+    state "실행" as exec_ {
+        arrived: 허가 도착
+        asking: 자동 허가를 기다림
+        queued: 줄 서 있음
+        running: 실행 중
+        ok: 성공 (끝남)
+        failed: 실패 (끝남)
+        declined: 실행하지 않음 (끝남)
+        [*] --> arrived: 노드 시도가 들어온다
+        arrived --> asking: 자동 허가를 청한다
+        arrived --> declined: 허가가 온다 [가드나 승인 재검증이 거절함]
+        arrived --> running: 허가가 온다 [실행 자리가 남]
+        arrived --> queued: 허가가 온다
+        arrived --> running: 스스로 실행한다
+        asking --> declined: 허가 기다리기를 포기한다
+        asking --> declined: 허가가 온다 [가드나 승인 재검증이 거절함]
+        asking --> running: 허가가 온다 [실행 자리가 남]
+        asking --> queued: 허가가 온다
+        queued --> queued: 허가가 온다
+        queued --> declined: 순서기가 자리를 준다 [가드나 승인 재검증이 거절함]
+        queued --> running: 순서기가 자리를 준다 [가드와 승인 재검증 통과]
+        running --> running: 허가가 온다
+        running --> ok: 성공으로 끝난다
+        running --> failed: 실패로 끝난다
+        ok --> ok: 허가가 온다
+        failed --> failed: 허가가 온다
+        declined --> declined: 허가가 온다
+    }

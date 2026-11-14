@@ -4,12 +4,18 @@
 바꾸는 길은 모두 코드의 상태 정의를 거친다(카드 #1259 PR 1이 지금 동작 그대로 옮겼고, PR 2a가 「점검 필요」 영역을,
 PR 2b-1이 닫힌 시도의 늦은 글 규칙과 「닫힌 뒤 적용」 꼬리표 영역을, PR 2b-2가 「지금 시도에 대한 믿음」 영역과 다시 대기(again),
 닫힘 일곱, hello 대조, 믿음별 마감, 할 일 기호를 더했다).
-정본은 `orch-server/src/haniel_orch/statechart/definitions.py`의 정의 둘이고, 여기 그림과 표는 거기서 뽑는다.
+오케스트레이터 정본은 `orch-server/src/haniel_orch/statechart/definitions.py`, 노드 실행 정본은
+`src/haniel/core/node_run.py`이며 여기 그림과 표는 그 정의에서 뽑는다.
+
+노드 정의는 제품의 실행 경계를 반영한다. 순서기가 자리를 줄 때 재검증을 통과하면 시작하고,
+가드나 재검증에 실패하면 실행하지 않음으로 닫는다. 자체 배포의 시작도 기존 시작 보고를 보존하도록
+시작 기호를 낸다.
 
 | 정의 | 단위 | 잎 칸 | 바깥 칸 |
 |---|---|---|---|
 | `OrchRequest` | 배포 요청 한 건. 영역 넷: 요청 상태, 지금 시도에 대한 믿음, 점검 필요, 닫힌 뒤 적용 꼬리표 | `deploy_events.sm_status`(요청 상태), `deploy_events.sm_belief`(믿음), `deploy_events.sm_lock`(점검 필요), `deploy_events.sm_tag`(꼬리표) | `status`, `reject_reason`, 표시 줄(점검 필요의 바깥 칸은 `inspection_required`)과 계보 줄, 꼬리표의 `applied_after_close_at`과 `applied_after_close_attempt_id`. 믿음의 바깥 칸은 시도 줄의 마감 종류(`deadline_kind`)다 |
 | `AttemptEvidence` | 시도 한 건의 종결 증거 | `deploy_attempts.sm_evidence` | `result_status`, `settled_*`. 시도의 닫힘(`outcome`, `terminal_*`, `closure`, `completed_at`)은 증거와 따로 움직이는 닫힘 칸이다 |
+| `NodeRun` | 노드 실행 한 건의 실행과 보고 영역 | 실행 중 잎은 메모리, 빚진 종결 묶음은 보낼 것 파일 | 보낼 것 파일의 글과 시도 번호 |
 
 요청 상태의 대기는 셋이다: 처음 대기(표시 줄 없음), 다시 대기(표시 줄 있고 점검 필요 꺼짐, `again`), 실패 뒤 대기(표시 줄 있고 점검
 필요 켜짐, `retry`). 바깥 `status`는 셋 모두 `pending`이다. 판 1 노드(wire-v1을 아는 노드, hello의 `deploy_protocol`)의 시도만 다시
@@ -58,6 +64,9 @@ PR 2b-1이 닫힌 시도의 늦은 글 규칙과 「닫힌 뒤 적용」 꼬리�
 | [request-tag](generated/request-tag.svg) | 닫힌 뒤 적용 꼬리표 영역. 거절이나 밀림으로 닫힌 요청에 성공 증거가 닿으면 서고, 내리지 않는다 |
 | [attempt-evidence](generated/attempt-evidence.svg) | 시도 종결 증거 가운데 자리를 옮기는 전이. 오케스트레이터가 스스로 내는 닫힘은 증거 잎을 옮기지 않으므로 여기 없다 |
 | [attempt-evidence-dup](generated/attempt-evidence-dup.svg) | 시도 종결 증거 가운데 이미 종결된 뒤 같은 글이 또 오는 제자리 전이(dup. 같은 답을 다시 보낸다) |
+| [node-execution](generated/node-execution.svg) | 노드의 허가, 순서기, 실행과 종료 |
+| [node-execution-link](generated/node-execution-link.svg) | 노드의 연결과 재연결에 따른 실행 상태 |
+| [node-report](generated/node-report.svg) | 노드의 종결 묶음과 확인 응답 |
 | [transitions.md](generated/transitions.md) | 두 정의의 전이 표(함께 쓰는 것, 설계와 다른 점) |
 
 범례(색은 그 그림에 그린 화살표와 이름으로 적어 둔 잎만으로 정한다):

@@ -1,0 +1,21 @@
+stateDiagram-v2
+    direction TB
+    classDef breaks fill:#ffecee,stroke:#e72e3b
+    classDef notInDesign fill:#fff3e6,stroke:#e8730c
+    state "실행" as exec_ {
+        arrived: 허가 도착
+        asking: 자동 허가를 기다림
+        queued: 줄 서 있음
+        running: 실행 중
+        ok: 성공 (끝남)
+        failed: 실패 (끝남)
+        declined: 실행하지 않음 (끝남)
+        [*] --> arrived: 노드 시도가 들어온다
+        asking --> declined: 연결이 끊긴다
+        queued --> queued: 연결이 붙는다
+        queued --> queued: 연결이 끊긴다
+        running --> running: 연결이 붙는다
+        running --> running: 연결이 끊긴다
+        ok --> ok: 연결이 끊긴다
+        failed --> failed: 연결이 끊긴다
+    }

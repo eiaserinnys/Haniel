@@ -26,6 +26,12 @@ class ApprovalRevalidationError(RuntimeError):
     """Node-local evidence changed after the server fixed the execution mode."""
 
 
+class AdmissionRefused(ApprovalRevalidationError):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 def parse_deploy_id(deploy_id: str) -> tuple[str, str, str, str] | None:
     """Parse the four-part canonical node deploy ID."""
     if not isinstance(deploy_id, str) or not deploy_id:
@@ -162,7 +168,9 @@ class DeployReporter:
         for message in messages:
             await self._send_json(message)
 
-    async def handle_approval(self, msg: dict) -> None:
+    async def handle_approval(
+        self, msg: dict, *, before_start=None, on_prestart_failure=None
+    ) -> None:
         deploy_id = msg.get("deploy_id", "")
         orchestrator_attempt_id = msg.get("orchestrator_attempt_id", "")
         connection_generation = msg.get("connection_generation", "")
@@ -229,32 +237,92 @@ class DeployReporter:
             expected_budget_sec=expected_budget_sec,
             interval_sec=self._progress_interval_sec,
         )
-        emitter.start()
+        did_start = False
+
+        def start_execution(stage="preparing"):
+            nonlocal did_start
+            if not did_start:
+                if before_start is not None:
+                    reason = before_start()
+                    if reason:
+                        raise AdmissionRefused(reason)
+                did_start = True
+                if msg.get("execution_mode") != "evidence_recovery":
+                    emitter.start()
+            if (
+                stage != "preparing"
+                and msg.get("execution_mode") != "evidence_recovery"
+            ):
+                emitter.transition(stage)
+
+        if before_start is None and msg.get("execution_mode") != "evidence_recovery":
+            emitter.start()
+            did_start = True
         try:
             try:
                 result = await asyncio.to_thread(
-                    self._approval_handler, msg, emitter.transition
+                    self._approval_handler,
+                    msg,
+                    start_execution if before_start is not None else emitter.transition,
                 )
-            except ApprovalRevalidationError as exc:
-                await self._deliver(
-                    [
-                        {
-                            "type": "deploy_attempt_terminal",
-                            "kind": "approval_revalidation_failed",
-                            "deploy_id": deploy_id,
-                            "orchestrator_attempt_id": orchestrator_attempt_id,
-                            "connection_generation": connection_generation,
-                            "stage": "approval_revalidation",
-                            "reason": "approval_revalidation_failed",
-                            "error": str(exc),
-                        }
-                    ]
-                )
-                return
+                if before_start is not None and not did_start:
+                    start_execution()
             except Exception as exc:
-                operation_error = str(exc)
-                logger.warning("Deploy %s failed: %s", deploy_id, exc)
-                result = None
+                if before_start is not None and not did_start:
+                    reason = (
+                        exc.reason
+                        if isinstance(exc, AdmissionRefused)
+                        else "approval_revalidation_failed"
+                    )
+                    if on_prestart_failure is not None:
+                        on_prestart_failure(reason)
+                    kind = (
+                        "approval_revalidation_failed"
+                        if reason == "approval_revalidation_failed"
+                        else "not_executed"
+                    )
+                    stage = (
+                        "approval_revalidation"
+                        if kind == "approval_revalidation_failed"
+                        else "admission"
+                    )
+                    await self._deliver(
+                        [
+                            {
+                                "type": "deploy_attempt_terminal",
+                                "kind": kind,
+                                "stage": stage,
+                                "reason": reason,
+                                "deploy_id": deploy_id,
+                                "orchestrator_attempt_id": orchestrator_attempt_id,
+                                "connection_generation": connection_generation,
+                                "error": str(exc),
+                            }
+                        ]
+                    )
+                    return
+                if isinstance(exc, ApprovalRevalidationError) and (
+                    before_start is None or not did_start
+                ):
+                    await self._deliver(
+                        [
+                            {
+                                "type": "deploy_attempt_terminal",
+                                "kind": "approval_revalidation_failed",
+                                "deploy_id": deploy_id,
+                                "orchestrator_attempt_id": orchestrator_attempt_id,
+                                "connection_generation": connection_generation,
+                                "stage": "approval_revalidation",
+                                "reason": "approval_revalidation_failed",
+                                "error": str(exc),
+                            }
+                        ]
+                    )
+                    return
+                else:
+                    operation_error = str(exc)
+                    result = None
+                    logger.warning("Deploy %s failed: %s", deploy_id, exc)
         finally:
             emitter.stop()
             await asyncio.sleep(0)

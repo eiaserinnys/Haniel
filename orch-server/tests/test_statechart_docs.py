@@ -10,6 +10,11 @@ def _views_by_stem() -> dict[str, docs.View]:
     return {view.stem: view for view in docs.VIEWS}
 
 
+def test_node_definition_is_included():
+    assert any(cls.__name__ == "NodeRun" for cls in docs.DEFINITIONS)
+    assert {"node-execution.mmd", "node-report.mmd"} <= docs.outputs().keys()
+
+
 def test_committed_generated_files_match_the_definitions():
     assert docs.check(docs.default_out_dir()) == []
     assert docs.main(["--check"]) == 0

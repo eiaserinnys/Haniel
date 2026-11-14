@@ -1,0 +1,16 @@
+stateDiagram-v2
+    direction TB
+    classDef breaks fill:#ffecee,stroke:#e72e3b
+    classDef notInDesign fill:#fff3e6,stroke:#e8730c
+    state "보고" as report {
+        r_none: 빚 없음
+        r_owed: 묶음을 빚짐
+        r_acked: 종결을 받음
+        [*] --> r_none: 노드 시도가 들어온다
+        r_none --> r_owed: 성공으로 끝난다 [실행 중]
+        r_none --> r_owed: 실패로 끝난다 [실행 중]
+        r_none --> r_none: 종결을 받았다는 답이 온다
+        r_owed --> r_acked: 종결을 받았다는 답이 온다
+        r_owed --> r_owed: 연결이 붙는다
+        r_acked --> r_acked: 종결을 받았다는 답이 온다
+    }

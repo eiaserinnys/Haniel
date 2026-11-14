@@ -46,12 +46,8 @@ def _marker_path(config_dir: Path) -> Path:
     return config_dir / MARKER_RELPATH
 
 
-def read_and_consume(config_dir: Path) -> OrchPendingDeploy | None:
-    """Read marker if present, validate schema, delete it, return parsed.
-
-    On any I/O or schema error: warn, attempt deletion, return None.
-    The caller treats None as "no pending deploy correlation available".
-    """
+def read(config_dir: Path) -> OrchPendingDeploy | None:
+    """Read without removing a marker that has yet to be transferred."""
     path = _marker_path(config_dir)
     if not path.exists():
         return None
@@ -76,7 +72,15 @@ def read_and_consume(config_dir: Path) -> OrchPendingDeploy | None:
     except Exception as e:
         logger.warning("Orch pending deploy marker malformed at %s: %s", path, e)
         result = None
-    # Always delete (consume) — even on parse error so we don't loop on a bad file
+    return result
+
+
+def read_and_consume(config_dir: Path) -> OrchPendingDeploy | None:
+    """Read and remove a marker for callers that explicitly want consumption."""
+    path = _marker_path(config_dir)
+    if not path.exists():
+        return None
+    result = read(config_dir)
     try:
         path.unlink()
     except Exception as e:

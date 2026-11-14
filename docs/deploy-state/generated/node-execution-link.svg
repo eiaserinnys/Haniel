@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="pele pele-state" viewBox="0 0 1997 241" width="1997" height="241" style="max-width:100%;height:auto;--_bg:var(--pele-bg,#fff);--_fg:var(--pele-fg,#1f1f1f);--_m:var(--pele-muted,#6e6e6e);--_l:var(--pele-line,#1f1f1f);--_s:var(--pele-surface,#f3f3f3);--_a:var(--pele-surface-alt,#e6e6e6);--_b:var(--pele-border,#8a8a8a);--_c:var(--pele-accent,#5b7bd5);color:var(--_fg);--_fm:var(--pele-font-mono,monospace);font:16px sans-serif;letter-spacing:normal;word-spacing:normal;text-transform:none;direction:ltr;font-family:var(--pele-font,Pretendard Variable, Noto Sans CJK KR, Noto Sans KR, sans-serif)" fill="var(--_fg)" role="graphics-document document" aria-roledescription="state"><style>/*
+ * Statechart colors for Pele SVG output.
+ * Adapted from pstack skills/statechart/references/render.md
+ * (https://github.com/poteto/pstack), MIT License, Copyright (c) 2026 Lauren Tan.
+ * The mark rules use !important because Pele writes classDef colors as style attributes.
+ */
+.pele {
+  background-color: var(--pele-bg);
+  --pele-bg: #ffffff;
+  --pele-fg: #1c1c1c;
+  --pele-muted: #656565;
+  --pele-line: #808080;
+  --pele-surface: #fcfcfc;
+  --pele-surface-alt: #f1f1f1;
+  --pele-border: #c9c9c9;
+}
+.pele .blue rect { fill: #c3e0ff; }
+.pele .orange rect { fill: #f0d3bf; }
+.pele .purple rect { fill: #e3d5ff; }
+.pele .yellow rect { fill: #f0dcbf; }
+.pele .teal rect { fill: #bfe3df; }
+.pele .tan rect { fill: #e5d9ce; }
+.pele .pink rect { fill: #ffcbe6; }
+.pele .breaks rect { fill: #ffecee !important; stroke: #e72e3b !important; stroke-width: 2.5px !important; }
+.pele .breaks text { fill: #cd2834 !important; }
+.pele .mayBreak rect { fill: #fff3e6 !important; stroke: #e8730c !important; stroke-width: 2.5px !important; }
+.pele .mayBreak text { fill: #b85a06 !important; }
+.pele .bugPath rect { stroke: #1680f3 !important; stroke-width: 2.5px !important; }
+.pele .repeats rect { stroke: #9b35d6 !important; stroke-width: 2.5px !important; stroke-dasharray: 6 3; }
+@media (prefers-color-scheme: dark) {
+  .pele {
+    --pele-bg: #1f1f1f;
+    --pele-fg: #f5f5f5;
+    --pele-muted: #acacac;
+    --pele-line: #939393;
+    --pele-surface: #121212;
+    --pele-surface-alt: #2c2c2c;
+    --pele-border: #4e4e4e;
+  }
+  .pele .blue rect { fill: #1b3857; }
+  .pele .orange rect { fill: #573117; }
+  .pele .purple rect { fill: #3c2e57; }
+  .pele .yellow rect { fill: #573d17; }
+  .pele .teal rect { fill: #174641; }
+  .pele .tan rect { fill: #3d3127; }
+  .pele .pink rect { fill: #57233e; }
+  .pele .breaks rect { fill: #2e2021 !important; stroke: #cf2b35 !important; }
+  .pele .breaks text { fill: #ff6463 !important; }
+  .pele .mayBreak rect { fill: #2e2619 !important; stroke: #d0700f !important; }
+  .pele .mayBreak text { fill: #ffa257 !important; }
+  .pele .bugPath rect { stroke: #116dd2 !important; }
+  .pele .repeats rect { stroke: #9a3fcf !important; }
+}
+</style><g class="pele-clusters"><g class="pele-cluster pele-state-composite" data-id="exec_"><rect x="8" y="8" width="1980.03" height="225" rx="10" fill="var(--_a)" fill-opacity="0.5" stroke="var(--_b)"/><path d="M8,44H1988.03" fill="none" stroke="var(--_b)"/><text class="pele-cluster-label" x="998.01" y="31.6" text-anchor="middle">실행</text></g></g><g class="pele-edges" fill="none" stroke="var(--_l)" stroke-linecap="round"><g class="pele-edge pele-transition" data-id="edge0"><path d="M96.89,104L96.89,166"/><path class="pele-marker" d="M96.89,173L93.53,165L100.25,165Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge1"><path d="M276.89,104L276.89,166"/><path class="pele-marker" d="M276.89,173L273.53,165L280.25,165Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge2"><path d="M640.13,74C666.13,66 666.13,98 646.82,92.06"/><path class="pele-marker" d="M640.13,90L648.76,89.14L646.79,95.56Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge3"><path d="M640.13,68C674.13,54 674.13,110 646.6,98.67"/><path class="pele-marker" d="M640.13,96L648.8,95.94L646.25,102.15Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge4"><path d="M1032.36,74C1058.36,66 1058.36,98 1039.05,92.06"/><path class="pele-marker" d="M1032.36,90L1040.99,89.14L1039.02,95.56Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge5"><path d="M1032.36,68C1066.36,54 1066.36,110 1038.83,98.67"/><path class="pele-marker" d="M1032.36,96L1041.04,95.94L1038.48,102.15Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge6"><path d="M1443.25,74C1469.25,66 1469.25,98 1449.94,92.06"/><path class="pele-marker" d="M1443.25,90L1451.88,89.14L1449.91,95.56Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge pele-transition" data-id="edge7"><path d="M1846.14,74C1872.14,66 1872.14,98 1852.83,92.06"/><path class="pele-marker" d="M1846.14,90L1854.77,89.14L1852.79,95.56Z" fill="var(--_l)" stroke="none"/></g></g><g class="pele-edge-labels" font-size="14"><g class="pele-edge-label" data-id="edge0"><rect x="26" y="124.5" width="141.78" height="21" rx="3" fill="var(--_bg)"/><text x="96.89" y="139.9" text-anchor="middle">노드 시도가 들어온다</text></g><g class="pele-edge-label" data-id="edge1"><rect x="228.95" y="124.5" width="95.89" height="21" rx="3" fill="var(--_bg)"/><text x="276.89" y="139.9" text-anchor="middle">연결이 끊긴다</text></g><g class="pele-edge-label" data-id="edge2"><rect x="680.13" y="61" width="95.89" height="21" rx="3" fill="var(--_bg)"/><text x="728.07" y="76.4" text-anchor="middle">연결이 붙는다</text></g><g class="pele-edge-label" data-id="edge3"><rect x="680.13" y="82" width="95.89" height="21" rx="3" fill="var(--_bg)"/><text x="728.07" y="97.4" text-anchor="middle">연결이 끊긴다</text></g><g class="pele-edge-label" data-id="edge4"><rect x="1072.36" y="61" width="95.89" height="21" rx="3" fill="var(--_bg)"/><text x="1120.31" y="76.4" text-anchor="middle">연결이 붙는다</text></g><g class="pele-edge-label" data-id="edge5"><rect x="1072.36" y="82" width="95.89" height="21" rx="3" fill="var(--_bg)"/><text x="1120.31" y="97.4" text-anchor="middle">연결이 끊긴다</text></g><g class="pele-edge-label" data-id="edge6"><rect x="1475.25" y="71.5" width="95.89" height="21" rx="3" fill="var(--_bg)"/><text x="1523.19" y="86.9" text-anchor="middle">연결이 끊긴다</text></g><g class="pele-edge-label" data-id="edge7"><rect x="1878.14" y="71.5" width="95.89" height="21" rx="3" fill="var(--_bg)"/><text x="1926.08" y="86.9" text-anchor="middle">연결이 끊긴다</text></g></g><g class="pele-nodes"><g class="pele-node pele-state" data-id="arrived" transform="translate(96.89,195)"><rect x="-50.22" y="-22" width="100.45" height="44" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.6" text-anchor="middle">허가 도착</text></g><g class="pele-node pele-state" data-id="asking" transform="translate(276.89,82)"><rect x="-84.45" y="-22" width="168.9" height="44" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.6" text-anchor="middle">자동 허가를 기다림</text></g><g class="pele-node pele-state" data-id="queued" transform="translate(587.68,82)"><rect x="-52.45" y="-22" width="104.9" height="44" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.6" text-anchor="middle">줄 서 있음</text></g><g class="pele-node pele-state" data-id="running" transform="translate(990.14,82)"><rect x="-42.22" y="-22" width="84.45" height="44" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.6" text-anchor="middle">실행 중</text></g><g class="pele-node pele-state" data-id="ok" transform="translate(1387.7,82)"><rect x="-55.55" y="-22" width="111.1" height="44" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.6" text-anchor="middle">성공 (끝남)</text></g><g class="pele-node pele-state" data-id="failed" transform="translate(1790.58,82)"><rect x="-55.55" y="-22" width="111.1" height="44" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.6" text-anchor="middle">실패 (끝남)</text></g><g class="pele-node pele-state" data-id="declined" transform="translate(276.89,195)"><rect x="-89.78" y="-22" width="179.55" height="44" rx="10" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.6" text-anchor="middle">실행하지 않음 (끝남)</text></g><g class="pele-node pele-state-start" data-id="exec__start" transform="translate(96.89,97)"><circle r="7" fill="var(--_l)"/></g></g></svg>
+<!-- statechart-source-sha256: b15dd93842505076527c36f617a93b14f0b4f464d90fe147648a36483ca945bb -->

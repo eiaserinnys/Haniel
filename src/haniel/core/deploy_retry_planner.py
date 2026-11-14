@@ -115,7 +115,6 @@ class DeployRetryPlanner:
                 "journal manifest identity or digest differs from the target manifest",
             )
         if journal.get("state") == "success":
-            source = probe.get("source_orchestrator_attempt_id")
             lineage = probe.get("retry_lineage", [])
             if not journal.get("orchestrator_attempt_id"):
                 return self._build(
@@ -124,10 +123,7 @@ class DeployRetryPlanner:
                     "journal_link_missing",
                     "success journal lacks orchestrator_attempt_id",
                 )
-            if (
-                journal.get("orchestrator_attempt_id") != source
-                or source not in lineage
-            ):
+            if journal.get("orchestrator_attempt_id") not in lineage:
                 return self._build(
                     "fail_closed",
                     evidence,
@@ -148,8 +144,6 @@ class DeployRetryPlanner:
             journal.get("state") in {"failed", "verification_failed"}
             and journal.get("previous_head")
             and journal.get("completed_at")
-            and journal.get("orchestrator_attempt_id")
-            == probe.get("source_orchestrator_attempt_id")
             and journal.get("orchestrator_attempt_id") in probe.get("retry_lineage", [])
         ):
             return self._build("execute", evidence, "manifest_retry", None)

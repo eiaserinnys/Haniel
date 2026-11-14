@@ -126,6 +126,52 @@ def _write_deployment_record(
 
 
 class TestHandleDeployApprovalNonSelf:
+    @pytest.mark.asyncio
+    async def test_config_change_after_prepare_is_declined_before_progress(
+        self, tmp_path: Path
+    ):
+        import asyncio
+        from haniel.integrations.orchestrator_client import OrchestratorClient
+
+        runner = _build_runner(tmp_path)
+
+        def prepare(_approval):
+            runner._repo_states["appA"].config.branch = "changed"
+            return None, None
+
+        client = OrchestratorClient(
+            runner.config.orchestrator_client,
+            "test",
+            config_dir=tmp_path,
+            deploy_prepare_handler=prepare,
+            deploy_approval_handler=runner._handle_deploy_approval,
+        )
+        messages = []
+
+        async def send(message):
+            messages.append(message)
+
+        client._send_json = send
+        client._connected = True
+        client._ws = object()
+        client._sequencer.start()
+        try:
+            await client._handle_server_message(
+                {"type": "deploy_approval", **_approval()}
+            )
+
+            async def wait_refusal():
+                while not any(
+                    m.get("kind") == "approval_revalidation_failed" for m in messages
+                ):
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(wait_refusal(), 5)
+            assert not any(m.get("type") == "deploy_progress" for m in messages)
+            assert not client._registry.outbox.entries
+        finally:
+            await client._sequencer.close()
+
     def test_unknown_repo_raises(self, tmp_path: Path) -> None:
         runner = _build_runner(tmp_path)
         with pytest.raises(ValueError, match="Unknown repo"):
@@ -403,6 +449,39 @@ class TestHandleDeployApprovalNonSelf:
 
 
 class TestAutoDeployReconciliation:
+    def test_snapshot_failure_after_execution_sends_failure_bundle(
+        self, tmp_path: Path
+    ):
+        runner = _build_runner(tmp_path)
+        before = RepoReconciliationSnapshot(
+            "node-a", "appA", "main", "local", "remote", "node-a:appA:main:remote"
+        )
+        runner._capture_orchestrator_repo_snapshot = MagicMock(
+            side_effect=[before, OSError("snapshot failed")]
+        )
+        runner._orch_client = MagicMock()
+        permit = {
+            "deploy_id": before.deploy_id,
+            "begun_orchestrator_attempt_id": "a",
+            "connection_generation": "g",
+            "probe_id": None,
+            "execution_mode": "execute",
+            "preflight_fingerprint": "fp",
+        }
+        runner._orch_client.request_auto_attempt.return_value = permit
+        with (
+            patch.object(runner, "_prepare_deploy_approval", return_value=(None, None)),
+            patch(
+                "haniel.core.runner.execute_approved_plan",
+                side_effect=lambda *args, **kwargs: kwargs["progress_callback"](
+                    "preparing"
+                ),
+            ),
+        ):
+            with pytest.raises(OSError, match="snapshot failed"):
+                runner._run_auto_deploy("appA")
+        runner._orch_client.report_auto_failure.assert_called_once()
+
     def test_no_service_repo_still_uses_common_attempt_path(self, tmp_path: Path):
         runner = _build_runner(tmp_path)
         runner.config.services.clear()
@@ -449,12 +528,20 @@ class TestAutoDeployReconciliation:
         runner._orch_client.report_deploy_attempt.side_effect = lambda *args, **kwargs: (
             order.append("settled_report")
         )
-        with patch(
-            "haniel.core.runner.execute_approved_plan",
-            side_effect=lambda *args, **kwargs: (
-                order.append("execute")
-                if kwargs["progress_callback"] is progress.transition
-                else (_ for _ in ()).throw(AssertionError("wrong progress callback"))
+
+        def execute(*args, **kwargs):
+            kwargs["progress_callback"]("preparing")
+            order.append("execute")
+
+        with (
+            patch.object(
+                runner,
+                "_prepare_deploy_approval",
+                return_value=({"probe_id": "probe-1"}, MagicMock()),
+            ),
+            patch(
+                "haniel.core.runner.execute_approved_plan",
+                side_effect=execute,
             ),
         ):
             runner._run_auto_deploy("appA")
@@ -711,6 +798,14 @@ class TestHandleDeployApprovalSelfRepo:
 
 
 class TestEnqueuePendingSelfDeployResult:
+    def test_marker_is_preserved_when_outbox_write_fails(self, tmp_path: Path) -> None:
+        runner = _build_runner(tmp_path)
+        runner._orch_client = MagicMock()
+        runner._orch_client.enqueue_deploy_result.return_value = False
+        _write_pending(tmp_path, "d1", datetime.now(timezone.utc).isoformat())
+        runner._enqueue_pending_self_deploy_result()
+        assert (tmp_path / MARKER_RELPATH).exists()
+
     def test_no_marker_skips(self, tmp_path: Path) -> None:
         runner = _build_runner(tmp_path)
         runner._orch_client = MagicMock()
@@ -723,8 +818,8 @@ class TestEnqueuePendingSelfDeployResult:
         _write_pending(tmp_path, "d1", datetime.now(timezone.utc).isoformat())
         # Must not raise
         runner._enqueue_pending_self_deploy_result()
-        # Marker still consumed
-        assert not (tmp_path / MARKER_RELPATH).exists()
+        # No outbox is available, so the pending correlation must remain.
+        assert (tmp_path / MARKER_RELPATH).exists()
 
     def test_marker_with_success_result(self, tmp_path: Path) -> None:
         runner = _build_runner(tmp_path)
