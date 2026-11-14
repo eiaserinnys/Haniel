@@ -908,16 +908,23 @@ async def test_late_success_on_a_superseded_request_leaves_the_tag(store: EventS
     assert (await leaf_of(store))[:2] == ("rejected", "superseded")
 
 
-async def test_a_node_failure_or_a_late_failure_on_a_rejected_request_leaves_no_tag(store: EventStore):
+async def test_a_node_failure_or_a_late_failure_on_a_rejected_request_leaves_no_tag(store: EventStore, caplog):
+    """거절된 요청(점검 필요는 이미 켜짐)에 온 늦은 실패는 요청 정의에 전이가 없어 NoTransition으로 끝나지만,
+    증거 걸음은 그 앞에서 커밋되므로 시도 줄의 증거(ev_failed, late_evidence=failed)는 남는다(goal 5d)."""
     await seed(store)
     await begin(store)
     await lease_close(store)
     await store.reject_deploy(DEPLOY_ID, "no")
+    caplog.set_level(logging.WARNING)
 
     await store.record_node_deploy_report(node_report("failed"))
-    await late_result(store, status="failed", error="late")
+    result = await late_result(store, status="failed", error="late")
 
+    assert result["status"] == "late_evidence" and result["request_changed"] is False
+    assert (await attempt_row(store, "a1"))[:3] == ("failed", "ev_failed", "failed")
+    assert (await leaf_of(store)) == ("rejected", "rejected", "l_on")
     assert (await tag_of(store))[0] == "t_off"
+    assert any("late_failed" in r.getMessage() and "no_transition" in r.getMessage() for r in caplog.records)
 
 
 async def test_pending_and_history_items_carry_applied_after_close_false_by_default(store: EventStore):
