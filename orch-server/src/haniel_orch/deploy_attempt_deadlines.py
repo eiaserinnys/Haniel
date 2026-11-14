@@ -1,9 +1,19 @@
-"""Durable deploy probe and attempt deadline scheduling."""
+"""Durable deploy probe and attempt deadline scheduling.
+
+마감은 종류가 있다(wire-v1 5절): 판 없는 시도는 실행 임대 하나, 판 1 시도는 닿았는지 모름의 짧은 마감(ack), 줄 서 있음이고
+끊긴 동안의 유예 마감(grace), 시작했다의 실행 임대(lease), 줄 서 있음이고 붙어 있는 동안의 세지 않음(none)이다.
+마감 사건은 종류와 믿음이 맞을 때만 정의에 들어가고, 낡은 타이머는 저장소가 stale로 돌려 여기서 DEBUG로 넘긴다.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
+
+from .deploy_attempt_intake import DEADLINE_ACK, DEADLINE_GRACE, DEADLINE_NONE
+
+logger = logging.getLogger(__name__)
 
 
 class DeployAttemptDeadlines:
@@ -49,6 +59,7 @@ class DeployAttemptDeadlines:
             stage="deadline",
             reason="probe_timeout",
             error="deploy plan probe timed out before begin",
+            belief_event="probe_deadline",
         ):
             self._resolve_probe(probe_id, self._plan_rejected("preflight timeout", 504))
 
@@ -62,32 +73,49 @@ class DeployAttemptDeadlines:
         attempt = await self.attempts.get_attempt(orchestrator_attempt_id)
         if attempt is None or attempt["outcome"] != "active":
             return
+        deadline_kind = attempt["deadline_kind"]
+        if deadline_kind == DEADLINE_NONE:
+            return  # 줄 서 있음이고 붙어 있는 동안은 세지 않는다
         durable_deadline = attempt["deadline_at"]
         if datetime.fromisoformat(durable_deadline) > datetime.now(timezone.utc):
             self._schedule_attempt(orchestrator_attempt_id, durable_deadline)
             return
-        if attempt["execution_mode"] == "evidence_recovery":
-            reason = "recovery_evidence_timeout"
+        if deadline_kind == DEADLINE_ACK:
+            kind, reason = "ack_timeout", "permit_not_acknowledged"
+            error = "node did not acknowledge the permit before the short deadline"
+        elif deadline_kind == DEADLINE_GRACE:
+            kind, reason = "grace_timeout", "queued_node_unreachable"
+            error = "node stayed disconnected past the grace deadline while the attempt was queued"
+        elif attempt["execution_mode"] == "evidence_recovery":
+            kind, reason = "attempt_timeout", "recovery_evidence_timeout"
             error = "manifest recovery evidence was not received before the attempt deadline"
         elif attempt["result_status"] == "success":
-            reason = "settled_head_timeout"
+            kind, reason = "attempt_timeout", "settled_head_timeout"
             error = "settled HEAD evidence was not received after a successful deploy result"
         elif attempt["settled_at"] is not None:
-            reason = "deploy_result_timeout"
+            kind, reason = "attempt_timeout", "deploy_result_timeout"
             error = "deploy result was not received after settled HEAD evidence"
         else:
-            reason = "attempt_evidence_timeout"
+            kind, reason = "attempt_timeout", "attempt_evidence_timeout"
             error = "deploy result and settled HEAD evidence were not received before the attempt deadline"
         result = await self.attempts.fail_attempt_if_deadline_due(
             orchestrator_attempt_id,
             expected_deadline_at=durable_deadline,
-            kind="attempt_timeout",
+            kind=kind,
             stage="deadline",
             reason=reason,
             error=error,
         )
         if result.get("status") == "deadline_changed":
             self._schedule_attempt(orchestrator_attempt_id, result["deadline_at"])
+            return
+        if result.get("status") == "stale":
+            logger.debug(
+                "stale deadline timer: attempt=%s kind=%s belief=%s",
+                orchestrator_attempt_id,
+                result.get("deadline_kind"),
+                result.get("belief"),
+            )
             return
         if result.get("deploy_id"):
             await self._after_store_terminal(

@@ -23,6 +23,10 @@ REASON_UPDATE_ZERO = "update_zero"  # 전이는 있었으나 마지막 쓰기 �
 
 logger = logging.getLogger("haniel_orch.statechart")
 
+# 전이 없음이 예상되는 사건(사유 no_transition일 때). 관측은 머리가 다르거나 처음 대기가 아닐 때마다, 되살림은 보류가
+# 아닌 줄에 되풀이 알림이 올 때마다 전이가 없다. 운영 로그의 소음이라 경고 대신 DEBUG로 남긴다(2b-2 15항).
+QUIET_NO_TRANSITION = frozenset({"observed", "reopen"})
+
 
 class NoTransition(Exception):
     """지금 칸에 이 사건의 전이가 없다. 줄에는 아무것도 쓰이지 않는다."""
@@ -45,8 +49,17 @@ class NoTransition(Exception):
         self.key = key  # deploy_id 또는 orchestrator_attempt_id. 걸음이 채운다
 
     def warn(self, where: str) -> None:
-        """호출부가 이 예외를 삼키는 자리마다 부른다. 동작은 그대로고 사유만 남긴다."""
-        logger.warning(
+        """호출부가 이 예외를 삼키는 자리마다 부른다. 동작은 그대로고 사유만 남긴다.
+
+        예상된 (사건, 사유 no_transition) 짝은 DEBUG로 낮춘다(QUIET_NO_TRANSITION). 그 밖은 경고다.
+        """
+        level = (
+            logging.DEBUG
+            if self.event in QUIET_NO_TRANSITION and self.reason == REASON_NO_TRANSITION
+            else logging.WARNING
+        )
+        logger.log(
+            level,
             "전이 없음을 넘김: 자리=%s 정의=%s 사건=%s 사유=%s id=%s 줄=%s",
             where,
             self.definition,
@@ -134,10 +147,20 @@ def advance(
     event: str,
     facts: Mapping[str, bool] | None = None,
 ) -> dict[str, str]:
-    """새 인스턴스를 줄에서 되살려 사건 하나를 넣고 결과 줄을 돌려준다.
+    """새 인스턴스를 줄에서 되살려 사건 하나를 넣고 결과 줄을 돌려준다(할 일 기호는 버린다).
 
     전이가 없으면 NoTransition. 사건이 요구하는 사실이 빠지면 KeyError.
     """
+    return advance_with_todo(cls, row, event, facts)[0]
+
+
+def advance_with_todo(
+    cls: type,
+    row: Mapping[str, str],
+    event: str,
+    facts: Mapping[str, bool] | None = None,
+) -> tuple[dict[str, str], list[str]]:
+    """한 걸음의 결과 줄과 정의가 낸 할 일 기호 목록(전이의 on 콜백이 쌓은 순서)을 돌려준다."""
     required = REQUIRED_FACTS[cls]
     if event not in required:
         raise KeyError(f"{cls.__name__}에 없는 사건: {event}")
@@ -151,4 +174,4 @@ def advance(
         machine.send(event)
     except TransitionNotAllowed as exc:
         raise NoTransition(cls.__name__, row, event) from exc
-    return to_row(cls, machine)
+    return to_row(cls, machine), list(model.todo)

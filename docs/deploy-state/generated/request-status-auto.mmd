@@ -1,0 +1,24 @@
+stateDiagram-v2
+    direction TB
+    classDef breaks fill:#ffecee,stroke:#e72e3b
+    classDef notInDesign fill:#fff3e6,stroke:#e8730c
+    state "요청 상태" as status {
+        pending: 처음 대기 (열림)
+        again: 다시 대기 (열림)
+        success: 성공 (닫힘)
+        retry: 실패 뒤 대기 (열림)
+        rejected: 거절 (닫힘)
+        deploying: 배포 중 (열림)
+        superseded: 새 커밋에 밀림 (닫힘)
+        [*] --> pending: 요청이 들어온다
+        pending --> pending: 노드가 자동 배포를 청한다 [계획 묻기나 시도가 이미 있음]
+        pending --> retry: 자동 탐침의 답에 실패 저널이 실려 왔다
+        again --> again: 노드가 자동 배포를 청한다 [계획 묻기나 시도가 이미 있음]
+        again --> retry: 자동 탐침의 답에 실패 저널이 실려 왔다
+        success --> success: 노드가 자동 배포를 청한다
+        retry --> retry: 노드가 자동 배포를 청한다
+        retry --> retry: 자동 탐침의 답에 실패 저널이 실려 왔다
+        rejected --> rejected: 노드가 자동 배포를 청한다
+        deploying --> deploying: 노드가 자동 배포를 청한다
+        superseded --> superseded: 노드가 자동 배포를 청한다
+    }

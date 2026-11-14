@@ -3,14 +3,15 @@ deploy_retry_source_attempts)에 쓰는 SQL이 있는 유일한 곳(스키마 �
 시도 줄(deploy_attempts)의 걸음은 `attempt_steps`에, 기동 때 다시 계산은 `backfill`에 있다.
 
 한 걸음은 저장소 변경 잠금과 트랜잭션 안에서(호출부가 쥔다) 이렇게 돈다.
-1. 줄(잎 칸)과 걸음마다 읽는 사실을 읽는다.
+1. 줄(잎 칸 넷)과 걸음마다 읽는 사실을 읽는다.
 2. `restore`로 새 인스턴스를 되살리고 사건 하나를 넣는다. 전이가 없으면 `NoTransition`이고
    줄에는 아무것도 쓰이지 않는다.
-3. 결과 잎(요청 상태, 점검 필요, 닫힌 뒤 적용 꼬리표)과 바깥 칸(status, reject_reason, 표시 줄의
+3. 결과 잎(요청 상태, 믿음, 점검 필요, 닫힌 뒤 적용 꼬리표)과 바깥 칸(status, reject_reason, 표시 줄의
    inspection_required, 꼬리표의 시각과 시도 번호 등)과 딸린 줄(표시 줄, 계보 줄)을 같은 트랜잭션에 쓴다.
    SQL의 `WHERE`는 마지막 쓰기 재확인으로 남는다.
+4. 정의가 낸 할 일 기호를 `RequestStep.todo`로 돌려준다. 기호는 DB에 적지 않는다(2b-1 8항).
 
-방송, 푸시, 타이머 같은 할 일은 커밋 뒤에 호출부가 돌린다(할 일 기호를 정의의 출력으로 내는 일은 PR 2b-2).
+방송, 푸시, 타이머, 허가와 탐침 보내기, 거절 답 같은 할 일은 커밋 뒤에 호출부가 기호를 보고 돌린다.
 """
 
 from __future__ import annotations
@@ -21,14 +22,14 @@ from typing import Any, NamedTuple
 
 import aiosqlite
 
-from .columns import LOCK_ON, LOCK_REGION, REQUEST_REGION, TAG_REGION
+from .columns import BELIEF_REGION, LOCK_ON, LOCK_REGION, REQUEST_REGION, TAG_REGION
 from .definitions import REQUEST_CLOSED, REQUEST_OUTER_STATUS, OrchRequest
 from .restore import (
     REASON_NO_ROW,
     REASON_STATE_MISMATCH,
     REASON_UPDATE_ZERO,
     NoTransition,
-    advance,
+    advance_with_todo,
     initial_row,
 )
 
@@ -40,16 +41,34 @@ def now_iso() -> str:
 class RequestStep(NamedTuple):
     previous: str
     leaf: str
+    todo: tuple[str, ...] = ()
+    belief_previous: str | None = None
+    belief: str | None = None
 
+
+# 시도를 닫아 대기(again, retry)나 밀림으로 보내는 사건. 닫힌 시도는 언제나 계보에 더한다(design.md:165)
+_CLOSING_EVENTS = frozenset(
+    {
+        "attempt_failed",
+        "send_failed",
+        "late_failed",
+        "declined",
+        "ack_deadline",
+        "lease_deadline",
+        "grace_deadline",
+        "hello_missing",
+        "plan_failed_journal",
+    }
+)
 
 # ---------------------------------------------------------------- 요청 줄
 
 _INSERT_REQUEST = """INSERT OR IGNORE INTO deploy_events
-    (deploy_id, node_id, repo, branch, status, sm_status, sm_lock, sm_tag,
+    (deploy_id, node_id, repo, branch, status, sm_status, sm_belief, sm_lock, sm_tag,
      commits_json, affected_services_json, diff_stat, detected_at,
      created_at, updated_at, target_head, deployment_kind,
      expected_manifest_identity, expected_manifest_digest, is_self_update)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
 
 async def create_request(
@@ -70,7 +89,11 @@ async def create_request(
     is_self_update: bool,
     now: str,
 ) -> bool:
-    """요청 줄을 처음 대기로 만든다. 같은 deploy_id가 있으면 아무것도 쓰지 않고 False."""
+    """요청 줄을 처음 대기로 만든다. 같은 deploy_id가 있으면 아무것도 쓰지 않고 False.
+
+    요청 줄이 생기기 전에 노드가 스스로 한 배포의 실패가 이미 적혀 있으면(G12, wire-v1 6절) 같은 걸음에서
+    node_failed를 넣어 점검 필요가 켜진 채 시작한다. 그 까닭은 노드 시도 줄(이력과 대기 목록의 직전 실패)에 보인다.
+    """
     initial = initial_row(OrchRequest)
     leaf = initial[REQUEST_REGION]
     cursor = await db.execute(
@@ -82,6 +105,7 @@ async def create_request(
             branch,
             REQUEST_OUTER_STATUS[leaf],
             leaf,
+            initial[BELIEF_REGION],
             initial[LOCK_REGION],
             initial[TAG_REGION],
             commits_json,
@@ -97,7 +121,17 @@ async def create_request(
             int(is_self_update),
         ),
     )
-    return cursor.rowcount > 0
+    if cursor.rowcount <= 0:
+        return False
+    prior = await db.execute(
+        "SELECT 1 FROM node_deploy_attempts WHERE deploy_id = ? AND outcome = 'failed' LIMIT 1",
+        (deploy_id,),
+    )
+    if await prior.fetchone() is not None:
+        await step_request(
+            db, deploy_id, "node_failed", facts={"no_active_attempt": True}, now=now
+        )
+    return True
 
 
 def _request_columns(
@@ -113,7 +147,15 @@ def _request_columns(
         return {"approved_by": data["approved_by"]}
     if event == "attempt_succeeded":
         return {"error": None, "duration_ms": data.get("duration_ms")}
-    if event in ("attempt_failed", "send_failed"):
+    if event in (
+        "attempt_failed",
+        "send_failed",
+        "declined",
+        "ack_deadline",
+        "lease_deadline",
+        "grace_deadline",
+        "hello_missing",
+    ):
         if leaf == "superseded":
             return {"reject_reason": "superseded by newer canonical"}
         return {"approved_by": None, "error": None, "duration_ms": None}
@@ -130,7 +172,7 @@ def _request_columns(
     if event == "success_evidence":
         # 열린 대기가 늦은 성공으로 닫힌다(꼬리표만 바뀌는 닫힌 요청은 여기 오지 않는다)
         return {"error": None, "duration_ms": data.get("duration_ms")}
-    if event == "late_failed":
+    if event in ("late_failed", "plan_failed_journal"):
         return {}
     if event in ("observed", "observed_self_update"):
         return {}
@@ -147,12 +189,12 @@ def _request_columns(
 _UPSERT_MARKER = """INSERT INTO deploy_retry_requirements
    (deploy_id, source_orchestrator_attempt_id, last_failed_orchestrator_attempt_id,
     created_at, updated_at, inspection_required)
-   VALUES (?, ?, ?, ?, ?, 1)
+   VALUES (?, ?, ?, ?, ?, ?)
    ON CONFLICT(deploy_id) DO UPDATE SET
      source_orchestrator_attempt_id=excluded.source_orchestrator_attempt_id,
      last_failed_orchestrator_attempt_id=excluded.last_failed_orchestrator_attempt_id,
      updated_at=excluded.updated_at,
-     inspection_required=1"""
+     inspection_required=excluded.inspection_required"""
 
 
 async def step_request(
@@ -168,7 +210,7 @@ async def step_request(
     data = data or {}
     now = now or now_iso()
     cursor = await db.execute(
-        "SELECT status, sm_status, sm_lock, sm_tag FROM deploy_events WHERE deploy_id = ?",
+        "SELECT status, sm_status, sm_belief, sm_lock, sm_tag FROM deploy_events WHERE deploy_id = ?",
         (deploy_id,),
     )
     row = await cursor.fetchone()
@@ -180,37 +222,57 @@ async def step_request(
             REASON_NO_ROW,
             deploy_id,
         )
-    status, leaf, lock, tag = row
+    status, leaf, belief, lock, tag = row
+    before = {
+        "status": status,
+        "sm_status": leaf,
+        "sm_belief": belief,
+        "sm_lock": lock,
+        "sm_tag": tag,
+    }
     if (
         leaf is None
+        or belief is None
         or lock is None
         or tag is None
         or REQUEST_OUTER_STATUS.get(leaf) != status
     ):
         raise NoTransition(
-            OrchRequest.__name__,
-            {"status": status, "sm_status": leaf, "sm_lock": lock, "sm_tag": tag},
-            event,
-            REASON_STATE_MISMATCH,
-            deploy_id,
+            OrchRequest.__name__, before, event, REASON_STATE_MISMATCH, deploy_id
         )
     try:
-        after = advance(
+        after, todo = advance_with_todo(
             OrchRequest,
-            {REQUEST_REGION: leaf, LOCK_REGION: lock, TAG_REGION: tag},
+            {
+                REQUEST_REGION: leaf,
+                BELIEF_REGION: belief,
+                LOCK_REGION: lock,
+                TAG_REGION: tag,
+            },
             event,
             dict(facts or {}),
         )
     except NoTransition as exc:
         exc.key = deploy_id
         raise
-    new_leaf, new_lock, new_tag = after[REQUEST_REGION], after[LOCK_REGION], after[TAG_REGION]
+    new_leaf = after[REQUEST_REGION]
+    new_belief = after[BELIEF_REGION]
+    new_lock = after[LOCK_REGION]
+    new_tag = after[TAG_REGION]
     moved = new_leaf != leaf
     lock_changed = new_lock != lock
     tag_changed = new_tag != tag
+    result = RequestStep(
+        previous=leaf,
+        leaf=new_leaf,
+        todo=tuple(todo),
+        belief_previous=belief,
+        belief=new_belief,
+    )
 
-    # 요청 상태가 옮겨질 때만 바깥 칸과 updated_at을 쓴다. 점검 필요나 꼬리표만 바뀌면(닫힌 요청에 닿은 시도 실패,
-    # 도는 시도가 있는 배포 중의 노드 실패 보고, 닫힌 요청에 닿은 성공 증거) 요청 줄의 다른 칸은 건드리지 않는다
+    # 요청 상태가 옮겨질 때만 바깥 칸과 updated_at을 쓴다. 믿음이나 점검 필요나 꼬리표만 바뀌면(받았다, 시작했다,
+    # 닫힌 요청에 닿은 시도 실패, 도는 시도가 있는 배포 중의 노드 실패 보고, 닫힌 요청에 닿은 성공 증거) 요청 줄의
+    # 다른 칸은 건드리지 않는다. 제자리 전이만 있는 걸음(자동 요청의 무시, 끊김)은 아무 칸도 쓰지 않는다
     columns: dict[str, Any] = {}
     if moved:
         columns = {
@@ -219,6 +281,8 @@ async def step_request(
             **_request_columns(event, leaf, new_leaf, data),
             "updated_at": now,
         }
+    if new_belief != belief:
+        columns["sm_belief"] = new_belief
     if lock_changed:
         columns["sm_lock"] = new_lock
     if tag_changed:
@@ -226,19 +290,17 @@ async def step_request(
         columns["sm_tag"] = new_tag
         columns["applied_after_close_at"] = now
         columns["applied_after_close_attempt_id"] = data["attempt_id"]
+    if not columns:
+        return result
     assignments = ", ".join(f"{name} = ?" for name in columns)
     updated = await db.execute(
         f"UPDATE deploy_events SET {assignments} "
-        "WHERE deploy_id = ? AND status = ? AND sm_status = ? AND sm_lock = ? AND sm_tag = ?",
-        (*columns.values(), deploy_id, status, leaf, lock, tag),
+        "WHERE deploy_id = ? AND status = ? AND sm_status = ? AND sm_belief = ? AND sm_lock = ? AND sm_tag = ?",
+        (*columns.values(), deploy_id, status, leaf, belief, lock, tag),
     )
     if updated.rowcount != 1:
         raise NoTransition(
-            OrchRequest.__name__,
-            {"status": status, "sm_status": leaf, "sm_lock": lock, "sm_tag": tag},
-            event,
-            REASON_UPDATE_ZERO,
-            deploy_id,
+            OrchRequest.__name__, before, event, REASON_UPDATE_ZERO, deploy_id
         )
 
     if new_leaf in REQUEST_CLOSED:
@@ -251,11 +313,12 @@ async def step_request(
                 "DELETE FROM deploy_retry_source_attempts WHERE deploy_id = ?",
                 (deploy_id,),
             )
-        return RequestStep(previous=leaf, leaf=new_leaf)
+        return result
 
-    if event in ("attempt_failed", "send_failed", "late_failed") and moved:
-        # 닫힌 시도는 언제나 계보에 더한다. source는 호출부가 정한다(보내기 실패는 옮기지 않는다.
-        # 처음 대기에 닿은 늦은 실패는 실행한 그 시도를 source로 둔다)
+    if event in _CLOSING_EVENTS and moved:
+        # 닫힌 시도는 언제나 계보에 더한다. source는 호출부가 정한다(보내기 실패와 「실행하지 않음」 답은 옮기지 않는다.
+        # 처음 대기에 닿은 늦은 실패와 실패 저널은 실행한 그 시도를 source로 둔다). 표시 줄의 inspection_required는
+        # 점검 필요 잎을 따른다(다시 대기는 0, 실패 뒤 대기는 1)
         await db.execute(
             _UPSERT_MARKER,
             (
@@ -264,6 +327,7 @@ async def step_request(
                 data["failed_attempt_id"],
                 data["marker_created_at"] or now,
                 now,
+                1 if new_lock == LOCK_ON else 0,
             ),
         )
         await db.execute(
@@ -285,7 +349,7 @@ async def step_request(
             "WHERE deploy_id = ?",
             (1 if new_lock == LOCK_ON else 0, now, deploy_id),
         )
-    return RequestStep(previous=leaf, leaf=new_leaf)
+    return result
 
 
 async def set_postponed_until(

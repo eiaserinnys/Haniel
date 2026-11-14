@@ -176,15 +176,15 @@ async def wait_sent(harness: Harness, count: int) -> None:
     ("row", "event", "facts", "expected"),
     [
         # 점검 필요가 꺼져 있으면 어느 원천이든 연다. 켤 일은 없다
-        (("pending", "l_off"), "begin_attempt", {"manual_single": False}, ("deploying", "l_off")),
-        (("pending", "l_off"), "begin_attempt", {"manual_single": True}, ("deploying", "l_off")),
+        (("pending", "l_off"), "begin_attempt", {"manual_single": False, "via_probe": False}, ("deploying", "l_off")),
+        (("pending", "l_off"), "begin_attempt", {"manual_single": True, "via_probe": False}, ("deploying", "l_off")),
         # 점검 필요가 켜져 있으면 단건 승인만 열고, 그때 내린다
-        (("retry", "l_on"), "begin_attempt", {"manual_single": True}, ("deploying", "l_off")),
-        (("retry", "l_on"), "begin_attempt", {"manual_single": False}, None),
-        (("pending", "l_on"), "begin_attempt", {"manual_single": False}, None),
-        # 시도의 실패와 보내기 실패는 모두 켠다. 닫힌 요청에는 점검 필요만 켠다
+        (("retry", "l_on"), "begin_attempt", {"manual_single": True, "via_probe": False}, ("deploying", "l_off")),
+        (("retry", "l_on"), "begin_attempt", {"manual_single": False, "via_probe": False}, None),
+        (("pending", "l_on"), "begin_attempt", {"manual_single": False, "via_probe": False}, None),
+        # 시도의 실패와 보내기 실패(판 없는 시도)는 모두 켠다. 닫힌 요청에는 점검 필요만 켠다
         (("deploying", "l_off"), "attempt_failed", {"newer": False}, ("retry", "l_on")),
-        (("deploying", "l_off"), "send_failed", {"newer": False}, ("retry", "l_on")),
+        (("deploying", "l_off"), "send_failed", {"newer": False, "legacy": True}, ("retry", "l_on")),
         (("deploying", "l_off"), "attempt_failed", {"newer": True}, ("superseded", "l_on")),
         (("rejected", "l_off"), "attempt_failed", {"newer": False}, ("rejected", "l_on")),
         (("success", "l_off"), "attempt_failed", {"newer": True}, ("success", "l_on")),
@@ -209,13 +209,19 @@ async def wait_sent(harness: Harness, count: int) -> None:
     ],
 )
 def test_lock_definition_matrix(row, event, facts, expected):
-    before = {"status": row[0], "lock": row[1], "tag": "t_off"}  # 꼬리표 영역(2b-1)은 이 사건들이 건드리지 않는다
+    # 꼬리표 영역(2b-1)은 이 사건들이 건드리지 않는다. 믿음 영역(2b-2)은 배포 중이면 닿았는지 모름이고,
+    # 시도를 닫는 사건(실패, 보내기 실패, 성공, 노드 성공)이 도는 시도 없음으로 돌린다
+    belief = "b_unknown" if row[0] == "deploying" else "b_none"
+    before = {"status": row[0], "belief": belief, "lock": row[1], "tag": "t_off"}
     if expected is None:
         with pytest.raises(NoTransition):
             advance(OrchRequest, before, event, facts)
     else:
+        closes = event in ("attempt_failed", "send_failed", "attempt_succeeded", "node_succeeded")
+        after_belief = "b_unknown" if event == "begin_attempt" else ("b_none" if closes else belief)
         assert advance(OrchRequest, before, event, facts) == {
             "status": expected[0],
+            "belief": after_belief,
             "lock": expected[1],
             "tag": "t_off",
         }
@@ -228,8 +234,8 @@ def test_lock_definition_matrix(row, event, facts, expected):
 def test_reopen_follows_the_lock(lock, expected):
     facts = {"self_update": True, "postponed_due": True, "no_other_open": True}
     for closed in ("rejected", "superseded"):
-        after = advance(OrchRequest, {"status": closed, "lock": lock, "tag": "t_off"}, "reopen", facts)
-        assert after == {"status": expected[0], "lock": expected[1], "tag": "t_off"}
+        after = advance(OrchRequest, {"status": closed, "belief": "b_none", "lock": lock, "tag": "t_off"}, "reopen", facts)
+        assert after == {"status": expected[0], "belief": "b_none", "lock": expected[1], "tag": "t_off"}
 
 
 # ---------------------------------------------------------------- PR 1 검수에서 남긴 두 갈래

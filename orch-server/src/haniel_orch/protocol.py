@@ -50,8 +50,27 @@ SERVER_DEPLOY_PLAN_REASON_INVENTORY = frozenset(get_args(DeployPlanReason))
 # --- Node → Server messages ---
 
 
+class HeldAttempt(BaseModel):
+    """hello에 실리는, 노드가 쥔 시도 하나(wire-v1 1절). 오케스트레이터 시도 번호와 노드 시도 번호 가운데 정확히 하나."""
+
+    orchestrator_attempt_id: str | None = None
+    node_attempt_id: str | None = None
+    deploy_id: str | None = None
+    state: Literal["queued", "running", "owed"]
+
+    @model_validator(mode="after")
+    def validate_exactly_one_id(self) -> "HeldAttempt":
+        if (self.orchestrator_attempt_id is None) == (self.node_attempt_id is None):
+            raise ValueError("held attempt needs exactly one of orchestrator_attempt_id, node_attempt_id")
+        return self
+
+
 class NodeHello(BaseModel):
-    """First message sent by a node after WebSocket connect."""
+    """First message sent by a node after WebSocket connect.
+
+    deploy_protocol이 없거나 None이면 옛 노드, 1이면 wire-v1을 아는 노드다. held_attempts는 None(목록 없음, 옛 노드)과
+    빈 목록(쥔 것 없음)을 가른다(wire-v1 1절).
+    """
 
     type: str = "node_hello"
     node_id: str
@@ -61,6 +80,8 @@ class NodeHello(BaseModel):
     arch: str
     haniel_version: str
     services: list[dict] | None = None  # optional service list from node
+    deploy_protocol: int | None = None
+    held_attempts: list[HeldAttempt] | None = None
 
 
 class ChangeNotification(BaseModel):
@@ -243,17 +264,49 @@ class ManifestRecoveryEvidence(StrictMessage):
     original_previous_head: str | None = None
 
 
+class DeployAttemptReceived(StrictMessage):
+    """허가를 받아 줄 세웠다(wire-v1 2절, 판 1 노드만). 닿았는지 모름에서 줄 서 있음으로."""
+
+    type: Literal["deploy_attempt_received"] = "deploy_attempt_received"
+    node_id: str
+    deploy_id: str
+    orchestrator_attempt_id: str
+    connection_generation: str  # 그 허가가 온 연결. 오케스트레이터는 기록만 하고 견주지 않는다
+
+
+# deploy_attempt_terminal의 (kind, stage, reason) 짝은 둘뿐이다(wire-v1 2절)
+_TERMINAL_PAIRS = {
+    ("approval_revalidation_failed", "approval_revalidation"): frozenset({"approval_revalidation_failed"}),
+    ("not_executed", "admission"): frozenset({"already_held", "success_owed", "failure_owed", "no_waiter"}),
+}
+
+
 class DeployAttemptTerminal(StrictMessage):
-    """The sole terminal kind that a node is authorized to originate."""
+    """노드가 내는 「실행하지 않음」: 승인 재검증 실패와 가드(이미 쥠, 빚, 기다리는 이 없음). 시작 알림 전에만 온다."""
 
     type: Literal["deploy_attempt_terminal"] = "deploy_attempt_terminal"
-    kind: Literal["approval_revalidation_failed"]
+    kind: Literal["approval_revalidation_failed", "not_executed"]
     deploy_id: str
     orchestrator_attempt_id: str
     connection_generation: str
-    stage: Literal["approval_revalidation"] = "approval_revalidation"
-    reason: Literal["approval_revalidation_failed"]
+    stage: Literal["approval_revalidation", "admission"] = "approval_revalidation"
+    reason: Literal[
+        "approval_revalidation_failed",
+        "already_held",
+        "success_owed",
+        "failure_owed",
+        "no_waiter",
+    ]
     error: str
+
+    @model_validator(mode="after")
+    def validate_pair(self) -> "DeployAttemptTerminal":
+        allowed = _TERMINAL_PAIRS.get((self.kind, self.stage))
+        if allowed is None or self.reason not in allowed:
+            raise ValueError(
+                f"deploy_attempt_terminal pair not allowed: kind={self.kind} stage={self.stage} reason={self.reason}"
+            )
+        return self
 
 
 # --- Server → Node messages ---
@@ -326,6 +379,25 @@ class DeployReject(BaseModel):
     reason: str
 
 
+class DeployTerminalReceived(StrictMessage):
+    """이 시도의 종결 묶음을 적었다(wire-v1 3절). 종결 증거가 종결된 뒤에만, 판 1 연결에만 보낸다.
+
+    outcome은 이 글이 요청이나 시도를 닫았으면 closed_now, 이미 닫혀 있었으면 already_closed다.
+    """
+
+    type: Literal["deploy_terminal_received"] = "deploy_terminal_received"
+    deploy_id: str | None = None
+    orchestrator_attempt_id: str | None = None
+    node_attempt_id: str | None = None
+    outcome: Literal["closed_now", "already_closed"]
+
+    @model_validator(mode="after")
+    def validate_exactly_one_id(self) -> "DeployTerminalReceived":
+        if (self.orchestrator_attempt_id is None) == (self.node_attempt_id is None):
+            raise ValueError("deploy_terminal_received needs exactly one of orchestrator_attempt_id, node_attempt_id")
+        return self
+
+
 class DeployReportAck(StrictMessage):
     """Tell the current node connection why a late report was ignored."""
 
@@ -372,6 +444,7 @@ OrchestratorMessage = Union[
     RejectedDeployAttemptAck,
     DeployReject,
     DeployReportAck,
+    DeployTerminalReceived,
     ServiceCommand,
 ]
 NodeMessage = Union[
@@ -384,6 +457,7 @@ NodeMessage = Union[
     RepoReconciliation,
     DeployPlanProposal,
     ManifestRecoveryEvidence,
+    DeployAttemptReceived,
     DeployAttemptTerminal,
     ServiceCommandResult,
 ]
@@ -399,6 +473,7 @@ _NODE_MESSAGE_TYPES: dict[str, type[NodeMessage]] = {
     "repo_reconciliation": RepoReconciliation,
     "deploy_plan_proposal": DeployPlanProposal,
     "manifest_recovery_evidence": ManifestRecoveryEvidence,
+    "deploy_attempt_received": DeployAttemptReceived,
     "deploy_attempt_terminal": DeployAttemptTerminal,
     "service_command_result": ServiceCommandResult,
 }

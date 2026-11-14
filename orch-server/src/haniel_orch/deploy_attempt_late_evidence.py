@@ -71,7 +71,7 @@ class DeployAttemptLateEvidence:
                     await self._terminalize_sibling_probes_unlocked(
                         deploy_id, "canonical succeeded through late evidence"
                     )
-                    return {"status": "success", "deploy_id": deploy_id}
+                    return {"status": "success", "deploy_id": deploy_id, "closed_now": True}
         elif leaf == "ev_failed":
             current_retry = await self._retry_unlocked(deploy_id)
             try:
@@ -90,7 +90,7 @@ class DeployAttemptLateEvidence:
             except NoTransition as exc:
                 exc.warn("late_failed")
         else:
-            return {"status": "recorded"}
+            return {"status": "recorded", "closed_now": False}
         after = await self._event(deploy_id)
         return {
             "status": "late_evidence",
@@ -98,4 +98,5 @@ class DeployAttemptLateEvidence:
             "evidence": "success" if leaf == "ev_both" else "failed",
             "request_changed": changed,
             "request_status": after["status"] if after else None,
+            "closed_now": False,
         }

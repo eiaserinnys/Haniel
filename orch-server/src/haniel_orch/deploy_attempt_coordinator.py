@@ -1,6 +1,10 @@
 """Server authority for generation-bound deploy planning and finalization.
 
-노드 보고 처리기(결과, 정착, 증거 회수, deploy_attempt_terminal)는 `deploy_attempt_report_handlers`에 있다.
+노드 보고 처리기(결과, 정착, 증거 회수, deploy_attempt_terminal)는 `deploy_attempt_report_handlers`에, 믿음 글(받았다,
+hello 대조, 끊김의 유예 마감, 종결을 받았다)은 `deploy_attempt_belief`에 있다.
+
+허가 보내기, 탐침 보내기, 자동 거절 답은 정의가 낸 할 일 기호(send_permit, send_probe, auto_reject)가 나왔을 때만 한다(12항).
+기호는 저장소가 커밋한 뒤 결과에 실어 돌려준다.
 """
 
 from __future__ import annotations
@@ -13,9 +17,11 @@ from .connection_lifecycle import (
     ActiveConnection,
     ConnectionState,
 )
+from .deploy_attempt_belief import DeployAttemptBelief
 from .deploy_attempt_connection_lifecycle import DeployAttemptConnectionLifecycle
 from .deploy_attempt_coordinator_support import DeployAttemptCoordinatorSupport, PlanRejected
 from .deploy_attempt_deadlines import DeployAttemptDeadlines
+from .deploy_attempt_intake import DEADLINE_NONE
 from .deploy_attempt_progress import DeployAttemptProgress
 from .deploy_attempt_report_handlers import DeployAttemptReportHandlers
 from .event_store import EventStore
@@ -30,6 +36,9 @@ Send = Callable[[str, str, object], Awaitable[bool]]
 Broadcast = Callable[[dict], Awaitable[None]]
 TerminalCallback = Callable[[dict], Awaitable[None]]
 ConnectionPresence = Callable[[str, str, str], bool]
+NodeProtocol = Callable[[str], "int | None"]
+
+__all__ = ["DeployAttemptCoordinator", "PlanRejected"]
 
 
 class DeployAttemptCoordinator(
@@ -38,6 +47,7 @@ class DeployAttemptCoordinator(
     DeployAttemptDeadlines,
     DeployAttemptProgress,
     DeployAttemptReportHandlers,
+    DeployAttemptBelief,
 ):
     """The sole authority that turns evidence into deploy state transitions."""
 
@@ -51,6 +61,7 @@ class DeployAttemptCoordinator(
         probe_timeout_sec: float,
         attempt_timeout_sec: float,
         terminal_callback: TerminalCallback | None = None,
+        node_protocol: NodeProtocol | None = None,
     ) -> None:
         self._store = store
         self._send = send
@@ -59,6 +70,8 @@ class DeployAttemptCoordinator(
         self._probe_timeout_sec = probe_timeout_sec
         self._attempt_timeout_sec = attempt_timeout_sec
         self._terminal_callback = terminal_callback
+        # 지금 연결의 hello가 밝힌 판(wire-v1). 주지 않으면 모든 노드가 옛 노드다
+        self._node_protocol: NodeProtocol = node_protocol or (lambda _node_id: None)
         self._coordination_lock = asyncio.Lock()
         self._connections: dict[str, ConnectionState] = {}
         self._probe_context: dict[str, tuple[str, str, asyncio.Future[str] | None]] = {}
@@ -72,7 +85,10 @@ class DeployAttemptCoordinator(
         return attempts
 
     async def restore_deadlines(self) -> None:
-        """Close pre-restart probes and recreate persisted attempt deadlines."""
+        """Close pre-restart probes and recreate persisted attempt deadlines.
+
+        재기동은 모든 노드가 끊긴 것이다: 열린 계획 묻기를 닫고(link_down), 판 1 시도의 마감은 믿음별로 되살린다(wire-v1 5절).
+        """
         for probe in await self.attempts.get_active_probes():
             await self.attempts.terminalize_preflight(
                 probe["probe_id"],
@@ -80,8 +96,13 @@ class DeployAttemptCoordinator(
                 stage="startup",
                 reason="server_restarted",
                 error="probe connection generation cannot survive server restart",
+                belief_event="link_down",
             )
-        for attempt in await self.attempts.get_active_attempts():
+        for attempt in await self.attempts.restore_belief_deadlines(
+            grace_sec=self._attempt_timeout_sec
+        ):
+            if attempt["deadline_kind"] == DEADLINE_NONE:
+                continue
             self._schedule_attempt(
                 attempt["orchestrator_attempt_id"], attempt["deadline_at"]
             )
@@ -113,6 +134,7 @@ class DeployAttemptCoordinator(
                     },
                 )
             generation = self._require_generation(event["node_id"])
+            node_protocol = self._node_protocol(event["node_id"])
             # 실행했을 수 있는 시도(source)가 있는 표시 줄만 계획부터 묻는다. source가 빈 표시 줄은 첫 승인 길이다
             retry = await self.attempts.get_retry_requirement(event["deploy_id"])
             retry_required = (
@@ -120,9 +142,9 @@ class DeployAttemptCoordinator(
             )
             if not retry_required:
                 orchestrator_attempt_id = uuid4().hex
-                deadline = self._deadline(self._attempt_timeout_sec)
+                deadline = self._deadline(self._permit_deadline_sec(node_protocol))
                 try:
-                    await self.attempts.begin_normal_attempt(
+                    begun = await self.attempts.begin_normal_attempt(
                         orchestrator_attempt_id=orchestrator_attempt_id,
                         deploy_id=event["deploy_id"],
                         connection_generation=generation,
@@ -130,6 +152,7 @@ class DeployAttemptCoordinator(
                         source=source,
                         approved_by=approved_by,
                         deadline_at=deadline,
+                        node_protocol=node_protocol,
                     )
                 except ValueError as exc:
                     if str(exc) == "retry requires preflight":
@@ -146,7 +169,9 @@ class DeployAttemptCoordinator(
                         connection_generation=generation,
                         approved_by=approved_by,
                     )
-                    sent = await self._send(event["node_id"], generation, approval)
+                    sent = "send_permit" in begun.get("todo", ()) and await self._send(
+                        event["node_id"], generation, approval
+                    )
                     if not sent:
                         await self._close_unsent_attempt(
                             event["node_id"], orchestrator_attempt_id
@@ -170,15 +195,16 @@ class DeployAttemptCoordinator(
             except (ValueError, PermissionError) as exc:
                 self._probe_context.pop(probe_id, None)
                 raise PlanRejected(str(exc), 409) from exc
-            if not await self._send(
+            if not ("send_probe" in probe.get("todo", ()) and await self._send(
                 event["node_id"], generation, self._probe_message(probe)
-            ):
+            )):
                 await self.attempts.terminalize_preflight(
                     probe_id,
                     kind="preflight_disconnected",
                     stage="probe_send",
                     reason="node_disconnected",
                     error="node disconnected before plan probe delivery",
+                    belief_event="link_down",
                 )
                 self._probe_context.pop(probe_id, None)
                 raise PlanRejected("node not connected", 503)
@@ -186,6 +212,10 @@ class DeployAttemptCoordinator(
         return await future
 
     async def handle_auto_request(self, msg: RepoReconciliation) -> None:
+        """노드의 자동 배포 청. 점검 필요와 대기 상태의 판정은 정의(auto_request)가 한다(3항).
+
+        자기 갱신 차단(#1258)은 다른 요청 줄의 상태라 정의 밖에 그대로 둔다.
+        """
         requested = msg.orchestrator_attempt_id
         if requested is None:
             raise ValueError("auto attempt request requires orchestrator_attempt_id")
@@ -205,15 +235,6 @@ class DeployAttemptCoordinator(
                         "self_update_pending",
                     )
                     return
-            if await self.attempts.inspection_required(msg.deploy_id):
-                await self._send_auto_rejection(
-                    msg.node_id,
-                    msg.deploy_id,
-                    requested,
-                    generation,
-                    "retry_requires_manual_approval",
-                )
-                return
             probe_id = uuid4().hex
             try:
                 probe = await self.attempts.create_probe(
@@ -237,15 +258,16 @@ class DeployAttemptCoordinator(
             except ValueError:
                 return
             self._probe_context[probe_id] = ("auto", "system:auto", None)
-            if not await self._send(
+            if not ("send_probe" in probe.get("todo", ()) and await self._send(
                 msg.node_id, generation, self._probe_message(probe)
-            ):
+            )):
                 await self.attempts.terminalize_preflight(
                     probe_id,
                     kind="preflight_disconnected",
                     stage="probe_send",
                     reason="node_disconnected",
                     error="node disconnected before auto plan probe delivery",
+                    belief_event="link_down",
                 )
                 return
             self._schedule_probe(probe_id)
@@ -282,7 +304,8 @@ class DeployAttemptCoordinator(
             )
             if orchestrator_attempt_id is None:
                 return
-            deadline = self._deadline(self._attempt_timeout_sec)
+            node_protocol = self._node_protocol(proposal.node_id)
+            deadline = self._deadline(self._permit_deadline_sec(node_protocol))
             result = await self.attempts.record_proposal_and_begin(
                 proposal,
                 orchestrator_attempt_id=orchestrator_attempt_id,
@@ -290,6 +313,7 @@ class DeployAttemptCoordinator(
                 approved_by=approved_by,
                 deadline_at=deadline,
                 current_generation=current_generation,
+                node_protocol=node_protocol,
             )
             if not coordinator_generation_matches and result["status"] == "begun":
                 raise RuntimeError("store began an attempt for a stale generation")
@@ -300,11 +324,8 @@ class DeployAttemptCoordinator(
                     proposal.probe_id,
                     PlanRejected(result.get("kind", "preflight rejected"), 422),
                 )
-                if (
-                    source == "auto"
-                    and result.get("reason") == "retry_requires_manual_approval"
-                ):
-                    # 탐침을 만든 뒤 점검 필요가 섰다. 노드가 시간 초과까지 기다리지 않게 거절 답을 보낸다
+                if "auto_reject" in result.get("todo", ()):
+                    # 점검 필요가 자동 탐침을 막았다(섰거나 실패 저널이 실려 왔다). 노드가 시간 초과까지 기다리지 않게 답한다
                     await self._send_auto_rejection(
                         probe["node_id"],
                         probe["deploy_id"],
@@ -335,7 +356,7 @@ class DeployAttemptCoordinator(
                     preflight_fingerprint=attempt["proposal_fingerprint"],
                     approved_by=approved_by,
                 )
-            sent = await self._send(
+            sent = "send_permit" in result.get("todo", ()) and await self._send(
                 attempt["node_id"], attempt["connection_generation"], permit
             )
             self._cancel_timer(f"probe:{proposal.probe_id}")
@@ -352,4 +373,3 @@ class DeployAttemptCoordinator(
                     future.set_result(orchestrator_attempt_id)
                 else:
                     future.set_exception(PlanRejected("approval delivery failed", 503))
-

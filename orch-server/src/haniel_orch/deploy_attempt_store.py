@@ -1,7 +1,7 @@
 """Transactional deploy-attempt state machine behind :class:`EventStore`.
 
 노드 보고를 적는 조각은 `deploy_attempt_report_store`, 닫힌 시도의 늦은 증거는 `deploy_attempt_late_evidence`,
-이력은 `deploy_attempt_history`에 있다.
+믿음 글(받았다, 끊김, hello 대조, 믿음별 마감)은 `deploy_attempt_belief_store`, 이력은 `deploy_attempt_history`에 있다.
 """
 
 from __future__ import annotations
@@ -13,22 +13,22 @@ from typing import Any
 
 import aiosqlite
 
+from .deploy_attempt_belief_store import DeployAttemptBeliefStore
 from .deploy_attempt_generation_store import DeployAttemptGenerationStore
 from .deploy_attempt_history import DeployAttemptHistory
+from .deploy_attempt_intake import CLOSURE_NO, CLOSURE_NOT_EXECUTED, intake_send_failed, is_legacy
 from .deploy_attempt_late_evidence import DeployAttemptLateEvidence
 from .deploy_attempt_progress_store import DeployAttemptProgressStore
 from .deploy_attempt_report_store import DeployAttemptReportStore
 from .deploy_attempt_store_support import DeployAttemptStoreSupport
 from .deploy_attempt_validation import DeployAttemptValidation
 from .protocol import DeployPlanProposal, DeployStatus
+from .statechart import steps
+from .statechart.restore import REASON_NO_TRANSITION, NoTransition
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _expired(deadline: str) -> bool:
-    return datetime.fromisoformat(deadline) <= datetime.now(timezone.utc)
 
 
 class DeployAttemptStore(
@@ -36,6 +36,7 @@ class DeployAttemptStore(
     DeployAttemptProgressStore,
     DeployAttemptReportStore,
     DeployAttemptLateEvidence,
+    DeployAttemptBeliefStore,
     DeployAttemptHistory,
     DeployAttemptValidation,
     DeployAttemptStoreSupport,
@@ -54,7 +55,7 @@ class DeployAttemptStore(
         return await cursor.fetchone() is not None
 
     async def inspection_required(self, deploy_id: str) -> bool:
-        """점검 필요가 켜져 있는가. 자동 요청, 탐침 만들기, 일괄 승인이 시도를 열기 전에 본다."""
+        """점검 필요가 켜져 있는가. 일괄 승인이 시도를 열기 전에 본다."""
         return await self._lock_on(deploy_id)
 
     async def get_retry_requirement(self, deploy_id: str) -> dict[str, Any] | None:
@@ -84,6 +85,12 @@ class DeployAttemptStore(
         manual_retry: bool,
         requested_orchestrator_attempt_id: str | None = None,
     ) -> dict[str, Any]:
+        """계획 묻기 줄을 만든다. 믿음을 도는 시도 없음에서 계획을 물음으로 옮기는 것은 정의다(open_probe, auto_request).
+
+        정의가 계획을 열지 않으면 지금 인터페이스대로 예외다: 점검 필요가 자동 요청을 막으면 PermissionError
+        (retry_requires_manual_approval), 처음 대기가 아니거나 계획 묻기나 시도가 이미 있으면 ValueError.
+        돌려주는 탐침 줄에는 정의가 낸 기호(todo)가 함께 실린다(send_probe).
+        """
         async with self._mutation_lock:
             try:
                 event = await self._event(deploy_id)
@@ -94,8 +101,18 @@ class DeployAttemptStore(
                 retry = await self._retry_unlocked(deploy_id)
                 if manual_retry and retry is None:
                     raise ValueError("manual retry requires retry marker")
-                if not manual_retry and await self._lock_on(deploy_id):
+                try:
+                    step = await steps.step_request(
+                        self._db, deploy_id, "open_probe" if manual_retry else "auto_request"
+                    )
+                except NoTransition as exc:
+                    if exc.reason != REASON_NO_TRANSITION:
+                        exc.warn("create_probe")
+                    raise ValueError("a plan probe or attempt is already open for this request") from exc
+                if "auto_reject" in step.todo:
                     raise PermissionError("retry_requires_manual_approval")
+                if "send_probe" not in step.todo:
+                    raise ValueError("a plan probe or attempt is already open for this request")
                 lineage = retry["lineage"] if retry else []
                 await self._db.execute(
                     """INSERT INTO deploy_plan_probes
@@ -123,7 +140,8 @@ class DeployAttemptStore(
                     ),
                 )
                 await self._db.commit()
-                return await self._probe(probe_id)  # type: ignore[return-value]
+                probe = await self._probe(probe_id)
+                return {**probe, "todo": list(step.todo)}  # type: ignore[dict-item]
             except Exception:
                 await self._db.rollback()
                 raise
@@ -138,7 +156,9 @@ class DeployAttemptStore(
         source: str,
         approved_by: str,
         deadline_at: str,
+        node_protocol: int | None = None,
     ) -> dict[str, Any]:
+        """처음 승인 길(계획 묻기 없음). 돌려주는 시도 줄에 정의가 낸 기호(todo, send_permit)가 함께 실린다."""
         async with self._mutation_lock:
             try:
                 if connection_generation != current_generation:
@@ -155,7 +175,7 @@ class DeployAttemptStore(
                     raise ValueError("retry requires preflight")
                 if await self._has_active_branch(event):
                     raise PermissionError("active_attempt_conflict")
-                await self._insert_attempt(
+                todo = await self._insert_attempt(
                     event=event,
                     orchestrator_attempt_id=orchestrator_attempt_id,
                     connection_generation=connection_generation,
@@ -163,12 +183,81 @@ class DeployAttemptStore(
                     approved_by=approved_by,
                     deadline_at=deadline_at,
                     mode="execute",
+                    node_protocol=node_protocol,
                 )
                 await self._db.commit()
-                return await self._attempt(orchestrator_attempt_id)  # type: ignore[return-value]
+                attempt = await self._attempt(orchestrator_attempt_id)
+                return {**attempt, "todo": list(todo)}  # type: ignore[dict-item]
             except Exception:
                 await self._db.rollback()
                 raise
+
+    async def _plan_failed_journal_unlocked(
+        self, probe: dict[str, Any], proposal: DeployPlanProposal, source: str
+    ) -> dict[str, Any] | None:
+        """자동 탐침의 계획 답에 「아니오」로 닫힌 계보 시도의 실패 저널이 실려 왔으면 허가를 보내지 않고 점검 필요를 세운다(10항).
+
+        조건은 판으로 거르지 않는다(판 없는 요청은 「아니오」 닫힘이 없어 휴면이다).
+        """
+        is_auto = probe["requested_orchestrator_attempt_id"] is not None or source == "auto"
+        linked = proposal.linked_orchestrator_attempt_id
+        if not is_auto or linked is None or proposal.journal_status not in ("failed", "verification_failed"):
+            return None
+        retry = await self._retry_unlocked(probe["deploy_id"])
+        if retry is None or linked not in retry["lineage"]:
+            return None
+        linked_attempt = await self._attempt(linked)
+        if linked_attempt is None or linked_attempt["closure"] not in CLOSURE_NO:
+            return None
+        now = _now_iso()
+        await self._terminalize_probe_unlocked(
+            {**probe, "status": "proposed"},
+            "preflight_fail_closed",
+            "proposal",
+            "retry_requires_manual_approval",
+            f"journal {proposal.journal_attempt_id} records a failure of attempt {linked}, "
+            f"which closed as {linked_attempt['closure']} without inspection",
+        )
+        todo: list[str] = []
+        try:
+            step = await steps.step_request(
+                self._db,
+                probe["deploy_id"],
+                "plan_failed_journal",
+                data={
+                    "failed_attempt_id": linked,
+                    "stable_source": linked,
+                    "marker_created_at": retry["created_at"],
+                },
+                now=now,
+            )
+            todo = list(step.todo)
+        except NoTransition as exc:
+            exc.warn("plan_failed_journal")
+        return {
+            "status": "terminal",
+            "kind": "preflight_fail_closed",
+            "reason": "retry_requires_manual_approval",
+            "todo": todo,
+        }
+
+    async def _close_probe_unlocked(
+        self,
+        probe: dict[str, Any],
+        kind: str,
+        stage: str,
+        reason: str,
+        error: str,
+        *,
+        source: str,
+    ) -> list[str]:
+        """계획 묻기를 닫고 믿음을 되돌린다. 점검 필요가 자동 탐침을 막은 것이면 plan_rejected(auto_reject), 그 밖은 plan_closed."""
+        await self._terminalize_probe_unlocked(probe, kind, stage, reason, error)
+        is_auto = probe["requested_orchestrator_attempt_id"] is not None or source == "auto"
+        belief_event = (
+            "plan_rejected" if (is_auto and reason == "retry_requires_manual_approval") else "plan_closed"
+        )
+        return list(await self._settle_probe_belief_unlocked(probe["deploy_id"], belief_event))
 
     async def record_proposal_and_begin(
         self,
@@ -179,6 +268,7 @@ class DeployAttemptStore(
         approved_by: str,
         deadline_at: str,
         current_generation: str,
+        node_protocol: int | None = None,
     ) -> dict[str, Any]:
         async with self._mutation_lock:
             try:
@@ -196,27 +286,33 @@ class DeployAttemptStore(
                     proposal.connection_generation != probe["connection_generation"]
                     or probe["connection_generation"] != current_generation
                 ):
-                    await self._terminalize_probe_unlocked(
+                    todo = await self._close_probe_unlocked(
                         probe,
                         "preflight_stale",
                         "proposal",
                         "connection_generation_changed",
                         "proposal, stored probe, and current connection generation differ",
+                        source=source,
                     )
                     await self._db.commit()
-                    return {"status": "terminal", "kind": "preflight_stale"}
+                    return {"status": "terminal", "kind": "preflight_stale", "todo": todo}
                 stale = await self._proposal_stale_reason(probe, proposal, source)
                 if stale:
                     reason, error = stale
-                    await self._terminalize_probe_unlocked(
-                        probe, "preflight_stale", "proposal", reason, error
+                    todo = await self._close_probe_unlocked(
+                        probe, "preflight_stale", "proposal", reason, error, source=source
                     )
                     await self._db.commit()
                     return {
                         "status": "terminal",
                         "kind": "preflight_stale",
                         "reason": reason,
+                        "todo": todo,
                     }
+                failed_journal = await self._plan_failed_journal_unlocked(probe, proposal, source)
+                if failed_journal is not None:
+                    await self._db.commit()
+                    return failed_journal
                 await self._db.execute(
                     "UPDATE deploy_plan_probes SET status = 'proposed', mode = ?, "
                     "proposal_fingerprint = ?, proposal_json = ? WHERE probe_id = ?",
@@ -227,54 +323,59 @@ class DeployAttemptStore(
                         proposal.probe_id,
                     ),
                 )
+                legacy = is_legacy(await self._request_protocol(probe["deploy_id"]))
                 if proposal.mode == "fail_closed":
-                    await self._terminalize_probe_unlocked(
+                    todo = await self._close_probe_unlocked(
                         {**probe, "status": "proposed"},
                         "preflight_fail_closed",
                         "proposal",
                         proposal.reason,
                         proposal.error or proposal.reason,
+                        source=source,
                     )
                     await self._db.commit()
-                    return {"status": "terminal", "kind": "preflight_fail_closed"}
+                    return {"status": "terminal", "kind": "preflight_fail_closed", "todo": todo}
                 if proposal.mode == "evidence_recovery":
-                    error = self._validate_recovery_proposal(probe, proposal)
+                    error = self._validate_recovery_proposal(probe, proposal, legacy=legacy)
                     if error:
-                        await self._terminalize_probe_unlocked(
+                        todo = await self._close_probe_unlocked(
                             {**probe, "status": "proposed"},
                             "preflight_fail_closed",
                             "proposal",
                             "invalid_recovery_evidence",
                             error,
+                            source=source,
                         )
                         await self._db.commit()
-                        return {"status": "terminal", "kind": "preflight_fail_closed"}
+                        return {"status": "terminal", "kind": "preflight_fail_closed", "todo": todo}
                 elif proposal.mode == "execute":
-                    error = self._validate_execute_proposal(probe, proposal)
+                    error = self._validate_execute_proposal(probe, proposal, legacy=legacy)
                     if error:
-                        await self._terminalize_probe_unlocked(
+                        todo = await self._close_probe_unlocked(
                             {**probe, "status": "proposed"},
                             "preflight_fail_closed",
                             "proposal",
                             "unsafe_execute_plan",
                             error,
+                            source=source,
                         )
                         await self._db.commit()
-                        return {"status": "terminal", "kind": "preflight_fail_closed"}
+                        return {"status": "terminal", "kind": "preflight_fail_closed", "todo": todo}
                 event = await self._event(probe["deploy_id"])
                 if event is None:
                     raise RuntimeError("canonical disappeared")
                 if await self._has_active_branch(event):
-                    await self._terminalize_probe_unlocked(
+                    todo = await self._close_probe_unlocked(
                         {**probe, "status": "proposed"},
                         "preflight_stale",
                         "begin",
                         "active_attempt_conflict",
                         "another attempt owns this node, repo, and branch",
+                        source=source,
                     )
                     await self._db.commit()
-                    return {"status": "terminal", "kind": "preflight_stale"}
-                await self._insert_attempt(
+                    return {"status": "terminal", "kind": "preflight_stale", "todo": todo}
+                todo = await self._insert_attempt(
                     event=event,
                     orchestrator_attempt_id=orchestrator_attempt_id,
                     connection_generation=probe["connection_generation"],
@@ -284,6 +385,7 @@ class DeployAttemptStore(
                     mode=proposal.mode,
                     probe=probe,
                     proposal=proposal,
+                    node_protocol=node_protocol,
                 )
                 await self._db.execute(
                     "UPDATE deploy_plan_probes SET status = 'begun' WHERE probe_id = ?",
@@ -293,6 +395,7 @@ class DeployAttemptStore(
                 return {
                     "status": "begun",
                     "attempt": await self._attempt(orchestrator_attempt_id),
+                    "todo": list(todo),
                 }
             except Exception:
                 await self._db.rollback()
@@ -330,19 +433,24 @@ class DeployAttemptStore(
     async def fail_attempt_not_sent(
         self, orchestrator_attempt_id: str
     ) -> dict[str, Any]:
-        """허가가 노드에 닿지 못했을 때 시도를 그 자리에서 실패로 닫는다(보내기 실패)."""
+        """허가가 노드에 닿지 못했을 때 시도를 그 자리에서 닫는다(보내기 실패). 실행하지 않음이 확실해 source를 옮기지 않는다."""
         async with self._mutation_lock:
             try:
                 attempt = await self._attempt(orchestrator_attempt_id)
                 if attempt is None or attempt["outcome"] != "active":
                     return {"status": "ignored"}
-                result = await self._fail_attempt_unlocked(
-                    attempt=attempt,
+                intake = intake_send_failed(node_protocol=attempt["node_protocol"], newer=False)
+                result = await self._close_attempt_unlocked(
+                    attempt,
+                    event=intake.event,
+                    facts={"legacy": intake.facts["legacy"]},
                     kind="delivery_failed",
                     stage="approval_send",
                     reason="approval_send_failed",
                     error="approval could not be delivered to the node",
-                    not_sent=True,
+                    closure=CLOSURE_NOT_EXECUTED,
+                    move_source=False,
+                    node_glyph=False,
                 )
                 await self._db.commit()
                 return result
@@ -354,8 +462,16 @@ class DeployAttemptStore(
         return await self._attempt(orchestrator_attempt_id)
 
     async def terminalize_preflight(
-        self, probe_id: str, *, kind: str, stage: str, reason: str, error: str
+        self,
+        probe_id: str,
+        *,
+        kind: str,
+        stage: str,
+        reason: str,
+        error: str,
+        belief_event: str = "plan_closed",
     ) -> bool:
+        """계획 묻기를 밖에서 닫는다(마감, 끊김, 재시작, 탐침 보내기 실패). belief_event가 믿음을 되돌리는 까닭이다."""
         async with self._mutation_lock:
             try:
                 probe = await self._probe(probe_id)
@@ -364,6 +480,8 @@ class DeployAttemptStore(
                 changed = await self._terminalize_probe_unlocked(
                     probe, kind, stage, reason, error
                 )
+                if changed:
+                    await self._settle_probe_belief_unlocked(probe["deploy_id"], belief_event)
                 await self._db.commit()
                 return changed
             except Exception:

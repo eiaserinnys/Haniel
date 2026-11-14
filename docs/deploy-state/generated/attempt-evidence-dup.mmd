@@ -1,0 +1,25 @@
+stateDiagram-v2
+    direction TB
+    classDef breaks fill:#ffecee,stroke:#e72e3b
+    classDef notInDesign fill:#fff3e6,stroke:#e8730c
+    state "종결 증거" as ev {
+        ev_none: 증거 아직 없음 (열림)
+        ev_result: 성공 결과만 옴 (열림)
+        ev_both: 성공으로 종결 (닫힘)
+        ev_settled: 체크아웃 대조만 옴 (열림)
+        ev_failed: 실패로 종결 (닫힘)
+        [*] --> ev_none: 시도를 시작한다
+        ev_result --> ev_result: 성공 결과가 온다 [execute 방식]
+        ev_both --> ev_both: 성공 결과가 온다 [execute 방식]
+        ev_both --> ev_both: 목표와 같은 대조가 온다 [execute 방식]
+        ev_both --> ev_both: 대조가 온다 [execute 방식 아님]
+        ev_both --> ev_both: 실패로 닫는다
+        ev_both --> ev_both: 증거 회수가 검증을 통과한다 [증거 회수 방식]
+        ev_settled --> ev_settled: 목표와 같은 대조가 온다 [execute 방식]
+        ev_settled --> ev_settled: 대조가 온다 [execute 방식 아님]
+        ev_failed --> ev_failed: 성공 결과가 온다 [execute 방식]
+        ev_failed --> ev_failed: 목표와 같은 대조가 온다 [execute 방식]
+        ev_failed --> ev_failed: 대조가 온다 [execute 방식 아님]
+        ev_failed --> ev_failed: 실패로 닫는다
+        ev_failed --> ev_failed: 증거 회수가 검증을 통과한다 [증거 회수 방식]
+    }

@@ -156,8 +156,9 @@ class EventStoreLifecycleMixin:
         connected: bool = True,
         connection_generation: str | None = None,
         connection_token: str | None = None,
+        deploy_protocol: int | None = None,
     ) -> None:
-        """Register or update a node and its durable connection generation."""
+        """Register or update a node, its durable connection generation, and the deploy protocol it declared."""
         async with self._mutation_lock:
             try:
                 await event_store_nodes.upsert_node(
@@ -170,6 +171,7 @@ class EventStoreLifecycleMixin:
                     connected,
                     connection_generation,
                     connection_token,
+                    deploy_protocol,
                 )
                 await self._db.commit()
             except Exception:
@@ -241,7 +243,7 @@ class EventStoreLifecycleMixin:
         """Get all nodes (connected and disconnected)."""
         cursor = await self._db.execute(
             "SELECT node_id, hostname, os, arch, haniel_version, connected, "
-            "last_seen, created_at FROM nodes ORDER BY last_seen DESC"
+            "last_seen, created_at, deploy_protocol FROM nodes ORDER BY last_seen DESC"
         )
         rows = await cursor.fetchall()
         return [row_to_dict(cursor, row) for row in rows]

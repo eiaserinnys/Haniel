@@ -19,6 +19,9 @@ async def initialize_node_schema(db: aiosqlite.Connection) -> None:
         await db.execute("ALTER TABLE nodes ADD COLUMN connection_generation TEXT")
     if "connection_token" not in columns:
         await db.execute("ALTER TABLE nodes ADD COLUMN connection_token TEXT")
+    if "deploy_protocol" not in columns:
+        # hello에서 마지막으로 본 판(wire-v1 4절). NULL은 옛 노드다. 화면과 재시작 뒤 확인에 쓴다
+        await db.execute("ALTER TABLE nodes ADD COLUMN deploy_protocol INTEGER")
 
 
 async def upsert_node(
@@ -31,13 +34,14 @@ async def upsert_node(
     connected: bool,
     connection_generation: str | None,
     connection_token: str | None,
+    deploy_protocol: int | None = None,
 ) -> None:
     now = _now_iso()
     await db.execute(
         """INSERT INTO nodes
            (node_id, hostname, os, arch, haniel_version, connected,
-            connection_generation, connection_token, last_seen, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            connection_generation, connection_token, deploy_protocol, last_seen, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(node_id) DO UPDATE SET
              hostname = excluded.hostname,
              os = excluded.os,
@@ -46,6 +50,7 @@ async def upsert_node(
              connected = excluded.connected,
              connection_generation = excluded.connection_generation,
              connection_token = excluded.connection_token,
+             deploy_protocol = excluded.deploy_protocol,
              last_seen = excluded.last_seen""",
         (
             node_id,
@@ -56,6 +61,7 @@ async def upsert_node(
             int(connected),
             connection_generation,
             connection_token,
+            deploy_protocol,
             now,
             now,
         ),

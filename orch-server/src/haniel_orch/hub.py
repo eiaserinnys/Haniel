@@ -19,6 +19,7 @@ from .node_registry import NodeRegistry
 from .push import NullPushService, PushService
 from .protocol import (
     ChangeNotification,
+    DeployAttemptReceived,
     DeployAttemptTerminal,
     DeployPlanProposal,
     DeployProgress,
@@ -38,7 +39,13 @@ logger = logging.getLogger(__name__)
 
 # 시도에 묶인 노드 글 가운데 본문에 node_id가 있는 것(deploy_attempt_terminal에는 node_id 칸이 없다).
 # RepoReconciliation은 정착(settled)만 시도에 묶인다
-_ATTEMPT_BOUND = (DeployProgress, DeployResult, RepoReconciliation, ManifestRecoveryEvidence)
+_ATTEMPT_BOUND = (
+    DeployProgress,
+    DeployResult,
+    RepoReconciliation,
+    ManifestRecoveryEvidence,
+    DeployAttemptReceived,
+)
 
 
 class WebSocketHub(HubCanonicalFlows, HubServiceCommands):
@@ -80,6 +87,7 @@ class WebSocketHub(HubCanonicalFlows, HubServiceCommands):
             probe_timeout_sec=min(deploy_timeout_sec, 30.0),
             attempt_timeout_sec=deploy_timeout_sec,
             terminal_callback=self._on_deploy_terminal,
+            node_protocol=self._registry.deploy_protocol,
         )
         self._disconnects = NodeDisconnectWorkflow(
             self._registry,
@@ -145,6 +153,11 @@ class WebSocketHub(HubCanonicalFlows, HubServiceCommands):
                 logger.debug(
                     "Failed to close replaced node %s websocket: %s", node_id, e
                 )
+
+        # 2b. hello 대조: 메시지 고리에 들어가기 전에 이 노드의 판 1 시도를 쥔 시도 목록과 견준다(wire-v1 1절, 7항)
+        await self.deploy_coordinator.reconcile_hello(
+            node_id, msg.deploy_protocol, msg.held_attempts
+        )
 
         # 3. Broadcast node_connected
         await self.broadcast_to_dashboards(
@@ -222,6 +235,8 @@ class WebSocketHub(HubCanonicalFlows, HubServiceCommands):
                         continue
                 elif isinstance(incoming, DeployProgress):
                     await self.deploy_coordinator.handle_progress(incoming)
+                elif isinstance(incoming, DeployAttemptReceived):
+                    await self.deploy_coordinator.handle_received(incoming)
                 elif isinstance(incoming, RepoReconciliation):
                     if incoming.phase == "observed":
                         await self._repo_reconciler.handle(incoming)

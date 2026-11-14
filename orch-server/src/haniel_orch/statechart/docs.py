@@ -22,14 +22,16 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from statemachine.callbacks import CallbackGroup
+
 from .definitions import (
     BREAKS,
-    DESIGN_LINES,
     DIVERGENCE,
     LEAVES_NOT_IN_DESIGN,
     AttemptEvidence,
     OrchRequest,
 )
+from .divergence import design_line_for, mark_for
 from .labels import COND_LABELS, EVENT_LABELS, STATE_LABELS, effect_for
 from .restore import initial_row, regions
 
@@ -70,10 +72,13 @@ def transitions(cls: type) -> list[Arrow]:
         for transition in state.transitions:
             if not transition.event:
                 continue
+            # 전이의 콜백 목록에는 on 콜백(할 일 기호)도 들어 있다. 조건 묶음만 고른다
             conds = tuple(
                 spec.func
                 for spec in transition.cond.list
-                if not spec.is_convention and isinstance(spec.func, str)
+                if spec.group == CallbackGroup.COND
+                and not spec.is_convention
+                and isinstance(spec.func, str)
             )
             for target in transition.targets:
                 arrows.append(
@@ -100,6 +105,7 @@ def validate(cls: type) -> list[Arrow]:
         if effect_for(name, arrow.event, arrow.target, arrow.source) is None:
             problems.append(f"{name}: 사건 '{arrow.event}'의 「함께 쓰는 것」이 없다")
     keys = {(a.definition, a.source, a.event, a.target) for a in arrows}
+    keys |= {(a.definition, a.source, a.event, a.target, a.conds) for a in arrows}
     for key in DIVERGENCE:
         if key[0] == name and key not in keys:
             problems.append(f"{name}: 정의에 없는 전이에 표시가 달려 있다: {key[1:]}")
@@ -141,7 +147,7 @@ def _arrow_label(arrow: Arrow) -> str:
     text = EVENT_LABELS[name][arrow.event]
     if arrow.conds:
         text += " [" + " 그리고 ".join(COND_LABELS[name][c] for c in arrow.conds) + "]"
-    mark = DIVERGENCE.get((name, arrow.source, arrow.event, arrow.target))
+    mark = _mark(arrow)
     if mark:
         text += f" ({mark[1]})"
     return text
@@ -151,19 +157,67 @@ def _arrow_label(arrow: Arrow) -> str:
 class View:
     """한 장의 그림. marked가 None이면 모든 전이, True면 표시 단 전이만, False면 표시 없는 전이만.
 
-    region이 있으면 그 영역 안의 전이만 그린다(병렬 영역이 둘인 요청 정의의 보기를 나눈다).
+    region이 있으면 그 영역 안의 전이만 그린다(병렬 영역이 넷인 요청 정의의 보기를 나눈다).
+    events가 있으면 그 사건의 전이만 그린다(한 영역의 화살표가 상한을 넘을 때 사건 묶음으로 나눈다).
     """
 
     stem: str
     cls: type
     marked: bool | None
     region: str | None = None
+    events: frozenset[str] | None = None
+    self_arrows: bool | None = None  # None이면 모두, False면 자리를 옮기는 화살표만, True면 제자리 화살표만
 
+
+# 요청 상태 영역의 사건 묶음 넷: 승인과 종결, 노드 스스로 한 배포와 늦은 증거, 닫힘 일곱, 자동 요청과 계획 묻기
+_STATUS_MAIN = frozenset(
+    {
+        "begin_attempt",
+        "attempt_succeeded",
+        "attempt_failed",
+        "reject",
+        "newer_commit",
+        "observed",
+        "observed_self_update",
+        "reopen",
+    }
+)
+_STATUS_NODE = frozenset({"node_succeeded", "node_failed", "success_evidence", "late_failed"})
+_STATUS_CLOSINGS = frozenset(
+    {"send_failed", "declined", "ack_deadline", "lease_deadline", "grace_deadline", "hello_missing"}
+)
+_STATUS_AUTO = frozenset({"auto_request", "plan_failed_journal"})
+# 믿음 영역의 사건 묶음 셋: 허가와 노드의 답, 계획 묻기의 닫힘, 시도의 닫힘
+_BELIEF_OPEN = frozenset({"begin_attempt", "open_probe", "auto_request", "acked", "started", "hello_holds"})
+_BELIEF_PROBE = frozenset(
+    {"plan_failed_journal", "plan_closed", "plan_rejected", "probe_deadline", "link_down", "reject", "newer_commit"}
+)
+_BELIEF_CLOSE = frozenset(
+    {
+        "send_failed",
+        "declined",
+        "ack_deadline",
+        "lease_deadline",
+        "grace_deadline",
+        "hello_missing",
+        "attempt_succeeded",
+        "attempt_failed",
+        "success_evidence",
+        "node_succeeded",
+    }
+)
 
 VIEWS = (
-    View("request-status", OrchRequest, False, "status"),
+    View("request-status", OrchRequest, False, "status", _STATUS_MAIN),
+    View("request-status-node", OrchRequest, False, "status", _STATUS_NODE),
+    View("request-status-closings", OrchRequest, False, "status", _STATUS_CLOSINGS),
+    View("request-status-auto", OrchRequest, False, "status", _STATUS_AUTO),
     View("request-divergence", OrchRequest, True, "status"),
-    View("attempt-evidence", AttemptEvidence, None),
+    View("request-belief-open", OrchRequest, None, "belief", _BELIEF_OPEN),
+    View("request-belief-probe", OrchRequest, None, "belief", _BELIEF_PROBE),
+    View("request-belief-close", OrchRequest, None, "belief", _BELIEF_CLOSE),
+    View("attempt-evidence", AttemptEvidence, None, self_arrows=False),
+    View("attempt-evidence-dup", AttemptEvidence, None, self_arrows=True),
     View("request-lock", OrchRequest, None, "lock"),
     View("request-tag", OrchRequest, None, "tag"),
 )
@@ -182,20 +236,17 @@ def _view_arrows(view: View) -> list[Arrow]:
     arrows = validate(view.cls)
     if view.region is not None:
         arrows = [a for a in arrows if _region_of(view.cls, a.source) == view.region]
+    if view.events is not None:
+        arrows = [a for a in arrows if a.event in view.events]
+    if view.self_arrows is not None:
+        arrows = [a for a in arrows if (a.source == a.target) == view.self_arrows]
     if view.marked is None:
         return arrows
-    return [
-        a
-        for a in arrows
-        if (
-            (a.definition, a.source, a.event, a.target) in DIVERGENCE
-        )
-        == view.marked
-    ]
+    return [a for a in arrows if (_mark(a) is not None) == view.marked]
 
 
 def _mark(arrow: Arrow):
-    return DIVERGENCE.get((arrow.definition, arrow.source, arrow.event, arrow.target))
+    return mark_for(arrow.definition, arrow.source, arrow.event, arrow.target, arrow.conds)
 
 
 def _fold(cls: type, arrows: list[Arrow]) -> tuple[list[Arrow], list[tuple[list[str], Arrow]]]:
@@ -291,8 +342,8 @@ def table(cls: type) -> str:
     ]
     for arrow in arrows:
         effect = effect_for(name, arrow.event, arrow.target, arrow.source)
-        mark = DIVERGENCE.get((name, arrow.source, arrow.event, arrow.target))
-        line = DESIGN_LINES.get((name, arrow.source, arrow.event, arrow.target))
+        mark = _mark(arrow)
+        line = design_line_for(name, arrow.source, arrow.event, arrow.target, arrow.conds)
         mark_text = "-" if not mark else (f"{mark[1]} ({line})" if line else mark[1])
         conds = " 그리고 ".join(COND_LABELS[name][c] for c in arrow.conds) or "-"
         rows.append(
@@ -309,8 +360,9 @@ def transitions_markdown() -> str:
         "「설계와 다른 점」은 설계 글(design.md)과 견준 표시다. `어긋남 N`은 설계가 어긋남으로 적은 동작이고, "
         "`PR 2에서 바뀜`은 괄호 속 design.md 줄이 옛 노드 규칙이나 PR 2에서 바꾼다고 적은 동작이며, "
         "`설계에 없음`은 설계에 그 전이가 없는 동작이다. 표시가 없는 전이는 설계 글이 받친다. "
-        "요청 정의의 점검 필요(lock) 영역과 닫힌 뒤 적용 꼬리표(tag) 영역은 요청 상태 영역과 함께 한 사건으로 움직이므로, 세 영역의 화살표가 같은 사건 이름으로 표에 나란히 있다. "
-        "시도의 닫힘(outcome)은 증거 정의의 상태가 아니라 시도 줄의 닫힘 칸이다. 오케스트레이터가 스스로 내는 닫힘(실행 임대 마감, 보내기 실패)은 증거 잎을 옮기지 않으므로 이 표에 없다.\n\n"
+        "요청 정의의 믿음(belief), 점검 필요(lock), 닫힌 뒤 적용 꼬리표(tag) 영역은 요청 상태 영역과 함께 한 사건으로 움직이므로, 네 영역의 화살표가 같은 사건 이름으로 표에 나란히 있다. "
+        "제자리 전이(출발과 도착이 같음)는 그 사건을 받되 아무 칸도 바꾸지 않는다는 뜻이다. "
+        "시도의 닫힘(outcome)은 증거 정의의 상태가 아니라 시도 줄의 닫힘 칸이다. 오케스트레이터가 스스로 내는 닫힘(마감, 보내기 실패, hello 목록에 없음)은 증거 잎을 옮기지 않으므로 증거 표에 없다.\n\n"
     )
     return head + "\n".join(table(cls) for cls in DEFINITIONS)
 

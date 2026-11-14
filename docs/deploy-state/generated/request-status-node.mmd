@@ -1,0 +1,22 @@
+stateDiagram-v2
+    direction TB
+    classDef breaks fill:#ffecee,stroke:#e72e3b
+    classDef notInDesign fill:#fff3e6,stroke:#e8730c
+    state "요청 상태" as status {
+        state join1 <<join>>
+        pending: 처음 대기 (열림)
+        again: 다시 대기 (열림)
+        success: 성공 (닫힘)
+        retry: 실패 뒤 대기 (열림)
+        deploying: 배포 중 (열림)
+        [*] --> pending: 요청이 들어온다
+        pending --> retry: 노드가 자기 배포의 실패를 알린다
+        pending --> retry: 닫힌 시도의 늦은 실패가 닿는다
+        again --> retry: 노드가 자기 배포의 실패를 알린다
+        again --> retry: 닫힌 시도의 늦은 실패가 닿는다
+        pending --> join1
+        again --> join1
+        retry --> join1
+        deploying --> join1
+        join1 --> success: 노드가 자기 배포의 성공을 알린다
+    }

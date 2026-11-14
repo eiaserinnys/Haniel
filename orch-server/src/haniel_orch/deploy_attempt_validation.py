@@ -1,4 +1,8 @@
-"""계획 답과 증거 회수의 재확인(저장소 조각). 2b-2에서 저장소 도우미 모듈의 크기를 지키려 옮겼다. 내용은 그대로다."""
+"""계획 답과 증거 회수의 재확인(저장소 조각).
+
+계보 검사(design.md:229-235, 2b-2 9항): 판 1 요청(그 요청의 마지막 시도가 판 1)은 「저널의 시도 번호가 계보 안에 있는가」를
+보고, 판 없는 요청은 「source와 같은가」를 그대로 본다(옛 노드의 계획 함수가 같은가를 보기 때문이다, design.md:432).
+"""
 
 from __future__ import annotations
 
@@ -6,6 +10,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from .deploy_attempt_intake import is_legacy
 from .protocol import DeployPlanProposal, DeployStatus, ManifestRecoveryEvidence
 
 
@@ -20,11 +25,18 @@ class DeployAttemptValidation:
         self, attempt: dict[str, Any], evidence: ManifestRecoveryEvidence
     ) -> str | None:
         retry = await self._retry_unlocked(attempt["deploy_id"])
+        legacy = is_legacy(attempt["node_protocol"])
+        if legacy:
+            lineage_ok = (
+                retry is not None
+                and evidence.source_orchestrator_attempt_id
+                == retry["source_orchestrator_attempt_id"]
+                and evidence.source_orchestrator_attempt_id in retry["lineage"]
+            )
+        else:
+            lineage_ok = retry is not None and evidence.source_orchestrator_attempt_id in retry["lineage"]
         checks = {
-            "source lineage": retry is not None
-            and evidence.source_orchestrator_attempt_id
-            == retry["source_orchestrator_attempt_id"]
-            and evidence.source_orchestrator_attempt_id in retry["lineage"],
+            "source lineage": lineage_ok,
             "journal identity": evidence.journal_attempt_id
             == attempt["journal_attempt_id"],
             "target": evidence.target_head
@@ -45,16 +57,22 @@ class DeployAttemptValidation:
         failed = [name for name, value in checks.items() if not value]
         return f"recovery evidence mismatch: {', '.join(failed)}" if failed else None
 
+    @staticmethod
     def _validate_recovery_proposal(
-        self, probe: dict[str, Any], proposal: DeployPlanProposal
+        probe: dict[str, Any], proposal: DeployPlanProposal, *, legacy: bool = True
     ) -> str | None:
         lineage = json.loads(probe["retry_lineage_json"])
+        if legacy:
+            linked_ok = proposal.linked_orchestrator_attempt_id == probe["source_orchestrator_attempt_id"]
+            lineage_ok = probe["source_orchestrator_attempt_id"] in lineage
+        else:
+            linked_ok = proposal.linked_orchestrator_attempt_id in lineage
+            lineage_ok = True
         checks = {
             "journal success": proposal.journal_status == "success",
             "journal_attempt_id": bool(proposal.journal_attempt_id),
-            "linked source": proposal.linked_orchestrator_attempt_id
-            == probe["source_orchestrator_attempt_id"],
-            "source lineage": probe["source_orchestrator_attempt_id"] in lineage,
+            "linked source": linked_ok,
+            "source lineage": lineage_ok,
             "target": proposal.current_head
             == probe["target_head"]
             == proposal.journal_target_head,
@@ -69,7 +87,7 @@ class DeployAttemptValidation:
 
     @staticmethod
     def _validate_execute_proposal(
-        probe: dict[str, Any], proposal: DeployPlanProposal
+        probe: dict[str, Any], proposal: DeployPlanProposal, *, legacy: bool = True
     ) -> str | None:
         """Fail closed when an equal-HEAD manifest retry lacks a safe journal."""
         expected_manifest = probe["expected_manifest_identity"] is not None
@@ -77,16 +95,21 @@ class DeployAttemptValidation:
             return None
         if proposal.current_head != probe["target_head"]:
             return None
+        lineage = json.loads(probe["retry_lineage_json"])
+        if legacy:
+            linked_ok = proposal.linked_orchestrator_attempt_id == probe["source_orchestrator_attempt_id"]
+            lineage_ok = probe["source_orchestrator_attempt_id"] in lineage
+        else:
+            linked_ok = proposal.linked_orchestrator_attempt_id in lineage
+            lineage_ok = True
         checks = {
             "failed journal": proposal.journal_status
             in ("failed", "verification_failed"),
             "journal_attempt_id": bool(proposal.journal_attempt_id),
             "journal target": proposal.journal_target_head == probe["target_head"],
             "original previous_head": bool(proposal.original_previous_head),
-            "linked source": proposal.linked_orchestrator_attempt_id
-            == probe["source_orchestrator_attempt_id"],
-            "source lineage": probe["source_orchestrator_attempt_id"]
-            in json.loads(probe["retry_lineage_json"]),
+            "linked source": linked_ok,
+            "source lineage": lineage_ok,
             "manifest identity": proposal.manifest_identity
             == probe["expected_manifest_identity"],
             "manifest digest": proposal.manifest_digest
@@ -128,14 +151,20 @@ class DeployAttemptValidation:
                 "retry now requires manual approval",
             )
         retry = await self._retry_unlocked(probe["deploy_id"])
-        current = (
+        current_source, current_lineage = (
             (retry["source_orchestrator_attempt_id"], retry["lineage"])
             if retry is not None
             else (None, [])
         )
-        if current != (
-            probe["source_orchestrator_attempt_id"],
-            json.loads(probe["retry_lineage_json"]),
-        ):
+        probe_source = probe["source_orchestrator_attempt_id"]
+        probe_lineage = json.loads(probe["retry_lineage_json"])
+        if is_legacy(await self._request_protocol(probe["deploy_id"])):
+            unchanged = (current_source, current_lineage) == (probe_source, probe_lineage)
+        else:
+            # 판 1 요청: 탐침이 본 source가 지금 계보 안에 있고(둘 다 비었어도 된다) 탐침의 계보가 지금 계보에 들어 있으면 된다
+            unchanged = (
+                (probe_source is None and current_source is None) or probe_source in current_lineage
+            ) and set(probe_lineage) <= set(current_lineage)
+        if not unchanged:
             return "retry_lineage_changed", "retry lineage changed after probe creation"
         return None

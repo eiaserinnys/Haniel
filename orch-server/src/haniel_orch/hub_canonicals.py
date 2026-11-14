@@ -131,8 +131,19 @@ class HubCanonicalFlows:
         await self.deploy_coordinator.handle_result(msg)
 
     async def _handle_node_deploy_report(self, msg: NodeDeployReport) -> None:
-        """Reconcile an attempt-independent node-owned deployment report."""
+        """Reconcile an attempt-independent node-owned deployment report.
+
+        종결 보고(성공, 실패)에는 언제나 「종결을 받았다」로 답한다(design.md:120, 판 1 연결만). 요청 줄이 없거나 닫혀 있거나
+        이미 적은 노드 시도여도 같다. outcome은 이 글이 노드 시도나 요청을 닫았으면 closed_now, 아니면 already_closed다.
+        """
         result = await self._store.record_node_deploy_report(msg)
+        if msg.phase in ("succeeded", "failed"):
+            await self.deploy_coordinator._answer_terminal(
+                msg.node_id,
+                deploy_id=msg.deploy_id,
+                node_attempt_id=msg.node_attempt_id,
+                closed_now=bool(result.get("closed_now")),
+            )
         if result["status"] in {"ignored", "started"}:
             return
         cancelled = result.get("cancelled_orchestrator_attempt_ids", [])
