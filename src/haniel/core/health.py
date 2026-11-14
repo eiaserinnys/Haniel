@@ -75,7 +75,7 @@ class ServiceHealth:
         self.current_backoff = 0
 
     def record_running(self) -> None:
-        """Record that the service is running (ready passed or no ready condition)."""
+        """Record that the service is running (no ready condition, or the condition could not be parsed)."""
         self.state = ServiceState.RUNNING
         # Reset consecutive failures on successful start
         self.consecutive_failures = 0

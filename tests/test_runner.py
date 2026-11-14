@@ -3354,12 +3354,14 @@ class TestServiceRunnerCollectServicesInfo:
     ready 3필드로 분리하여 process 상태와 readiness가 한 문자열로 섞이지 않도록
     보장한다. design-principles §3 (정본 하나)."""
 
-    def _make_runner(self, tmp_path: Path) -> ServiceRunner:
+    def _make_runner(
+        self, tmp_path: Path, ready: str | None = None
+    ) -> ServiceRunner:
         config = HanielConfig(
             poll_interval=5,
             repos={},
             services={
-                "svc": ServiceConfig(run="sleep 100"),
+                "svc": ServiceConfig(run="sleep 100", ready=ready),
             },
         )
         return ServiceRunner(config, config_dir=tmp_path)
@@ -3422,6 +3424,22 @@ class TestServiceRunnerCollectServicesInfo:
         # (process_status=stopped takes precedence)
         self._mock_pid(runner, None)
         self._mock_health(runner, "ready")
+        assert runner._collect_services_info()[0]["ready"] is False
+
+    def test_ready_true_when_running_without_ready_condition(self, tmp_path: Path):
+        """ready 조건이 없는 서비스는 health가 RUNNING이 정상 상태다."""
+        runner = self._make_runner(tmp_path)
+        self._mock_pid(runner, 100)
+        self._mock_health(runner, "running")
+
+        assert runner._collect_services_info()[0]["ready"] is True
+
+    def test_ready_false_when_running_with_ready_condition(self, tmp_path: Path):
+        """ready 조건이 있는데 health가 RUNNING에 머문 서비스(조건 해석 실패)는 ready가 아니다."""
+        runner = self._make_runner(tmp_path, ready="port:9999")
+        self._mock_pid(runner, 100)
+        self._mock_health(runner, "running")
+
         assert runner._collect_services_info()[0]["ready"] is False
 
     def test_status_field_removed(self, tmp_path: Path):

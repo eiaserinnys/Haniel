@@ -618,7 +618,8 @@ class ProcessManager:
         """
         ready_str = managed.config.ready
         if not ready_str:
-            # No ready condition, mark as ready immediately
+            # No ready condition: record RUNNING (not READY); the heartbeat
+            # reports ready=true for a running service with no ready condition.
             if managed.ready_event:
                 managed.ready_event.set()
             self.health_manager.record_running(managed.name)
@@ -629,7 +630,8 @@ class ProcessManager:
         try:
             condition = ReadyCondition.parse(ready_str)
         except ValueError:
-            # Invalid condition, mark as ready
+            # Invalid condition: record RUNNING; the heartbeat keeps ready=false
+            # because the service does have a ready condition.
             if managed.ready_event:
                 managed.ready_event.set()
             self.health_manager.record_running(managed.name)
