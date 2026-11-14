@@ -19,6 +19,7 @@ ApprovalHandler = Callable[[dict, ProgressCallback], str | dict | None]
 SnapshotHandler = Callable[[str, str, str], "RepoReconciliationSnapshot"]
 ExpectedBudgetHandler = Callable[[str], int | None]
 SendJson = Callable[[dict], Awaitable[None]]
+Deliver = Callable[[list[dict]], Awaitable[None]]
 
 
 class ApprovalRevalidationError(RuntimeError):
@@ -50,8 +51,93 @@ def classify_deploy_result(
     return "success", None
 
 
+def deploy_result_message(
+    node_id: str,
+    deploy_id: str,
+    orchestrator_attempt_id: str,
+    connection_generation: str,
+    status: str,
+    *,
+    error: str | None = None,
+    duration_ms: int | None = None,
+) -> dict:
+    """One DeployResult exactly as the wire expects it."""
+    return {
+        "type": "deploy_result",
+        "deploy_id": deploy_id,
+        "node_id": node_id,
+        "status": status,
+        "error": error,
+        "duration_ms": duration_ms,
+        "orchestrator_attempt_id": orchestrator_attempt_id,
+        "connection_generation": connection_generation,
+    }
+
+
+def reconciliation_message(
+    snapshot: RepoReconciliationSnapshot,
+    phase: str,
+    *,
+    orchestrator_attempt_id: str | None = None,
+    connection_generation: str | None = None,
+) -> dict:
+    """One RepoReconciliation; attempt snapshot IDs never enter the node wire."""
+    if snapshot.deploy_id.startswith("attempt:"):
+        raise ValueError("attempt snapshot IDs are server-only")
+    payload = {
+        "type": "repo_reconciliation",
+        "phase": phase,
+        "deploy_id": snapshot.deploy_id,
+        "node_id": snapshot.node_id,
+        "repo": snapshot.repo,
+        "branch": snapshot.branch,
+        "local_head": snapshot.local_head,
+        "remote_head": snapshot.remote_head,
+        "orchestrator_attempt_id": orchestrator_attempt_id,
+    }
+    if connection_generation is not None:
+        payload["connection_generation"] = connection_generation
+    return payload
+
+
+def settled_result_messages(
+    node_id: str,
+    snapshot: RepoReconciliationSnapshot,
+    operation_error: str | None,
+    duration_ms: int,
+    orchestrator_attempt_id: str,
+    connection_generation: str,
+) -> list[dict]:
+    """The result of one attempt followed by its settled reconciliation."""
+    status = "failed" if operation_error else "success"
+    return [
+        deploy_result_message(
+            node_id,
+            snapshot.deploy_id,
+            orchestrator_attempt_id,
+            connection_generation,
+            status,
+            error=operation_error,
+            duration_ms=duration_ms,
+        ),
+        reconciliation_message(
+            snapshot,
+            "settled",
+            orchestrator_attempt_id=orchestrator_attempt_id,
+            connection_generation=connection_generation,
+        ),
+    ]
+
+
 class DeployReporter:
-    """Execute approvals and emit result before settled reconciliation."""
+    """Execute approvals and emit result before settled reconciliation.
+
+    ``send_json`` is the live socket: progress heartbeats and generation-bound
+    reconciliations go there and are simply lost without a connection.
+    ``deliver`` carries everything that closes an attempt (result, settled
+    reconciliation, terminal, recovery evidence); the client keeps those
+    until a connection can take them.
+    """
 
     def __init__(
         self,
@@ -61,6 +147,7 @@ class DeployReporter:
         snapshot_handler: SnapshotHandler | None,
         expected_budget_handler: ExpectedBudgetHandler | None = None,
         send_json: SendJson,
+        deliver: Deliver | None = None,
         progress_interval_sec: float = 30.0,
     ) -> None:
         self._node_id = node_id
@@ -68,7 +155,12 @@ class DeployReporter:
         self._snapshot_handler = snapshot_handler
         self._expected_budget_handler = expected_budget_handler
         self._send_json = send_json
+        self._deliver = deliver if deliver is not None else self._send_each
         self._progress_interval_sec = progress_interval_sec
+
+    async def _send_each(self, messages: list[dict]) -> None:
+        for message in messages:
+            await self._send_json(message)
 
     async def handle_approval(self, msg: dict) -> None:
         deploy_id = msg.get("deploy_id", "")
@@ -144,17 +236,19 @@ class DeployReporter:
                     self._approval_handler, msg, emitter.transition
                 )
             except ApprovalRevalidationError as exc:
-                await self._send_json(
-                    {
-                        "type": "deploy_attempt_terminal",
-                        "kind": "approval_revalidation_failed",
-                        "deploy_id": deploy_id,
-                        "orchestrator_attempt_id": orchestrator_attempt_id,
-                        "connection_generation": connection_generation,
-                        "stage": "approval_revalidation",
-                        "reason": "approval_revalidation_failed",
-                        "error": str(exc),
-                    }
+                await self._deliver(
+                    [
+                        {
+                            "type": "deploy_attempt_terminal",
+                            "kind": "approval_revalidation_failed",
+                            "deploy_id": deploy_id,
+                            "orchestrator_attempt_id": orchestrator_attempt_id,
+                            "connection_generation": connection_generation,
+                            "stage": "approval_revalidation",
+                            "reason": "approval_revalidation_failed",
+                            "error": str(exc),
+                        }
+                    ]
                 )
                 return
             except Exception as exc:
@@ -182,7 +276,7 @@ class DeployReporter:
             isinstance(result, dict)
             and result.get("type") == "manifest_recovery_evidence"
         ):
-            await self._send_json(result)
+            await self._deliver([result])
             return
 
         if self._snapshot_handler is None:
@@ -231,21 +325,16 @@ class DeployReporter:
         orchestrator_attempt_id: str,
         connection_generation: str,
     ) -> None:
-        status = "failed" if operation_error else "success"
-        error = operation_error
-        await self.send_result(
-            snapshot.deploy_id,
-            orchestrator_attempt_id,
-            connection_generation,
-            status,
-            error=error,
-            duration_ms=duration_ms,
-        )
-        await self.send_reconciliation(
-            snapshot,
-            "settled",
-            orchestrator_attempt_id=orchestrator_attempt_id,
-            connection_generation=connection_generation,
+        """Deliver result then settled reconciliation as one ordered batch."""
+        await self._deliver(
+            settled_result_messages(
+                self._node_id,
+                snapshot,
+                operation_error,
+                duration_ms,
+                orchestrator_attempt_id,
+                connection_generation,
+            )
         )
 
     async def send_result(
@@ -258,17 +347,18 @@ class DeployReporter:
         error: str | None = None,
         duration_ms: int | None = None,
     ) -> None:
-        await self._send_json(
-            {
-                "type": "deploy_result",
-                "deploy_id": deploy_id,
-                "node_id": self._node_id,
-                "status": status,
-                "error": error,
-                "duration_ms": duration_ms,
-                "orchestrator_attempt_id": orchestrator_attempt_id,
-                "connection_generation": connection_generation,
-            }
+        await self._deliver(
+            [
+                deploy_result_message(
+                    self._node_id,
+                    deploy_id,
+                    orchestrator_attempt_id,
+                    connection_generation,
+                    status,
+                    error=error,
+                    duration_ms=duration_ms,
+                )
+            ]
         )
 
     async def send_reconciliation(
@@ -279,19 +369,12 @@ class DeployReporter:
         orchestrator_attempt_id: str | None = None,
         connection_generation: str | None = None,
     ) -> None:
-        if snapshot.deploy_id.startswith("attempt:"):
-            raise ValueError("attempt snapshot IDs are server-only")
-        payload = {
-            "type": "repo_reconciliation",
-            "phase": phase,
-            "deploy_id": snapshot.deploy_id,
-            "node_id": snapshot.node_id,
-            "repo": snapshot.repo,
-            "branch": snapshot.branch,
-            "local_head": snapshot.local_head,
-            "remote_head": snapshot.remote_head,
-            "orchestrator_attempt_id": orchestrator_attempt_id,
-        }
-        if connection_generation is not None:
-            payload["connection_generation"] = connection_generation
-        await self._send_json(payload)
+        """Send one generation-bound reconciliation on the live socket only."""
+        await self._send_json(
+            reconciliation_message(
+                snapshot,
+                phase,
+                orchestrator_attempt_id=orchestrator_attempt_id,
+                connection_generation=connection_generation,
+            )
+        )

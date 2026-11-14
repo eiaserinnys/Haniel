@@ -2547,6 +2547,7 @@ class ServiceRunner:
         if action == "reload":
             from .service_lifecycle import reload_service_definition
 
+            self._wait_for_deployments_touching(service_name)
             return reload_service_definition(self, service_name)
 
         if not service_name:
@@ -2554,6 +2555,7 @@ class ServiceRunner:
         if service_name not in self._snapshot_config_state().config.services:
             raise ValueError(f"Unknown service: {service_name}")
 
+        self._wait_for_deployments_touching(service_name)
         if action == "restart":
             message = self.restart_service(service_name)
             return {"ok": True, "service": service_name, "message": message}
@@ -2565,6 +2567,34 @@ class ServiceRunner:
                 raise RuntimeError(f"Failed to start service: {service_name}")
             return {"ok": True, "service": service_name, "action": action}
         raise ValueError(f"Unknown action: {action}")
+
+    def _wait_for_deployments_touching(self, service_name: str) -> None:
+        """Let a running deployment that may stop or start this service finish first.
+
+        A deployment holds its repository's pull lock from pull to readiness,
+        so a lifecycle command for a service that deployment can restart (the
+        repository's own services and their dependents) waits for that lock
+        instead of interleaving with it. The lock is released again at once:
+        the command only orders itself after the deployment, it does not block
+        the next one. Config commands never come here.
+        """
+        for repo_name in self._snapshot_config_state().repo_identity:
+            try:
+                runtime = self._snapshot_repo_runtime(repo_name)
+            except ValueError:
+                continue
+            if service_name not in runtime.affected_services:
+                continue
+            lock = runtime.pull_lock
+            if not lock.locked():
+                continue
+            logger.info(
+                "Service command for %s waits for the running deployment of %s",
+                service_name,
+                repo_name,
+            )
+            lock.acquire()
+            lock.release()
 
     def trigger_pull(
         self,

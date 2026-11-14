@@ -326,12 +326,19 @@ class TestHandleDeployApproval:
 
     @staticmethod
     def _capture_send_json(client):
+        """Capture sends on a client that believes its socket is up.
+
+        Attempt results now go through the reconnect buffer and are flushed
+        only while connected; without a connection they would simply wait.
+        """
         sent = []
 
         async def fake_send_json(msg):
             sent.append(msg)
 
         client._send_json = fake_send_json  # type: ignore[assignment]
+        client._connected = True
+        client._ws = object()
         return sent
 
     async def test_invalid_format_sends_failed(self, config):
@@ -487,6 +494,7 @@ class TestDeployPlanProbe:
                 "target_head": "target",
             }
         )
+        await asyncio.gather(*client._background_tasks)
 
         assert sent[0]["mode"] == "fail_closed"
         assert sent[0]["reason"] == "planner_missing"
@@ -519,6 +527,7 @@ class TestDeployPlanProbe:
                 "target_head": "target",
             }
         )
+        await asyncio.gather(*client._background_tasks)
 
         assert sent[0]["mode"] == "fail_closed"
         assert sent[0]["reason"] == "planner_error"
