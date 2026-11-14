@@ -106,8 +106,9 @@ def _source_names(path: Path) -> set[str]:
     return names
 
 
-def test_definition_source_names_no_forbidden_features():
-    names = _source_names(SRC / "statechart" / "definitions.py")
+@pytest.mark.parametrize("module", ["definitions.py", "evidence.py", "base.py"])
+def test_definition_source_names_no_forbidden_features(module):
+    names = _source_names(SRC / "statechart" / module)
     assert not names & {"internal", "delay", "invoke", "HistoryState", "HistoryType", "final", "deep", "shallow"}
 
 
