@@ -135,6 +135,8 @@ CANONICAL_COLUMNS = {
     # 꼬리표가 선 시각과 그때의 시도 번호(노드가 스스로 한 배포면 노드 시도 번호). 꼬리표 전이가 함께 쓴다
     "applied_after_close_at": "TEXT",
     "applied_after_close_attempt_id": "TEXT",
+    # 지금 시도에 대한 믿음의 잎(같은 정의의 belief 영역, 2b-2). 옛 줄은 기동 때 도는 시도와 실행 시작 시각에서 채운다
+    "sm_belief": "TEXT",
 }
 
 ATTEMPT_COLUMNS = {
@@ -149,6 +151,12 @@ ATTEMPT_COLUMNS = {
     "execution_started_at": "TEXT",
     # 오케스트레이터가 스스로 닫은 시도의 증거가 그 뒤 종결된 결과(success, failed). 이력 항목에 보인다
     "late_evidence": "TEXT",
+    # 시도를 열 때 그 노드 연결의 deploy_protocol(wire-v1 4절). NULL이면 판 없는 시도로 2a와 2b-1 규칙 그대로다
+    "node_protocol": "INTEGER",
+    # 마감 종류(lease, ack, grace, none). NULL은 lease로 읽는다. none은 세지 않음이고 deadline_at은 마지막 값 그대로다
+    "deadline_kind": "TEXT",
+    # 닫힘의 종류(not_executed, execution_unknown, failed). 「아니오」 닫힘인가를 계획 답의 실패 저널 규칙이 본다
+    "closure": "TEXT",
 }
 
 

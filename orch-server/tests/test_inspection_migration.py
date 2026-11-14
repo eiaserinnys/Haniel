@@ -178,9 +178,9 @@ async def test_startup_fix_turns_the_lock_on_in_one_direction_only(tmp_path):
     await make_pr1_db(path)
     await migrate(path)
     con = sqlite3.connect(path)
-    # PR 1 코드로 되돌렸다 다시 올린 줄: 대기인데 표시 줄이 있고 점검 필요가 꺼져 있다
+    # PR 1 코드로 되돌렸다 다시 올린 줄: 대기인데 표시 줄(inspection_required는 PR 1이 모르는 칸이라 기본값 1)이 있고
+    # 점검 필요 잎이 꺼진 채 남았다. 2b-2부터 inspection_required가 0인 대기는 다시 대기(again)라 고치지 않는다
     con.execute("UPDATE deploy_events SET sm_lock = 'l_off' WHERE deploy_id = 'n:r2:main:rt'")
-    con.execute("UPDATE deploy_retry_requirements SET inspection_required = 0 WHERE deploy_id = 'n:r2:main:rt'")
     # 배포 중이고 표시 줄이 있는 줄은 inspection_required 값을 그대로 잎으로 읽는다. 켜짐은 내리지 않는다
     con.execute("UPDATE deploy_events SET sm_lock = 'l_off' WHERE deploy_id = 'n:r3:main:dp'")
     con.execute("UPDATE deploy_retry_requirements SET inspection_required = 0 WHERE deploy_id = 'n:r3:main:dp'")

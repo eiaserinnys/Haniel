@@ -1,0 +1,23 @@
+stateDiagram-v2
+    direction TB
+    classDef breaks fill:#ffecee,stroke:#e72e3b
+    classDef notInDesign fill:#fff3e6,stroke:#e8730c
+    state "지금 시도에 대한 믿음" as belief {
+        b_none: 도는 시도 없음
+        b_probe: 계획을 물음
+        b_unknown: 닿았는지 모름
+        b_queued: 줄 서 있음
+        b_running: 시작했다
+        [*] --> b_none: 요청이 들어온다
+        b_none --> b_none: 노드가 끊긴 것을 안다
+        b_probe --> b_none: 자동 탐침의 답에 실패 저널이 실려 왔다
+        b_probe --> b_none: 계획 답이나 재확인이 계획 묻기를 닫는다
+        b_probe --> b_none: 점검 필요가 자동 탐침을 막는다
+        b_probe --> b_none: 계획 묻기의 마감이 지난다
+        b_probe --> b_none: 노드가 끊긴 것을 안다
+        b_probe --> b_none: 거절한다
+        b_probe --> b_none: 더 새 커밋이 들어온다
+        b_unknown --> b_unknown: 노드가 끊긴 것을 안다
+        b_queued --> b_queued: 노드가 끊긴 것을 안다
+        b_running --> b_running: 노드가 끊긴 것을 안다
+    }

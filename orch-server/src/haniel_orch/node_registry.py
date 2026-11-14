@@ -62,8 +62,14 @@ class NodeRegistry:
             connected=True,
             connection_generation=connection_generation,
             connection_token=connection_token,
+            deploy_protocol=hello.deploy_protocol,
         )
-        logger.info(f"Node registered: {hello.node_id} ({hello.hostname})")
+        logger.info(
+            "Node registered: %s (%s) deploy_protocol=%s",
+            hello.node_id,
+            hello.hostname,
+            hello.deploy_protocol,
+        )
 
     def is_current_connection(
         self,
@@ -167,6 +173,11 @@ class NodeRegistry:
     def get_node(self, node_id: str) -> ConnectedNode | None:
         """Get a connected node by ID."""
         return self._nodes.get(node_id)
+
+    def deploy_protocol(self, node_id: str) -> int | None:
+        """지금 연결의 hello가 밝힌 판(wire-v1). 연결이 없거나 옛 노드면 None."""
+        node = self._nodes.get(node_id)
+        return None if node is None else node.hello.deploy_protocol
 
     def get_connected_nodes(self) -> list[ConnectedNode]:
         """Get all currently connected nodes."""

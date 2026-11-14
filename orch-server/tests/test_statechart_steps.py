@@ -88,6 +88,19 @@ async def at_each_leaf(store: EventStore):
     await store.reject_deploy("rejected", "no")
     await _create(store, "superseded", repo="r6")
     await fire(store, "superseded", "newer_commit", data={"reason": "superseded by x"})
+    # 다시 대기(2b-2): 판 1 시도의 보내기 실패는 점검 필요를 세우지 않는다
+    await _create(store, "again", repo="r7")
+    await store.attempts.begin_normal_attempt(
+        orchestrator_attempt_id="a-again",
+        deploy_id="again",
+        connection_generation="g",
+        current_generation="g",
+        source="manual_single",
+        approved_by="d",
+        deadline_at="2099-01-01T00:00:00+00:00",
+        node_protocol=1,
+    )
+    await store.attempts.fail_attempt_not_sent("a-again")
     return store
 
 
@@ -107,21 +120,25 @@ async def test_every_leaf_is_reachable_through_real_events(at_each_leaf):
         assert REQUEST_OUTER_STATUS[leaf] == status
 
 
-# at_each_leaf가 세운 줄의 점검 필요 잎. 실패한 시도가 retry에 켜 두었고 나머지는 꺼져 있다. 꼬리표는 모두 없음
+# at_each_leaf가 세운 줄의 점검 필요 잎. 실패한 시도가 retry에 켜 두었고 나머지는 꺼져 있다. 꼬리표는 모두 없음.
+# 믿음은 배포 중(시도 줄 없이 begin_attempt만 넣음)이 닿았는지 모름이고 나머지는 도는 시도 없음
 FIXTURE_LOCK = {"retry": "l_on"}
+FIXTURE_BELIEF = {"deploying": "b_unknown"}
 FIXTURE_TAG = "t_off"
 
 
 def _no_transition_cases():
-    """줄(요청 상태 잎, 점검 필요 잎, 꼬리표 잎)에서 세 영역 어디에도 그 사건의 화살표가 없는 짝."""
+    """줄(요청 상태 잎, 믿음 잎, 점검 필요 잎, 꼬리표 잎)에서 네 영역 어디에도 그 사건의 화살표가 없는 짝."""
     cls = OrchRequest
     allowed = {(a.source, a.event) for a in transitions(cls)}
     for leaf in _leaves_of(cls, "status"):
         lock = FIXTURE_LOCK.get(leaf, "l_off")
+        belief = FIXTURE_BELIEF.get(leaf, "b_none")
         for event in REQUIRED_FACTS[cls]:
             if (
                 (leaf, event) not in allowed
                 and (lock, event) not in allowed
+                and (belief, event) not in allowed
                 and (FIXTURE_TAG, event) not in allowed
             ):
                 yield leaf, event
@@ -166,12 +183,18 @@ async def test_unknown_row_and_legacy_row_are_no_transition(store: EventStore):
 
 
 def test_introspected_transitions_equal_what_advance_allows():
-    """생성기가 읽는 전이 목록과 실제로 일어나는 전이(모든 사실 조합)가 같다."""
+    """생성기가 읽는 전이 목록과 실제로 일어나는 전이(모든 사실 조합)가 같다.
+
+    제자리 전이(출발과 도착이 같음, 2b-2의 auto_request, link_down, newer_commit, acked, started, hello_holds, 증거의 dup)는
+    줄만으로는 움직임이 보이지 않으므로 「그 잎에서 그 사건이 받아들여진다」로 따로 본다.
+    """
     for cls in (OrchRequest, AttemptEvidence):
-        listed = {(a.source, a.event, a.target) for a in transitions(cls)}
+        listed = {(a.source, a.event, a.target) for a in transitions(cls) if a.source != a.target}
+        self_arrows = {(a.source, a.event) for a in transitions(cls) if a.source == a.target}
         names_of = list(regions(cls))
-        combos = itertools.product(*(_leaves_of(cls, region) for region in names_of))
+        combos = list(itertools.product(*(_leaves_of(cls, region) for region in names_of)))
         actual = set()
+        accepted = set()
         for combo in combos:
             row = dict(zip(names_of, combo))
             for event, names in REQUIRED_FACTS[cls].items():
@@ -181,10 +204,12 @@ def test_introspected_transitions_equal_what_advance_allows():
                     except NoTransition:
                         continue
                     for region in names_of:
-                        # 영역이 둘인 요청 정의는 제자리 전이가 없어 바뀐 영역이 움직인 영역이다
-                        if len(names_of) == 1 or after[region] != row[region]:
+                        if after[region] != row[region]:
                             actual.add((row[region], event, after[region]))
+                        else:
+                            accepted.add((row[region], event))
         assert actual == listed, cls.__name__
+        assert self_arrows <= accepted, cls.__name__
 
 
 async def test_marker_and_lineage_follow_the_failure_and_the_closing(store: EventStore):
@@ -235,9 +260,11 @@ async def test_attempt_leaf_and_outcome_move_together(store: EventStore):
         local_head="t", remote_head="t",
     )
     assert await state() == ("success", "ev_both")
-    # 끝난 시도에는 더 받을 사건이 없다
-    with pytest.raises(NoTransition):
-        await attempt_steps.step_attempt(store._db, "a1", "fail", data={"kind": "k", "stage": "s", "reason": "r", "error": "e"})
+    # 끝난 시도에 같은 글이 또 오면 아무 칸도 쓰지 않고 dup 기호만 돌려준다(2b-2, design.md:81)
+    step = await attempt_steps.step_attempt(store._db, "a1", "fail", data={"kind": "k", "stage": "s", "reason": "r", "error": "e"})
+    assert (step.previous, step.leaf, step.todo) == ("ev_both", "ev_both", ("dup",))
+    assert await state() == ("success", "ev_both")
+    assert (await _raw(store, "SELECT terminal_kind FROM deploy_attempts"))[0] == (None,)
 
 
 @pytest.mark.parametrize("name", sorted(SCENARIOS))
@@ -385,7 +412,7 @@ async def test_startup_fixes_a_leaf_that_disagrees_with_the_outer_column(tmp_pat
             "b": "deploying",
         }
         fixed = await backfill.backfill_leaves(store._db)
-        assert fixed == {"requests": 0, "locks": 0, "tags": 0, "attempts": 0, "attempt_seqs": 0}
+        assert fixed == {"requests": 0, "locks": 0, "beliefs": 0, "tags": 0, "attempts": 0, "attempt_seqs": 0}
     finally:
         await store.close()
 
@@ -413,7 +440,7 @@ async def test_leaves_survive_a_restart_and_events_continue(tmp_path):
             deploy_id="n:r:main:t", orchestrator_attempt_id="a1", connection_generation="g",
             local_head="t", remote_head="t",
         )
-        assert result == {"status": "recorded"}
+        assert result["status"] == "recorded"
         assert (await _leaf(second, "n:r:main:t")) == ("deploying", "deploying")
         assert (await _raw(second, "SELECT sm_evidence FROM deploy_attempts"))[0][0] == "ev_settled"
     finally:

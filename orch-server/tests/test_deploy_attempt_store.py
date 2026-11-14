@@ -1,8 +1,9 @@
 """Contract tests for v16 durable deploy attempts and retry state."""
 
 import sqlite3
-
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from haniel_orch.event_store import EventStore
 from haniel_orch.protocol import (
@@ -338,9 +339,9 @@ class TestNormalFinalization:
             reason="attempt_evidence_timeout",
             error="late timeout",
         )
-        # 늦은 실패가 a의 증거를 실패로 종결하고 점검 필요만 켠다. 증거가 종결된 뒤의 정착과 마감은 ignored다
+        # 늦은 실패가 a의 증거를 실패로 종결하고 점검 필요만 켠다. 증거가 종결된 뒤의 정착은 dup(같은 답), 마감은 ignored다
         assert (late_failure["status"], late_failure["evidence"]) == ("late_evidence", "failed")
-        assert late_settled["status"] == late_timeout["status"] == "ignored"
+        assert (late_settled["status"], late_timeout["status"]) == ("duplicate", "ignored")
         a = await attempts.get_attempt("a")
         assert (a["outcome"], a["terminal_kind"], a["late_evidence"]) == ("failed", "attempt_timeout", "failed")
         active = await attempts.get_active_attempts()
@@ -499,7 +500,8 @@ class TestPreflightAuthority:
             current_generation="g2",
         )
 
-        assert result == {"status": "terminal", "kind": "preflight_stale"}
+        assert (result["status"], result["kind"]) == ("terminal", "preflight_stale")
+        assert result["todo"] == ["closed_plan"]  # 계획 묻기가 닫히며 믿음이 도는 시도 없음으로 돌아갔다
         assert await attempts.get_active_attempts() == []
         probe = await attempts.get_probe("generation-probe")
         assert probe["terminal_reason"] == "connection_generation_changed"
@@ -510,17 +512,23 @@ class TestPreflightAuthority:
         await canonical(store)
         attempts = store.attempts
         assert attempts is not None
-        probes = []
-        for probe_id, requested in (("p1", "a1"), ("p2", "a2")):
-            probes.append(
-                await attempts.create_probe(
-                    probe_id=probe_id,
-                    deploy_id="n:r:main:target",
-                    connection_generation="g1",
-                    deadline_at=deadline(),
-                    manual_retry=False,
-                    requested_orchestrator_attempt_id=requested,
-                )
+        await attempts.create_probe(
+            probe_id="p1",
+            deploy_id="n:r:main:target",
+            connection_generation="g1",
+            deadline_at=deadline(),
+            manual_retry=False,
+            requested_orchestrator_attempt_id="a1",
+        )
+        # 믿음은 하나다(2b-2): 계획 묻기가 열려 있는 동안 같은 요청의 둘째 자동 탐침은 열리지 않는다
+        with pytest.raises(ValueError):
+            await attempts.create_probe(
+                probe_id="p2",
+                deploy_id="n:r:main:target",
+                connection_generation="g1",
+                deadline_at=deadline(),
+                manual_retry=False,
+                requested_orchestrator_attempt_id="a2",
             )
         first = DeployPlanProposal(
             mode="execute",
@@ -549,17 +557,16 @@ class TestPreflightAuthority:
             "a1", kind="failed", stage="execution", reason="test_failure", error="boom"
         )
 
-        second = first.model_copy(update={"probe_id": "p2", "fingerprint": "fp2"})
-        late = await attempts.record_proposal_and_begin(
-            second,
-            orchestrator_attempt_id="a2",
-            source="auto",
-            approved_by="system:auto",
-            deadline_at=deadline(),
-            current_generation="g1",
-        )
-
-        assert late == {"status": "ignored", "reason": "terminal_probe"}
+        # 실패 뒤 대기(점검 필요 켜짐)에 온 다음 자동 탐침은 정의가 거절한다(auto_request: retry에서 auto_reject)
+        with pytest.raises(PermissionError, match="retry_requires_manual_approval"):
+            await attempts.create_probe(
+                probe_id="p2",
+                deploy_id="n:r:main:target",
+                connection_generation="g1",
+                deadline_at=deadline(),
+                manual_retry=False,
+                requested_orchestrator_attempt_id="a2",
+            )
         assert await attempts.get_active_attempts() == []
         assert await attempts.has_retry_requirement("n:r:main:target")
 

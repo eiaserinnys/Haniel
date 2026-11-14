@@ -16,11 +16,8 @@ stateDiagram-v2
         ev_none --> ev_result: 성공 결과가 온다 [execute 방식]
         ev_none --> ev_settled: 목표와 같은 대조가 온다 [execute 방식]
         ev_none --> ev_settled: 대조가 온다 [execute 방식 아님]
-        ev_result --> ev_result: 성공 결과가 온다 [execute 방식]
         ev_result --> ev_both: 목표와 같은 대조가 온다 [execute 방식]
         ev_settled --> ev_both: 성공 결과가 온다 [execute 방식]
-        ev_settled --> ev_settled: 목표와 같은 대조가 온다 [execute 방식]
-        ev_settled --> ev_settled: 대조가 온다 [execute 방식 아님]
         ev_none --> join1
         ev_result --> join1
         ev_settled --> join1

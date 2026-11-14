@@ -46,7 +46,7 @@ async def to_deploying(
         store,
         deploy_id,
         "begin_attempt",
-        facts={"manual_single": manual_single},
+        facts={"manual_single": manual_single, "via_probe": False},
         data={"approved_by": by},
     )
 

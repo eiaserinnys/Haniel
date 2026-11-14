@@ -1,6 +1,16 @@
-"""Generation-scoped probe terminalization transactions."""
+"""Generation-scoped probe terminalization transactions.
+
+계획 묻기가 닫히면 그 요청의 믿음을 계획을 물음에서 도는 시도 없음으로 돌린다(link_down. 끊김과 연결 교체는
+오케스트레이터가 끊김을 안 것이다, fable 146-152).
+"""
 
 from __future__ import annotations
+
+from datetime import datetime, timezone
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class DeployAttemptGenerationStore:
@@ -15,6 +25,7 @@ class DeployAttemptGenerationStore:
                     (generation,),
                 )
                 changed: list[str] = []
+                now = _now_iso()
                 for (probe_id,) in await cursor.fetchall():
                     probe = await self._probe(probe_id)
                     if probe and await self._terminalize_probe_unlocked(
@@ -25,6 +36,7 @@ class DeployAttemptGenerationStore:
                         "node disconnected before begin",
                     ):
                         changed.append(probe_id)
+                        await self._settle_probe_belief_unlocked(probe["deploy_id"], "link_down", now)
                 await self._db.commit()
                 return changed
             except Exception:
@@ -43,6 +55,7 @@ class DeployAttemptGenerationStore:
                     (node_id, current_generation),
                 )
                 changed: list[str] = []
+                now = _now_iso()
                 for (probe_id,) in await cursor.fetchall():
                     probe = await self._probe(probe_id)
                     if probe and await self._terminalize_probe_unlocked(
@@ -53,6 +66,7 @@ class DeployAttemptGenerationStore:
                         "a newer node connection generation replaced this probe",
                     ):
                         changed.append(probe_id)
+                        await self._settle_probe_belief_unlocked(probe["deploy_id"], "link_down", now)
                 await self._db.commit()
                 return changed
             except Exception:

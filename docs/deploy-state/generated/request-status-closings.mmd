@@ -1,0 +1,29 @@
+stateDiagram-v2
+    direction TB
+    classDef breaks fill:#ffecee,stroke:#e72e3b
+    classDef notInDesign fill:#fff3e6,stroke:#e8730c
+    state "요청 상태" as status {
+        pending: 처음 대기 (열림)
+        again: 다시 대기 (열림)
+        retry: 실패 뒤 대기 (열림)
+        deploying: 배포 중 (열림)
+        superseded: 새 커밋에 밀림 (닫힘)
+        [*] --> pending: 요청이 들어온다
+        deploying --> superseded: 허가가 노드에 닿지 못해 시도를 닫는다 [닿았는지 모름 그리고 더 새 커밋이 있음]
+        deploying --> retry: 허가가 노드에 닿지 못해 시도를 닫는다 [닿았는지 모름 그리고 더 새 커밋이 없음 그리고 판 1 시도 그리고 점검 필요 켜짐]
+        deploying --> again: 허가가 노드에 닿지 못해 시도를 닫는다 [닿았는지 모름 그리고 더 새 커밋이 없음 그리고 판 1 시도 그리고 점검 필요 꺼짐]
+        deploying --> superseded: 노드가 실행하지 않음으로 답한다 [닿았는지 모름이나 줄 서 있음 그리고 더 새 커밋이 있음]
+        deploying --> retry: 노드가 실행하지 않음으로 답한다 [닿았는지 모름이나 줄 서 있음 그리고 더 새 커밋이 없음 그리고 점검 필요 켜짐]
+        deploying --> again: 노드가 실행하지 않음으로 답한다 [닿았는지 모름이나 줄 서 있음 그리고 더 새 커밋이 없음 그리고 점검 필요 꺼짐]
+        deploying --> superseded: 닿았는지 모름의 짧은 마감이 지난다 [닿았는지 모름 그리고 더 새 커밋이 있음]
+        deploying --> retry: 닿았는지 모름의 짧은 마감이 지난다 [닿았는지 모름 그리고 더 새 커밋이 없음 그리고 점검 필요 켜짐]
+        deploying --> again: 닿았는지 모름의 짧은 마감이 지난다 [닿았는지 모름 그리고 더 새 커밋이 없음 그리고 점검 필요 꺼짐]
+        deploying --> superseded: 실행 임대의 마감이 지난다 [시작했다 그리고 더 새 커밋이 있음]
+        deploying --> retry: 실행 임대의 마감이 지난다 [시작했다 그리고 더 새 커밋이 없음]
+        deploying --> superseded: 끊긴 동안의 유예 마감이 지난다 [줄 서 있음 그리고 더 새 커밋이 있음]
+        deploying --> retry: 끊긴 동안의 유예 마감이 지난다 [줄 서 있음 그리고 더 새 커밋이 없음]
+        deploying --> superseded: 다시 붙은 노드의 목록에 지금 시도가 없다 [노드가 쥐고 있을 수 있음 그리고 더 새 커밋이 있음]
+        deploying --> retry: 다시 붙은 노드의 목록에 지금 시도가 없다 [닿았는지 모름이나 줄 서 있음 그리고 더 새 커밋이 없음 그리고 점검 필요 켜짐]
+        deploying --> again: 다시 붙은 노드의 목록에 지금 시도가 없다 [닿았는지 모름이나 줄 서 있음 그리고 더 새 커밋이 없음 그리고 점검 필요 꺼짐]
+        deploying --> retry: 다시 붙은 노드의 목록에 지금 시도가 없다 [시작했다 그리고 더 새 커밋이 없음]
+    }

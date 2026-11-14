@@ -1231,10 +1231,12 @@
     "approved_by": "director",
     "attempt_seq": 1,
     "branch": "main",
+    "closure": null,
     "commits_json": "[\"c\"]",
     "completed_at": null,
     "connection_generation": "g1",
     "deadline_at": true,
+    "deadline_kind": "lease",
     "deploy_id": "n:r:main:t1",
     "detected_at": true,
     "diff_stat": "1 file",
@@ -1249,6 +1251,7 @@
     "manifest_digest": null,
     "manifest_identity": null,
     "node_id": "n",
+    "node_protocol": null,
     "orchestrator_attempt_id": "a1",
     "original_previous_head": null,
     "outcome": "active",
@@ -1267,7 +1270,10 @@
     "terminal_error": null,
     "terminal_kind": null,
     "terminal_reason": null,
-    "terminal_stage": null
+    "terminal_stage": null,
+    "todo": [
+     "send_permit"
+    ]
    },
    "rows": {
     "attempts": [
@@ -1316,7 +1322,9 @@
   },
   {
    "result": {
-    "status": "recorded"
+    "closed_now": false,
+    "status": "recorded",
+    "todo": []
    },
    "rows": {
     "attempts": [
@@ -1365,8 +1373,12 @@
   },
   {
    "result": {
+    "closed_now": true,
     "deploy_id": "n:r:main:t1",
-    "status": "success"
+    "status": "success",
+    "todo": [
+     "terminal_ok"
+    ]
    },
    "rows": {
     "attempts": [
@@ -1415,7 +1427,12 @@
   },
   {
    "result": {
-    "status": "ignored"
+    "closed_now": false,
+    "deploy_id": "n:r:main:t1",
+    "status": "duplicate",
+    "todo": [
+     "dup"
+    ]
    },
    "rows": {
     "attempts": [
@@ -1509,7 +1526,9 @@
  "s03_settled_first_then_result": [
   {
    "result": {
-    "status": "recorded"
+    "closed_now": false,
+    "status": "recorded",
+    "todo": []
    },
    "rows": {
     "attempts": [
@@ -1607,8 +1626,12 @@
   },
   {
    "result": {
+    "closed_now": true,
     "deploy_id": "n:r:main:t2",
-    "status": "success"
+    "status": "success",
+    "todo": [
+     "terminal_ok"
+    ]
    },
    "rows": {
     "attempts": [
@@ -1659,8 +1682,12 @@
  "s04_failed_result_then_retry": [
   {
    "result": {
+    "closed_now": true,
     "deploy_id": "n:r:main:t3",
-    "status": "failed"
+    "status": "failed",
+    "todo": [
+     "terminal_fail"
+    ]
    },
    "rows": {
     "attempts": [
@@ -1786,10 +1813,12 @@
      "approved_by": "director",
      "attempt_seq": 2,
      "branch": "main",
+     "closure": null,
      "commits_json": "[\"c\"]",
      "completed_at": null,
      "connection_generation": "g2",
      "deadline_at": true,
+     "deadline_kind": "lease",
      "deploy_id": "n:r:main:t3",
      "detected_at": true,
      "diff_stat": "1 file",
@@ -1804,6 +1833,7 @@
      "manifest_digest": null,
      "manifest_identity": null,
      "node_id": "n",
+     "node_protocol": null,
      "orchestrator_attempt_id": "a2",
      "original_previous_head": null,
      "outcome": "active",
@@ -1824,7 +1854,10 @@
      "terminal_reason": null,
      "terminal_stage": null
     },
-    "status": "begun"
+    "status": "begun",
+    "todo": [
+     "send_permit"
+    ]
    },
    "rows": {
     "attempts": [
@@ -1913,9 +1946,14 @@
   },
   {
    "result": {
+    "closed_now": true,
     "deploy_id": "n:r:main:t3",
+    "event": "attempt_failed",
     "node_id": "n",
-    "status": "failed"
+    "status": "failed",
+    "todo": [
+     "terminal_fail"
+    ]
    },
    "rows": {
     "attempts": [
@@ -2120,6 +2158,7 @@
      "error": "boom",
      "late_evidence": null,
      "node_id": "n",
+     "node_protocol": null,
      "repo": "r",
      "status": "failed",
      "terminal_error": "boom",
@@ -2147,6 +2186,7 @@
      "error": "journal changed",
      "late_evidence": null,
      "node_id": "n",
+     "node_protocol": null,
      "repo": "r",
      "status": "failed",
      "terminal_error": "journal changed",
@@ -2258,8 +2298,12 @@
   },
   {
    "result": {
+    "closed_now": true,
     "deploy_id": "n:r:main:old1",
-    "status": "superseded"
+    "status": "superseded",
+    "todo": [
+     "terminal_fail"
+    ]
    },
    "rows": {
     "attempts": [
@@ -2342,6 +2386,7 @@
      "error": "late",
      "late_evidence": null,
      "node_id": "n",
+     "node_protocol": null,
      "repo": "r",
      "status": "failed",
      "terminal_error": "late",
@@ -2425,8 +2470,12 @@
  "s06_settled_mismatch_and_deadline": [
   {
    "result": {
+    "closed_now": true,
     "deploy_id": "n:r:main:m1",
-    "status": "failed"
+    "status": "failed",
+    "todo": [
+     "terminal_fail"
+    ]
    },
    "rows": {
     "attempts": [
@@ -2580,8 +2629,11 @@
   },
   {
    "result": {
+    "closed_now": true,
     "deploy_id": "n2:r:main:m2",
-    "status": "failed"
+    "event": "attempt_failed",
+    "status": "failed",
+    "todo": []
    },
    "rows": {
     "attempts": [
@@ -2785,6 +2837,7 @@
   },
   {
    "result": {
+    "belief": "b_running",
     "deadline_at": true,
     "expected_budget_sec": 10,
     "status": "renewed"
@@ -2924,8 +2977,12 @@
  "s07_mode_mismatch_and_recovery": [
   {
    "result": {
+    "closed_now": true,
     "deploy_id": "n:r:main:rec",
-    "status": "failed"
+    "status": "failed",
+    "todo": [
+     "terminal_fail"
+    ]
    },
    "rows": {
     "attempts": [
@@ -2990,10 +3047,12 @@
      "approved_by": "director",
      "attempt_seq": 2,
      "branch": "main",
+     "closure": null,
      "commits_json": "[\"c\"]",
      "completed_at": null,
      "connection_generation": "g2",
      "deadline_at": true,
+     "deadline_kind": "lease",
      "deploy_id": "n:r:main:rec",
      "detected_at": true,
      "diff_stat": "1 file",
@@ -3008,6 +3067,7 @@
      "manifest_digest": "digest",
      "manifest_identity": "release.json",
      "node_id": "n",
+     "node_protocol": null,
      "orchestrator_attempt_id": "recovery",
      "original_previous_head": null,
      "outcome": "active",
@@ -3028,7 +3088,10 @@
      "terminal_reason": null,
      "terminal_stage": null
     },
-    "status": "begun"
+    "status": "begun",
+    "todo": [
+     "send_permit"
+    ]
    },
    "rows": {
     "attempts": [
@@ -3117,8 +3180,12 @@
   },
   {
    "result": {
+    "closed_now": true,
     "deploy_id": "n:r:main:rec",
-    "status": "failed"
+    "status": "failed",
+    "todo": [
+     "terminal_fail"
+    ]
    },
    "rows": {
     "attempts": [
@@ -3230,6 +3297,7 @@
      "error": "raw DeployResult is forbidden for evidence_recovery mode",
      "late_evidence": null,
      "node_id": "n",
+     "node_protocol": null,
      "repo": "r",
      "status": "failed",
      "terminal_error": "raw DeployResult is forbidden for evidence_recovery mode",
@@ -3257,6 +3325,7 @@
      "error": "ManifestRecoveryEvidence is forbidden for execute mode",
      "late_evidence": null,
      "node_id": "n",
+     "node_protocol": null,
      "repo": "r",
      "status": "failed",
      "terminal_error": "ManifestRecoveryEvidence is forbidden for execute mode",
@@ -3306,8 +3375,12 @@
  "s08_recovery_invalid": [
   {
    "result": {
+    "closed_now": true,
     "deploy_id": "n:r:main:rec2",
-    "status": "failed"
+    "status": "failed",
+    "todo": [
+     "terminal_fail"
+    ]
    },
    "rows": {
     "attempts": [
@@ -3419,6 +3492,7 @@
      "error": "recovery evidence mismatch: journal identity",
      "late_evidence": null,
      "node_id": "n",
+     "node_protocol": null,
      "repo": "r",
      "status": "failed",
      "terminal_error": "recovery evidence mismatch: journal identity",
@@ -3446,6 +3520,7 @@
      "error": "lost",
      "late_evidence": null,
      "node_id": "n",
+     "node_protocol": null,
      "repo": "r",
      "status": "failed",
      "terminal_error": "lost",
@@ -3495,8 +3570,12 @@
  "s09_recovery_success": [
   {
    "result": {
+    "closed_now": true,
     "deploy_id": "n:r:main:rec3",
-    "status": "success"
+    "status": "success",
+    "todo": [
+     "terminal_ok"
+    ]
    },
    "rows": {
     "attempts": [
@@ -3593,6 +3672,7 @@
      "error": "lost",
      "late_evidence": null,
      "node_id": "n",
+     "node_protocol": null,
      "repo": "r",
      "status": "failed",
      "terminal_error": "lost",
@@ -3648,6 +3728,7 @@
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
     "canonical_status": "pending",
+    "closed_now": false,
     "deploy_id": "n:r:main:np",
     "status": "started"
    },
@@ -3690,6 +3771,7 @@
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
     "canonical_status": "pending",
+    "closed_now": true,
     "deploy_id": "n:r:main:np",
     "status": "failed"
    },
@@ -3738,6 +3820,7 @@
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
     "canonical_status": "success",
+    "closed_now": true,
     "deploy_id": "n:r:main:np",
     "status": "success"
    },
@@ -3787,6 +3870,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r:main:np",
     "status": "ignored"
    },
@@ -3837,6 +3921,7 @@
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
     "canonical_status": "deploying",
+    "closed_now": true,
     "deploy_id": "n2:r:main:nd",
     "status": "failed"
    },
@@ -3937,6 +4022,7 @@
      "oa1"
     ],
     "canonical_status": "success",
+    "closed_now": true,
     "deploy_id": "n2:r:main:nd",
     "status": "success"
    },
@@ -4037,6 +4123,7 @@
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
     "canonical_status": "pending",
+    "closed_now": true,
     "deploy_id": "n3:r:main:ne",
     "status": "failed"
    },
@@ -4206,6 +4293,7 @@
      "error": "x",
      "late_evidence": null,
      "node_id": "n3",
+     "node_protocol": null,
      "repo": "r",
      "status": "failed",
      "terminal_error": "x",
@@ -6070,9 +6158,14 @@
   },
   {
    "result": {
+    "closed_now": true,
     "deploy_id": "n:r:race-a:t1",
+    "event": "attempt_failed",
     "node_id": "n",
-    "status": "failed"
+    "status": "failed",
+    "todo": [
+     "terminal_fail"
+    ]
    },
    "rows": {
     "attempts": [
@@ -6238,9 +6331,14 @@
   },
   {
    "result": {
+    "closed_now": true,
     "deploy_id": "n:r:race-b:t1",
+    "event": "attempt_failed",
     "node_id": "n",
-    "status": "superseded"
+    "status": "superseded",
+    "todo": [
+     "terminal_fail"
+    ]
    },
    "rows": {
     "attempts": [
@@ -6348,7 +6446,9 @@
   },
   {
    "result": {
-    "status": "recorded"
+    "closed_now": false,
+    "status": "recorded",
+    "todo": []
    },
    "rows": {
     "attempts": [
@@ -6489,8 +6589,12 @@
   },
   {
    "result": {
+    "closed_now": true,
     "deploy_id": "n:r:race-c:t1",
-    "status": "success"
+    "status": "success",
+    "todo": [
+     "terminal_ok"
+    ]
    },
    "rows": {
     "attempts": [
@@ -6650,6 +6754,7 @@
      "error": "boom",
      "late_evidence": null,
      "node_id": "n",
+     "node_protocol": null,
      "repo": "r",
      "status": "failed",
      "terminal_error": "boom",
@@ -6677,6 +6782,7 @@
      "error": "boom",
      "late_evidence": null,
      "node_id": "n",
+     "node_protocol": null,
      "repo": "r",
      "status": "failed",
      "terminal_error": "boom",
@@ -7290,6 +7396,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r1:main:lf1",
     "status": "ignored"
    },
@@ -7442,6 +7549,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r1:main:lf1",
     "status": "ignored"
    },
@@ -7594,6 +7702,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r1:main:lf1",
     "status": "ignored"
    },
@@ -8042,6 +8151,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r2:main:lf2",
     "status": "ignored"
    },
@@ -8194,6 +8304,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r2:main:lf2",
     "status": "ignored"
    },
@@ -8346,6 +8457,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r2:main:lf2",
     "status": "ignored"
    },
@@ -8794,6 +8906,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r3:main:la1",
     "status": "ignored"
    },
@@ -8946,6 +9059,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r3:main:la1",
     "status": "ignored"
    },
@@ -9098,6 +9212,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r3:main:la1",
     "status": "ignored"
    },
@@ -9546,6 +9661,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r4:main:lr0",
     "status": "ignored"
    },
@@ -9698,6 +9814,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r4:main:lr0",
     "status": "ignored"
    },
@@ -9850,6 +9967,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r4:main:lr0",
     "status": "ignored"
    },
@@ -10298,6 +10416,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r5:main:lr1",
     "status": "ignored"
    },
@@ -10450,6 +10569,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r5:main:lr1",
     "status": "ignored"
    },
@@ -10602,6 +10722,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r5:main:lr1",
     "status": "ignored"
    },
@@ -11050,6 +11171,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r6:main:lr2",
     "status": "ignored"
    },
@@ -11202,6 +11324,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r6:main:lr2",
     "status": "ignored"
    },
@@ -11354,6 +11477,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r6:main:lr2",
     "status": "ignored"
    },
@@ -11802,6 +11926,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r7:main:lr3",
     "status": "ignored"
    },
@@ -11954,6 +12079,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r7:main:lr3",
     "status": "ignored"
    },
@@ -12106,6 +12232,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r7:main:lr3",
     "status": "ignored"
    },
@@ -12554,6 +12681,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r8:main:lr4",
     "status": "ignored"
    },
@@ -12706,6 +12834,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r8:main:lr4",
     "status": "ignored"
    },
@@ -12858,6 +12987,7 @@
   {
    "result": {
     "cancelled_orchestrator_attempt_ids": [],
+    "closed_now": false,
     "deploy_id": "n:r8:main:lr4",
     "status": "ignored"
    },

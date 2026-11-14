@@ -107,6 +107,8 @@ class DeployAttemptConnectionLifecycle:
                     probe_id,
                     self._plan_rejected("node disconnected", 503),
                 )
+            # 끊김을 안 때: 줄 서 있는 판 1 시도에 유예 마감을 건다(wire-v1 5절)
+            await self._on_link_down(node_id)
             if on_current_disconnect is not None:
                 await on_current_disconnect()
             return True

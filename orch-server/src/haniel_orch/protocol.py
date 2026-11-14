@@ -4,15 +4,11 @@ from __future__ import annotations
 
 import json
 from enum import Enum
-from typing import Annotated, Any, Literal, Union, get_args
+from typing import Any, Literal, Union, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 
-
-class StrictMessage(BaseModel):
-    """Wire message that rejects fields belonging to another protocol variant."""
-
-    model_config = ConfigDict(extra="forbid")
+from .protocol_base import StrictMessage
 
 
 class DeployStatus(str, Enum):
@@ -46,12 +42,43 @@ DeployPlanReason = Literal[
 ]
 SERVER_DEPLOY_PLAN_REASON_INVENTORY = frozenset(get_args(DeployPlanReason))
 
+from .protocol_server import (  # noqa: E402, F401 (서버에서 노드로 가는 글. 호출부는 여기서 가져온다)
+    AcceptedDeployAttemptAck,
+    DeployApproval,
+    DeployAttemptAck,
+    DeployPlanProbe,
+    DeployReject,
+    DeployReportAck,
+    DeployTerminalReceived,
+    RejectedDeployAttemptAck,
+    ServiceCommand,
+)
+
 
 # --- Node → Server messages ---
 
 
+class HeldAttempt(BaseModel):
+    """hello에 실리는, 노드가 쥔 시도 하나(wire-v1 1절). 오케스트레이터 시도 번호와 노드 시도 번호 가운데 정확히 하나."""
+
+    orchestrator_attempt_id: str | None = None
+    node_attempt_id: str | None = None
+    deploy_id: str | None = None
+    state: Literal["queued", "running", "owed"]
+
+    @model_validator(mode="after")
+    def validate_exactly_one_id(self) -> "HeldAttempt":
+        if (self.orchestrator_attempt_id is None) == (self.node_attempt_id is None):
+            raise ValueError("held attempt needs exactly one of orchestrator_attempt_id, node_attempt_id")
+        return self
+
+
 class NodeHello(BaseModel):
-    """First message sent by a node after WebSocket connect."""
+    """First message sent by a node after WebSocket connect.
+
+    deploy_protocol이 없거나 None이면 옛 노드, 1이면 wire-v1을 아는 노드다. held_attempts는 None(목록 없음, 옛 노드)과
+    빈 목록(쥔 것 없음)을 가른다(wire-v1 1절).
+    """
 
     type: str = "node_hello"
     node_id: str
@@ -61,6 +88,8 @@ class NodeHello(BaseModel):
     arch: str
     haniel_version: str
     services: list[dict] | None = None  # optional service list from node
+    deploy_protocol: int | None = None
+    held_attempts: list[HeldAttempt] | None = None
 
 
 class ChangeNotification(BaseModel):
@@ -243,109 +272,49 @@ class ManifestRecoveryEvidence(StrictMessage):
     original_previous_head: str | None = None
 
 
+class DeployAttemptReceived(StrictMessage):
+    """허가를 받아 줄 세웠다(wire-v1 2절, 판 1 노드만). 닿았는지 모름에서 줄 서 있음으로."""
+
+    type: Literal["deploy_attempt_received"] = "deploy_attempt_received"
+    node_id: str
+    deploy_id: str
+    orchestrator_attempt_id: str
+    connection_generation: str  # 그 허가가 온 연결. 오케스트레이터는 기록만 하고 견주지 않는다
+
+
+# deploy_attempt_terminal의 (kind, stage, reason) 짝은 둘뿐이다(wire-v1 2절)
+_TERMINAL_PAIRS = {
+    ("approval_revalidation_failed", "approval_revalidation"): frozenset({"approval_revalidation_failed"}),
+    ("not_executed", "admission"): frozenset({"already_held", "success_owed", "failure_owed", "no_waiter"}),
+}
+
+
 class DeployAttemptTerminal(StrictMessage):
-    """The sole terminal kind that a node is authorized to originate."""
+    """노드가 내는 「실행하지 않음」: 승인 재검증 실패와 가드(이미 쥠, 빚, 기다리는 이 없음). 시작 알림 전에만 온다."""
 
     type: Literal["deploy_attempt_terminal"] = "deploy_attempt_terminal"
-    kind: Literal["approval_revalidation_failed"]
+    kind: Literal["approval_revalidation_failed", "not_executed"]
     deploy_id: str
     orchestrator_attempt_id: str
     connection_generation: str
-    stage: Literal["approval_revalidation"] = "approval_revalidation"
-    reason: Literal["approval_revalidation_failed"]
+    stage: Literal["approval_revalidation", "admission"] = "approval_revalidation"
+    reason: Literal[
+        "approval_revalidation_failed",
+        "already_held",
+        "success_owed",
+        "failure_owed",
+        "no_waiter",
+    ]
     error: str
 
-
-# --- Server → Node messages ---
-
-
-class DeployApproval(StrictMessage):
-    """Server instructs node to proceed with deployment."""
-
-    type: Literal["deploy_approval"] = "deploy_approval"
-    deploy_id: str
-    orchestrator_attempt_id: str
-    execution_mode: Literal["execute", "evidence_recovery"]
-    probe_id: str | None = None
-    connection_generation: str
-    preflight_fingerprint: str | None = None
-    approved_by: str = "dashboard"
-
-
-class DeployPlanProbe(StrictMessage):
-    """Read-only, generation-bound planning request; it grants no execution."""
-
-    type: Literal["deploy_plan_probe"] = "deploy_plan_probe"
-    probe_id: str
-    connection_generation: str
-    deploy_id: str
-    node_id: str
-    repo: str
-    branch: str
-    target_head: str
-    source_orchestrator_attempt_id: str | None = None
-    retry_lineage: list[str] = Field(default_factory=list)
-    expected_manifest_identity: str | None = None
-    expected_manifest_digest: str | None = None
-    deadline_at: str
-    requested_orchestrator_attempt_id: str | None = None
-
-
-class AcceptedDeployAttemptAck(StrictMessage):
-    type: Literal["deploy_attempt_ack"] = "deploy_attempt_ack"
-    accepted: Literal[True]
-    requested_orchestrator_attempt_id: str
-    begun_orchestrator_attempt_id: str
-    deploy_id: str
-    connection_generation: str
-    probe_id: str
-    execution_mode: Literal["execute", "evidence_recovery"]
-    preflight_fingerprint: str
-
-
-class RejectedDeployAttemptAck(StrictMessage):
-    type: Literal["deploy_attempt_ack"] = "deploy_attempt_ack"
-    accepted: Literal[False]
-    requested_orchestrator_attempt_id: str
-    deploy_id: str
-    connection_generation: str
-    error: Literal["retry_requires_manual_approval", "self_update_pending"]
-
-
-DeployAttemptAck = Annotated[
-    Union[AcceptedDeployAttemptAck, RejectedDeployAttemptAck],
-    Field(discriminator="accepted"),
-]
-
-
-class DeployReject(BaseModel):
-    """Server instructs node to skip deployment."""
-
-    type: str = "deploy_reject"
-    deploy_id: str
-    reason: str
-
-
-class DeployReportAck(StrictMessage):
-    """Tell the current node connection why a late report was ignored."""
-
-    type: Literal["deploy_report_ack"] = "deploy_report_ack"
-    deploy_id: str
-    orchestrator_attempt_id: str
-    report_type: Literal["deploy_result", "repo_reconciliation"]
-    status: Literal["ignored"] = "ignored"
-    reason: Literal["unknown_attempt", "terminal_attempt", "identity_mismatch"]
-    attempt_outcome: str | None = None
-
-
-class ServiceCommand(BaseModel):
-    """Server instructs node to run a service/config lifecycle command."""
-
-    type: str = "service_command"
-    command_id: str  # unique ID for tracking
-    service_name: str
-    action: str
-    payload: dict[str, Any] | None = None
+    @model_validator(mode="after")
+    def validate_pair(self) -> "DeployAttemptTerminal":
+        allowed = _TERMINAL_PAIRS.get((self.kind, self.stage))
+        if allowed is None or self.reason not in allowed:
+            raise ValueError(
+                f"deploy_attempt_terminal pair not allowed: kind={self.kind} stage={self.stage} reason={self.reason}"
+            )
+        return self
 
 
 # --- Node → Server messages (additional) ---
@@ -372,6 +341,7 @@ OrchestratorMessage = Union[
     RejectedDeployAttemptAck,
     DeployReject,
     DeployReportAck,
+    DeployTerminalReceived,
     ServiceCommand,
 ]
 NodeMessage = Union[
@@ -384,6 +354,7 @@ NodeMessage = Union[
     RepoReconciliation,
     DeployPlanProposal,
     ManifestRecoveryEvidence,
+    DeployAttemptReceived,
     DeployAttemptTerminal,
     ServiceCommandResult,
 ]
@@ -399,6 +370,7 @@ _NODE_MESSAGE_TYPES: dict[str, type[NodeMessage]] = {
     "repo_reconciliation": RepoReconciliation,
     "deploy_plan_proposal": DeployPlanProposal,
     "manifest_recovery_evidence": ManifestRecoveryEvidence,
+    "deploy_attempt_received": DeployAttemptReceived,
     "deploy_attempt_terminal": DeployAttemptTerminal,
     "service_command_result": ServiceCommandResult,
 }

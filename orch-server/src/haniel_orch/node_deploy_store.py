@@ -101,13 +101,54 @@ async def _insert_started(
     return await _attempt(db, report.node_attempt_id)  # type: ignore[return-value]
 
 
+async def _record_prior_failure(db: aiosqlite.Connection, report: NodeDeployReport) -> bool:
+    """요청 줄이 아직 없을 때 온 스스로 한 배포의 실패(G12, wire-v1 6절)를 노드 시도 줄에 끝난 채로 적는다.
+
+    같은 deploy_id의 요청 줄이 뒤에 생기면 `steps.create_request`가 이 줄을 보고 점검 필요를 켠 채 시작한다.
+    이력과 대기 목록의 직전 실패에 그 까닭이 보인다. 이미 적은 노드 시도면 False다.
+    """
+    if await _attempt(db, report.node_attempt_id) is not None:
+        return False
+    now = now_iso()
+    await db.execute(
+        """INSERT INTO node_deploy_attempts
+           (node_attempt_id, journal_attempt_id, deploy_id, node_id, repo, branch,
+            target_head, trigger, outcome, started_local_head, terminal_local_head, error,
+            duration_ms, started_at, completed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, ?, ?, ?, ?, ?)""",
+        (
+            report.node_attempt_id,
+            report.journal_attempt_id,
+            report.deploy_id,
+            report.node_id,
+            report.repo,
+            report.branch,
+            report.target_head,
+            report.trigger,
+            report.local_head,
+            report.local_head,
+            report.error,
+            report.duration_ms,
+            now,
+            now,
+        ),
+    )
+    return True
+
+
 async def record(db: aiosqlite.Connection, report: NodeDeployReport) -> dict[str, Any]:
-    """Apply one report inside the caller-owned SQLite transaction."""
+    """Apply one report inside the caller-owned SQLite transaction.
+
+    closed_now는 이 글이 노드 시도나 요청을 닫았는가다(판 1 연결에 보내는 「종결을 받았다」의 outcome).
+    """
     canonical = await _canonical(db, report)
     if canonical is None or canonical["status"] not in {
         DeployStatus.PENDING.value,
         DeployStatus.DEPLOYING.value,
     }:
+        closed_now = False
+        if canonical is None and report.phase == "failed":
+            closed_now = await _record_prior_failure(db, report)
         if (
             canonical is not None
             and canonical["status"] == DeployStatus.REJECTED.value
@@ -130,6 +171,7 @@ async def record(db: aiosqlite.Connection, report: NodeDeployReport) -> dict[str
             "status": "ignored",
             "deploy_id": report.deploy_id,
             "cancelled_orchestrator_attempt_ids": [],
+            "closed_now": closed_now,
         }
 
     existing = await _attempt(db, report.node_attempt_id)
@@ -142,6 +184,7 @@ async def record(db: aiosqlite.Connection, report: NodeDeployReport) -> dict[str
                 "status": "ignored",
                 "deploy_id": report.deploy_id,
                 "cancelled_orchestrator_attempt_ids": [],
+                "closed_now": False,
             }
 
     now = now_iso()
@@ -151,6 +194,7 @@ async def record(db: aiosqlite.Connection, report: NodeDeployReport) -> dict[str
             "canonical_status": canonical["status"],
             "deploy_id": report.deploy_id,
             "cancelled_orchestrator_attempt_ids": [],
+            "closed_now": False,
         }
 
     outcome = "success" if report.phase == "succeeded" else "failed"
@@ -226,6 +270,7 @@ async def record(db: aiosqlite.Connection, report: NodeDeployReport) -> dict[str
         "cancelled_orchestrator_attempt_ids": (
             active_orchestrator_ids if report.phase == "succeeded" else []
         ),
+        "closed_now": True,
     }
 
 

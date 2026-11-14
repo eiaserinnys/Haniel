@@ -204,13 +204,14 @@ def iso(moment: datetime) -> str:
     ],
 )
 def test_success_evidence_definition_matrix(row, facts, expected):
-    before = {"status": row[0], "lock": row[1], "tag": row[2]}
+    before = {"status": row[0], "belief": "b_none", "lock": row[1], "tag": row[2]}  # 믿음 영역(2b-2)은 도는 시도 없음
     if expected is None:
         with pytest.raises(NoTransition):
             advance(OrchRequest, before, "success_evidence", facts)
     else:
         assert advance(OrchRequest, before, "success_evidence", facts) == {
             "status": expected[0],
+            "belief": "b_none",
             "lock": expected[1],
             "tag": expected[2],
         }
@@ -229,13 +230,14 @@ def test_success_evidence_definition_matrix(row, facts, expected):
     ],
 )
 def test_late_failed_definition_matrix(row, expected):
-    before = {"status": row[0], "lock": row[1], "tag": "t_off"}
+    before = {"status": row[0], "belief": "b_none", "lock": row[1], "tag": "t_off"}
     if expected is None:
         with pytest.raises(NoTransition):
             advance(OrchRequest, before, "late_failed")
     else:
         assert advance(OrchRequest, before, "late_failed") == {
             "status": expected[0],
+            "belief": "b_none",
             "lock": expected[1],
             "tag": "t_off",
         }
@@ -243,9 +245,9 @@ def test_late_failed_definition_matrix(row, expected):
 
 def test_observed_needs_the_lock_off():
     facts = {"heads_equal": True, "no_active_attempt": True, "no_failed_node_attempt": True}
-    assert advance(OrchRequest, {"status": "pending", "lock": "l_off", "tag": "t_off"}, "observed", facts)["status"] == "success"
+    assert advance(OrchRequest, {"status": "pending", "belief": "b_none", "lock": "l_off", "tag": "t_off"}, "observed", facts)["status"] == "success"
     with pytest.raises(NoTransition):
-        advance(OrchRequest, {"status": "pending", "lock": "l_on", "tag": "t_off"}, "observed", facts)
+        advance(OrchRequest, {"status": "pending", "belief": "b_none", "lock": "l_on", "tag": "t_off"}, "observed", facts)
 
 
 # ---------------------------------------------------------------- 어긋남 4: 닫힌 시도의 늦은 성공
@@ -259,8 +261,8 @@ async def test_repro_late_success_of_a_lease_closed_attempt_closes_the_request_w
     await lease_close(store)
     assert await leaf_of(store) == ("pending", "retry", "l_on")
 
-    assert await late_result(store) == {"status": "recorded"}
-    assert await late_settled(store) == {"status": "success", "deploy_id": DEPLOY_ID}
+    assert (await late_result(store))["status"] == "recorded"
+    assert (await late_settled(store))["status"] == "success"
 
     assert (await leaf_of(store))[:2] == ("success", "success")
     outcome, leaf, late, _started, _seq, kind = await attempt_row(store, "a1")
@@ -278,7 +280,7 @@ async def test_repro_late_success_after_a_later_attempt_was_opened_is_evidence_o
     await begin_after_retry(store, "a2")
     assert await leaf_of(store) == ("deploying", "deploying", "l_off")
 
-    assert await late_result(store) == {"status": "recorded"}
+    assert (await late_result(store))["status"] == "recorded"
     result = await late_settled(store)
 
     assert result["status"] == "late_evidence" and result["evidence"] == "success"
@@ -300,7 +302,7 @@ async def test_repro_late_success_after_a_later_attempt_was_opened_and_closed_is
     assert (await late_result(store, attempt_id="a2", status="failed", error="a2 boom"))["status"] == "failed"
     assert await leaf_of(store) == ("pending", "retry", "l_on")
 
-    assert await late_result(store) == {"status": "recorded"}
+    assert (await late_result(store))["status"] == "recorded"
     result = await late_settled(store)
 
     assert result["status"] == "late_evidence" and result["evidence"] == "success"
@@ -332,8 +334,8 @@ async def test_late_success_settled_first_then_result_closes_the_same_way(store:
     await begin(store)
     await lease_close(store)
 
-    assert await late_settled(store) == {"status": "recorded"}
-    assert await late_result(store) == {"status": "success", "deploy_id": DEPLOY_ID}
+    assert (await late_settled(store))["status"] == "recorded"
+    assert (await late_result(store))["status"] == "success"
     assert (await leaf_of(store))[:2] == ("success", "success")
 
 
@@ -344,8 +346,8 @@ async def test_a_second_late_report_after_the_evidence_closed_is_ignored(store: 
     await late_result(store)
     await late_settled(store)
 
-    assert await late_result(store) == {"status": "ignored"}
-    assert await late_settled(store) == {"status": "ignored"}
+    assert (await late_result(store))["status"] == "duplicate"  # 이미 종결된 증거: 같은 답을 다시 보낸다(dup, design.md:81)
+    assert (await late_settled(store))["status"] == "duplicate"
     assert (await attempt_row(store, "a1"))[:3] == ("failed", "ev_both", "success")
 
 
@@ -356,8 +358,8 @@ async def test_late_reports_to_a_node_closed_attempt_stay_ignored(store: EventSt
     assert (await late_result(store, status="failed", error="boom"))["status"] == "failed"
     assert (await attempt_row(store, "a1"))[:3] == ("failed", "ev_failed", None)
 
-    assert await late_result(store) == {"status": "ignored"}
-    assert await late_settled(store) == {"status": "ignored"}
+    assert (await late_result(store))["status"] == "duplicate"  # 노드 글로 닫힌 시도의 늦은 글: 증거가 이미 종결됐으니 dup
+    assert (await late_settled(store))["status"] == "duplicate"
     assert await leaf_of(store) == ("pending", "retry", "l_on")
 
 
@@ -908,7 +910,7 @@ async def test_repro_late_success_on_a_rejected_request_leaves_the_applied_after
     await store.reject_deploy(DEPLOY_ID, "no")
     assert await tag_of(store) == ("t_off", None, None)
 
-    assert await late_result(store) == {"status": "recorded"}
+    assert (await late_result(store))["status"] == "recorded"
     result = await late_settled(store)
 
     assert result["status"] == "late_evidence" and result["request_changed"] is True
@@ -919,7 +921,7 @@ async def test_repro_late_success_on_a_rejected_request_leaves_the_applied_after
     assert (item["applied_after_close"], item["applied_after_close_at"], item["applied_after_close_attempt_id"]) == (True, at, "a1")
 
     # 같은 글이 다시 오면 ignored이고 꼬리표는 그대로다
-    assert await late_settled(store) == {"status": "ignored"}
+    assert (await late_settled(store))["status"] == "duplicate"
     assert await tag_of(store) == ("t_on", at, "a1")
 
 

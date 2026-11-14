@@ -1,0 +1,25 @@
+stateDiagram-v2
+    direction TB
+    classDef breaks fill:#ffecee,stroke:#e72e3b
+    classDef notInDesign fill:#fff3e6,stroke:#e8730c
+    state "지금 시도에 대한 믿음" as belief {
+        b_none: 도는 시도 없음
+        b_probe: 계획을 물음
+        b_unknown: 닿았는지 모름
+        b_queued: 줄 서 있음
+        b_running: 시작했다
+        [*] --> b_none: 요청이 들어온다
+        b_none --> b_unknown: 승인해서 시도를 시작한다 [점검 필요가 없거나 승인 원천이 단건 승인 그리고 처음 승인]
+        b_none --> b_probe: 점검 뒤 승인이 계획을 묻는다 [표시 줄 있는 대기]
+        b_none --> b_probe: 노드가 자동 배포를 청한다 [처음 대기나 다시 대기이고 도는 시도 없음]
+        b_probe --> b_unknown: 승인해서 시도를 시작한다 [점검 필요가 없거나 승인 원천이 단건 승인 그리고 계획 답 뒤 승인]
+        b_unknown --> b_queued: 노드가 받았다고 답한다
+        b_unknown --> b_running: 노드가 시작했다고 알린다
+        b_unknown --> b_queued: 다시 붙은 노드의 목록에 지금 시도가 있다
+        b_queued --> b_queued: 노드가 받았다고 답한다
+        b_queued --> b_running: 노드가 시작했다고 알린다
+        b_queued --> b_queued: 다시 붙은 노드의 목록에 지금 시도가 있다
+        b_running --> b_running: 노드가 받았다고 답한다
+        b_running --> b_running: 노드가 시작했다고 알린다
+        b_running --> b_running: 다시 붙은 노드의 목록에 지금 시도가 있다
+    }

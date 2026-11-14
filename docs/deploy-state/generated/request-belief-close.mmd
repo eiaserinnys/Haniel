@@ -1,0 +1,35 @@
+stateDiagram-v2
+    direction TB
+    classDef breaks fill:#ffecee,stroke:#e72e3b
+    classDef notInDesign fill:#fff3e6,stroke:#e8730c
+    state "지금 시도에 대한 믿음" as belief {
+        b_none: 도는 시도 없음
+        b_probe: 계획을 물음
+        b_unknown: 닿았는지 모름
+        b_queued: 줄 서 있음
+        b_running: 시작했다
+        [*] --> b_none: 요청이 들어온다
+        b_probe --> b_none: 노드가 자기 배포의 성공을 알린다
+        b_probe --> b_none: 지금 시도가 아닌 실행의 성공 증거가 닿는다 [뒤 시도를 연 적이 없음]
+        b_unknown --> b_none: 시도가 성공으로 끝난다
+        b_unknown --> b_none: 시도가 실패로 끝난다
+        b_unknown --> b_none: 허가가 노드에 닿지 못해 시도를 닫는다
+        b_unknown --> b_none: 노드가 실행하지 않음으로 답한다
+        b_unknown --> b_none: 닿았는지 모름의 짧은 마감이 지난다
+        b_unknown --> b_none: 다시 붙은 노드의 목록에 지금 시도가 없다
+        b_unknown --> b_none: 노드가 자기 배포의 성공을 알린다
+        b_unknown --> b_none: 지금 시도가 아닌 실행의 성공 증거가 닿는다 [뒤 시도를 연 적이 없음]
+        b_queued --> b_none: 시도가 성공으로 끝난다
+        b_queued --> b_none: 시도가 실패로 끝난다
+        b_queued --> b_none: 노드가 실행하지 않음으로 답한다
+        b_queued --> b_none: 끊긴 동안의 유예 마감이 지난다
+        b_queued --> b_none: 다시 붙은 노드의 목록에 지금 시도가 없다
+        b_queued --> b_none: 노드가 자기 배포의 성공을 알린다
+        b_queued --> b_none: 지금 시도가 아닌 실행의 성공 증거가 닿는다 [뒤 시도를 연 적이 없음]
+        b_running --> b_none: 시도가 성공으로 끝난다
+        b_running --> b_none: 시도가 실패로 끝난다
+        b_running --> b_none: 실행 임대의 마감이 지난다
+        b_running --> b_none: 다시 붙은 노드의 목록에 지금 시도가 없다
+        b_running --> b_none: 노드가 자기 배포의 성공을 알린다
+        b_running --> b_none: 지금 시도가 아닌 실행의 성공 증거가 닿는다 [뒤 시도를 연 적이 없음]
+    }
