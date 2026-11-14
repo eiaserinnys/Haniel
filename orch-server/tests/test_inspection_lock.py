@@ -209,7 +209,7 @@ async def wait_sent(harness: Harness, count: int) -> None:
     ],
 )
 def test_lock_definition_matrix(row, event, facts, expected):
-    before = {"status": row[0], "lock": row[1]}
+    before = {"status": row[0], "lock": row[1], "tag": "t_off"}  # 꼬리표 영역(2b-1)은 이 사건들이 건드리지 않는다
     if expected is None:
         with pytest.raises(NoTransition):
             advance(OrchRequest, before, event, facts)
@@ -217,6 +217,7 @@ def test_lock_definition_matrix(row, event, facts, expected):
         assert advance(OrchRequest, before, event, facts) == {
             "status": expected[0],
             "lock": expected[1],
+            "tag": "t_off",
         }
 
 
@@ -227,8 +228,8 @@ def test_lock_definition_matrix(row, event, facts, expected):
 def test_reopen_follows_the_lock(lock, expected):
     facts = {"self_update": True, "postponed_due": True, "no_other_open": True}
     for closed in ("rejected", "superseded"):
-        after = advance(OrchRequest, {"status": closed, "lock": lock}, "reopen", facts)
-        assert after == {"status": expected[0], "lock": expected[1]}
+        after = advance(OrchRequest, {"status": closed, "lock": lock, "tag": "t_off"}, "reopen", facts)
+        assert after == {"status": expected[0], "lock": expected[1], "tag": "t_off"}
 
 
 # ---------------------------------------------------------------- PR 1 검수에서 남긴 두 갈래

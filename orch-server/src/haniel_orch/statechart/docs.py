@@ -165,6 +165,7 @@ VIEWS = (
     View("request-divergence", OrchRequest, True, "status"),
     View("attempt-evidence", AttemptEvidence, None),
     View("request-lock", OrchRequest, None, "lock"),
+    View("request-tag", OrchRequest, None, "tag"),
 )
 
 
@@ -308,7 +309,8 @@ def transitions_markdown() -> str:
         "「설계와 다른 점」은 설계 글(design.md)과 견준 표시다. `어긋남 N`은 설계가 어긋남으로 적은 동작이고, "
         "`PR 2에서 바뀜`은 괄호 속 design.md 줄이 옛 노드 규칙이나 PR 2에서 바꾼다고 적은 동작이며, "
         "`설계에 없음`은 설계에 그 전이가 없는 동작이다. 표시가 없는 전이는 설계 글이 받친다. "
-        "요청 정의의 점검 필요(lock) 영역은 요청 상태 영역과 함께 한 사건으로 움직이므로, 두 영역의 화살표가 같은 사건 이름으로 표에 나란히 있다.\n\n"
+        "요청 정의의 점검 필요(lock) 영역과 닫힌 뒤 적용 꼬리표(tag) 영역은 요청 상태 영역과 함께 한 사건으로 움직이므로, 세 영역의 화살표가 같은 사건 이름으로 표에 나란히 있다. "
+        "시도의 닫힘(outcome)은 증거 정의의 상태가 아니라 시도 줄의 닫힘 칸이다. 오케스트레이터가 스스로 내는 닫힘(실행 임대 마감, 보내기 실패)은 증거 잎을 옮기지 않으므로 이 표에 없다.\n\n"
     )
     return head + "\n".join(table(cls) for cls in DEFINITIONS)
 

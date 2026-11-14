@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import aiosqlite
 
-from .statechart.steps import backfill_leaves
+from .statechart.backfill import backfill_leaves
 
 
 ATTEMPT_TABLES_SQL = """
@@ -130,14 +130,25 @@ CANONICAL_COLUMNS = {
     "sm_status": "TEXT",
     # 점검 필요의 잎(같은 정의의 lock 영역). 바깥 칸은 표시 줄의 inspection_required다
     "sm_lock": "TEXT",
+    # 닫힌 뒤 적용 꼬리표의 잎(같은 정의의 tag 영역). 옛 줄은 기동 때 꼬리표 없음으로 채운다
+    "sm_tag": "TEXT",
+    # 꼬리표가 선 시각과 그때의 시도 번호(노드가 스스로 한 배포면 노드 시도 번호). 꼬리표 전이가 함께 쓴다
+    "applied_after_close_at": "TEXT",
+    "applied_after_close_attempt_id": "TEXT",
 }
 
 ATTEMPT_COLUMNS = {
     "expected_budget_sec": "INTEGER",
     "terminal_stage": "TEXT",
     "terminal_reason": "TEXT",
-    # 시도 종결 증거의 잎(statechart.definitions.AttemptEvidence). outcome은 바깥 칸이다
+    # 시도 종결 증거의 잎(statechart.definitions.AttemptEvidence). outcome은 시도의 닫힘이고 증거와 따로 움직인다
     "sm_evidence": "TEXT",
+    # 같은 요청 안의 시도 순서(첫 시도가 1). 시도 줄을 만드는 걸음이 저장 잠금 안에서 적고, 옛 줄은 기동 때 채운다
+    "attempt_seq": "INTEGER",
+    # 실제 실행이 시작됐다는 첫 증거(진행 알림, 결과, 정착)의 시각. 처음 한 번만 적는다. 실행 상한은 여기서 잰다
+    "execution_started_at": "TEXT",
+    # 오케스트레이터가 스스로 닫은 시도의 증거가 그 뒤 종결된 결과(success, failed). 이력 항목에 보인다
+    "late_evidence": "TEXT",
 }
 
 
@@ -217,5 +228,5 @@ async def initialize_attempt_schema(db: aiosqlite.Connection) -> None:
     await db.executescript(ATTEMPT_TABLES_SQL)
     await _migrate_retry_requirements(db)
     await _ensure_columns(db, "deploy_attempts", ATTEMPT_COLUMNS)
-    # 잎이 비었거나 바깥 칸과 어긋난 줄만 옛 칸에서 다시 계산한다
+    # 잎이 비었거나 바깥 칸과 어긋난 줄만 옛 칸에서 다시 계산하고, 빈 순서 칸과 꼬리표 칸을 채운다
     await backfill_leaves(db)

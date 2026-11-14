@@ -9,7 +9,7 @@ import aiosqlite
 
 from .event_store_rows import now_iso
 from .protocol import DeployStatus, NodeDeployReport
-from .statechart import steps
+from .statechart import attempt_steps, steps
 from .statechart.columns import LEAF_COLUMNS
 from .statechart.restore import NoTransition
 
@@ -108,6 +108,24 @@ async def record(db: aiosqlite.Connection, report: NodeDeployReport) -> dict[str
         DeployStatus.PENDING.value,
         DeployStatus.DEPLOYING.value,
     }:
+        if (
+            canonical is not None
+            and canonical["status"] == DeployStatus.REJECTED.value
+            and report.phase == "succeeded"
+        ):
+            # 거절이나 밀림으로 닫힌 요청에 닿은 성공: 「닫힌 뒤 적용」 꼬리표만 남긴다(어긋남 12). 답은 지금 그대로다.
+            # 노드 시도 번호에는 순서가 없으므로 「뒤 시도 없음」은 보지 않는다(거짓으로 둔다)
+            try:
+                await steps.step_request(
+                    db,
+                    report.deploy_id,
+                    "success_evidence",
+                    facts={"no_later": False},
+                    data={"attempt_id": report.node_attempt_id},
+                    now=now_iso(),
+                )
+            except NoTransition as exc:
+                exc.warn("node_deploy_report")
         return {
             "status": "ignored",
             "deploy_id": report.deploy_id,
@@ -161,7 +179,7 @@ async def record(db: aiosqlite.Connection, report: NodeDeployReport) -> dict[str
 
     if report.phase == "succeeded":
         for attempt_id in active_orchestrator_ids:
-            await steps.step_attempt(
+            await attempt_steps.step_attempt(
                 db, attempt_id, "superseded_by_node", now=now
             )
         await steps.step_request(

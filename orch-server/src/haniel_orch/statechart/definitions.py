@@ -1,4 +1,5 @@
-"""배포 요청과 시도의 상태 정의(카드 #1259 PR 1에서 정의로 옮기고, PR 2a가 「점검 필요」 영역을 더했다).
+"""배포 요청과 시도의 상태 정의(카드 #1259 PR 1에서 정의로 옮기고, PR 2a가 「점검 필요」 영역을, PR 2b-1이
+닫힌 시도의 늦은 글 규칙과 「닫힌 뒤 적용」 꼬리표 영역을 더했다).
 
 설계 정의(fable_r4_product.py의 OrchReq, AttemptEvidence)와 다른 전이는
 `DIVERGENCE`에 표시를 달고 그림에도 드러낸다. 이 정의의 전이는 모두
@@ -37,11 +38,15 @@ class _Base(StateChart):
 
 
 class OrchRequest(_Base):
-    """오케스트레이터의 배포 요청 한 건. 영역은 요청 상태와 점검 필요 둘이다(PR 3이 믿음을 더한다).
+    """오케스트레이터의 배포 요청 한 건. 영역은 요청 상태, 점검 필요, 닫힌 뒤 적용 꼬리표 셋이다(PR 2b-2가 믿음을 더한다).
 
     점검 필요(lock)는 「실제로 돌다 실패한 커밋」을 점검 뒤 승인 말고는 시도로 열지 못하게 잠근다.
-    옛 노드 규칙(design.md:429-430)에 따라 모든 시도의 닫힘(실패, 보내기 실패, 노드 스스로 한 배포의 실패)이 켠다.
-    닫힘(성공, 거절, 밀림)은 이 영역을 건드리지 않는다. 내리는 곳은 원천이 단건 승인인 begin_attempt 하나다.
+    옛 노드 규칙(design.md:429-430)에 따라 모든 시도의 닫힘(실패, 보내기 실패, 노드 스스로 한 배포의 실패,
+    닫힌 시도의 늦은 실패)이 켠다. 닫힘(성공, 거절, 밀림)은 이 영역을 건드리지 않는다. 내리는 곳은 원천이 단건 승인인
+    begin_attempt 하나다.
+
+    닫힌 뒤 적용 꼬리표(tag)는 거절이나 밀림으로 닫힌 요청에 성공 증거(닫힌 시도의 늦은 성공, 노드가 스스로 한 배포의
+    성공)가 닿았음을 드러낸다(어긋남 12, design.md:336, 414). 한 번 서면 내리지 않는다.
     """
 
     class req(State.Parallel):
@@ -59,6 +64,10 @@ class OrchRequest(_Base):
         class lock(State.Compound):
             l_off = State(initial=True)  # 점검 필요가 서지 않음
             l_on = State()  # 점검 필요가 섬. 단건 승인이 새 시도를 열 때에만 내린다
+
+        class tag(State.Compound):
+            t_off = State(initial=True)  # 꼬리표 없음
+            t_on = State()  # 닫힌 뒤 적용. 거절이나 밀림으로 닫힌 요청에 성공 증거가 닿았다
 
     # 승인해서 시도를 연다. 점검 필요가 켜져 있으면 원천이 단건 승인(manual_single)일 때만 열고, 그때 점검 필요를 내린다
     begin_attempt = (
@@ -97,9 +106,23 @@ class OrchRequest(_Base):
         | req.status.open_.deploying.to(req.status.open_.retry, cond="no_active_attempt")
         | req.lock.l_off.to(req.lock.l_on, cond="open_request")
     )
+    # 지금 시도가 아닌 실행의 성공 증거: 오케스트레이터가 스스로 닫은 시도의 늦은 성공(design.md:119, 123)과 거절이나 밀림으로
+    # 닫힌 요청에 닿은 성공(노드가 스스로 한 배포 포함, design.md:336). 옛 노드 규칙(완화 A, design.md:431)이라
+    # 「뒤 시도를 연 적이 없을 때만」 열린 대기를 성공으로 닫는다. 배포 중과 성공은 그대로다(증거만 남는다)
+    success_evidence = (
+        req.status.open_.pending.to(req.status.closed.success, cond="no_later")
+        | req.status.open_.retry.to(req.status.closed.success, cond="no_later")
+        | req.tag.t_off.to(req.tag.t_on, cond="closed_without_success")
+    )
+    # 지금 시도가 아닌 실행의 실패 증거(닫힌 시도의 늦은 실패, design.md:125): 처음 대기는 표시 줄 있는 대기로 가고,
+    # 점검 필요는 요청 상태와 상관없이 켠다(배포 중이면 칸만 서고 도는 시도는 그대로, 닫힌 요청도 칸만 켠다)
+    late_failed = req.status.open_.pending.to(req.status.open_.retry) | req.lock.l_off.to(
+        req.lock.l_on
+    )
+    # 관측은 처음 대기이고 도는 시도가 없고 점검 필요가 꺼져 있을 때만 닫는다(design.md:382)
     observed = req.status.open_.pending.to(
         req.status.closed.success,
-        cond=["heads_equal", "no_active_attempt", "no_failed_node_attempt"],
+        cond=["heads_equal", "no_active_attempt", "no_failed_node_attempt", "unlocked"],
     )
     observed_self_update = (
         req.status.open_.pending.to(
@@ -147,6 +170,13 @@ class OrchRequest(_Base):
 
     def open_request(self) -> bool:
         return self.has("pending", "retry", "deploying")
+
+    def no_later(self) -> bool:
+        """이 증거의 시도보다 뒤 시도를 연 적이 없음(순서 칸이 비었거나 견줄 수 없으면 「있다」로 본다)."""
+        return self.fact("no_later")
+
+    def closed_without_success(self) -> bool:
+        return self.has("rejected", "superseded")
 
     def locked(self) -> bool:
         return self.has("l_on")
@@ -238,6 +268,8 @@ REQUIRED_FACTS: dict[type, dict[str, tuple[str, ...]]] = {
         "newer_commit": (),
         "node_succeeded": (),
         "node_failed": ("no_active_attempt",),
+        "success_evidence": ("no_later",),
+        "late_failed": (),
         "observed": ("heads_equal", "no_active_attempt", "no_failed_node_attempt"),
         "observed_self_update": ("self_update", "heads_equal", "no_active_attempt"),
         "reopen": ("self_update", "postponed_due", "no_other_open"),
@@ -268,6 +300,10 @@ DIVERGENCE: dict[tuple[str, str, str, str], tuple[str, str]] = {
     ("OrchRequest", "l_off", "send_failed", "l_on"): (CHANGES, _PR2),
     # 도는 시도 없는 노드 실패 보고(W17): design.md 125줄이 점검 필요를 세워 실패 뒤 대기로 보낸다고 바꾼다
     ("OrchRequest", "deploying", "node_failed", "retry"): (CHANGES, _PR2),
+    # 닫힌 시도의 늦은 성공(완화 A): 설계 123줄은 「뒤 시도가 실행을 시작한 적이 없으면」 닫지만, 옛 노드 규칙(431줄)은
+    # 「뒤 시도를 연 적이 없을 때만」 닫는다. 이 판은 모든 노드에 옛 노드 규칙을 쓴다
+    ("OrchRequest", "pending", "success_evidence", "success"): (CHANGES, _PR2),
+    ("OrchRequest", "retry", "success_evidence", "success"): (CHANGES, _PR2),
     # 자기 갱신 관측이 고른 다른 줄을 닫음(W4): design.md 382줄은 처음 대기이고 점검 필요가 없을 때만 닫는다
     ("OrchRequest", "pending", "observed_self_update", "success"): (CHANGES, _PR2),
     ("OrchRequest", "retry", "observed_self_update", "success"): (CHANGES, _PR2),
@@ -283,6 +319,8 @@ DESIGN_LINES: dict[tuple[str, str, str, str], str] = {
     ("OrchRequest", "deploying", "send_failed", "retry"): "design.md:429-430",
     ("OrchRequest", "l_off", "send_failed", "l_on"): "design.md:429-430",
     ("OrchRequest", "deploying", "node_failed", "retry"): "design.md:125",
+    ("OrchRequest", "pending", "success_evidence", "success"): "design.md:123, 431",
+    ("OrchRequest", "retry", "success_evidence", "success"): "design.md:123, 431",
     ("OrchRequest", "pending", "observed_self_update", "success"): "design.md:382, 489",
     ("OrchRequest", "retry", "observed_self_update", "success"): "design.md:382, 489",
     ("OrchRequest", "rejected", "reopen", "pending"): "design.md:489",

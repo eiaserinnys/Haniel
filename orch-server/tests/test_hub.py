@@ -1762,29 +1762,41 @@ class TestDeployTimeout:
             "attempt-d1", persisted_deadline
         )
 
-    async def test_progress_requires_current_node_generation(self, registry, store):
+    async def test_progress_requires_the_owner_node_not_the_connection_generation(
+        self, registry, store
+    ):
+        """진행 알림은 시도 번호와 노드로 견준다(2b-1, 어긋남 5). 허가의 세대는 보지 않아 재접속 뒤에도 받는다."""
         hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
         await self._seed_deploying(store, "d1")
         bind_generation(hub)
         original = await store.attempts.get_attempt("attempt-d1")
 
-        for node_id, generation in (("n2", "g1"), ("n1", "stale-g0")):
-            await hub.deploy_coordinator.handle_progress(
-                DeployProgress(
-                    deploy_id="d1",
-                    node_id=node_id,
-                    orchestrator_attempt_id="attempt-d1",
-                    connection_generation=generation,
-                    stage="build",
-                )
+        await hub.deploy_coordinator.handle_progress(
+            DeployProgress(
+                deploy_id="d1",
+                node_id="n2",
+                orchestrator_attempt_id="attempt-d1",
+                connection_generation="g1",
+                stage="build",
             )
+        )
+        assert (await store.attempts.get_attempt("attempt-d1"))["deadline_at"] == original["deadline_at"]
 
-        current = await store.attempts.get_attempt("attempt-d1")
-        assert current["deadline_at"] == original["deadline_at"]
+        await hub.deploy_coordinator.handle_progress(
+            DeployProgress(
+                deploy_id="d1",
+                node_id="n1",
+                orchestrator_attempt_id="attempt-d1",
+                connection_generation="stale-g0",
+                stage="build",
+            )
+        )
+        assert (await store.attempts.get_attempt("attempt-d1"))["deadline_at"] != original["deadline_at"]
 
-    async def test_late_result_is_logged_and_acknowledged(
-        self, registry, store, caplog
+    async def test_late_result_to_a_self_closed_attempt_is_evidence_not_an_ignored_ack(
+        self, registry, store
     ):
+        """임대 마감으로 닫힌 시도의 늦은 결과는 증거로 적힌다(2b-1). 받아들인 결과처럼 노드에 답을 보내지 않는다."""
         hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
         await self._seed_deploying(store, "d1")
         bind_generation(hub)
@@ -1802,44 +1814,44 @@ class TestDeployTimeout:
             reason="attempt_evidence_timeout",
             error="timed out",
         )
+
+        await hub._handle_deploy_result(deploy_result("d1", status="success"))
+        await hub.deploy_coordinator.handle_settled(settled("d1"))
+
+        assert not [message for message in sent if isinstance(message, DeployReportAck)]
+        attempt = await store.attempts.get_attempt("attempt-d1")
+        assert (attempt["outcome"], attempt["late_evidence"]) == ("failed", "success")
+        assert (await store.get_deploy_event("d1"))["status"] == "success"  # 뒤 시도를 연 적이 없다
+
+    async def test_late_result_and_settled_to_a_node_closed_attempt_are_logged_and_acknowledged(
+        self, registry, store, caplog
+    ):
+        hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
+        await self._seed_deploying(store, "d1")
+        bind_generation(hub)
+        sent: list[object] = []
+
+        async def capture(_node_id: str, _generation: str, message: object) -> bool:
+            sent.append(message)
+            return True
+
+        hub.deploy_coordinator._send = capture
+        await hub._handle_deploy_result(
+            deploy_result("d1", status="failed", error="hook failed")
+        )  # 노드 글로 닫혀 증거도 종결됐다
 
         with caplog.at_level("WARNING"):
             await hub._handle_deploy_result(deploy_result("d1", status="success"))
+            await hub.deploy_coordinator.handle_settled(settled("d1"))
 
         assert "attempt_id=attempt-d1" in caplog.text
         assert "outcome=failed" in caplog.text
-        ack = next(message for message in sent if isinstance(message, DeployReportAck))
-        assert ack.status == "ignored"
-        assert ack.reason == "terminal_attempt"
-
-    async def test_late_settled_is_logged_and_acknowledged(
-        self, registry, store, caplog
-    ):
-        hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=10.0)
-        await self._seed_deploying(store, "d1")
-        bind_generation(hub)
-        sent: list[object] = []
-
-        async def capture(_node_id: str, _generation: str, message: object) -> bool:
-            sent.append(message)
-            return True
-
-        hub.deploy_coordinator._send = capture
-        await store.attempts.fail_active_attempt(
-            "attempt-d1",
-            kind="attempt_timeout",
-            stage="deadline",
-            reason="attempt_evidence_timeout",
-            error="timed out",
-        )
-
-        with caplog.at_level("WARNING"):
-            await hub.deploy_coordinator.handle_settled(settled("d1"))
-
         assert "report_type=repo_reconciliation" in caplog.text
-        ack = next(message for message in sent if isinstance(message, DeployReportAck))
-        assert ack.report_type == "repo_reconciliation"
-        assert ack.reason == "terminal_attempt"
+        acks = [message for message in sent if isinstance(message, DeployReportAck)]
+        assert [(ack.report_type, ack.status, ack.reason) for ack in acks] == [
+            ("deploy_result", "ignored", "terminal_attempt"),
+            ("repo_reconciliation", "ignored", "terminal_attempt"),
+        ]
 
     async def test_disconnect_keeps_active_attempt_for_result_or_deadline(
         self, registry, store

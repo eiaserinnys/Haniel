@@ -1,6 +1,6 @@
 """Internal SQL and transition support for durable deploy attempts.
 
-500줄을 넘는다(모듈 크기 제한 예외): PR 1 때부터 넘었고 PR 2a는 점검 필요만 더했다. 믿음과 새 글을 더하는 PR 2b 전에 나누면 같은 자리를 두 번 옮기게 되어 뒤로 미룬다.
+이력 항목은 `deploy_attempt_history`, 노드 보고 적기는 `deploy_attempt_report_store`에 있다.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from typing import Any
 import aiosqlite
 
 from .protocol import DeployPlanProposal, DeployStatus, ManifestRecoveryEvidence
-from .statechart import steps
+from .statechart import attempt_steps, steps
 from .statechart.columns import LEAF_COLUMNS, LOCK_ON
 from .statechart.restore import REASON_NO_TRANSITION, NoTransition
 
@@ -28,88 +28,6 @@ def _expired(deadline: str) -> bool:
 class DeployAttemptStoreSupport:
     """Private helpers mixed into the transaction-owning store."""
 
-    async def history_rows(self, include_superseded: bool) -> list[dict[str, Any]]:
-        attempt_cursor = await self._db.execute(
-            "SELECT * FROM deploy_attempts WHERE outcome = 'failed'"
-        )
-        attempts = self._rows(attempt_cursor, await attempt_cursor.fetchall())
-        rows: list[dict[str, Any]] = []
-        for attempt in attempts:
-            rows.append(
-                {
-                    "deploy_id": f"attempt:{attempt['orchestrator_attempt_id']}",
-                    "canonical_deploy_id": attempt["deploy_id"],
-                    "node_id": attempt["node_id"],
-                    "repo": attempt["repo"],
-                    "branch": attempt["branch"],
-                    "status": "success"
-                    if "success" in attempt["outcome"]
-                    else "failed",
-                    "commits": json.loads(attempt["commits_json"]),
-                    "affected_services": json.loads(attempt["affected_services_json"]),
-                    "diff_stat": attempt["diff_stat"],
-                    "detected_at": attempt["detected_at"],
-                    "approved_by": attempt["approved_by"],
-                    "error": attempt["terminal_error"] or attempt["result_error"],
-                    "duration_ms": attempt["duration_ms"],
-                    "created_at": attempt["started_at"],
-                    "updated_at": attempt["completed_at"],
-                    "attempt_outcome": attempt["outcome"],
-                    "terminal_kind": attempt["terminal_kind"],
-                    "terminal_stage": attempt["terminal_stage"],
-                    "terminal_reason": attempt["terminal_reason"],
-                    "terminal_error": attempt["terminal_error"],
-                }
-            )
-        probe_cursor = await self._db.execute(
-            "SELECT * FROM deploy_plan_probes WHERE status = 'terminal'"
-        )
-        for probe in self._rows(probe_cursor, await probe_cursor.fetchall()):
-            rows.append(
-                {
-                    "deploy_id": f"preflight:{probe['probe_id']}",
-                    "canonical_deploy_id": probe["deploy_id"],
-                    "node_id": probe["node_id"],
-                    "repo": probe["repo"],
-                    "branch": probe["branch"],
-                    "status": "failed",
-                    "commits": [],
-                    "affected_services": [],
-                    "diff_stat": None,
-                    "detected_at": probe["created_at"],
-                    "approved_by": None,
-                    "error": probe["terminal_error"],
-                    "duration_ms": None,
-                    "created_at": probe["created_at"],
-                    "updated_at": probe["completed_at"],
-                    "terminal_kind": probe["terminal_kind"],
-                    "terminal_stage": probe["terminal_stage"],
-                    "terminal_reason": probe["terminal_reason"],
-                    "terminal_error": probe["terminal_error"],
-                }
-            )
-        return rows
-
-    async def success_metadata(self) -> dict[str, dict[str, Any]]:
-        """Join the successful attempt onto its canonical History row once."""
-        cursor = await self._db.execute(
-            """SELECT * FROM deploy_attempts
-               WHERE outcome IN ('success','evidence_recovered_success')
-               ORDER BY completed_at DESC"""
-        )
-        metadata: dict[str, dict[str, Any]] = {}
-        for attempt in self._rows(cursor, await cursor.fetchall()):
-            metadata.setdefault(
-                attempt["deploy_id"],
-                {
-                    "orchestrator_attempt_id": attempt["orchestrator_attempt_id"],
-                    "execution_mode": attempt["execution_mode"],
-                    "attempt_outcome": attempt["outcome"],
-                    "journal_attempt_id": attempt["journal_attempt_id"],
-                },
-            )
-        return metadata
-
     async def _insert_attempt(
         self,
         *,
@@ -124,7 +42,13 @@ class DeployAttemptStoreSupport:
         proposal: DeployPlanProposal | None = None,
     ) -> None:
         now = _now_iso()
-        await steps.create_attempt(
+        # 시도 순서 칸: 같은 요청의 최댓값 더하기 1(첫 시도는 1). 자동 길처럼 노드가 시도 번호를 정해도 순서는 여기서 적는다
+        cursor = await self._db.execute(
+            "SELECT COALESCE(MAX(attempt_seq), 0) + 1 FROM deploy_attempts WHERE deploy_id = ?",
+            (event["deploy_id"],),
+        )
+        attempt_seq = (await cursor.fetchone())[0]
+        await attempt_steps.create_attempt(
             self._db,
             orchestrator_attempt_id=orchestrator_attempt_id,
             deploy_id=event["deploy_id"],
@@ -152,6 +76,7 @@ class DeployAttemptStoreSupport:
             detected_at=event["detected_at"],
             started_at=now,
             deadline_at=deadline_at,
+            attempt_seq=attempt_seq,
         )
         try:
             await steps.step_request(
@@ -203,26 +128,45 @@ class DeployAttemptStoreSupport:
         error: str,
         extra: dict[str, Any] | None = None,
         not_sent: bool = False,
+        self_closed: bool = False,
     ) -> dict[str, Any]:
-        """시도를 실패로 닫고 요청을 옮긴다. not_sent는 허가가 노드에 닿지 못한 보내기 실패다."""
+        """시도를 실패로 닫고 요청을 옮긴다.
+
+        not_sent는 허가가 노드에 닿지 못한 보내기 실패다. self_closed는 오케스트레이터가 스스로 내는 닫힘(실행 임대
+        마감, 보내기 실패)으로, 증거 잎은 옮기지 않는다(뒤에 오는 늦은 글이 증거로 적힌다). 노드 글로 닫히는 것은
+        닫힘과 증거를 한 걸음에 한다.
+        """
         now = _now_iso()
-        try:
-            await steps.step_attempt(
+        if self_closed or not_sent:
+            closed = await attempt_steps.close_attempt(
                 self._db,
                 attempt["orchestrator_attempt_id"],
-                "fail",
-                data={
-                    "kind": kind,
-                    "stage": stage,
-                    "reason": reason,
-                    "error": error,
-                    "extra": extra,
-                },
+                kind=kind,
+                stage=stage,
+                reason=reason,
+                error=error,
                 now=now,
             )
-        except NoTransition as exc:
-            exc.warn("fail")
-            return {"status": "ignored"}
+            if not closed:
+                return {"status": "ignored"}
+        else:
+            try:
+                await attempt_steps.step_attempt(
+                    self._db,
+                    attempt["orchestrator_attempt_id"],
+                    "fail",
+                    data={
+                        "kind": kind,
+                        "stage": stage,
+                        "reason": reason,
+                        "error": error,
+                        "extra": extra,
+                    },
+                    now=now,
+                )
+            except NoTransition as exc:
+                exc.warn("fail")
+                return {"status": "ignored"}
         event = await self._event(attempt["deploy_id"])
         if event is None:
             return {"status": "failed", "deploy_id": attempt["deploy_id"]}
@@ -462,16 +406,24 @@ class DeployAttemptStoreSupport:
         row = await cursor.fetchone()
         return None if row is None else self._rows(cursor, [row])[0]
 
-    async def _current_attempt(
+    async def _owned_attempt(
         self, deploy_id: str, orchestrator_attempt_id: str, generation: str
     ) -> dict[str, Any] | None:
+        """글이 가리키는 시도 줄. 요청 번호나 허가의 세대가 다르면 모순되는 글이라 None이다(닫힌 시도도 돌려준다)."""
         attempt = await self._attempt(orchestrator_attempt_id)
         if (
             attempt is None
             or attempt["deploy_id"] != deploy_id
             or attempt["connection_generation"] != generation
-            or attempt["outcome"] != "active"
         ):
+            return None
+        return attempt
+
+    async def _current_attempt(
+        self, deploy_id: str, orchestrator_attempt_id: str, generation: str
+    ) -> dict[str, Any] | None:
+        attempt = await self._owned_attempt(deploy_id, orchestrator_attempt_id, generation)
+        if attempt is None or attempt["outcome"] != "active":
             return None
         return attempt
 

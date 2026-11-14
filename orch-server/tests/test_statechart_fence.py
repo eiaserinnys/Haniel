@@ -163,7 +163,7 @@ def test_each_step_builds_a_fresh_instance(monkeypatch):
             built.append(self)
 
     monkeypatch.setattr(restore_module, "Facts", Counting)
-    row = {"status": "pending", "lock": "l_off"}
+    row = {"status": "pending", "lock": "l_off", "tag": "t_off"}
     advance(OrchRequest, row, "begin_attempt", {"manual_single": False})
     advance(OrchRequest, row, "begin_attempt", {"manual_single": False})
     assert len(built) == 2 and built[0] is not built[1]
@@ -245,3 +245,20 @@ def test_unknown_event_and_missing_fact_fail_loudly():
         advance(OrchRequest, {"status": "deploying"}, "attempt_failed")  # newer 사실이 빠졌다
     with pytest.raises(ValueError):
         restore(OrchRequest, {"status": "no_such_leaf"})
+
+
+def test_every_request_region_has_exactly_one_leaf_column():
+    """영역마다 잎 칸이 하나다(요청 상태, 점검 필요, 닫힌 뒤 적용 꼬리표). 새 영역을 더하면 칸도 함께 더해야 한다."""
+    from haniel_orch.statechart.columns import LEAF_COLUMNS, REGION_COLUMNS
+
+    assert set(regions(OrchRequest)) == {"status", "lock", "tag"}
+    assert set(REGION_COLUMNS[OrchRequest.__name__]) == set(regions(OrchRequest))
+    assert set(REGION_COLUMNS[AttemptEvidence.__name__]) == set(regions(AttemptEvidence))
+    columns = [column for mapping in REGION_COLUMNS.values() for column in mapping.values()]
+    assert len(columns) == len(set(columns)) == 4
+    assert set(columns) == LEAF_COLUMNS
+
+
+def test_the_tag_region_never_comes_down():
+    """꼬리표는 한 번 서면 내리지 않는다: t_on에서 나가는 화살표가 없다."""
+    assert list(OrchRequest.states_map["t_on"].transitions) == []
