@@ -140,14 +140,14 @@ def test_attempt_failure_reaches_every_request_leaf_with_only_the_lock_unless_de
     """PR 1은 요청 상태를 보지 않고 더 새 커밋이 있으면 거절로 덮고 없으면 표시 줄을 썼다(어긋남 8).
     이제는 도는 시도가 있는 배포 중만 요청 상태를 옮기고, 그 밖의 줄에는 점검 필요만 켠다."""
     for newer in (True, False):
-        row = {"status": leaf, "lock": "l_off"}
+        row = {"status": leaf, "lock": "l_off", "tag": "t_off"}
         after = advance(OrchRequest, row, "attempt_failed", {"newer": newer})
         if leaf == "deploying":
-            assert after == {"status": "superseded" if newer else "retry", "lock": "l_on"}
+            assert after == {"status": "superseded" if newer else "retry", "lock": "l_on", "tag": "t_off"}
         else:
-            assert after == {"status": leaf, "lock": "l_on"}
+            assert after == {"status": leaf, "lock": "l_on", "tag": "t_off"}
         # 점검 필요가 이미 켜져 있으면 닫힌 줄과 열린 줄 모두 전이가 없다
-        locked = {"status": leaf, "lock": "l_on"}
+        locked = {"status": leaf, "lock": "l_on", "tag": "t_off"}
         if leaf == "deploying":
             assert advance(OrchRequest, locked, "attempt_failed", {"newer": newer})["lock"] == "l_on"
         else:

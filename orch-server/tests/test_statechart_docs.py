@@ -26,20 +26,24 @@ def test_request_views_split_by_region_and_mark_and_cover_every_transition():
     status = docs.mermaid(docs.VIEWS[0])
     divergence = docs.mermaid(docs.VIEWS[1])
     lock = docs.mermaid(docs.VIEWS[3])
+    tag = docs.mermaid(docs.VIEWS[4])
     # 어긋남 8이 없어졌다. 설계와 다른 전이의 표시는 옛 노드 규칙(PR 2에서 바뀜)과 설계에 없음 둘이다
-    assert "어긋남" not in status + divergence + lock
+    assert "어긋남" not in status + divergence + lock + tag
     assert "(PR 2에서 바뀜)" not in status and "(PR 2에서 바뀜)" in divergence
     assert "(설계에 없음)" in divergence
-    # 점검 필요 영역은 자기 그림이 있고, 요청 상태 그림에는 그 영역의 잎이 없다
+    # 점검 필요 영역과 꼬리표 영역은 자기 그림이 있고, 요청 상태 그림에는 그 영역의 잎이 없다
     assert 'state "점검 필요" as lock' in lock and "l_on" in lock
-    assert "l_on" not in status + divergence
-    # 접힌 화살표(합류 막대)는 그림에서 한 줄이므로 정의의 전이 전부가 세 그림 가운데 한 곳에 든다는 것으로 견준다
+    assert 'state "닫힌 뒤 적용 꼬리표" as tag' in tag and "t_on" in tag
+    assert "l_on" not in status + divergence + tag and "t_on" not in status + divergence + lock
+    # 접힌 화살표(합류 막대)는 그림에서 한 줄이므로 정의의 전이 전부가 네 그림 가운데 한 곳에 든다는 것으로 견준다
     drawn_status = {a for a in docs._view_arrows(docs.VIEWS[0])}
     drawn_divergence = {a for a in docs._view_arrows(docs.VIEWS[1])}
     drawn_lock = {a for a in docs._view_arrows(docs.VIEWS[3])}
-    assert drawn_status | drawn_divergence | drawn_lock == set(docs.transitions(OrchRequest))
+    drawn_tag = {a for a in docs._view_arrows(docs.VIEWS[4])}
+    assert drawn_status | drawn_divergence | drawn_lock | drawn_tag == set(docs.transitions(OrchRequest))
     assert not drawn_status & drawn_divergence
     assert not drawn_lock & (drawn_status | drawn_divergence)
+    assert not drawn_tag & (drawn_status | drawn_divergence | drawn_lock)
 
 
 def test_divergence_marks_use_only_the_agreed_texts():
@@ -68,6 +72,7 @@ def test_state_colors_follow_what_the_picture_draws():
     assert "class " not in status.split("\n    }\n", 1)[1]
     assert "class " not in divergence.split("\n    }\n", 1)[1]
     assert "class " not in docs.mermaid(docs.VIEWS[3]).split("\n    }\n", 1)[1]
+    assert "class " not in docs.mermaid(docs.VIEWS[4]).split("\n    }\n", 1)[1]
     # 주황은 이름으로 적어 둔 설계 밖 잎 하나뿐이다
     assert [line for line in evidence.splitlines() if line.startswith("    class ")] == [
         "    class ev_superseded notInDesign"
@@ -179,6 +184,7 @@ def test_writing_without_arguments_regenerates_every_text_file(tmp_path):
         "request-divergence.mmd",
         "attempt-evidence.mmd",
         "request-lock.mmd",
+        "request-tag.mmd",
         "transitions.md",
     }
     # svg는 render.py가 만든다. 쓰기만 한 폴더는 svg가 없어서 검사가 실패한다

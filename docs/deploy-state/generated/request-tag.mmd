@@ -1,0 +1,10 @@
+stateDiagram-v2
+    direction TB
+    classDef breaks fill:#ffecee,stroke:#e72e3b
+    classDef notInDesign fill:#fff3e6,stroke:#e8730c
+    state "닫힌 뒤 적용 꼬리표" as tag {
+        t_off: 꼬리표 없음
+        t_on: 닫힌 뒤 적용
+        [*] --> t_off: 요청이 들어온다
+        t_off --> t_on: 지금 시도가 아닌 실행의 성공 증거가 닿는다 [거절이나 밀림으로 닫힘]
+    }

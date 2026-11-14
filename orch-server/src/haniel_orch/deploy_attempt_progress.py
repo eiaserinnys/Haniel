@@ -36,17 +36,22 @@ class DeployAttemptProgress:
     """Coordinator mixin for bounded lease renewal and report acknowledgements."""
 
     async def handle_progress(self, progress: DeployProgress) -> None:
+        """진행 알림은 시도 번호로 견준다(어긋남 5). 글의 시도가 그 요청의 도는 시도이고, 글의 node_id와 연결이
+        인증한 node_id와 시도 줄의 node_id가 모두 같을 때만 임대를 늘린다. 허가의 세대는 보지 않으므로 재접속 뒤
+        같은 시도의 알림도 받는다(hub가 본문 node_id와 연결의 node_id가 다른 글을 버린다).
+        """
         attempt = await self.attempts.get_attempt(progress.orchestrator_attempt_id)
         connection = self._connections.get(progress.node_id)
         if (
             attempt is None
+            or attempt["deploy_id"] != progress.deploy_id
             or attempt["node_id"] != progress.node_id
             or not isinstance(connection, ActiveConnection)
-            or connection.generation != progress.connection_generation
         ):
             return
-        started_at = datetime.fromisoformat(attempt["started_at"])
-        hard_deadline = started_at + timedelta(
+        # 실행 상한은 실제 실행 시작 시각에서 잰다(어긋남 6). 아직 없으면 지금처럼 승인 시각에서 잰다
+        base = datetime.fromisoformat(attempt["execution_started_at"] or attempt["started_at"])
+        hard_deadline = base + timedelta(
             seconds=attempt_hard_budget_seconds(
                 self._attempt_timeout_sec,
                 attempt["expected_budget_sec"] or progress.expected_budget_sec,
@@ -56,10 +61,10 @@ class DeployAttemptProgress:
             seconds=self._attempt_timeout_sec
         )
         deadline_at = min(idle_deadline, hard_deadline).isoformat()
-        result = await self.attempts.renew_active_attempt(
+        result = await self.attempts.record_progress(
             deploy_id=progress.deploy_id,
             orchestrator_attempt_id=progress.orchestrator_attempt_id,
-            connection_generation=progress.connection_generation,
+            node_id=progress.node_id,
             expected_budget_sec=progress.expected_budget_sec,
             deadline_at=deadline_at,
         )

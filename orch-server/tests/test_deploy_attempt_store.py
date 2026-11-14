@@ -265,6 +265,7 @@ class TestNormalFinalization:
         ] == "deploying"
 
     async def test_late_attempt_a_cannot_mutate_retry_b(self, store: EventStore):
+        """임대 마감으로 닫힌 a의 늦은 글은 a의 증거로 적히지만(2b-1), 도는 시도 b와 요청 상태는 건드리지 못한다."""
         await canonical(store)
         await begin(store, "a")
         attempts = store.attempts
@@ -314,7 +315,7 @@ class TestNormalFinalization:
             error=None,
             duration_ms=99,
         )
-        assert late["status"] == "ignored"
+        assert late["status"] == "recorded"  # 닫힌 a의 증거(성공 결과만 옴)
         late_failure = await attempts.record_result(
             deploy_id="n:r:main:target",
             orchestrator_attempt_id="a",
@@ -337,13 +338,14 @@ class TestNormalFinalization:
             reason="attempt_evidence_timeout",
             error="late timeout",
         )
-        assert {
-            late_failure["status"],
-            late_settled["status"],
-            late_timeout["status"],
-        } == {"ignored"}
+        # 늦은 실패가 a의 증거를 실패로 종결하고 점검 필요만 켠다. 증거가 종결된 뒤의 정착과 마감은 ignored다
+        assert (late_failure["status"], late_failure["evidence"]) == ("late_evidence", "failed")
+        assert late_settled["status"] == late_timeout["status"] == "ignored"
+        a = await attempts.get_attempt("a")
+        assert (a["outcome"], a["terminal_kind"], a["late_evidence"]) == ("failed", "attempt_timeout", "failed")
         active = await attempts.get_active_attempts()
         assert [row["orchestrator_attempt_id"] for row in active] == ["b"]
+        assert (await store.get_deploy_event("n:r:main:target"))["status"] == "deploying"
         assert probe["source_orchestrator_attempt_id"] == "a"
 
     async def test_newer_canonical_wins_if_old_attempt_fails_after_creation(

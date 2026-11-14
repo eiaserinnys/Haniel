@@ -6,11 +6,11 @@ deploy_retry_source_attempts)에 쓰는 SQL이 있는 유일한 곳(스키마 �
 1. 줄(잎 칸)과 걸음마다 읽는 사실을 읽는다.
 2. `restore`로 새 인스턴스를 되살리고 사건 하나를 넣는다. 전이가 없으면 `NoTransition`이고
    줄에는 아무것도 쓰이지 않는다.
-3. 결과 잎(요청 상태와 점검 필요)과 바깥 칸(status, reject_reason, outcome, 표시 줄의
-   inspection_required 등)과 딸린 줄(표시 줄, 계보 줄)을 같은 트랜잭션에 쓴다. SQL의 `WHERE`는
-   마지막 쓰기 재확인으로 남는다.
+3. 결과 잎(요청 상태, 점검 필요, 닫힌 뒤 적용 꼬리표)과 바깥 칸(status, reject_reason, 표시 줄의
+   inspection_required, 꼬리표의 시각과 시도 번호 등)과 딸린 줄(표시 줄, 계보 줄)을 같은 트랜잭션에 쓴다.
+   SQL의 `WHERE`는 마지막 쓰기 재확인으로 남는다.
 
-방송, 푸시, 타이머 같은 할 일은 커밋 뒤에 호출부가 돌린다(할 일 기호의 저장은 PR 2b).
+방송, 푸시, 타이머 같은 할 일은 커밋 뒤에 호출부가 돌린다(할 일 기호를 정의의 출력으로 내는 일은 PR 2b-2).
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from typing import Any, NamedTuple
 
 import aiosqlite
 
-from .columns import LOCK_ON, LOCK_REGION, REQUEST_REGION
+from .columns import LOCK_ON, LOCK_REGION, REQUEST_REGION, TAG_REGION
 from .definitions import REQUEST_CLOSED, REQUEST_OUTER_STATUS, OrchRequest
 from .restore import (
     REASON_NO_ROW,
@@ -45,11 +45,11 @@ class RequestStep(NamedTuple):
 # ---------------------------------------------------------------- 요청 줄
 
 _INSERT_REQUEST = """INSERT OR IGNORE INTO deploy_events
-    (deploy_id, node_id, repo, branch, status, sm_status, sm_lock,
+    (deploy_id, node_id, repo, branch, status, sm_status, sm_lock, sm_tag,
      commits_json, affected_services_json, diff_stat, detected_at,
      created_at, updated_at, target_head, deployment_kind,
      expected_manifest_identity, expected_manifest_digest, is_self_update)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
 
 async def create_request(
@@ -83,6 +83,7 @@ async def create_request(
             REQUEST_OUTER_STATUS[leaf],
             leaf,
             initial[LOCK_REGION],
+            initial[TAG_REGION],
             commits_json,
             affected_services_json,
             diff_stat,
@@ -126,6 +127,11 @@ def _request_columns(
         if previous != "deploying":
             return {}
         return {"approved_by": None, "error": None, "duration_ms": None}
+    if event == "success_evidence":
+        # 열린 대기가 늦은 성공으로 닫힌다(꼬리표만 바뀌는 닫힌 요청은 여기 오지 않는다)
+        return {"error": None, "duration_ms": data.get("duration_ms")}
+    if event == "late_failed":
+        return {}
     if event in ("observed", "observed_self_update"):
         return {}
     if event == "reopen":
@@ -162,7 +168,7 @@ async def step_request(
     data = data or {}
     now = now or now_iso()
     cursor = await db.execute(
-        "SELECT status, sm_status, sm_lock FROM deploy_events WHERE deploy_id = ?",
+        "SELECT status, sm_status, sm_lock, sm_tag FROM deploy_events WHERE deploy_id = ?",
         (deploy_id,),
     )
     row = await cursor.fetchone()
@@ -174,11 +180,16 @@ async def step_request(
             REASON_NO_ROW,
             deploy_id,
         )
-    status, leaf, lock = row
-    if leaf is None or lock is None or REQUEST_OUTER_STATUS.get(leaf) != status:
+    status, leaf, lock, tag = row
+    if (
+        leaf is None
+        or lock is None
+        or tag is None
+        or REQUEST_OUTER_STATUS.get(leaf) != status
+    ):
         raise NoTransition(
             OrchRequest.__name__,
-            {"status": status, "sm_status": leaf, "sm_lock": lock},
+            {"status": status, "sm_status": leaf, "sm_lock": lock, "sm_tag": tag},
             event,
             REASON_STATE_MISMATCH,
             deploy_id,
@@ -186,19 +197,20 @@ async def step_request(
     try:
         after = advance(
             OrchRequest,
-            {REQUEST_REGION: leaf, LOCK_REGION: lock},
+            {REQUEST_REGION: leaf, LOCK_REGION: lock, TAG_REGION: tag},
             event,
             dict(facts or {}),
         )
     except NoTransition as exc:
         exc.key = deploy_id
         raise
-    new_leaf, new_lock = after[REQUEST_REGION], after[LOCK_REGION]
+    new_leaf, new_lock, new_tag = after[REQUEST_REGION], after[LOCK_REGION], after[TAG_REGION]
     moved = new_leaf != leaf
     lock_changed = new_lock != lock
+    tag_changed = new_tag != tag
 
-    # 요청 상태가 옮겨질 때만 바깥 칸과 updated_at을 쓴다. 점검 필요만 바뀌면(닫힌 요청에 닿은 시도 실패,
-    # 도는 시도가 있는 배포 중의 노드 실패 보고) 요청 줄의 다른 칸은 건드리지 않는다
+    # 요청 상태가 옮겨질 때만 바깥 칸과 updated_at을 쓴다. 점검 필요나 꼬리표만 바뀌면(닫힌 요청에 닿은 시도 실패,
+    # 도는 시도가 있는 배포 중의 노드 실패 보고, 닫힌 요청에 닿은 성공 증거) 요청 줄의 다른 칸은 건드리지 않는다
     columns: dict[str, Any] = {}
     if moved:
         columns = {
@@ -209,16 +221,21 @@ async def step_request(
         }
     if lock_changed:
         columns["sm_lock"] = new_lock
+    if tag_changed:
+        # 꼬리표의 바깥 칸은 선 시각과 그때의 시도 번호(노드가 스스로 한 배포면 노드 시도 번호)다
+        columns["sm_tag"] = new_tag
+        columns["applied_after_close_at"] = now
+        columns["applied_after_close_attempt_id"] = data["attempt_id"]
     assignments = ", ".join(f"{name} = ?" for name in columns)
     updated = await db.execute(
         f"UPDATE deploy_events SET {assignments} "
-        "WHERE deploy_id = ? AND status = ? AND sm_status = ? AND sm_lock = ?",
-        (*columns.values(), deploy_id, status, leaf, lock),
+        "WHERE deploy_id = ? AND status = ? AND sm_status = ? AND sm_lock = ? AND sm_tag = ?",
+        (*columns.values(), deploy_id, status, leaf, lock, tag),
     )
     if updated.rowcount != 1:
         raise NoTransition(
             OrchRequest.__name__,
-            {"status": status, "sm_status": leaf, "sm_lock": lock},
+            {"status": status, "sm_status": leaf, "sm_lock": lock, "sm_tag": tag},
             event,
             REASON_UPDATE_ZERO,
             deploy_id,
@@ -236,8 +253,9 @@ async def step_request(
             )
         return RequestStep(previous=leaf, leaf=new_leaf)
 
-    if event in ("attempt_failed", "send_failed") and moved:
-        # 닫힌 시도는 언제나 계보에 더한다. source는 호출부가 정한다(보내기 실패는 옮기지 않는다)
+    if event in ("attempt_failed", "send_failed", "late_failed") and moved:
+        # 닫힌 시도는 언제나 계보에 더한다. source는 호출부가 정한다(보내기 실패는 옮기지 않는다.
+        # 처음 대기에 닿은 늦은 실패는 실행한 그 시도를 source로 둔다)
         await db.execute(
             _UPSERT_MARKER,
             (

@@ -38,6 +38,8 @@ TIME_KEYS = {
     "added_at",
     "settled_at",
     "postponed_until",
+    "applied_after_close_at",
+    "execution_started_at",
 }
 
 
@@ -493,10 +495,10 @@ async def s06_settled_mismatch_and_deadline(store: EventStore) -> list:
         out,
         "renew-after-close-ignored",
         store,
-        await store.attempts.renew_active_attempt(
+        await store.attempts.record_progress(
             deploy_id=d2,
             orchestrator_attempt_id="a2",
-            connection_generation="g1",
+            node_id="n2",
             expected_budget_sec=10,
             deadline_at=_later(),
         ),
@@ -516,10 +518,10 @@ async def s06_settled_mismatch_and_deadline(store: EventStore) -> list:
         out,
         "renew",
         store,
-        await store.attempts.renew_active_attempt(
+        await store.attempts.record_progress(
             deploy_id=d3,
             orchestrator_attempt_id="a3",
-            connection_generation="g1",
+            node_id="n3",
             expected_budget_sec=10,
             deadline_at="2099-01-01T00:00:00+00:00",
         ),

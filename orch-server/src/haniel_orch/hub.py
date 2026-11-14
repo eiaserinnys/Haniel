@@ -36,6 +36,10 @@ from .reconciliation import RepoReconciler
 
 logger = logging.getLogger(__name__)
 
+# 시도에 묶인 노드 글 가운데 본문에 node_id가 있는 것(deploy_attempt_terminal에는 node_id 칸이 없다).
+# RepoReconciliation은 정착(settled)만 시도에 묶인다
+_ATTEMPT_BOUND = (DeployProgress, DeployResult, RepoReconciliation, ManifestRecoveryEvidence)
+
 
 @dataclass
 class PendingCommand:
@@ -176,6 +180,24 @@ class WebSocketHub:
                     incoming = parse_node_message(raw)
                 except Exception as e:
                     logger.warning(f"Node {node_id}: invalid message: {e}")
+                    continue
+
+                if (
+                    isinstance(incoming, _ATTEMPT_BOUND)
+                    and incoming.node_id != node_id
+                    and not (
+                        isinstance(incoming, RepoReconciliation)
+                        and incoming.phase != "settled"
+                    )
+                ):
+                    # 시도에 묶인 노드 글의 소유권: 본문 node_id가 연결이 인증한 node_id와 다르면 버린다(design.md:110)
+                    logger.warning(
+                        "Ignoring %s with connection identity mismatch: connected=%s reported=%s attempt=%s",
+                        incoming.type,
+                        node_id,
+                        incoming.node_id,
+                        incoming.orchestrator_attempt_id,
+                    )
                     continue
 
                 if isinstance(incoming, ChangeNotification):

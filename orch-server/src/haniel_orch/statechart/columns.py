@@ -11,16 +11,27 @@ from .definitions import REQUEST_OUTER_STATUS
 
 SUPERSEDED_PREFIX = "superseded by "
 
-# 잎 칸은 저장소 안쪽의 표현이다. REST, 방송 글, 저장소 반환값의 모양은 바뀌지 않는다.
-LEAF_COLUMNS = frozenset({"sm_status", "sm_lock", "sm_evidence"})
-
 # 영역 이름 = 칸 이름의 접미를 뗀 이름
 REQUEST_REGION = "status"
 LOCK_REGION = "lock"
+TAG_REGION = "tag"
 ATTEMPT_REGION = "ev"
+
+# 정의 이름 -> 영역 이름 -> 잎 칸. 영역을 더하면 칸도 여기에 더한다(울타리 시험이 본다)
+REGION_COLUMNS: dict[str, dict[str, str]] = {
+    "OrchRequest": {REQUEST_REGION: "sm_status", LOCK_REGION: "sm_lock", TAG_REGION: "sm_tag"},
+    "AttemptEvidence": {ATTEMPT_REGION: "sm_evidence"},
+}
+
+# 잎 칸은 저장소 안쪽의 표현이다. REST, 방송 글, 저장소 반환값의 모양은 바뀌지 않는다.
+LEAF_COLUMNS = frozenset(
+    column for mapping in REGION_COLUMNS.values() for column in mapping.values()
+)
 
 LOCK_ON = "l_on"
 LOCK_OFF = "l_off"
+TAG_ON = "t_on"  # 닫힌 뒤 적용 꼬리표가 섬. 한 번 서면 내리지 않는다
+TAG_OFF = "t_off"
 
 
 def request_leaf_from_columns(
@@ -90,15 +101,20 @@ def attempt_leaf_from_columns(
     return None
 
 
-# 잎이 가리키는 outcome 칸 값. ev_both는 두 값이 가능하다.
+# 잎과 함께 설 수 있는 outcome(시도의 닫힘) 값. 닫힘과 증거 종결은 따로 움직인다(design.md:79).
+# 오케스트레이터가 스스로 닫은 시도(실행 임대 마감, 보내기 실패)는 outcome이 failed인 채로 증거 잎이 열려 있을 수 있고,
+# 그 뒤 늦은 글이 증거를 ev_both나 ev_failed로 종결한다. 노드 글로 닫힌 시도는 닫힘과 증거가 한 걸음에 끝난다.
 ATTEMPT_OUTCOMES = {
-    "ev_none": ("active",),
-    "ev_result": ("active",),
-    "ev_settled": ("active",),
-    "ev_both": ("success", "evidence_recovered_success"),
+    "ev_none": ("active", "failed"),
+    "ev_result": ("active", "failed"),
+    "ev_settled": ("active", "failed"),
+    "ev_both": ("success", "evidence_recovered_success", "failed"),
     "ev_failed": ("failed",),
     "ev_superseded": ("superseded",),
 }
+
+# 증거 잎이 종결된 뒤 이력에 보이는 늦은 증거 값(late_evidence 칸)
+LATE_EVIDENCE_OF_LEAF = {"ev_both": "success", "ev_failed": "failed"}
 
 
 def attempt_leaf_is_consistent(leaf: str | None, outcome: str) -> bool:

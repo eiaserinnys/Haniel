@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -15,6 +16,9 @@ from .protocol import DeployPlanProposal, DeployStatus, ManifestRecoveryEvidence
 from .statechart import attempt_steps, steps
 from .statechart.columns import LEAF_COLUMNS, LOCK_ON
 from .statechart.restore import REASON_NO_TRANSITION, NoTransition
+
+
+logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -42,6 +46,12 @@ class DeployAttemptStoreSupport:
         proposal: DeployPlanProposal | None = None,
     ) -> None:
         now = _now_iso()
+        # 시도 순서 칸: 같은 요청의 최댓값 더하기 1(첫 시도는 1). 자동 길처럼 노드가 시도 번호를 정해도 순서는 여기서 적는다
+        cursor = await self._db.execute(
+            "SELECT COALESCE(MAX(attempt_seq), 0) + 1 FROM deploy_attempts WHERE deploy_id = ?",
+            (event["deploy_id"],),
+        )
+        attempt_seq = (await cursor.fetchone())[0]
         await attempt_steps.create_attempt(
             self._db,
             orchestrator_attempt_id=orchestrator_attempt_id,
@@ -70,6 +80,7 @@ class DeployAttemptStoreSupport:
             detected_at=event["detected_at"],
             started_at=now,
             deadline_at=deadline_at,
+            attempt_seq=attempt_seq,
         )
         try:
             await steps.step_request(
@@ -121,26 +132,45 @@ class DeployAttemptStoreSupport:
         error: str,
         extra: dict[str, Any] | None = None,
         not_sent: bool = False,
+        self_closed: bool = False,
     ) -> dict[str, Any]:
-        """시도를 실패로 닫고 요청을 옮긴다. not_sent는 허가가 노드에 닿지 못한 보내기 실패다."""
+        """시도를 실패로 닫고 요청을 옮긴다.
+
+        not_sent는 허가가 노드에 닿지 못한 보내기 실패다. self_closed는 오케스트레이터가 스스로 내는 닫힘(실행 임대
+        마감, 보내기 실패)으로, 증거 잎은 옮기지 않는다(뒤에 오는 늦은 글이 증거로 적힌다). 노드 글로 닫히는 것은
+        닫힘과 증거를 한 걸음에 한다.
+        """
         now = _now_iso()
-        try:
-            await attempt_steps.step_attempt(
+        if self_closed or not_sent:
+            closed = await attempt_steps.close_attempt(
                 self._db,
                 attempt["orchestrator_attempt_id"],
-                "fail",
-                data={
-                    "kind": kind,
-                    "stage": stage,
-                    "reason": reason,
-                    "error": error,
-                    "extra": extra,
-                },
+                kind=kind,
+                stage=stage,
+                reason=reason,
+                error=error,
                 now=now,
             )
-        except NoTransition as exc:
-            exc.warn("fail")
-            return {"status": "ignored"}
+            if not closed:
+                return {"status": "ignored"}
+        else:
+            try:
+                await attempt_steps.step_attempt(
+                    self._db,
+                    attempt["orchestrator_attempt_id"],
+                    "fail",
+                    data={
+                        "kind": kind,
+                        "stage": stage,
+                        "reason": reason,
+                        "error": error,
+                        "extra": extra,
+                    },
+                    now=now,
+                )
+            except NoTransition as exc:
+                exc.warn("fail")
+                return {"status": "ignored"}
         event = await self._event(attempt["deploy_id"])
         if event is None:
             return {"status": "failed", "deploy_id": attempt["deploy_id"]}
@@ -185,6 +215,81 @@ class DeployAttemptStoreSupport:
             "attempt failed; a new manual retry probe is required",
         )
         return {"status": "failed", "deploy_id": attempt["deploy_id"]}
+
+    async def _no_later_attempt(self, attempt: dict[str, Any]) -> bool:
+        """이 시도보다 뒤 시도를 연 적이 없는가. 순서 칸이 비었으면 견줄 수 없으므로 「있다」로 본다(요청을 닫지 않는 쪽)."""
+        if attempt["attempt_seq"] is None:
+            return False
+        cursor = await self._db.execute(
+            "SELECT 1 FROM deploy_attempts WHERE deploy_id = ? AND attempt_seq > ? LIMIT 1",
+            (attempt["deploy_id"], attempt["attempt_seq"]),
+        )
+        return await cursor.fetchone() is None
+
+    async def _apply_late_evidence_unlocked(
+        self, attempt: dict[str, Any], leaf: str
+    ) -> dict[str, Any]:
+        """닫힌 시도의 증거가 종결된 뒤 요청에 늦은 사건을 넣는다. 요청을 바꾸는 것은 정의의 전이뿐이다."""
+        deploy_id = attempt["deploy_id"]
+        now = _now_iso()
+        before = await self._event(deploy_id)
+        changed = False
+        if leaf == "ev_both":
+            no_later = await self._no_later_attempt(attempt)
+            if no_later and before is not None and before["status"] == DeployStatus.DEPLOYING.value:
+                logger.warning(
+                    "늦은 성공의 no_later가 배포 중인 요청에서 참이다(도는 시도 없는 배포 중): deploy_id=%s attempt=%s",
+                    deploy_id,
+                    attempt["orchestrator_attempt_id"],
+                )
+            try:
+                step = await steps.step_request(
+                    self._db,
+                    deploy_id,
+                    "success_evidence",
+                    facts={"no_later": no_later},
+                    data={
+                        "attempt_id": attempt["orchestrator_attempt_id"],
+                        "duration_ms": attempt["duration_ms"],
+                    },
+                    now=now,
+                )
+                changed = True
+            except NoTransition as exc:
+                exc.warn("success_evidence")
+            else:
+                if step.leaf == "success":
+                    await self._terminalize_sibling_probes_unlocked(
+                        deploy_id, "canonical succeeded through late evidence"
+                    )
+                    return {"status": "success", "deploy_id": deploy_id}
+        elif leaf == "ev_failed":
+            current_retry = await self._retry_unlocked(deploy_id)
+            try:
+                await steps.step_request(
+                    self._db,
+                    deploy_id,
+                    "late_failed",
+                    data={
+                        "failed_attempt_id": attempt["orchestrator_attempt_id"],
+                        "stable_source": attempt["orchestrator_attempt_id"],
+                        "marker_created_at": current_retry["created_at"] if current_retry else None,
+                    },
+                    now=now,
+                )
+                changed = True
+            except NoTransition as exc:
+                exc.warn("late_failed")
+        else:
+            return {"status": "recorded"}
+        after = await self._event(deploy_id)
+        return {
+            "status": "late_evidence",
+            "deploy_id": deploy_id,
+            "evidence": "success" if leaf == "ev_both" else "failed",
+            "request_changed": changed,
+            "request_status": after["status"] if after else None,
+        }
 
     async def _terminalize_sibling_probes_unlocked(
         self, deploy_id: str, error: str
@@ -380,16 +485,24 @@ class DeployAttemptStoreSupport:
         row = await cursor.fetchone()
         return None if row is None else self._rows(cursor, [row])[0]
 
-    async def _current_attempt(
+    async def _owned_attempt(
         self, deploy_id: str, orchestrator_attempt_id: str, generation: str
     ) -> dict[str, Any] | None:
+        """글이 가리키는 시도 줄. 요청 번호나 허가의 세대가 다르면 모순되는 글이라 None이다(닫힌 시도도 돌려준다)."""
         attempt = await self._attempt(orchestrator_attempt_id)
         if (
             attempt is None
             or attempt["deploy_id"] != deploy_id
             or attempt["connection_generation"] != generation
-            or attempt["outcome"] != "active"
         ):
+            return None
+        return attempt
+
+    async def _current_attempt(
+        self, deploy_id: str, orchestrator_attempt_id: str, generation: str
+    ) -> dict[str, Any] | None:
+        attempt = await self._owned_attempt(deploy_id, orchestrator_attempt_id, generation)
+        if attempt is None or attempt["outcome"] != "active":
             return None
         return attempt
 

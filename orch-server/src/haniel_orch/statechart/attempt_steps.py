@@ -2,6 +2,11 @@
 
 요청 줄의 걸음은 `steps`에 있다. 걸음의 규약(저장소 변경 잠금, 한 트랜잭션, 전이가 없으면
 `NoTransition`이고 줄에는 아무것도 쓰이지 않음)은 같다.
+
+시도의 닫힘(outcome, terminal 네 칸, completed_at)과 증거 종결(sm_evidence 잎)은 따로 움직인다(design.md:79).
+- 노드 글로 닫히는 것(실패 결과, deploy_attempt_terminal 등)은 `step_attempt`의 fail 사건이 닫힘과 증거를 한 걸음에 쓴다.
+- 오케스트레이터가 스스로 내는 닫힘(실행 임대 마감, 보내기 실패)은 `close_attempt`가 닫힘만 쓰고 증거 잎은 두지 않는다.
+- 닫힌 시도에 닿은 늦은 글은 `step_attempt`가 증거 잎과 증거 칸만 옮기고 닫힘은 바꾸지 않는다(design.md:118).
 """
 
 from __future__ import annotations
@@ -12,7 +17,7 @@ from typing import Any, NamedTuple
 
 import aiosqlite
 
-from .columns import ATTEMPT_REGION, attempt_leaf_is_consistent
+from .columns import ATTEMPT_REGION, LATE_EVIDENCE_OF_LEAF, attempt_leaf_is_consistent
 from .definitions import ATTEMPT_TERMINAL, AttemptEvidence
 from .restore import (
     REASON_NO_ROW,
@@ -59,6 +64,7 @@ _ATTEMPT_INSERT_COLUMNS = (
     "detected_at",
     "started_at",
     "deadline_at",
+    "attempt_seq",
 )
 
 
@@ -91,8 +97,9 @@ _FAIL_EXTRA_COLUMNS = frozenset(
 
 
 def _attempt_columns(
-    event: str, leaf: str, data: Mapping[str, Any], now: str
+    event: str, leaf: str, data: Mapping[str, Any], now: str, closed: bool
 ) -> dict[str, Any]:
+    """사건과 결과 잎에서 시도 줄에 쓸 칸을 정한다. closed면 닫힘 칸(outcome, terminal, completed_at)은 쓰지 않는다."""
     columns: dict[str, Any] = {}
     if event == "result_ok":
         columns.update(
@@ -105,14 +112,15 @@ def _attempt_columns(
             settled_at=now,
         )
     elif event == "fail":
-        columns.update(
-            outcome="failed",
-            terminal_kind=data["kind"],
-            terminal_stage=data["stage"],
-            terminal_reason=data["reason"],
-            terminal_error=data["error"],
-            completed_at=now,
-        )
+        if not closed:
+            columns.update(
+                outcome="failed",
+                terminal_kind=data["kind"],
+                terminal_stage=data["stage"],
+                terminal_reason=data["reason"],
+                terminal_error=data["error"],
+                completed_at=now,
+            )
         extra = dict(data.get("extra") or {})
         unknown = set(extra) - _FAIL_EXTRA_COLUMNS
         if unknown:
@@ -131,8 +139,11 @@ def _attempt_columns(
         )
     else:
         raise KeyError(f"시도 사건에 쓸 칸이 정해지지 않았다: {event}")
-    if leaf == "ev_both" and event in ("result_ok", "settled_ok"):
+    if leaf == "ev_both" and event in ("result_ok", "settled_ok") and not closed:
         columns.update(outcome="success", completed_at=now)
+    if closed and leaf in LATE_EVIDENCE_OF_LEAF:
+        # 스스로 닫은 시도의 증거가 뒤늦게 종결됐다. 닫힘은 그대로고 이력에 늦은 증거로 보인다
+        columns["late_evidence"] = LATE_EVIDENCE_OF_LEAF[leaf]
     return columns
 
 
@@ -145,7 +156,10 @@ async def step_attempt(
     data: Mapping[str, Any] | None = None,
     now: str | None = None,
 ) -> AttemptStep:
-    """시도 줄에 사건 하나를 넣는다. 끝난 시도나 칸 없는 사건은 NoTransition."""
+    """시도 줄에 사건 하나를 넣는다. 증거가 종결된 시도나 칸 없는 사건은 NoTransition.
+
+    닫힌 시도(outcome이 active가 아님)에도 증거 잎이 열려 있으면 늦은 글을 증거로 적는다. 그때 닫힘 칸은 바꾸지 않는다.
+    """
     data = data or {}
     now = now or now_iso()
     cursor = await db.execute(
@@ -185,13 +199,13 @@ async def step_attempt(
         raise
     columns = {
         "sm_evidence": new_leaf,
-        **_attempt_columns(event, new_leaf, data, now),
+        **_attempt_columns(event, new_leaf, data, now, closed=outcome != "active"),
     }
     assignments = ", ".join(f"{name} = ?" for name in columns)
     updated = await db.execute(
         f"UPDATE deploy_attempts SET {assignments} "
-        "WHERE orchestrator_attempt_id = ? AND outcome = 'active' AND sm_evidence = ?",
-        (*columns.values(), orchestrator_attempt_id, leaf),
+        "WHERE orchestrator_attempt_id = ? AND outcome = ? AND sm_evidence = ?",
+        (*columns.values(), orchestrator_attempt_id, outcome, leaf),
     )
     if updated.rowcount != 1:
         raise NoTransition(
@@ -206,6 +220,40 @@ async def step_attempt(
 
 def attempt_is_terminal(leaf: str) -> bool:
     return leaf in ATTEMPT_TERMINAL
+
+
+async def close_attempt(
+    db: aiosqlite.Connection,
+    orchestrator_attempt_id: str,
+    *,
+    kind: str,
+    stage: str,
+    reason: str,
+    error: str,
+    now: str,
+) -> bool:
+    """오케스트레이터가 스스로 내는 닫힘(실행 임대 마감, 보내기 실패). 증거 잎은 옮기지 않는다.
+
+    닫힘은 증거 정의의 상태가 아니라 시도 줄의 닫힘 칸이다. 도는 시도에만 쓰이고, 이미 닫힌 시도면 False다.
+    """
+    updated = await db.execute(
+        "UPDATE deploy_attempts SET outcome = 'failed', terminal_kind = ?, terminal_stage = ?, "
+        "terminal_reason = ?, terminal_error = ?, completed_at = ? "
+        "WHERE orchestrator_attempt_id = ? AND outcome = 'active'",
+        (kind, stage, reason, error, now, orchestrator_attempt_id),
+    )
+    return updated.rowcount == 1
+
+
+async def mark_execution_started(
+    db: aiosqlite.Connection, orchestrator_attempt_id: str, now: str
+) -> None:
+    """실제 실행이 시작됐다는 첫 증거(진행 알림, 결과, 정착)의 시각을 처음 한 번만 적는다. 닫힌 시도에도 사실만 적는다."""
+    await db.execute(
+        "UPDATE deploy_attempts SET execution_started_at = ? "
+        "WHERE orchestrator_attempt_id = ? AND execution_started_at IS NULL",
+        (now, orchestrator_attempt_id),
+    )
 
 
 async def renew_deadline(

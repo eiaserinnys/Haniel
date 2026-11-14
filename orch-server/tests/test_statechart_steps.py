@@ -107,18 +107,23 @@ async def test_every_leaf_is_reachable_through_real_events(at_each_leaf):
         assert REQUEST_OUTER_STATUS[leaf] == status
 
 
-# at_each_leaf가 세운 줄의 점검 필요 잎. 실패한 시도가 retry에 켜 두었고 나머지는 꺼져 있다
+# at_each_leaf가 세운 줄의 점검 필요 잎. 실패한 시도가 retry에 켜 두었고 나머지는 꺼져 있다. 꼬리표는 모두 없음
 FIXTURE_LOCK = {"retry": "l_on"}
+FIXTURE_TAG = "t_off"
 
 
 def _no_transition_cases():
-    """줄(요청 상태 잎, 점검 필요 잎)에서 두 영역 어디에도 그 사건의 화살표가 없는 짝."""
+    """줄(요청 상태 잎, 점검 필요 잎, 꼬리표 잎)에서 세 영역 어디에도 그 사건의 화살표가 없는 짝."""
     cls = OrchRequest
     allowed = {(a.source, a.event) for a in transitions(cls)}
     for leaf in _leaves_of(cls, "status"):
         lock = FIXTURE_LOCK.get(leaf, "l_off")
         for event in REQUIRED_FACTS[cls]:
-            if (leaf, event) not in allowed and (lock, event) not in allowed:
+            if (
+                (leaf, event) not in allowed
+                and (lock, event) not in allowed
+                and (FIXTURE_TAG, event) not in allowed
+            ):
                 yield leaf, event
 
 
@@ -259,7 +264,11 @@ async def test_leaves_stay_consistent_with_outer_columns_after_every_scenario(na
             "FROM deploy_attempts",
         ):
             assert attempt_leaf_is_consistent(leaf, outcome), (_id, outcome, leaf)
-            assert attempt_leaf_from_columns(outcome, result_status, settled_at) == leaf
+            if outcome == "active":
+                assert attempt_leaf_from_columns(outcome, result_status, settled_at) == leaf
+            else:
+                # 닫힌 시도의 증거 잎은 닫힘과 따로 움직인다(2b-1). 스스로 닫은 시도는 증거 잎이 열린 채 남는다
+                assert attempt_leaf_from_columns(outcome, result_status, settled_at) in {leaf, "ev_failed"}
     finally:
         await store.close()
 
@@ -376,7 +385,7 @@ async def test_startup_fixes_a_leaf_that_disagrees_with_the_outer_column(tmp_pat
             "b": "deploying",
         }
         fixed = await backfill.backfill_leaves(store._db)
-        assert fixed == {"requests": 0, "locks": 0, "attempts": 0}
+        assert fixed == {"requests": 0, "locks": 0, "tags": 0, "attempts": 0, "attempt_seqs": 0}
     finally:
         await store.close()
 

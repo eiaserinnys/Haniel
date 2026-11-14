@@ -40,6 +40,8 @@ class DeployAttemptHistory:
                     "terminal_stage": attempt["terminal_stage"],
                     "terminal_reason": attempt["terminal_reason"],
                     "terminal_error": attempt["terminal_error"],
+                    # 오케스트레이터가 스스로 닫은 시도의 증거가 그 뒤 종결된 결과(success, failed). 그 밖은 null
+                    "late_evidence": attempt["late_evidence"],
                 }
             )
         probe_cursor = await self._db.execute(

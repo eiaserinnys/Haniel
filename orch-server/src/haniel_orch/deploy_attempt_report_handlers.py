@@ -77,6 +77,19 @@ class DeployAttemptReportHandlers:
     async def _after_store_terminal(
         self, node_id: str, orchestrator_attempt_id: str, result: dict
     ) -> None:
+        if result.get("status") == "late_evidence":
+            # 닫힌 시도의 늦은 증거. 요청이 바뀌었으면(점검 필요가 섰거나 꼬리표가 남았다) 화면만 맞춘다.
+            # 노드에는 받아들인 결과와 정착에 보내는 것과 같은 것(없음)을 보낸다
+            if result.get("request_changed") and result.get("request_status"):
+                await self._broadcast(
+                    {
+                        "type": "status_change",
+                        "deploy_id": result["deploy_id"],
+                        "status": result["request_status"],
+                        "node_id": node_id,
+                    }
+                )
+            return
         if result.get("status") not in {"success", "failed", "superseded"}:
             return
         await self.resolve_terminal_canonicals(

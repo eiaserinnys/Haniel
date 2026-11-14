@@ -7,6 +7,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [
@@ -36,6 +39,9 @@
     },
     {
      "affected_services": [],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [],
@@ -63,6 +69,9 @@
     },
     {
      "affected_services": [],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [],
@@ -90,6 +99,9 @@
     },
     {
      "affected_services": [],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [],
@@ -117,6 +129,9 @@
     },
     {
      "affected_services": [],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [],
@@ -144,6 +159,9 @@
     },
     {
      "affected_services": [],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [],
@@ -177,6 +195,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [
@@ -206,6 +227,9 @@
     },
     {
      "affected_services": [],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [],
@@ -233,6 +257,9 @@
     },
     {
      "affected_services": [],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [],
@@ -260,6 +287,9 @@
     },
     {
      "affected_services": [],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [],
@@ -287,6 +317,9 @@
     },
     {
      "affected_services": [],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [],
@@ -314,6 +347,9 @@
     },
     {
      "affected_services": [],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [],
@@ -347,6 +383,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [
@@ -588,6 +627,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [
@@ -619,6 +661,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [
@@ -657,6 +702,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [
@@ -686,6 +734,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [
@@ -1037,6 +1088,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "dev",
      "commits": [
@@ -1068,6 +1122,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [
@@ -1099,6 +1156,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [
@@ -1130,6 +1190,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [
@@ -1166,6 +1229,7 @@
    "result": {
     "affected_services_json": "[\"svc\"]",
     "approved_by": "director",
+    "attempt_seq": 1,
     "branch": "main",
     "commits_json": "[\"c\"]",
     "completed_at": null,
@@ -1176,10 +1240,12 @@
     "diff_stat": "1 file",
     "duration_ms": null,
     "execution_mode": "execute",
+    "execution_started_at": null,
     "expected_budget_sec": null,
     "journal_attempt_id": null,
     "journal_completed_at": null,
     "journal_target_head": null,
+    "late_evidence": null,
     "manifest_digest": null,
     "manifest_identity": null,
     "node_id": "n",
@@ -1402,6 +1468,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": "director",
      "attempt_outcome": "success",
      "branch": "main",
@@ -1715,6 +1784,7 @@
     "attempt": {
      "affected_services_json": "[\"svc\"]",
      "approved_by": "director",
+     "attempt_seq": 2,
      "branch": "main",
      "commits_json": "[\"c\"]",
      "completed_at": null,
@@ -1725,10 +1795,12 @@
      "diff_stat": "1 file",
      "duration_ms": null,
      "execution_mode": "execute",
+     "execution_started_at": null,
      "expected_budget_sec": null,
      "journal_attempt_id": null,
      "journal_completed_at": null,
      "journal_target_head": null,
+     "late_evidence": null,
      "manifest_digest": null,
      "manifest_identity": null,
      "node_id": "n",
@@ -2046,6 +2118,7 @@
      "diff_stat": "1 file",
      "duration_ms": 9,
      "error": "boom",
+     "late_evidence": null,
      "node_id": "n",
      "repo": "r",
      "status": "failed",
@@ -2072,6 +2145,7 @@
      "diff_stat": "1 file",
      "duration_ms": null,
      "error": "journal changed",
+     "late_evidence": null,
      "node_id": "n",
      "repo": "r",
      "status": "failed",
@@ -2085,6 +2159,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [
@@ -2263,6 +2340,7 @@
      "diff_stat": "1 file",
      "duration_ms": 3,
      "error": "late",
+     "late_evidence": null,
      "node_id": "n",
      "repo": "r",
      "status": "failed",
@@ -2276,6 +2354,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [
@@ -2307,6 +2388,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": "director",
      "branch": "main",
      "commits": [
@@ -2599,7 +2683,7 @@
   },
   {
    "result": {
-    "status": "ignored"
+    "status": "closed"
    },
    "rows": {
     "attempts": [
@@ -2904,6 +2988,7 @@
     "attempt": {
      "affected_services_json": "[\"svc\"]",
      "approved_by": "director",
+     "attempt_seq": 2,
      "branch": "main",
      "commits_json": "[\"c\"]",
      "completed_at": null,
@@ -2914,10 +2999,12 @@
      "diff_stat": "1 file",
      "duration_ms": null,
      "execution_mode": "evidence_recovery",
+     "execution_started_at": null,
      "expected_budget_sec": null,
      "journal_attempt_id": "journal-1",
      "journal_completed_at": "2026-08-01T00:01:00Z",
      "journal_target_head": "rec",
+     "late_evidence": null,
      "manifest_digest": "digest",
      "manifest_identity": "release.json",
      "node_id": "n",
@@ -3141,6 +3228,7 @@
      "diff_stat": "1 file",
      "duration_ms": null,
      "error": "raw DeployResult is forbidden for evidence_recovery mode",
+     "late_evidence": null,
      "node_id": "n",
      "repo": "r",
      "status": "failed",
@@ -3167,6 +3255,7 @@
      "diff_stat": "1 file",
      "duration_ms": null,
      "error": "ManifestRecoveryEvidence is forbidden for execute mode",
+     "late_evidence": null,
      "node_id": "n",
      "repo": "r",
      "status": "failed",
@@ -3180,6 +3269,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [
@@ -3325,6 +3417,7 @@
      "diff_stat": "1 file",
      "duration_ms": null,
      "error": "recovery evidence mismatch: journal identity",
+     "late_evidence": null,
      "node_id": "n",
      "repo": "r",
      "status": "failed",
@@ -3351,6 +3444,7 @@
      "diff_stat": "1 file",
      "duration_ms": null,
      "error": "lost",
+     "late_evidence": null,
      "node_id": "n",
      "repo": "r",
      "status": "failed",
@@ -3364,6 +3458,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [
@@ -3494,6 +3591,7 @@
      "diff_stat": "1 file",
      "duration_ms": null,
      "error": "lost",
+     "late_evidence": null,
      "node_id": "n",
      "repo": "r",
      "status": "failed",
@@ -3507,6 +3605,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": "director",
      "attempt_outcome": "evidence_recovered_success",
      "branch": "main",
@@ -4103,6 +4204,7 @@
      "diff_stat": "1 file",
      "duration_ms": null,
      "error": "x",
+     "late_evidence": null,
      "node_id": "n3",
      "repo": "r",
      "status": "failed",
@@ -4116,6 +4218,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "attempt_outcome": "success",
      "branch": "main",
@@ -4151,6 +4256,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [
@@ -4182,6 +4290,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "attempt_outcome": "success",
      "branch": "main",
@@ -6537,6 +6648,7 @@
      "diff_stat": "1 file",
      "duration_ms": null,
      "error": "boom",
+     "late_evidence": null,
      "node_id": "n",
      "repo": "r",
      "status": "failed",
@@ -6563,6 +6675,7 @@
      "diff_stat": "1 file",
      "duration_ms": null,
      "error": "boom",
+     "late_evidence": null,
      "node_id": "n",
      "repo": "r",
      "status": "failed",
@@ -6576,6 +6689,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "race-a",
      "commits": [
@@ -6607,6 +6723,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": "director",
      "branch": "race-b",
      "commits": [
@@ -6638,6 +6757,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "race-b",
      "commits": [
@@ -6669,6 +6791,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": "director",
      "attempt_outcome": "success",
      "branch": "race-c",
@@ -6712,6 +6837,9 @@
       "affected_services": [
        "svc"
       ],
+      "applied_after_close": false,
+      "applied_after_close_at": null,
+      "applied_after_close_attempt_id": null,
       "approved_by": null,
       "branch": "main",
       "commits": [
@@ -6741,6 +6869,9 @@
      },
      {
       "affected_services": [],
+      "applied_after_close": false,
+      "applied_after_close_at": null,
+      "applied_after_close_attempt_id": null,
       "approved_by": null,
       "branch": "main",
       "commits": [],
@@ -6768,6 +6899,9 @@
      },
      {
       "affected_services": [],
+      "applied_after_close": false,
+      "applied_after_close_at": null,
+      "applied_after_close_attempt_id": null,
       "approved_by": null,
       "branch": "main",
       "commits": [],
@@ -6795,6 +6929,9 @@
      },
      {
       "affected_services": [],
+      "applied_after_close": false,
+      "applied_after_close_at": null,
+      "applied_after_close_attempt_id": null,
       "approved_by": null,
       "branch": "main",
       "commits": [],
@@ -6822,6 +6959,9 @@
      },
      {
       "affected_services": [],
+      "applied_after_close": false,
+      "applied_after_close_at": null,
+      "applied_after_close_attempt_id": null,
       "approved_by": null,
       "branch": "main",
       "commits": [],
@@ -6849,6 +6989,9 @@
      },
      {
       "affected_services": [],
+      "applied_after_close": false,
+      "applied_after_close_at": null,
+      "applied_after_close_attempt_id": null,
       "approved_by": null,
       "branch": "main",
       "commits": [],
@@ -6876,6 +7019,9 @@
      },
      {
       "affected_services": [],
+      "applied_after_close": false,
+      "applied_after_close_at": null,
+      "applied_after_close_attempt_id": null,
       "approved_by": null,
       "branch": "main",
       "commits": [],
@@ -6903,6 +7049,9 @@
      },
      {
       "affected_services": [],
+      "applied_after_close": false,
+      "applied_after_close_at": null,
+      "applied_after_close_attempt_id": null,
       "approved_by": null,
       "branch": "main",
       "commits": [],
@@ -6930,6 +7079,9 @@
      },
      {
       "affected_services": [],
+      "applied_after_close": false,
+      "applied_after_close_at": null,
+      "applied_after_close_attempt_id": null,
       "approved_by": null,
       "branch": "main",
       "commits": [],
@@ -6961,6 +7113,9 @@
       "affected_services": [
        "svc"
       ],
+      "applied_after_close": false,
+      "applied_after_close_at": null,
+      "applied_after_close_attempt_id": null,
       "approved_by": null,
       "branch": "main",
       "commits": [
@@ -13154,6 +13309,9 @@
      "affected_services": [
       "svc"
      ],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [
@@ -13183,6 +13341,9 @@
     },
     {
      "affected_services": [],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [],
@@ -13210,6 +13371,9 @@
     },
     {
      "affected_services": [],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [],
@@ -13237,6 +13401,9 @@
     },
     {
      "affected_services": [],
+     "applied_after_close": false,
+     "applied_after_close_at": null,
+     "applied_after_close_attempt_id": null,
      "approved_by": null,
      "branch": "main",
      "commits": [],
@@ -13264,6 +13431,9 @@
     },
     {
      "affected_services": [],
+     "applied_after_close": true,
+     "applied_after_close_at": true,
+     "applied_after_close_attempt_id": "nl-lr0-succeeded",
      "approved_by": null,
      "branch": "main",
      "commits": [],
@@ -13291,6 +13461,9 @@
     },
     {
      "affected_services": [],
+     "applied_after_close": true,
+     "applied_after_close_at": true,
+     "applied_after_close_attempt_id": "nl-lr1-succeeded",
      "approved_by": null,
      "branch": "main",
      "commits": [],
@@ -13318,6 +13491,9 @@
     },
     {
      "affected_services": [],
+     "applied_after_close": true,
+     "applied_after_close_at": true,
+     "applied_after_close_attempt_id": "nl-lr2-succeeded",
      "approved_by": null,
      "branch": "main",
      "commits": [],
@@ -13345,6 +13521,9 @@
     },
     {
      "affected_services": [],
+     "applied_after_close": true,
+     "applied_after_close_at": true,
+     "applied_after_close_attempt_id": "nl-lr3-succeeded",
      "approved_by": null,
      "branch": "main",
      "commits": [],
@@ -13372,6 +13551,9 @@
     },
     {
      "affected_services": [],
+     "applied_after_close": true,
+     "applied_after_close_at": true,
+     "applied_after_close_attempt_id": "nl-lr4-succeeded",
      "approved_by": null,
      "branch": "main",
      "commits": [],

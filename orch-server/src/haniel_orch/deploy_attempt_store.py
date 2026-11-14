@@ -302,6 +302,7 @@ class DeployAttemptStore(
         reason: str,
         error: str,
     ) -> dict[str, Any]:
+        """오케스트레이터가 스스로 내는 닫힘(노드 글이 아닌 닫힘). 증거 잎은 옮기지 않는다."""
         async with self._mutation_lock:
             try:
                 attempt = await self._attempt(orchestrator_attempt_id)
@@ -313,6 +314,7 @@ class DeployAttemptStore(
                     stage=stage,
                     reason=reason,
                     error=error,
+                    self_closed=True,
                 )
                 await self._db.commit()
                 return result
