@@ -24,11 +24,11 @@ DIVERGENCE: dict[tuple, tuple[str, str]] = {
     ("OrchRequest", "l_off", "send_failed", "l_on"): (CHANGES, _PR2),
     # 도는 시도 없는 노드 실패 보고(W17): design.md 125줄이 점검 필요를 세워 실패 뒤 대기로 보낸다고 바꾼다
     ("OrchRequest", "deploying", "node_failed", "retry"): (CHANGES, _PR2),
-    # 닫힌 시도의 늦은 성공(완화 A): 설계 123줄은 「뒤 시도가 실행을 시작한 적이 없으면」 닫지만, 옛 노드 규칙(431줄)은
-    # 「뒤 시도를 연 적이 없을 때만」 닫는다. 이 판은 모든 노드에 옛 노드 규칙을 쓴다
+    # 닫힌 시도의 늦은 성공: 판 1은 뒤 시도의 실행 시작으로(design.md:123), 판 없음은 뒤 시도를 연 이력으로 가른다(완화 A, 431줄)
     ("OrchRequest", "pending", "success_evidence", "success"): (CHANGES, _PR2),
     ("OrchRequest", "again", "success_evidence", "success"): (CHANGES, _PR2),
     ("OrchRequest", "retry", "success_evidence", "success"): (CHANGES, _PR2),
+    ("OrchRequest", "deploying", "success_evidence", "success"): (CHANGES, _PR2),
     # 자기 갱신 관측이 고른 다른 줄을 닫음(W4): design.md 382줄은 처음 대기이고 점검 필요가 없을 때만 닫는다
     ("OrchRequest", "pending", "observed_self_update", "success"): (CHANGES, _PR2),
     ("OrchRequest", "again", "observed_self_update", "success"): (CHANGES, _PR2),
@@ -48,6 +48,7 @@ DESIGN_LINES: dict[tuple, str] = {
     ("OrchRequest", "pending", "success_evidence", "success"): "design.md:123, 431",
     ("OrchRequest", "again", "success_evidence", "success"): "design.md:123, 431",
     ("OrchRequest", "retry", "success_evidence", "success"): "design.md:123, 431",
+    ("OrchRequest", "deploying", "success_evidence", "success"): "design.md:123, 431",
     ("OrchRequest", "pending", "observed_self_update", "success"): "design.md:382, 489",
     ("OrchRequest", "again", "observed_self_update", "success"): "design.md:382, 489",
     ("OrchRequest", "retry", "observed_self_update", "success"): "design.md:382, 489",

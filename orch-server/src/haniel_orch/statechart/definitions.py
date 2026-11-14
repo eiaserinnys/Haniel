@@ -236,13 +236,14 @@ class OrchRequest(_Base):
         | req.status.open_.deploying.to(req.status.open_.retry, cond="no_active_attempt", on="ack")
         | req.lock.l_off.to(req.lock.l_on, cond="open_request")
     )
-    # 지금 시도가 아닌 실행의 성공 증거: 오케스트레이터가 스스로 닫은 시도의 늦은 성공(design.md:119, 123)과 거절이나 밀림으로
-    # 닫힌 요청에 닿은 성공(노드가 스스로 한 배포 포함, design.md:336). 옛 노드 규칙(완화 A, design.md:431)이라
-    # 「뒤 시도를 연 적이 없을 때만」 열린 대기를 성공으로 닫는다. 배포 중과 성공은 그대로다(증거만 남는다)
+    # 닫힌 시도의 늦은 성공: 판 1은 뒤 시도가 실행을 시작한 적이 없으면(design.md:123), 판 없음은 뒤 시도를
+    # 연 적이 없으면(완화 A, design.md:431) 열린 요청을 닫는다. 거절이나 밀림 뒤 노드 스스로 한 배포의 성공도
+    # 이 사건으로 꼬리표를 남긴다(design.md:336).
     success_evidence = (
         req.status.open_.pending.to(req.status.closed.success, cond="no_later")
         | req.status.open_.again.to(req.status.closed.success, cond="no_later")
         | req.status.open_.retry.to(req.status.closed.success, cond="no_later")
+        | req.status.open_.deploying.to(req.status.closed.success, cond="no_later")
         | req.belief.b_probe.to(req.belief.b_none, cond="no_later")
         | req.belief.b_unknown.to(req.belief.b_none, cond="no_later")
         | req.belief.b_queued.to(req.belief.b_none, cond="no_later")
