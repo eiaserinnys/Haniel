@@ -33,6 +33,7 @@ OTHER_WRITES = {
     ("node_deploy_store.py", "deploy_plan_probes"): "노드의 배포 성공 보고가 열린 계획 묻기를 닫는다. 정의 밖 저장",
     ("node_deploy_store.py", "node_deploy_attempts"): "노드 시도 줄은 정의 밖 저장(설계의 실행 정의는 노드 쪽)",
     ("event_store_nodes.py", "nodes"): "노드 접속 표. 배포 상태가 아니다",
+    ("deploy_attempt_schema.py", "deploy_retry_requirements_new"): "표시 줄 표를 다시 만드는 이전의 임시 표(두 시도 번호 칸의 NOT NULL을 풀고 inspection_required를 더한다). 이전이 끝나면 이름을 바꿔 표시 줄 표가 된다",
 }
 
 _WRITE = re.compile(

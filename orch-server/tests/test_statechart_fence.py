@@ -18,6 +18,7 @@ import pytest
 from statemachine import State, StateChart
 
 from haniel_orch.statechart import restore as restore_module
+from haniel_orch.statechart.docs import _region_of
 from haniel_orch.statechart.definitions import (
     REQUIRED_FACTS,
     AttemptEvidence,
@@ -144,7 +145,7 @@ def test_restore_is_the_only_way_to_build_a_configuration():
 @pytest.mark.parametrize("cls", DEFINITIONS)
 def test_restore_spreads_ancestors_in_document_order(cls):
     for leaf in leaf_ids(cls):
-        region = next(iter(regions(cls)))
+        region = _region_of(cls, leaf)
         configuration = restore(cls, {region: leaf})
         state = cls.states_map[leaf]
         chain = [state, *state.ancestors()]
@@ -162,8 +163,9 @@ def test_each_step_builds_a_fresh_instance(monkeypatch):
             built.append(self)
 
     monkeypatch.setattr(restore_module, "Facts", Counting)
-    advance(OrchRequest, {"status": "pending"}, "begin_attempt")
-    advance(OrchRequest, {"status": "pending"}, "begin_attempt")
+    row = {"status": "pending", "lock": "l_off"}
+    advance(OrchRequest, row, "begin_attempt", {"manual_single": False})
+    advance(OrchRequest, row, "begin_attempt", {"manual_single": False})
     assert len(built) == 2 and built[0] is not built[1]
 
 
@@ -176,10 +178,13 @@ def _fact_combinations(cls, event):
 @pytest.mark.parametrize("cls", DEFINITIONS)
 def test_every_reachable_configuration_round_trips_through_a_row(cls):
     """닿는 구성을 모두 줄에 적었다 되살려도 같다. 살아 있는 인스턴스의 경로와도 견준다."""
-    region = next(iter(regions(cls)))
     start = initial_row(cls)
+
+    def key(row):
+        return tuple(sorted(row.items()))
+
     queue = [(start, [])]
-    seen = {start[region]}
+    seen = {key(start)}
     checked = 0
     while queue:
         row, path = queue.pop(0)
@@ -196,11 +201,12 @@ def test_every_reachable_configuration_round_trips_through_a_row(cls):
                     nxt = advance(cls, row, event, facts)
                 except NoTransition:
                     continue
-                if nxt[region] not in seen:
-                    seen.add(nxt[region])
+                if key(nxt) not in seen:
+                    seen.add(key(nxt))
                     queue.append((nxt, [*path, (event, facts)]))
-    assert seen == set(leaf_ids(cls)), "닿지 않는 잎이 있다"
-    assert checked == len(leaf_ids(cls))
+    reached = {leaf for row_key in seen for _region, leaf in row_key}
+    assert reached == set(leaf_ids(cls)), "닿지 않는 잎이 있다"
+    assert checked == len(seen)
 
 
 def test_a_step_that_moves_two_regions_reads_conditions_before_the_step():

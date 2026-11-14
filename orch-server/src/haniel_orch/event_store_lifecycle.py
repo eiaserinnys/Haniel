@@ -73,9 +73,9 @@ class EventStoreLifecycleMixin:
     async def reject_deploy(self, deploy_id: str, reason: str | None = None) -> bool:
         """Reject one request through the reject step.
 
-        The step is unconditional by design today (어긋남 8): any current state
-        goes to rejected. Returns False when the row is unknown or has no leaf,
-        which the old unconditional UPDATE also silently skipped.
+        Only a pending or retry request can be rejected (어긋남 8 is gone).
+        Returns False when the definition has no reject transition from the
+        current state (deploying or closed), the row is unknown, or it has no leaf.
         """
         async with self._mutation_lock:
             try:

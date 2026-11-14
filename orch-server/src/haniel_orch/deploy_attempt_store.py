@@ -1,4 +1,7 @@
-"""Transactional deploy-attempt state machine behind :class:`EventStore`."""
+"""Transactional deploy-attempt state machine behind :class:`EventStore`.
+
+500줄을 넘는다(모듈 크기 제한 예외): PR 1 때부터 넘었고 PR 2a는 점검 필요만 더했다. 믿음과 새 글을 더하는 PR 2b 전에 나누면 같은 자리를 두 번 옮기게 되어 뒤로 미룬다.
+"""
 
 from __future__ import annotations
 
@@ -48,6 +51,10 @@ class DeployAttemptStore(
         )
         return await cursor.fetchone() is not None
 
+    async def inspection_required(self, deploy_id: str) -> bool:
+        """점검 필요가 켜져 있는가. 자동 요청, 탐침 만들기, 일괄 승인이 시도를 열기 전에 본다."""
+        return await self._lock_on(deploy_id)
+
     async def get_retry_requirement(self, deploy_id: str) -> dict[str, Any] | None:
         cursor = await self._db.execute(
             "SELECT * FROM deploy_retry_requirements WHERE deploy_id = ?",
@@ -85,7 +92,7 @@ class DeployAttemptStore(
                 retry = await self._retry_unlocked(deploy_id)
                 if manual_retry and retry is None:
                     raise ValueError("manual retry requires retry marker")
-                if not manual_retry and retry is not None:
+                if not manual_retry and await self._lock_on(deploy_id):
                     raise PermissionError("retry_requires_manual_approval")
                 lineage = retry["lineage"] if retry else []
                 await self._db.execute(
@@ -139,7 +146,10 @@ class DeployAttemptStore(
                     raise ValueError("canonical is not pending")
                 if not await self._is_latest(event):
                     raise ValueError("canonical is stale")
-                if await self._retry_unlocked(deploy_id) is not None:
+                retry = await self._retry_unlocked(deploy_id)
+                if retry is not None and retry["source_orchestrator_attempt_id"] is not None:
+                    # 실행했을 수 있는 시도가 있으면 계획부터 묻는다. source가 빈 표시 줄(스스로 한 배포의 실패,
+                    # 첫 시도의 보내기 실패)은 옛 노드 계획 함수가 시도 번호 없는 저널을 닫아 버리므로 첫 승인 길로 간다
                     raise ValueError("retry requires preflight")
                 if await self._has_active_branch(event):
                     raise PermissionError("active_attempt_conflict")
@@ -193,14 +203,18 @@ class DeployAttemptStore(
                     )
                     await self._db.commit()
                     return {"status": "terminal", "kind": "preflight_stale"}
-                stale = await self._proposal_stale_reason(probe, proposal)
+                stale = await self._proposal_stale_reason(probe, proposal, source)
                 if stale:
                     reason, error = stale
                     await self._terminalize_probe_unlocked(
                         probe, "preflight_stale", "proposal", reason, error
                     )
                     await self._db.commit()
-                    return {"status": "terminal", "kind": "preflight_stale"}
+                    return {
+                        "status": "terminal",
+                        "kind": "preflight_stale",
+                        "reason": reason,
+                    }
                 await self._db.execute(
                     "UPDATE deploy_plan_probes SET status = 'proposed', mode = ?, "
                     "proposal_fingerprint = ?, proposal_json = ? WHERE probe_id = ?",
@@ -458,6 +472,29 @@ class DeployAttemptStore(
                     stage=stage,
                     reason=reason,
                     error=error,
+                )
+                await self._db.commit()
+                return result
+            except Exception:
+                await self._db.rollback()
+                raise
+
+    async def fail_attempt_not_sent(
+        self, orchestrator_attempt_id: str
+    ) -> dict[str, Any]:
+        """허가가 노드에 닿지 못했을 때 시도를 그 자리에서 실패로 닫는다(보내기 실패)."""
+        async with self._mutation_lock:
+            try:
+                attempt = await self._attempt(orchestrator_attempt_id)
+                if attempt is None or attempt["outcome"] != "active":
+                    return {"status": "ignored"}
+                result = await self._fail_attempt_unlocked(
+                    attempt=attempt,
+                    kind="delivery_failed",
+                    stage="approval_send",
+                    reason="approval_send_failed",
+                    error="approval could not be delivered to the node",
+                    not_sent=True,
                 )
                 await self._db.commit()
                 return result

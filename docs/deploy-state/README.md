@@ -1,12 +1,12 @@
 # 오케스트레이터 배포 상태 정의
 
 오케스트레이터(`orch-server`)가 배포 요청 줄(`deploy_events`)과 시도 줄(`deploy_attempts`)의 상태를
-바꾸는 길은 모두 코드의 상태 정의를 거친다(카드 #1259 PR 1, 지금 동작 그대로).
+바꾸는 길은 모두 코드의 상태 정의를 거친다(카드 #1259 PR 1이 지금 동작 그대로 옮겼고, PR 2a가 「점검 필요」 영역을 더했다).
 정본은 `orch-server/src/haniel_orch/statechart/definitions.py`의 정의 둘이고, 여기 그림과 표는 거기서 뽑는다.
 
 | 정의 | 단위 | 잎 칸 | 바깥 칸 |
 |---|---|---|---|
-| `OrchRequest` | 배포 요청 한 건 | `deploy_events.sm_status` | `status`, `reject_reason`, 표시 줄과 계보 줄 |
+| `OrchRequest` | 배포 요청 한 건. 영역 둘: 요청 상태와 점검 필요 | `deploy_events.sm_status`(요청 상태), `deploy_events.sm_lock`(점검 필요) | `status`, `reject_reason`, 표시 줄(점검 필요의 바깥 칸은 `inspection_required`)과 계보 줄 |
 | `AttemptEvidence` | 시도 한 건의 종결 증거 | `deploy_attempts.sm_evidence` | `outcome`, `result_status`, `settled_*` |
 
 한 걸음은 저장소 변경 잠금과 트랜잭션 안에서 돈다(`statechart/steps.py`). 줄에서 새 인스턴스를 되살려
@@ -21,7 +21,8 @@
 | 그림 | 내용 |
 |---|---|
 | [request-status](generated/request-status.svg) | 요청 상태. 설계 정의와 같은 전이 |
-| [request-divergence](generated/request-divergence.svg) | 요청 상태 가운데 설계와 다른 전이(어긋남 8, PR 2에서 바뀜, 설계에 없음) |
+| [request-divergence](generated/request-divergence.svg) | 요청 상태 가운데 설계와 다른 전이(PR 2에서 바뀜, 설계에 없음) |
+| [request-lock](generated/request-lock.svg) | 점검 필요 영역. 모든 시도의 닫힘이 켜고, 원천이 단건 승인인 승인이 시도를 열 때에만 내린다 |
 | [attempt-evidence](generated/attempt-evidence.svg) | 시도 종결 증거 전체 |
 | [transitions.md](generated/transitions.md) | 두 정의의 전이 표(함께 쓰는 것, 설계와 다른 점) |
 
@@ -29,10 +30,10 @@
 
 | 표시 | 뜻 |
 |---|---|
-| 빨강 상태 | 그 그림에 그린 `(어긋남 8)` 화살표가 닿는 상태. 설계가 어긋남으로 적은 동작이다 |
+| 빨강 상태 | 그 그림에 그린 `(어긋남 N)` 화살표가 닿는 상태. 설계가 어긋남으로 적은 동작이다(PR 2a에서 어긋남 8이 없어져 지금 정의에는 없다) |
 | 주황 상태 | 설계 증거 정의의 다섯 상태에 없는 잎(`definitions.LEAVES_NOT_IN_DESIGN`, 지금은 노드의 배포 성공에 밀려 종결 하나) |
-| `(어긋남 8)` | 설계가 어긋남 8로 적은 동작(배포 중이 아닌 요청에 닿는 거절과 시도의 실패) |
-| `(PR 2에서 바뀜)` | 설계 글의 줄이 PR 2에서 바꾼다고 적은 동작. 줄 번호는 전이 표 「설계와 다른 점」에 적는다(W17은 design.md:125, W4는 design.md:382와 489) |
+| `(어긋남 N)` | 설계가 어긋남 N으로 적은 동작. 지금 정의에는 없다 |
+| `(PR 2에서 바뀜)` | 설계 글의 줄이 옛 노드 규칙이나 PR 2에서 바꾼다고 적은 동작. 줄 번호는 전이 표 「설계와 다른 점」에 적는다(보내기 실패가 점검 필요를 켬은 design.md:429-430, W17은 design.md:125, W4는 design.md:382와 489) |
 | `(설계에 없음)` | 설계에 그 전이가 없는 동작(W5 보류 되살림. 자기 갱신 영역은 둘째 걸음, design.md:489) |
 | 가로 막대 | 한 묶음(열림, 닫힘)의 모든 잎에서 같은 사건과 조건으로 같은 곳에 가는 화살표를 한 줄로 모은 합류 막대 |
 

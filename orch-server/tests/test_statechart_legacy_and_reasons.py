@@ -1,4 +1,4 @@
-"""옛 모양의 줄이 든 DB, 전이 없음의 사유, 시도 실패의 어긋남 8 전이(카드 #1259).
+"""옛 모양의 줄이 든 DB, 전이 없음의 사유, 닫힌 요청에 닿은 시도 실패(카드 #1259).
 
 운영 DB 읽기 전용 사본(deploy_events 9,236줄 가운데 status가 failed인 119줄, approved인 3줄,
 시도 짝 없음, 표시 줄과 계보 줄 없음)과 같은 모양을 시험 fixture로 만든다. 기준 커밋(155b69f)과
@@ -62,12 +62,9 @@ async def test_reject_and_node_reports_on_legacy_rows_never_raise(legacy_store, 
     results = {}
     for deploy_id in EXPECTED_LEAVES:
         results[deploy_id] = await legacy_store.reject_deploy(deploy_id, "operator")
+    # 거절은 처음 대기와 표시 줄 있는 대기에서만 된다(어긋남 8이 없어졌다). 닫힌 줄은 전이 없음으로 False다.
     # 잎이 없는 옛 값은 줄을 건드리지 않고 False다. REST는 이 줄에 거절을 아예 보내지 않는다(409)
-    assert [d for d, ok in results.items() if not ok] == [
-        "n:r1:main:lf1",
-        "n:r2:main:lf2",
-        "n:r3:main:la1",
-    ]
+    assert all(ok is False for ok in results.values())
     cursor = await legacy_store._db.execute(
         "SELECT deploy_id, status FROM deploy_events WHERE deploy_id IN (?, ?, ?)",
         ("n:r1:main:lf1", "n:r2:main:lf2", "n:r3:main:la1"),
@@ -78,8 +75,10 @@ async def test_reject_and_node_reports_on_legacy_rows_never_raise(legacy_store, 
         ("n:r3:main:la1", "approved"),
     ]
     warned = [r.getMessage() for r in caplog.records if "전이 없음을 넘김" in r.getMessage()]
-    assert len(warned) == 3
-    assert all(f"사유={REASON_STATE_MISMATCH}" in m and "자리=reject" in m for m in warned)
+    assert len(warned) == 8
+    assert all("자리=reject" in m for m in warned)
+    assert sum(f"사유={REASON_STATE_MISMATCH}" in m for m in warned) == 3
+    assert sum(f"사유={REASON_NO_TRANSITION}" in m for m in warned) == 5
     assert any("n:r3:main:la1" in m for m in warned)
 
 
@@ -137,9 +136,20 @@ async def test_a_zero_row_update_is_named_update_zero(store: EventStore):
 
 
 @pytest.mark.parametrize("leaf", ["pending", "retry", "deploying", "success", "rejected", "superseded"])
-def test_attempt_failure_reaches_every_request_leaf_like_the_baseline(leaf):
-    """기준 코드는 요청 상태를 보지 않고 더 새 커밋이 있으면 거절로 덮고, 없으면 표시 줄만 쓴다."""
-    newer = advance(OrchRequest, {"status": leaf}, "attempt_failed", {"newer": True})
-    assert newer == {"status": "superseded"}
-    older = advance(OrchRequest, {"status": leaf}, "attempt_failed", {"newer": False})
-    assert older == {"status": {"pending": "retry", "retry": "retry", "deploying": "retry"}.get(leaf, leaf)}
+def test_attempt_failure_reaches_every_request_leaf_with_only_the_lock_unless_deploying(leaf):
+    """PR 1은 요청 상태를 보지 않고 더 새 커밋이 있으면 거절로 덮고 없으면 표시 줄을 썼다(어긋남 8).
+    이제는 도는 시도가 있는 배포 중만 요청 상태를 옮기고, 그 밖의 줄에는 점검 필요만 켠다."""
+    for newer in (True, False):
+        row = {"status": leaf, "lock": "l_off"}
+        after = advance(OrchRequest, row, "attempt_failed", {"newer": newer})
+        if leaf == "deploying":
+            assert after == {"status": "superseded" if newer else "retry", "lock": "l_on"}
+        else:
+            assert after == {"status": leaf, "lock": "l_on"}
+        # 점검 필요가 이미 켜져 있으면 닫힌 줄과 열린 줄 모두 전이가 없다
+        locked = {"status": leaf, "lock": "l_on"}
+        if leaf == "deploying":
+            assert advance(OrchRequest, locked, "attempt_failed", {"newer": newer})["lock"] == "l_on"
+        else:
+            with pytest.raises(NoTransition):
+                advance(OrchRequest, locked, "attempt_failed", {"newer": newer})

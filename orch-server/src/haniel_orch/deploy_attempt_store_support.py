@@ -1,4 +1,7 @@
-"""Internal SQL and transition support for durable deploy attempts."""
+"""Internal SQL and transition support for durable deploy attempts.
+
+500줄을 넘는다(모듈 크기 제한 예외): PR 1 때부터 넘었고 PR 2a는 점검 필요만 더했다. 믿음과 새 글을 더하는 PR 2b 전에 나누면 같은 자리를 두 번 옮기게 되어 뒤로 미룬다.
+"""
 
 from __future__ import annotations
 
@@ -10,8 +13,8 @@ import aiosqlite
 
 from .protocol import DeployPlanProposal, DeployStatus, ManifestRecoveryEvidence
 from .statechart import steps
-from .statechart.columns import LEAF_COLUMNS
-from .statechart.restore import NoTransition
+from .statechart.columns import LEAF_COLUMNS, LOCK_ON
+from .statechart.restore import REASON_NO_TRANSITION, NoTransition
 
 
 def _now_iso() -> str:
@@ -155,10 +158,16 @@ class DeployAttemptStoreSupport:
                 self._db,
                 event["deploy_id"],
                 "begin_attempt",
+                # 점검 필요를 내릴 수 있는 원천은 단건 승인 하나다(일괄 승인과 자동 요청은 못 내린다)
+                facts={"manual_single": source == "manual_single"},
                 data={"approved_by": approved_by},
                 now=now,
             )
         except NoTransition as exc:
+            if exc.reason == REASON_NO_TRANSITION and await self._lock_on(
+                event["deploy_id"]
+            ):
+                raise PermissionError("inspection_required") from exc
             raise RuntimeError("canonical owner changed during begin") from exc
 
     async def _close_request_after_success(
@@ -193,7 +202,9 @@ class DeployAttemptStoreSupport:
         reason: str,
         error: str,
         extra: dict[str, Any] | None = None,
+        not_sent: bool = False,
     ) -> dict[str, Any]:
+        """시도를 실패로 닫고 요청을 옮긴다. not_sent는 허가가 노드에 닿지 못한 보내기 실패다."""
         now = _now_iso()
         try:
             await steps.step_attempt(
@@ -217,16 +228,20 @@ class DeployAttemptStoreSupport:
             return {"status": "failed", "deploy_id": attempt["deploy_id"]}
         newer = not await self._is_latest(event)
         current_retry = await self._retry_unlocked(attempt["deploy_id"])
-        stable_source = (
-            current_retry["source_orchestrator_attempt_id"]
-            if attempt["execution_mode"] == "evidence_recovery" and current_retry
-            else attempt["orchestrator_attempt_id"]
-        )
+        if not_sent:
+            # 실행하지 않았음이 확실한 닫힘은 계보에는 더하되 source를 옮기지 않는다(design.md:232)
+            stable_source = (
+                current_retry["source_orchestrator_attempt_id"] if current_retry else None
+            )
+        elif attempt["execution_mode"] == "evidence_recovery" and current_retry:
+            stable_source = current_retry["source_orchestrator_attempt_id"]
+        else:
+            stable_source = attempt["orchestrator_attempt_id"]
         try:
             await steps.step_request(
                 self._db,
                 attempt["deploy_id"],
-                "attempt_failed",
+                "send_failed" if not_sent else "attempt_failed",
                 facts={"newer": newer},
                 data={
                     "failed_attempt_id": attempt["orchestrator_attempt_id"],
@@ -238,9 +253,9 @@ class DeployAttemptStoreSupport:
                 now=now,
             )
         except NoTransition as exc:
-            # 요청 줄이 없거나 정의에 잎이 없는 옛 값(approved, failed)일 때만 닿는다. 배포 중이 아닌
-            # 요청은 정의의 전이(어긋남 8)가 지금처럼 처리한다
-            exc.warn("attempt_failed")
+            # 요청 줄이 없거나 정의에 잎이 없는 옛 값(approved, failed)이거나, 닫힌 요청에 점검 필요가
+            # 이미 켜져 있을 때 닿는다
+            exc.warn("send_failed" if not_sent else "attempt_failed")
         if newer:
             await self._terminalize_sibling_probes_unlocked(
                 attempt["deploy_id"],
@@ -328,7 +343,8 @@ class DeployAttemptStoreSupport:
         if proposal.current_head != probe["target_head"]:
             return None
         checks = {
-            "failed journal": proposal.journal_status == "failed",
+            "failed journal": proposal.journal_status
+            in ("failed", "verification_failed"),
             "journal_attempt_id": bool(proposal.journal_attempt_id),
             "journal target": proposal.journal_target_head == probe["target_head"],
             "original previous_head": bool(proposal.original_previous_head),
@@ -346,7 +362,7 @@ class DeployAttemptStoreSupport:
         return f"execute proposal mismatch: {', '.join(failed)}" if failed else None
 
     async def _proposal_stale_reason(
-        self, probe: dict[str, Any], proposal: DeployPlanProposal
+        self, probe: dict[str, Any], proposal: DeployPlanProposal, source: str
     ) -> tuple[str, str] | None:
         if _expired(probe["deadline_at"]):
             return "probe_deadline_expired", "probe deadline expired"
@@ -365,21 +381,37 @@ class DeployAttemptStoreSupport:
                 "canonical_not_latest_pending",
                 "canonical is no longer latest pending",
             )
-        retry = await self._retry_unlocked(probe["deploy_id"])
-        probe_source = probe["source_orchestrator_attempt_id"]
-        probe_lineage = json.loads(probe["retry_lineage_json"])
-        if probe_source is None and retry is not None:
+        # 점검 필요가 켜졌으면 원천이 단건 승인이고 자동이 아닌 탐침만 시도를 연다. 자동 탐침은 탐침의
+        # requested_orchestrator_attempt_id가 있거나 원천이 auto인 것이다(둘이 어긋나면 자동으로 본다).
+        # 일괄 탐침은 탐침 줄에 원천 칸이 없어 source 인자로 가린다
+        is_auto = probe["requested_orchestrator_attempt_id"] is not None or source == "auto"
+        if await self._lock_on(probe["deploy_id"]) and (
+            is_auto or source != "manual_single"
+        ):
             return (
                 "retry_requires_manual_approval",
                 "retry now requires manual approval",
             )
-        if probe_source is not None and (
-            retry is None
-            or retry["source_orchestrator_attempt_id"] != probe_source
-            or retry["lineage"] != probe_lineage
+        retry = await self._retry_unlocked(probe["deploy_id"])
+        current = (
+            (retry["source_orchestrator_attempt_id"], retry["lineage"])
+            if retry is not None
+            else (None, [])
+        )
+        if current != (
+            probe["source_orchestrator_attempt_id"],
+            json.loads(probe["retry_lineage_json"]),
         ):
             return "retry_lineage_changed", "retry lineage changed after probe creation"
         return None
+
+    async def _lock_on(self, deploy_id: str) -> bool:
+        """점검 필요 잎(deploy_events.sm_lock)이 켜져 있는가."""
+        cursor = await self._db.execute(
+            "SELECT sm_lock FROM deploy_events WHERE deploy_id = ?", (deploy_id,)
+        )
+        row = await cursor.fetchone()
+        return row is not None and row[0] == LOCK_ON
 
     async def _terminalize_probe_unlocked(
         self, probe: dict[str, Any], kind: str, stage: str, reason: str, error: str

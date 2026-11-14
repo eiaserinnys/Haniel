@@ -22,8 +22,8 @@ from haniel_orch.statechart.definitions import (
     AttemptEvidence,
     OrchRequest,
 )
-from haniel_orch.statechart.docs import transitions
-from haniel_orch.statechart.restore import NoTransition, advance, leaf_ids
+from haniel_orch.statechart.docs import _region_of, transitions
+from haniel_orch.statechart.restore import NoTransition, advance, initial_row, leaf_ids, regions
 
 
 async def _create(store: EventStore, deploy_id: str, **kwargs) -> None:
@@ -91,20 +91,34 @@ async def at_each_leaf(store: EventStore):
     return store
 
 
+def _leaves_of(cls, region):
+    return [leaf for leaf in leaf_ids(cls) if _region_of(cls, leaf) == region]
+
+
 async def test_every_leaf_is_reachable_through_real_events(at_each_leaf):
     store = at_each_leaf
     leaves = {row[0] for row in await _raw(store, "SELECT sm_status FROM deploy_events")}
-    assert leaves == set(leaf_ids(OrchRequest))
+    assert leaves == set(_leaves_of(OrchRequest, "status"))
+    # 점검 필요 영역: 실패한 시도가 켠 줄(retry)과 켜지 않은 줄이 모두 있다
+    assert {row[0] for row in await _raw(store, "SELECT sm_lock FROM deploy_events")} == set(
+        _leaves_of(OrchRequest, "lock")
+    )
     for status, leaf in await _raw(store, "SELECT status, sm_status FROM deploy_events"):
         assert REQUEST_OUTER_STATUS[leaf] == status
 
 
+# at_each_leaf가 세운 줄의 점검 필요 잎. 실패한 시도가 retry에 켜 두었고 나머지는 꺼져 있다
+FIXTURE_LOCK = {"retry": "l_on"}
+
+
 def _no_transition_cases():
+    """줄(요청 상태 잎, 점검 필요 잎)에서 두 영역 어디에도 그 사건의 화살표가 없는 짝."""
     cls = OrchRequest
     allowed = {(a.source, a.event) for a in transitions(cls)}
-    for leaf in leaf_ids(cls):
+    for leaf in _leaves_of(cls, "status"):
+        lock = FIXTURE_LOCK.get(leaf, "l_off")
         for event in REQUIRED_FACTS[cls]:
-            if (leaf, event) not in allowed:
+            if (leaf, event) not in allowed and (lock, event) not in allowed:
                 yield leaf, event
 
 
@@ -150,16 +164,21 @@ def test_introspected_transitions_equal_what_advance_allows():
     """생성기가 읽는 전이 목록과 실제로 일어나는 전이(모든 사실 조합)가 같다."""
     for cls in (OrchRequest, AttemptEvidence):
         listed = {(a.source, a.event, a.target) for a in transitions(cls)}
-        region = next(iter({"status"} if cls is OrchRequest else {"ev"}))
+        names_of = list(regions(cls))
+        combos = itertools.product(*(_leaves_of(cls, region) for region in names_of))
         actual = set()
-        for leaf in leaf_ids(cls):
+        for combo in combos:
+            row = dict(zip(names_of, combo))
             for event, names in REQUIRED_FACTS[cls].items():
                 for values in itertools.product([False, True], repeat=len(names)):
                     try:
-                        target = advance(cls, {region: leaf}, event, dict(zip(names, values)))[region]
+                        after = advance(cls, row, event, dict(zip(names, values)))
                     except NoTransition:
                         continue
-                    actual.add((leaf, event, target))
+                    for region in names_of:
+                        # 영역이 둘인 요청 정의는 제자리 전이가 없어 바뀐 영역이 움직인 영역이다
+                        if len(names_of) == 1 or after[region] != row[region]:
+                            actual.add((row[region], event, after[region]))
         assert actual == listed, cls.__name__
 
 
@@ -268,9 +287,11 @@ async def _seed_old_db(path):
     con.execute("UPDATE deploy_events SET status='rejected', reject_reason='superseded by x' WHERE deploy_id='sup'")
     con.execute("UPDATE deploy_events SET status='failed' WHERE deploy_id='f'")
     con.execute(
-        "INSERT INTO deploy_retry_requirements VALUES ('m','a','a','2026-08-01T00:00:00Z','2026-08-01T00:00:00Z')"
+        "INSERT INTO deploy_retry_requirements "
+        "(deploy_id, source_orchestrator_attempt_id, last_failed_orchestrator_attempt_id, created_at, updated_at) "
+        "VALUES ('m','a','a','2026-08-01T00:00:00Z','2026-08-01T00:00:00Z')"
     )
-    con.execute("UPDATE deploy_events SET sm_status = NULL")
+    con.execute("UPDATE deploy_events SET sm_status = NULL, sm_lock = NULL")
     for attempt_id, outcome, result, settled in (
         ("act-none", "active", None, None),
         ("act-result", "active", "success", None),
@@ -309,6 +330,16 @@ async def test_startup_recomputes_empty_leaves_from_the_old_columns(tmp_path):
             "sup": "superseded",
             "f": None,  # 정의에 잎이 없는 옛 값
         }
+        # 점검 필요 잎은 표시 줄이 있는 줄(m)만 켜진다. 정의에 잎이 없는 옛 값 줄도 잎이 채워진다
+        assert dict(await _raw(store, "SELECT deploy_id, sm_lock FROM deploy_events")) == {
+            "p": "l_off",
+            "m": "l_on",
+            "d": "l_off",
+            "s": "l_off",
+            "rj": "l_off",
+            "sup": "l_off",
+            "f": "l_off",
+        }
         evidence = dict(await _raw(store, "SELECT orchestrator_attempt_id, sm_evidence FROM deploy_attempts"))
         assert evidence == {
             "act-none": "ev_none",
@@ -345,7 +376,7 @@ async def test_startup_fixes_a_leaf_that_disagrees_with_the_outer_column(tmp_pat
             "b": "deploying",
         }
         fixed = await steps.backfill_leaves(store._db)
-        assert fixed == {"requests": 0, "attempts": 0}
+        assert fixed == {"requests": 0, "locks": 0, "attempts": 0}
     finally:
         await store.close()
 

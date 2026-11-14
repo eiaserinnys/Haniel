@@ -1061,20 +1061,21 @@ class TestRejectDeploy:
     ):
         assert await store.reject_deploy("nope", "x") is False
 
-    async def test_reject_is_still_unconditional_from_every_state(
-        self, store: EventStore
-    ):
-        """어긋남 8: 조건 없는 거절을 지금 동작 그대로 옮겼다(PR 2에서 바뀜)."""
+    async def test_reject_only_from_pending_and_retry(self, store: EventStore):
+        """어긋남 8이 없어졌다: 배포 중과 닫힘에서는 거절이 전이 없음이고 줄은 그대로다."""
         await self._seed(store, "dep")
         await to_deploying(store, "dep")
         await self._seed(store, "suc")
         await to_success(store, "suc", 8200)
+        await self._seed(store, "pen")
 
-        assert await store.reject_deploy("dep", "late") is True
-        assert await store.reject_deploy("suc", "late") is True
+        assert await store.reject_deploy("dep", "late") is False
+        assert await store.reject_deploy("suc", "late") is False
+        assert await store.reject_deploy("pen", "ok") is True
 
-        assert (await store.get_deploy_event("dep"))["status"] == "rejected"
-        assert (await store.get_deploy_event("suc"))["status"] == "rejected"
+        assert (await store.get_deploy_event("dep"))["status"] == "deploying"
+        assert (await store.get_deploy_event("suc"))["status"] == "success"
+        assert (await store.get_deploy_event("pen"))["status"] == "rejected"
 
     async def test_success_keeps_the_reported_duration(self, store: EventStore):
         await self._seed(store, "suc1")

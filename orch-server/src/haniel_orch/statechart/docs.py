@@ -149,22 +149,38 @@ def _arrow_label(arrow: Arrow) -> str:
 
 @dataclass(frozen=True)
 class View:
-    """한 장의 그림. marked가 None이면 모든 전이, True면 표시 단 전이만, False면 표시 없는 전이만."""
+    """한 장의 그림. marked가 None이면 모든 전이, True면 표시 단 전이만, False면 표시 없는 전이만.
+
+    region이 있으면 그 영역 안의 전이만 그린다(병렬 영역이 둘인 요청 정의의 보기를 나눈다).
+    """
 
     stem: str
     cls: type
     marked: bool | None
+    region: str | None = None
 
 
 VIEWS = (
-    View("request-status", OrchRequest, False),
-    View("request-divergence", OrchRequest, True),
+    View("request-status", OrchRequest, False, "status"),
+    View("request-divergence", OrchRequest, True, "status"),
     View("attempt-evidence", AttemptEvidence, None),
+    View("request-lock", OrchRequest, None, "lock"),
 )
+
+
+def _region_of(cls: type, state_id: str) -> str:
+    """잎이 속한 영역의 id."""
+    names = regions(cls)
+    node = cls.states_map[state_id]
+    while node.id not in names:
+        node = node.parent
+    return node.id
 
 
 def _view_arrows(view: View) -> list[Arrow]:
     arrows = validate(view.cls)
+    if view.region is not None:
+        arrows = [a for a in arrows if _region_of(view.cls, a.source) == view.region]
     if view.marked is None:
         return arrows
     return [
@@ -214,7 +230,7 @@ def mermaid(view: View) -> str:
     plain, folded = _fold(cls, arrows)
     if len(plain) + len(folded) + 1 > MAX_ARROWS:
         raise DocsError(f"{view.stem}: 한 장의 화살표가 {MAX_ARROWS}개를 넘는다")
-    region = next(iter(regions(cls)))
+    region = view.region or next(iter(regions(cls)))
     initial = initial_row(cls)[region]
     start_here = view.marked is not True
     touched = {a.source for a in arrows} | {a.target for a in arrows}
@@ -290,8 +306,9 @@ def transitions_markdown() -> str:
         "# 배포 상태 전이 표\n\n"
         "`python -m haniel_orch.statechart.docs`가 정의에서 만든 파일이다. 손으로 고치지 않는다.\n"
         "「설계와 다른 점」은 설계 글(design.md)과 견준 표시다. `어긋남 N`은 설계가 어긋남으로 적은 동작이고, "
-        "`PR 2에서 바뀜`은 괄호 속 design.md 줄이 PR 2에서 바꾼다고 적은 동작이며, "
-        "`설계에 없음`은 설계에 그 전이가 없는 동작이다. 모두 지금 동작을 그대로 옮겼다. 표시가 없는 전이는 설계 글이 받친다.\n\n"
+        "`PR 2에서 바뀜`은 괄호 속 design.md 줄이 옛 노드 규칙이나 PR 2에서 바꾼다고 적은 동작이며, "
+        "`설계에 없음`은 설계에 그 전이가 없는 동작이다. 표시가 없는 전이는 설계 글이 받친다. "
+        "요청 정의의 점검 필요(lock) 영역은 요청 상태 영역과 함께 한 사건으로 움직이므로, 두 영역의 화살표가 같은 사건 이름으로 표에 나란히 있다.\n\n"
     )
     return head + "\n".join(table(cls) for cls in DEFINITIONS)
 

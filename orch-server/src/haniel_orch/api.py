@@ -18,6 +18,8 @@ from .protocol import DeployReject, DeployStatus, ServiceCommand
 
 logger = logging.getLogger(__name__)
 
+INSPECTION_REQUIRED_TEXT = "점검한 뒤 하나씩 승인할 것"
+
 SERVICE_SCOPED_COMMANDS = {"start", "restart", "stop", "reload"}
 CONFIG_COMMANDS = {"reload-config", "register-service", "register-repo"}
 SERVICE_COMMAND_ACTIONS = SERVICE_SCOPED_COMMANDS | CONFIG_COMMANDS
@@ -137,7 +139,13 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
             )
 
         reason = body.get("reason", "rejected by dashboard")
-        await store.reject_deploy(deploy_id, reason)
+        if not await store.reject_deploy(deploy_id, reason):
+            # 잠금 밖 확인 뒤에 승인이 먼저 시도를 열었다. 정의가 거절을 받지 않으면 위 확인과 같은 409를 낸다
+            current = await store.get_deploy_event(deploy_id) or event
+            return JSONResponse(
+                {"error": f"deploy is '{current['status']}', not pending"},
+                status_code=409,
+            )
         if event["is_self_update"]:
             postponed_until = datetime.now(timezone.utc) + timedelta(
                 seconds=hub.self_update_postpone_sec
@@ -216,9 +224,16 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
 
         approved: list[str] = []
         failed: list[dict[str, Any]] = []
+        needs_inspection: list[dict[str, Any]] = []
 
         for event in to_approve:
             deploy_id = event["deploy_id"]
+            if await store.attempts.inspection_required(deploy_id):
+                # 점검 필요가 선 요청은 일괄 승인이 시도를 열지 못한다. 점검한 뒤 하나씩 승인한다
+                needs_inspection.append(
+                    {"deploy_id": deploy_id, "reason": INSPECTION_REQUIRED_TEXT}
+                )
+                continue
 
             try:
                 await _approve_one(event, "dashboard", "manual_batch")
@@ -236,6 +251,8 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         response: dict[str, Any] = {"approved": approved, "failed": failed}
         if auto_superseded:
             response["superseded"] = auto_superseded
+        if needs_inspection:
+            response["needs_inspection"] = needs_inspection
         return JSONResponse(response)
 
     async def service_command(request: Request) -> JSONResponse:

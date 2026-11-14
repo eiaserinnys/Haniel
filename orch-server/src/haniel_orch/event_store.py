@@ -11,10 +11,12 @@ import aiosqlite
 from . import event_store_mutations, event_store_nodes, node_deploy_store
 from .deploy_attempt_schema import initialize_attempt_schema
 from .deploy_attempt_store import DeployAttemptStore
+from .deploy_last_failure import last_failure
 from .event_store_lifecycle import EventStoreLifecycleMixin
 from .event_store_rows import decode_deploy_row, now_iso
 from .protocol import DeployStatus, NodeDeployReport
 from .statechart import steps
+from .statechart.columns import LOCK_ON
 from .statechart.restore import REASON_NO_TRANSITION, NoTransition
 
 _CREATE_TABLES = """
@@ -402,8 +404,15 @@ class EventStore(EventStoreLifecycleMixin):
             "ORDER BY detected_at DESC, created_at DESC, deploy_id DESC",
             (DeployStatus.PENDING.value, DeployStatus.DEPLOYING.value),
         )
-        rows = await cursor.fetchall()
-        return [decode_deploy_row(cursor, row) for row in rows]
+        names = [column[0] for column in cursor.description]
+        deploys = []
+        for row in await cursor.fetchall():
+            item = decode_deploy_row(cursor, row)
+            # 점검 필요(잎 칸은 decode가 거른다)와 직전 실패 요약. 기존 칸과 이름은 그대로다
+            item["inspection_required"] = row[names.index("sm_lock")] == LOCK_ON
+            item["last_failure"] = await last_failure(self._db, item["deploy_id"])
+            deploys.append(item)
+        return deploys
 
     async def get_active_self_update_for_node(
         self, node_id: str

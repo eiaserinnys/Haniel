@@ -182,15 +182,24 @@ async def record(db: aiosqlite.Connection, report: NodeDeployReport) -> dict[str
             (now, report.deploy_id),
         )
         canonical_status = DeployStatus.SUCCESS.value
-    elif active_orchestrator_ids:
-        canonical_status = DeployStatus.DEPLOYING.value
     else:
+        # 노드가 스스로 한 배포의 실패는 점검 필요를 켠다. 도는 시도가 있으면 칸만 켜고 시도와 요청 상태는 그대로 둔다
         try:
-            await steps.step_request(db, report.deploy_id, "node_failed", now=now)
+            await steps.step_request(
+                db,
+                report.deploy_id,
+                "node_failed",
+                facts={"no_active_attempt": not active_orchestrator_ids},
+                now=now,
+            )
         except NoTransition as exc:
-            # 요청이 배포 중이 아니면(대기) 지금도 0건 갱신으로 넘어간다
+            # 점검 필요가 이미 켜져 있고 요청 상태도 옮길 곳이 없을 때
             exc.warn("node_failed")
-        canonical_status = DeployStatus.PENDING.value
+        canonical_status = (
+            DeployStatus.DEPLOYING.value
+            if active_orchestrator_ids
+            else DeployStatus.PENDING.value
+        )
 
     return {
         "status": outcome,

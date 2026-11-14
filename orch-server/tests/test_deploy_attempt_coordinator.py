@@ -468,13 +468,13 @@ class TestAutoPermission:
         attempts = store.attempts
         assert attempts is not None
 
-        async def marker_not_seen(_deploy_id: str) -> bool:
+        async def lock_not_seen(_deploy_id: str) -> bool:
             return False
 
         async def marker_won_before_probe(**_kwargs):
             raise PermissionError("retry_requires_manual_approval")
 
-        monkeypatch.setattr(attempts, "has_retry_requirement", marker_not_seen)
+        monkeypatch.setattr(attempts, "inspection_required", lock_not_seen)
         monkeypatch.setattr(attempts, "create_probe", marker_won_before_probe)
         try:
             await harness.coordinator.handle_auto_request(auto_request("racing-auto"))
@@ -498,10 +498,10 @@ class TestManualRetryPreflight:
         try:
             await make_retry(store, harness.generation)
 
-            async def stale_marker_read(_deploy_id: str) -> bool:
-                return False
+            async def stale_marker_read(_deploy_id: str):
+                return None
 
-            monkeypatch.setattr(attempts, "has_retry_requirement", stale_marker_read)
+            monkeypatch.setattr(attempts, "get_retry_requirement", stale_marker_read)
             approval_task = asyncio.create_task(
                 harness.coordinator.approve_manual(
                     event, approved_by="director", source="manual_single"
