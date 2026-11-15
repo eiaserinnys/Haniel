@@ -155,15 +155,16 @@ class TestDashboardApi:
         assert "web" in data
         assert "worker" in data
 
-    def test_service_stop_calls_process_manager(self, dashboard_app, mock_runner):
-        """POST /api/services/{name}/stop calls process_manager.stop_service."""
+    def test_service_stop_uses_runner_stop_service(self, dashboard_app, mock_runner):
+        """POST /api/services/{name}/stop goes through the runner stop method."""
         client = TestClient(dashboard_app)
         resp = client.post("/api/services/web/stop")
         assert resp.status_code == 200
         data = resp.json()
         assert data["ok"] is True
         assert data["action"] == "stop"
-        mock_runner.process_manager.stop_service.assert_called_once_with("web")
+        mock_runner.stop_service.assert_called_once_with("web")
+        mock_runner.process_manager.stop_service.assert_not_called()
 
     def test_service_not_found_returns_404(self, dashboard_app, mock_runner):
         """POST /api/services/{name}/stop with unknown name returns 404."""

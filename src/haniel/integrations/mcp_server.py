@@ -594,18 +594,8 @@ class HanielMcpServer:
 
         try:
             loop = asyncio.get_running_loop()
-
-            # Stop the service
-            is_running = await loop.run_in_executor(
-                None, self.runner.process_manager.is_running, service
-            )
-            if is_running:
-                await loop.run_in_executor(
-                    None, self.runner.process_manager.stop_service, service
-                )
-
-            # Start the service
-            await loop.run_in_executor(None, self.runner._start_service, service)
+            # One runner call keeps stop and start under a single service lock.
+            await loop.run_in_executor(None, self.runner.restart_service, service)
             return f"Success: Service '{service}' restarted"
         except Exception as e:
             logger.error(f"Failed to restart {service}: {e}")
@@ -624,9 +614,7 @@ class HanielMcpServer:
 
         try:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None, self.runner.process_manager.stop_service, service
-            )
+            await loop.run_in_executor(None, self.runner.stop_service, service)
             return f"Success: Service '{service}' stopped"
         except Exception as e:
             logger.error(f"Failed to stop {service}: {e}")
@@ -651,7 +639,16 @@ class HanielMcpServer:
             return f"Warning: Service '{service}' is already running"
 
         try:
-            await loop.run_in_executor(None, self.runner._start_service, service)
+            started = await loop.run_in_executor(
+                None, self.runner._start_service, service
+            )
+            if not started:
+                still_running = await loop.run_in_executor(
+                    None, self.runner.process_manager.is_running, service
+                )
+                if still_running:
+                    return f"Warning: Service '{service}' is already running"
+                return json.dumps({"error": f"Failed to start '{service}'"})
             return f"Success: Service '{service}' started"
         except Exception as e:
             logger.error(f"Failed to start {service}: {e}")

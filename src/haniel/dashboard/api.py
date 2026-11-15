@@ -75,7 +75,13 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
                 {"ok": False, "service": name, "message": "already running"}
             )
         try:
-            await loop.run_in_executor(None, runner._start_service, name)
+            started = await loop.run_in_executor(None, runner._start_service, name)
+            if not started:
+                running = await loop.run_in_executor(
+                    None, runner.process_manager.is_running, name
+                )
+                message = "already running" if running else f"Failed to start {name}"
+                return JSONResponse({"ok": False, "service": name, "message": message})
             return JSONResponse({"ok": True, "service": name, "action": "start"})
         except Exception as e:
             logger.error(f"Failed to start {name}: {e}")
@@ -89,7 +95,7 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
             return _error(f"Service not found: {name}", status=404)
         try:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, runner.process_manager.stop_service, name)
+            await loop.run_in_executor(None, runner.stop_service, name)
             return JSONResponse({"ok": True, "service": name, "action": "stop"})
         except Exception as e:
             logger.error(f"Failed to stop {name}: {e}")
@@ -103,14 +109,7 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
             return _error(f"Service not found: {name}", status=404)
         try:
             loop = asyncio.get_running_loop()
-            is_running = await loop.run_in_executor(
-                None, runner.process_manager.is_running, name
-            )
-            if is_running:
-                await loop.run_in_executor(
-                    None, runner.process_manager.stop_service, name
-                )
-            await loop.run_in_executor(None, runner._start_service, name)
+            await loop.run_in_executor(None, runner.restart_service, name)
             return JSONResponse({"ok": True, "service": name, "action": "restart"})
         except Exception as e:
             logger.error(f"Failed to restart {name}: {e}")

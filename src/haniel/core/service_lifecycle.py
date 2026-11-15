@@ -317,9 +317,11 @@ def reload_service_definition(runner: "ServiceRunner", service: str) -> dict[str
         raise ValueError("Service name is required")
 
     config_path = _require_config_path(runner)
+    # The service lock must come before CONFIG_WRITE_LOCK: a deployment takes
+    # its service locks first and may bind config inside the execution section.
     # The writer lock serializes file identity. The resident lock is acquired
     # only by snapshot/CAS helpers and is never retained across restart I/O.
-    with config_write_transaction(runner):
+    with runner.service_locks.hold(service), config_write_transaction(runner):
         resident = runner._snapshot_config_state()
         disk_config = read_config(config_path)
         if service not in disk_config.services:
@@ -358,7 +360,7 @@ def disable_service(runner: "ServiceRunner", service: str) -> dict[str, Any]:
         raise ValueError("Service name is required")
 
     config_path = _require_config_path(runner)
-    with config_write_transaction(runner):
+    with runner.service_locks.hold(service), config_write_transaction(runner):
         config = read_config(config_path)
         if service not in config.services:
             raise KeyError(f"Service not found: {service}")
@@ -398,7 +400,7 @@ def delete_service_config(
     config_path = _require_config_path(runner)
     purge_path: Path | None = None
 
-    with config_write_transaction(runner):
+    with runner.service_locks.hold(service), config_write_transaction(runner):
         config = read_config(config_path)
         if service not in config.services:
             raise KeyError(f"Service not found: {service}")

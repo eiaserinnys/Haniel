@@ -296,11 +296,12 @@ class TestMcpTools:
 
     @pytest.mark.asyncio
     async def test_restart_service(self, mcp_server, mock_runner):
-        """Test haniel_restart tool."""
+        """Test haniel_restart delegates to one runner restart call."""
         result = await mcp_server.call_tool("haniel_restart", {"service": "web"})
         assert "success" in result.lower() or "restarted" in result.lower()
-        mock_runner.process_manager.stop_service.assert_called_with("web")
-        mock_runner._start_service.assert_called_with("web")
+        mock_runner.restart_service.assert_called_once_with("web")
+        mock_runner.process_manager.stop_service.assert_not_called()
+        mock_runner._start_service.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_restart_unknown_service(self, mcp_server, mock_runner):
@@ -315,10 +316,10 @@ class TestMcpTools:
 
     @pytest.mark.asyncio
     async def test_stop_service(self, mcp_server, mock_runner):
-        """Test haniel_stop tool."""
+        """Test haniel_stop delegates to the runner stop method."""
         result = await mcp_server.call_tool("haniel_stop", {"service": "web"})
         assert "stopped" in result.lower() or "success" in result.lower()
-        mock_runner.process_manager.stop_service.assert_called_with("web")
+        mock_runner.stop_service.assert_called_once_with("web")
 
     @pytest.mark.asyncio
     async def test_start_service(self, mcp_server, mock_runner):
@@ -639,9 +640,8 @@ class TestMcpServerExtended:
 
     @pytest.mark.asyncio
     async def test_restart_exception_handling(self, mcp_server, mock_runner):
-        """Test restart with exception during _start_service."""
-        # Make _start_service raise an exception
-        mock_runner._start_service.side_effect = Exception("Start failed")
+        """Test restart with an exception from the runner restart."""
+        mock_runner.restart_service.side_effect = Exception("Start failed")
 
         result = await mcp_server.call_tool("haniel_restart", {"service": "web"})
         data = json.loads(result)
@@ -649,8 +649,8 @@ class TestMcpServerExtended:
 
     @pytest.mark.asyncio
     async def test_stop_exception_handling(self, mcp_server, mock_runner):
-        """Test stop with exception."""
-        mock_runner.process_manager.stop_service.side_effect = Exception("Stop failed")
+        """Test stop with an exception from the runner stop."""
+        mock_runner.stop_service.side_effect = Exception("Stop failed")
 
         result = await mcp_server.call_tool("haniel_stop", {"service": "web"})
         data = json.loads(result)

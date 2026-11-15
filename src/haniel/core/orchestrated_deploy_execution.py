@@ -269,7 +269,8 @@ def _redeploy_at_target(
             suppressed = affected
             runner._suppress_pending_restarts(suppressed)
             runner._require_config_generation(config_snapshot)
-            runner._restart_after_pull_legacy(repo, affected)
+            with runner.service_locks.hold(set(affected)):
+                runner._restart_after_pull_legacy(repo, affected)
             return
         reload_plan = runner._prepare_current_manifest_config(repo)
         config_snapshot, state = runner._snapshot_repo_and_config(repo)
@@ -308,20 +309,21 @@ def _redeploy_at_target(
             else {}
         )
         runner._require_config_generation(config_snapshot)
-        run_manifest_deployment(
-            runner,
-            repo,
-            affected,
-            previous_head,
-            orchestrator_attempt_id=approval["orchestrator_attempt_id"],
-            node_id=node_id,
-            branch=branch,
-            expected_operation="upgrade",
-            request_id=approval["orchestrator_attempt_id"],
-            config_snapshot=config_snapshot,
-            **config_kwargs,
-            **progress_kwargs,
-        )
+        with runner.service_locks.hold(set(affected) | set(suppressed)):
+            run_manifest_deployment(
+                runner,
+                repo,
+                affected,
+                previous_head,
+                orchestrator_attempt_id=approval["orchestrator_attempt_id"],
+                node_id=node_id,
+                branch=branch,
+                expected_operation="upgrade",
+                request_id=approval["orchestrator_attempt_id"],
+                config_snapshot=config_snapshot,
+                **config_kwargs,
+                **progress_kwargs,
+            )
     finally:
         runner._release_restart_suppression(suppressed)
         if deployment_lease is not None:
