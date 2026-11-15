@@ -426,6 +426,8 @@ class ServiceRunner:
             shutdown_config=shutdown,
             health_manager=self.health_manager,
         )
+        # One per-service lock set orders deployments and lifecycle commands.
+        self.service_locks = self.process_manager.service_locks
 
         # Build dependency graph for enabled services only
         self._enabled_services = {
@@ -1630,7 +1632,7 @@ class ServiceRunner:
         approved_env_snapshot: "ServiceEnvironmentFile | None" = None,
         propagate_failure: bool = False,
     ) -> bool:
-        """Start a single service.
+        """Start a single service while holding its lifecycle lock.
 
         Args:
             name: Service name
@@ -1638,38 +1640,50 @@ class ServiceRunner:
         Returns:
             True if started successfully
         """
-        snapshot = self._snapshot_config_state()
-        if name not in snapshot.enabled_services:
-            return False
-
-        config = snapshot.enabled_services[name]
-        logger.info(f"Starting service: {name}")
-
-        try:
-            if not self.execute_hook(name, "pre_start"):
-                logger.error(f"pre_start hook failed for {name}, aborting start")
-                self._record_start_failure(name, "pre_start hook failed")
+        with self.service_locks.hold(name):
+            snapshot = self._snapshot_config_state()
+            if name not in snapshot.enabled_services:
                 return False
-            self.process_manager.start_service(
-                name=name,
-                config=config,
-                ready_timeout=effective_ready_timeout(
-                    config,
-                    self.process_manager.DEFAULT_READY_TIMEOUT,
-                ),
-                on_ready=lambda n=name: self._on_service_ready(n),
-                on_crash=lambda exit_code, n=name: self._on_service_crash(n, exit_code),
-                expected_env_path=expected_env_path,
-                expected_env_sha256=expected_env_sha256,
-                approved_env_snapshot=approved_env_snapshot,
-            )
-            return True
-        except Exception as e:
-            logger.error(f"Failed to start service {name}: {e}")
-            if propagate_failure:
-                raise
-            self._schedule_start_failure_retry(name, str(e))
-            return False
+
+            if self.process_manager.is_running(name):
+                logger.info("Service %s is already running; skipping start", name)
+                return False
+
+            config = snapshot.enabled_services[name]
+            logger.info(f"Starting service: {name}")
+
+            try:
+                if not self.execute_hook(name, "pre_start"):
+                    logger.error(f"pre_start hook failed for {name}, aborting start")
+                    self._record_start_failure(name, "pre_start hook failed")
+                    return False
+                self.process_manager.start_service(
+                    name=name,
+                    config=config,
+                    ready_timeout=effective_ready_timeout(
+                        config,
+                        self.process_manager.DEFAULT_READY_TIMEOUT,
+                    ),
+                    on_ready=lambda n=name: self._on_service_ready(n),
+                    on_crash=lambda exit_code, n=name: self._on_service_crash(
+                        n, exit_code
+                    ),
+                    expected_env_path=expected_env_path,
+                    expected_env_sha256=expected_env_sha256,
+                    approved_env_snapshot=approved_env_snapshot,
+                )
+                return True
+            except Exception as e:
+                logger.error(f"Failed to start service {name}: {e}")
+                if propagate_failure:
+                    raise
+                if self.process_manager.is_running(name):
+                    logger.info(
+                        "Service %s is already running; not scheduling a retry", name
+                    )
+                    return False
+                self._schedule_start_failure_retry(name, str(e))
+                return False
 
     def _on_service_ready(self, name: str) -> None:
         """Called when a service becomes ready."""
@@ -2627,6 +2641,8 @@ class ServiceRunner:
             return {"ok": True, "service": service_name, "action": action}
         if action == "start":
             if not self._start_service(service_name):
+                if self.process_manager.is_running(service_name):
+                    raise RuntimeError(f"Service {service_name} is already running")
                 raise RuntimeError(f"Failed to start service: {service_name}")
             return {"ok": True, "service": service_name, "action": action}
         raise ValueError(f"Unknown action: {action}")
@@ -2765,6 +2781,12 @@ class ServiceRunner:
                 else affected
             )
             self._suppress_pending_restarts(quiesce_services)
+            # Hold every service this deployment may stop, start, or restore
+            # for the whole execution section. Sorted acquisition keeps
+            # overlapping deployments from deadlocking each other.
+            deployment_service_locks = self.service_locks.acquire(
+                set(quiesce_services) | set(affected)
+            )
             try:
                 for svc in quiesce_services:
                     self._cancel_pending_restart(svc)
@@ -2996,6 +3018,7 @@ class ServiceRunner:
                     self._restart_after_pull_legacy(repo_name, affected)
             finally:
                 self._release_restart_suppression(quiesce_services)
+                self.service_locks.release(deployment_service_locks)
 
             if node_report_context is not None:
                 self._finish_node_deploy_report(
@@ -4629,8 +4652,9 @@ class ServiceRunner:
         """
         if name == "haniel":
             return self.request_restart()
-        self.process_manager.stop_service(name)
-        self._start_service(name)
+        with self.service_locks.hold(name):
+            self.process_manager.stop_service(name)
+            self._start_service(name)
         return f"Service '{name}' restarted"
 
     def start_service(self, name: str) -> None:
@@ -4641,11 +4665,12 @@ class ServiceRunner:
         self._start_service(name)
 
     def stop_service(self, name: str) -> None:
-        """Stop a managed service.
+        """Stop a managed service while holding its lifecycle lock.
 
         Satisfies AppHomeController protocol (duck-typed, no import needed).
         """
-        self.process_manager.stop_service(name)
+        with self.service_locks.hold(name):
+            self.process_manager.stop_service(name)
 
     def enable_service(self, name: str) -> str:
         """Reset circuit breaker for a service.
@@ -4767,7 +4792,11 @@ class ServiceRunner:
             return False, []
 
     def _process_pending_restarts(self) -> None:
-        """Process any pending service restarts."""
+        """Process any pending service restarts.
+
+        A restart whose service lock is busy stays queued for the next poll
+        cycle instead of interleaving with the running command or deployment.
+        """
         now = time.time()
 
         with self._restart_lock:
@@ -4777,11 +4806,22 @@ class ServiceRunner:
                 if restart_time <= now and name not in self._restart_suppressed
             ]
 
-            for name in ready:
-                del self._pending_restarts[name]
-
         for name in ready:
-            if not self.process_manager.is_running(name):
+            with self.service_locks.try_hold(name) as acquired:
+                if not acquired:
+                    logger.info(
+                        "Deferring scheduled restart for %s: service is busy", name
+                    )
+                    continue
+                with self._restart_lock:
+                    if name in self._restart_suppressed:
+                        continue
+                    self._pending_restarts.pop(name, None)
+                if self.process_manager.is_running(name):
+                    logger.info(
+                        "Skipping scheduled restart for %s: already running", name
+                    )
+                    continue
                 blockers = self._blocked_start_dependencies(name)
                 if blockers:
                     self._schedule_restart_after_dependency_block(name, blockers)

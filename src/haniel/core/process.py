@@ -30,6 +30,7 @@ from ..platform import get_platform_handler
 from .health import HealthManager, ServiceState
 from .logs import LogCapture, LogManager, StreamReader
 from .service_environment import ServiceEnvironmentFile, service_process_environment
+from .service_locks import ServiceLockRegistry
 from .stale_instance import PortInUseError, StaleInstanceCleaner, extract_ready_port
 
 logger = logging.getLogger(__name__)
@@ -115,6 +116,7 @@ class ProcessManager:
         log_dir: Path | None = None,
         shutdown_config: ShutdownConfig | None = None,
         health_manager: HealthManager | None = None,
+        service_locks: ServiceLockRegistry | None = None,
     ):
         """Initialize the process manager.
 
@@ -123,11 +125,13 @@ class ProcessManager:
             log_dir: Directory for log files (default: config_dir/logs)
             shutdown_config: Global shutdown configuration
             health_manager: Health manager for state tracking
+            service_locks: Per-service lifecycle locks shared with the runner
         """
         self.config_dir = config_dir
         self.log_dir = log_dir or config_dir / "logs"
         self.shutdown_config = shutdown_config or ShutdownConfig()
         self.health_manager = health_manager or HealthManager()
+        self.service_locks = service_locks or ServiceLockRegistry()
         self.log_manager = LogManager(self.log_dir)
         self.platform = get_platform_handler()
         self.stale_instance_grace_timeout = self.STALE_INSTANCE_GRACE_TIMEOUT
@@ -150,6 +154,10 @@ class ProcessManager:
     ) -> ManagedProcess:
         """Start a service process.
 
+        The service's lifecycle lock covers the running check through Popen,
+        the immediate-exit retry, and registration, so two starts cannot both
+        spawn a child.
+
         Args:
             name: Service name
             config: Service configuration
@@ -163,6 +171,29 @@ class ProcessManager:
         Raises:
             RuntimeError: If the service is already running
         """
+        with self.service_locks.hold(name):
+            return self._start_service_locked(
+                name,
+                config,
+                ready_timeout=ready_timeout,
+                on_ready=on_ready,
+                on_crash=on_crash,
+                expected_env_path=expected_env_path,
+                expected_env_sha256=expected_env_sha256,
+                approved_env_snapshot=approved_env_snapshot,
+            )
+
+    def _start_service_locked(
+        self,
+        name: str,
+        config: ServiceConfig,
+        ready_timeout: float | None,
+        on_ready: Callable[[], None] | None,
+        on_crash: Callable[[int | None], None] | None,
+        expected_env_path: str | None,
+        expected_env_sha256: str | None,
+        approved_env_snapshot: ServiceEnvironmentFile | None,
+    ) -> ManagedProcess:
         with self._lock:
             if name in self._processes and self._processes[name].process:
                 if self._processes[name].process.poll() is None:
@@ -422,7 +453,7 @@ class ProcessManager:
         timeout: float | None = None,
         force: bool = False,
     ) -> bool:
-        """Stop a service process.
+        """Stop a service process under the service's lifecycle lock.
 
         Args:
             name: Service name
@@ -432,6 +463,15 @@ class ProcessManager:
         Returns:
             True if the service was stopped successfully
         """
+        with self.service_locks.hold(name):
+            return self._stop_service_locked(name, timeout=timeout, force=force)
+
+    def _stop_service_locked(
+        self,
+        name: str,
+        timeout: float | None,
+        force: bool,
+    ) -> bool:
         with self._lock:
             if name not in self._processes:
                 return True
