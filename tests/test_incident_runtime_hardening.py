@@ -562,7 +562,9 @@ def test_manual_manifest_activation_rolls_back_when_generation_commit_is_stale(
     staged = SimpleNamespace(
         target_head=target,
         manifest_digest="d" * 64,
-        manifest=SimpleNamespace(release_id="incident-release"),
+        manifest=SimpleNamespace(
+            release_id="incident-release", service_restart_filters={}
+        ),
     )
     monkeypatch.setattr(
         "haniel.core.runner.probe_manifest_target", lambda *_a, **_k: staged
@@ -604,7 +606,9 @@ def test_startup_manifest_activation_rolls_back_and_service_continues_on_stale_c
     staged = SimpleNamespace(
         target_head=target,
         manifest_digest="d" * 64,
-        manifest=SimpleNamespace(release_id="incident-release"),
+        manifest=SimpleNamespace(
+            release_id="incident-release", service_restart_filters={}
+        ),
     )
     monkeypatch.setattr(
         "haniel.core.runner.probe_manifest_target", lambda *_a, **_k: staged

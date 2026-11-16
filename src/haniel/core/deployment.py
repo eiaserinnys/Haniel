@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -27,6 +28,9 @@ from .deployment_verification import (
     verify_with_retry,
 )
 from .release_manifest import MigrationSpec, ReleaseManifest
+from .restart_filter import RestartFilterCandidates
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -44,6 +48,8 @@ class DeploymentCallbacks:
     quiescence_nonce: str | None = None
     config_digest: str | None = None
     acknowledge_quiesced: Callable[[dict[str, Any]], None] | None = None
+    restart_candidates: RestartFilterCandidates | None = None
+    apply_restart_skips: Callable[[frozenset[str]], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -162,6 +168,7 @@ class DeploymentCoordinator:
                 retry_if=lambda error: not isinstance(error, StableDeploymentError),
             )
             self.state_store.transition(repo_name, "preflight")
+            preflight: CommandResult | None = None
             if manifest.migration:
                 preflight = self._run_database(
                     repo_name,
@@ -183,10 +190,25 @@ class DeploymentCoordinator:
                         database_journal_path=database_journal_path,
                     )
 
+            skipped_services = self._confirm_restart_skips(
+                repo_name=repo_name,
+                target_head=target_head,
+                callbacks=callbacks,
+                contract_mode=contract_mode,
+                operation=operation,
+                preflight=preflight,
+            )
+            if skipped_services:
+                if callbacks.apply_restart_skips is not None:
+                    callbacks.apply_restart_skips(skipped_services)
+                self.state_store.record_restart_skips(
+                    repo_name, sorted(skipped_services)
+                )
+
             quiescence_receipt: dict[str, Any] | None = None
             if not contract_mode or operation == "upgrade":
                 quiescence_receipt = callbacks.stop()
-            if contract_mode and operation == "upgrade":
+            if contract_mode and operation == "upgrade" and not skipped_services:
                 validate_quiescence_receipt(
                     quiescence_receipt,
                     request_id=request_id,
@@ -258,6 +280,84 @@ class DeploymentCoordinator:
                 contract_mode=contract_mode,
                 operation=operation,
             )
+
+    def _confirm_restart_skips(
+        self,
+        *,
+        repo_name: str,
+        target_head: str,
+        callbacks: DeploymentCallbacks,
+        contract_mode: bool,
+        operation: str | None,
+        preflight: CommandResult | None,
+    ) -> frozenset[str]:
+        """Decide which candidate services stay running for this attempt."""
+        candidates = callbacks.restart_candidates
+        if candidates is None or not candidates.services:
+            return frozenset()
+        if not contract_mode:
+            self._log_restart_skips(
+                repo_name, target_head, candidates, candidates.services
+            )
+            return candidates.services
+        if operation != "upgrade":
+            self._log_restart_skips(
+                repo_name,
+                target_head,
+                candidates,
+                frozenset(),
+                reason="contract operation is not an upgrade",
+            )
+            return frozenset()
+        payload = preflight.json_data if preflight is not None else None
+        pending_count = (
+            payload.get("pending_count") if isinstance(payload, dict) else None
+        )
+        if not isinstance(payload, dict):
+            reason = "contract preflight returned no JSON object"
+        elif "pending_count" not in payload:
+            reason = "contract preflight result has no pending_count"
+        elif type(pending_count) is not int:
+            reason = "contract preflight pending_count is not an integer"
+        elif pending_count != 0:
+            reason = f"contract preflight pending_count={pending_count}"
+        else:
+            self._log_restart_skips(
+                repo_name, target_head, candidates, candidates.services
+            )
+            return candidates.services
+        self._log_restart_skips(
+            repo_name, target_head, candidates, frozenset(), reason=reason
+        )
+        return frozenset()
+
+    @staticmethod
+    def _log_restart_skips(
+        repo_name: str,
+        target_head: str,
+        candidates: RestartFilterCandidates,
+        skipped: frozenset[str],
+        *,
+        reason: str | None = None,
+    ) -> None:
+        if skipped:
+            logger.info(
+                "Skipping restarts for %s at %s: %d changed path(s) matched "
+                "filters; left running: %s",
+                repo_name,
+                target_head[:12],
+                candidates.changed_path_count,
+                ", ".join(sorted(skipped)),
+            )
+            return
+        logger.info(
+            "Restart filter candidates for %s at %s (%d changed path(s)) were "
+            "not applied: %s",
+            repo_name,
+            target_head[:12],
+            candidates.changed_path_count,
+            reason,
+        )
 
     def _recover_and_raise(
         self,

@@ -81,6 +81,20 @@ class RetrySpec(BaseModel):
 VerifyRetrySpec = RetrySpec
 
 
+class ServiceRestartFilter(BaseModel):
+    """Paths whose changes never require restarting one declared service.
+
+    Patterns are matched against repository-relative POSIX paths with
+    :func:`fnmatch.fnmatchcase`, so ``*`` also crosses ``/``. A deployment
+    whose every changed path matches one of the patterns may leave the
+    service running through the handover.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ignore_paths: list[str] = Field(min_length=1)
+
+
 class ReleaseManifest(BaseModel):
     """Repository-provided contract consumed by Haniel."""
 
@@ -95,6 +109,14 @@ class ReleaseManifest(BaseModel):
     post_start_verify: list[CommandSpec] = Field(min_length=1)
     post_start_verify_retry: RetrySpec = Field(default_factory=RetrySpec)
     recovery: RecoverySpec
+    service_restart_filters: dict[str, ServiceRestartFilter] = Field(
+        default_factory=dict,
+        description=(
+            "Optional per-service path filters keyed by Haniel service name. "
+            "A service stays running when every changed path matches one of "
+            "its ignore_paths."
+        ),
+    )
 
     @classmethod
     def load(cls, path: Path) -> "ReleaseManifest":
