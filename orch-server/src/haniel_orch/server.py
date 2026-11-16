@@ -22,6 +22,7 @@ from .api import create_api_routes
 from .auth import AuthConfig, create_auth_routes
 from .event_store import EventStore
 from .hub import WebSocketHub
+from .inspection_notice_sender import InspectionNoticeSender
 from .log_redaction import install_query_token_redaction
 from .node_registry import NodeRegistry
 from .push import NullPushService, PushService, RelayPushService
@@ -123,6 +124,10 @@ class OrchestratorConfig(BaseModel):
     deploy_timeout_sec: float = 300.0  # deploy 결과 대기 타임아웃 (5분)
     self_update_postpone_sec: float = 21600.0  # 자기 갱신 거절 후 되돌아옴까지 (6시간)
     pending_node_absent_sec: float = 1209600.0  # 이 기간 넘게 연결되지 않은 노드의 대기 요청을 내린다 (14일)
+    # 점검 필요 알림을 보낼 소울스트림 세션. 셋 가운데 하나라도 없으면 보내지 않는다
+    soulstream_url: str | None = None
+    soulstream_token: str | None = None
+    inspection_session_id: str | None = None
 
 
 class OrchestratorServer:
@@ -135,6 +140,12 @@ class OrchestratorServer:
             self._store, heartbeat_timeout=config.heartbeat_timeout
         )
         self._push = self._create_push_service(config)
+        self._inspection_notice_sender = InspectionNoticeSender(
+            self._store,
+            url=config.soulstream_url,
+            token=config.soulstream_token,
+            session_id=config.inspection_session_id,
+        )
         self._hub = WebSocketHub(
             self._registry,
             self._store,
@@ -145,6 +156,7 @@ class OrchestratorServer:
             deploy_timeout_sec=config.deploy_timeout_sec,
             self_update_postpone_sec=config.self_update_postpone_sec,
             pending_node_absent_sec=config.pending_node_absent_sec,
+            inspection_notice_sender=self._inspection_notice_sender,
         )
         self._app: Starlette | None = None
 
@@ -263,6 +275,9 @@ def create_app() -> Starlette:
         ORCH_DEPLOY_TIMEOUT_SEC  — optional override, default 300.0s (deploy 결과 대기)
         ORCH_SELF_UPDATE_POSTPONE_SEC — optional override, default 21600.0s (자기 갱신 거절 후 되돌아옴까지)
         ORCH_PENDING_NODE_ABSENT_SEC — optional override, default 1209600.0s (연결되지 않은 노드의 대기 요청을 내리는 기한)
+        ORCH_SOULSTREAM_URL       — 점검 필요 알림을 보낼 소울스트림 주소 (없으면 보내지 않음)
+        ORCH_SOULSTREAM_TOKEN     — 소울스트림 인증 토큰 (없으면 보내지 않음)
+        ORCH_INSPECTION_SESSION_ID — 알림을 받을 소울스트림 세션 id (없으면 보내지 않음)
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -282,6 +297,9 @@ def create_app() -> Starlette:
         port=int(os.environ.get("PORT", "9300")),
         heartbeat_timeout=float(os.environ.get("HEARTBEAT_TIMEOUT", "90")),
         dashboard_dir=os.environ.get("DASHBOARD_DIR"),
+        soulstream_url=os.environ.get("ORCH_SOULSTREAM_URL"),
+        soulstream_token=os.environ.get("ORCH_SOULSTREAM_TOKEN"),
+        inspection_session_id=os.environ.get("ORCH_INSPECTION_SESSION_ID"),
     )
     # ORCH_COMMAND_TIMEOUT_SEC: optional override.
     # 기본값(30.0)은 OrchestratorConfig.command_timeout_sec 필드가 정본으로 보유

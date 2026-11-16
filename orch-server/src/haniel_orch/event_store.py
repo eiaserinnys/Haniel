@@ -14,6 +14,7 @@ from .deploy_attempt_store import DeployAttemptStore
 from .deploy_last_failure import last_failure
 from .event_store_lifecycle import EventStoreLifecycleMixin
 from .event_store_rows import decode_deploy_row, now_iso
+from .inspection_notice_store import InspectionNoticeStoreMixin
 from .protocol import DeployStatus, NodeDeployReport
 from .statechart import steps
 from .statechart.columns import LOCK_ON
@@ -63,7 +64,7 @@ CREATE TABLE IF NOT EXISTS device_tokens (
 """
 
 
-class EventStore(EventStoreLifecycleMixin):
+class EventStore(EventStoreLifecycleMixin, InspectionNoticeStoreMixin):
     """Async SQLite store for deploy events and nodes."""
 
     def __init__(self, db_path: str) -> None:

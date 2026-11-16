@@ -16,6 +16,7 @@ from .deploy_attempt_coordinator import DeployAttemptCoordinator
 from .event_store import EventStore
 from .hub_canonicals import HubCanonicalFlows
 from .hub_commands import HubServiceCommands, PendingCommand  # noqa: F401 (재노출)
+from .inspection_notice_sender import InspectionNoticeSender
 from .node_disconnect_workflow import NodeDisconnectWorkflow
 from .node_registry import NodeRegistry
 from .push import NullPushService, PushService
@@ -69,6 +70,7 @@ class WebSocketHub(HubCanonicalFlows, HubServiceCommands):
         deploy_timeout_sec: float = 300.0,
         self_update_postpone_sec: float = 21600.0,
         pending_node_absent_sec: float = 1209600.0,
+        inspection_notice_sender: InspectionNoticeSender | None = None,
     ) -> None:
         self._registry = registry
         self._store = store
@@ -76,6 +78,7 @@ class WebSocketHub(HubCanonicalFlows, HubServiceCommands):
         self._push: PushService = push_service or NullPushService()
         self._auth_bearer_token = auth_bearer_token
         self._pending_node_absent_sec = pending_node_absent_sec
+        self._inspection_notice_sender = inspection_notice_sender
         self._dashboard_connections: set[WebSocket] = set()
         self._heartbeat_task: asyncio.Task | None = None
         self._background_tasks: set[asyncio.Task[None]] = set()
@@ -443,6 +446,13 @@ class WebSocketHub(HubCanonicalFlows, HubServiceCommands):
         except Exception:
             logger.exception("Absent node request sweep failed")
 
+    async def _record_startup_inspection_notices_safely(self) -> None:
+        """기동 보충 실패가 하트비트 작업과 알림 보내기를 멈추지 않게 한다."""
+        try:
+            await self._store.record_startup_inspection_notices()
+        except Exception:
+            logger.exception("Startup inspection notice backfill failed")
+
     async def start_heartbeat_checker(self) -> None:
         """Start periodic heartbeat check task (30s interval)."""
         # One explicit startup repair closes duplicate pending canonicals left by
@@ -452,6 +462,10 @@ class WebSocketHub(HubCanonicalFlows, HubServiceCommands):
         # 기동 직후 한 번, 그 뒤 한 시간에 한 번 노드 없음 훑기(어긋남 7).
         # 훑기가 실패해도 끊김 판정은 계속 돌아야 한다
         await self._sweep_absent_node_requests_safely()
+        # 훑기와 상태 보정이 끝난 뒤, 원장 줄이 없는 잠긴 열린 요청을 채운다. 그 뒤 보내기 루프를 켠다
+        await self._record_startup_inspection_notices_safely()
+        if self._inspection_notice_sender is not None:
+            self._inspection_notice_sender.start()
 
         async def _check_loop() -> None:
             next_absent_sweep = time.monotonic() + _ABSENT_SWEEP_INTERVAL_SEC
@@ -495,6 +509,9 @@ class WebSocketHub(HubCanonicalFlows, HubServiceCommands):
                 await self._heartbeat_task
             except asyncio.CancelledError:
                 pass
+
+        if self._inspection_notice_sender is not None:
+            await self._inspection_notice_sender.stop()
 
         # Close all dashboard connections
         for ws in list(self._dashboard_connections):
