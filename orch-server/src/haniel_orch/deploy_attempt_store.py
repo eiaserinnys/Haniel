@@ -268,8 +268,28 @@ class DeployAttemptStore(
                         proposal.error or proposal.reason,
                         source=source,
                     )
+                    # 노드가 계획 묻기에 fail_closed로 답한 요청은 대기에서 내린다(어긋남 13). 다른 계획 닫힘은 그대로 둔다
+                    try:
+                        step = await steps.step_request(
+                            self._db,
+                            probe["deploy_id"],
+                            "node_declined",
+                            data={"reason": f"node declined re-run: {proposal.reason}"},
+                        )
+                        todo.extend(step.todo)
+                        request_closed = True
+                    except NoTransition as exc:
+                        exc.warn("node_declined")
+                        request_closed = False
                     await self._db.commit()
-                    return {"status": "terminal", "kind": "preflight_fail_closed", "todo": todo}
+                    return {
+                        "status": "terminal",
+                        "kind": "preflight_fail_closed",
+                        "terminal_reason": proposal.reason,
+                        "terminal_error": proposal.error or proposal.reason,
+                        "request_closed": request_closed,
+                        "todo": todo,
+                    }
                 if proposal.mode == "evidence_recovery":
                     error = self._validate_recovery_proposal(probe, proposal, legacy=legacy)
                     if error:

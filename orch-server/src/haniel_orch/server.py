@@ -122,6 +122,7 @@ class OrchestratorConfig(BaseModel):
     command_timeout_sec: float = 30.0  # service-command 응답 대기 타임아웃
     deploy_timeout_sec: float = 300.0  # deploy 결과 대기 타임아웃 (5분)
     self_update_postpone_sec: float = 21600.0  # 자기 갱신 거절 후 되돌아옴까지 (6시간)
+    pending_node_absent_sec: float = 1209600.0  # 이 기간 넘게 연결되지 않은 노드의 대기 요청을 내린다 (14일)
 
 
 class OrchestratorServer:
@@ -143,6 +144,7 @@ class OrchestratorServer:
             command_timeout_sec=config.command_timeout_sec,
             deploy_timeout_sec=config.deploy_timeout_sec,
             self_update_postpone_sec=config.self_update_postpone_sec,
+            pending_node_absent_sec=config.pending_node_absent_sec,
         )
         self._app: Starlette | None = None
 
@@ -260,6 +262,7 @@ def create_app() -> Starlette:
         ORCH_COMMAND_TIMEOUT_SEC — optional override, default 30.0s (service-command 응답 대기)
         ORCH_DEPLOY_TIMEOUT_SEC  — optional override, default 300.0s (deploy 결과 대기)
         ORCH_SELF_UPDATE_POSTPONE_SEC — optional override, default 21600.0s (자기 갱신 거절 후 되돌아옴까지)
+        ORCH_PENDING_NODE_ABSENT_SEC — optional override, default 1209600.0s (연결되지 않은 노드의 대기 요청을 내리는 기한)
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -313,6 +316,19 @@ def create_app() -> Starlette:
             )
         config = config.model_copy(
             update={"self_update_postpone_sec": postpone_override}
+        )
+
+    # ORCH_PENDING_NODE_ABSENT_SEC: optional override.
+    # 기본값(1209600.0)은 OrchestratorConfig.pending_node_absent_sec 필드가 정본으로 보유
+    # (env-variables.md §1: 코드에 fallback 기본값을 두지 않음).
+    if "ORCH_PENDING_NODE_ABSENT_SEC" in os.environ:
+        absent_override = float(os.environ["ORCH_PENDING_NODE_ABSENT_SEC"])
+        if absent_override <= 0:
+            raise ValueError(
+                f"ORCH_PENDING_NODE_ABSENT_SEC must be > 0, got {absent_override}"
+            )
+        config = config.model_copy(
+            update={"pending_node_absent_sec": absent_override}
         )
 
     server = OrchestratorServer(config)

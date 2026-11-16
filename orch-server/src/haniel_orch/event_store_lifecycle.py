@@ -146,6 +146,24 @@ class EventStoreLifecycleMixin:
                 await self._db.rollback()
                 raise
 
+    async def close_absent_node_requests(
+        self, *, absent_before: str, connected_node_ids: set[str]
+    ) -> list[dict[str, Any]]:
+        """기한 넘게 연결되지 않은 노드의 대기 요청을 닫는다(어긋남 7). 닫은 요청을 돌려준다."""
+        async with self._mutation_lock:
+            try:
+                closed = await event_store_mutations.close_absent_node_requests(
+                    self._db,
+                    absent_before=absent_before,
+                    connected_node_ids=connected_node_ids,
+                    now=now_iso(),
+                )
+                await self._db.commit()
+                return closed
+            except Exception:
+                await self._db.rollback()
+                raise
+
     async def upsert_node(
         self,
         node_id: str,

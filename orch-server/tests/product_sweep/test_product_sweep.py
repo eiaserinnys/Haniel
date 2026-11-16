@@ -18,30 +18,33 @@ def test_manual_approval_opens_an_attempt_through_the_product_definition():
 
 
 BRANCHES = [
-    pytest.param("가", {}, id="ga"),
-    pytest.param("나", {"asym": True}, id="na"),
-    pytest.param("다", {"restart": "legacy"}, id="da", marks=FULL),
-    pytest.param("라", {"restart": "manifest", "asym": True}, id="ra", marks=FULL),
-    pytest.param("마", {"auto": True}, id="ma", marks=FULL),
-    pytest.param("바", {"auto": True, "restart": "legacy"}, id="ba", marks=FULL),
-    pytest.param("사", {"newer": True, "restart": "legacy"}, id="sa", marks=FULL),
-    pytest.param("아", {"orestart": True, "asym": True}, id="ah"),
-    pytest.param("자", {"auto": True, "orestart": True}, id="ja", marks=FULL),
-    pytest.param("차", {"auto": True, "restart": "manifest"}, id="cha", marks=FULL),
+    pytest.param("가", {}, ("노드 없이 기다림",), id="ga"),
+    pytest.param("나", {"asym": True}, ("노드 없이 기다림",), id="na"),
+    pytest.param("다", {"restart": "legacy"}, (), id="da", marks=FULL),
+    pytest.param("라", {"restart": "manifest", "asym": True}, (), id="ra", marks=FULL),
+    pytest.param("마", {"auto": True}, (), id="ma", marks=FULL),
+    pytest.param("바", {"auto": True, "restart": "legacy"}, (), id="ba", marks=FULL),
+    pytest.param("사", {"newer": True, "restart": "legacy"}, (), id="sa", marks=FULL),
+    pytest.param("아", {"orestart": True, "asym": True}, (), id="ah"),
+    pytest.param("자", {"auto": True, "orestart": True}, (), id="ja", marks=FULL),
+    pytest.param("차", {"auto": True, "restart": "manifest"}, (), id="cha", marks=FULL),
+    # 노드가 계획 묻기에 fail_closed로 답하는 갈래. sweep_full 없이 PR CI에서 돈다
+    pytest.param("카", {"decline": True}, ("계획 거절",), id="ka"),
 ]
 
 ZERO_METRICS = (
     "가 길 없음", "가 반드시 아님", "나 길 없음", "나 반드시 아님", "돌아오지 않으면 갇힘",
     "거짓 성공", "두 번 실행", "남는 빚", "약속 다", "잠금 불일치", "실패했는데 안 잠긴 대기",
-    "빈칸", "넘침",
+    "빈칸", "넘침", "끊긴 노드의 대기가 남음", "계획 거절 뒤 대기에 남음",
 )
 
 
 @TIMEOUT
-@pytest.mark.parametrize("name, options", BRANCHES)
-def test_product_promises_hold(name, options):
+@pytest.mark.parametrize("name, options, observed", BRANCHES)
+def test_product_promises_hold(name, options, observed):
     metrics = run(name, show_paths=True, **options)
     assert {key: metrics[key] for key in ZERO_METRICS} == {key: 0 for key in ZERO_METRICS}
+    assert all(metrics[key] > 0 for key in observed), metrics
 
 
 CONTROLS = [

@@ -140,7 +140,7 @@ def _request_columns(
     """사건과 출발, 결과 잎에서 요청 상태가 옮겨질 때 바깥 칸에 쓸 값을 정한다."""
     if event == "newer_commit":
         return {"reject_reason": data["reason"]}
-    if event == "reject":
+    if event in ("reject", "node_absent", "node_declined"):
         reason = data.get("reason")
         return {} if reason is None else {"reject_reason": reason}
     if event == "begin_attempt":

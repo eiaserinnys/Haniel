@@ -1097,6 +1097,119 @@ class TestHandleDeployResult:
         assert failed["duration_ms"] == 3400
 
 
+class TestAbsentNodeSweep:
+    """어긋남 7: 기한 넘게 연결되지 않은 노드의 대기 요청은 기동 직후 훑기에서 거절 모양으로 닫힌다."""
+
+    async def _seed(self, store: EventStore, deploy_id: str, node_id: str) -> None:
+        assert await store.create_deploy_event(
+            deploy_id=deploy_id,
+            node_id=node_id,
+            repo="r",
+            branch="main",
+            commits=["target"],
+            affected_services=[],
+            diff_stat=None,
+            detected_at="2026-08-01T00:00:00+00:00",
+            target_head="target",
+        )
+
+    async def _age(self, store: EventStore, sql: str, *args) -> None:
+        await store._db.execute(sql, args)
+        await store._db.commit()
+
+    async def test_waiting_requests_of_an_absent_node_are_rejected_at_startup(
+        self, hub: WebSocketHub, store: EventStore
+    ):
+        await self._seed(store, "old:r:main:target", "n-old")
+        await store.upsert_node(
+            node_id="n-old",
+            hostname="h",
+            os="Linux",
+            arch="x86_64",
+            haniel_version="0.1.0",
+            connected=False,
+        )
+        stale = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        await self._age(
+            store, "UPDATE nodes SET last_seen = ? WHERE node_id = ?", stale, "n-old"
+        )
+
+        # nodes 표에 없는 노드의 요청은 그 요청의 created_at을 기준 시각으로 본다
+        await self._seed(store, "gone:r:main:target", "n-gone")
+        await self._age(
+            store,
+            "UPDATE deploy_events SET created_at = ? WHERE deploy_id = ?",
+            stale,
+            "gone:r:main:target",
+        )
+
+        # 지금 연결된 노드의 요청은 내리지 않는다
+        await self._seed(store, "live:r:main:target", "n-live")
+        websocket = AsyncMock()
+        await register_node(
+            hub,
+            hub.registry,
+            websocket,
+            NodeHello(
+                node_id="n-live",
+                token="test-token",
+                hostname="h",
+                os="Linux",
+                arch="x86_64",
+                haniel_version="0.1.0",
+            ),
+        )
+        await self._age(
+            store, "UPDATE nodes SET last_seen = ? WHERE node_id = ?", stale, "n-live"
+        )
+
+        await hub.start_heartbeat_checker()
+        assert hub._heartbeat_task is not None
+
+        for deploy_id in ("old:r:main:target", "gone:r:main:target"):
+            event = await store.get_deploy_event(deploy_id)
+            assert event["status"] == "rejected", deploy_id
+            assert event["reject_reason"] == f"node absent since {stale}", deploy_id
+        live = await store.get_deploy_event("live:r:main:target")
+        assert live["status"] == "pending", "지금 연결된 노드의 요청을 내렸다"
+
+        await hub.shutdown()
+
+    async def test_sweep_failure_does_not_stop_the_heartbeat_loop(
+        self, hub: WebSocketHub, monkeypatch
+    ):
+        """훑기가 예외를 던져도 끊김 판정은 계속 돌고 다음 주기에 훑기가 다시 불린다."""
+        sweep_calls: list[str] = []
+
+        async def failing_sweep() -> None:
+            sweep_calls.append("sweep")
+            raise RuntimeError("sweep failed")
+
+        stale_calls: list[str] = []
+        real_stale = hub._registry.check_stale_connections
+
+        async def counting_stale():
+            stale_calls.append("stale")
+            return await real_stale()
+
+        monkeypatch.setattr(hub, "_sweep_absent_node_requests", failing_sweep)
+        monkeypatch.setattr(hub._registry, "check_stale_connections", counting_stale)
+        monkeypatch.setattr("haniel_orch.hub._HEARTBEAT_INTERVAL_SEC", 0.01)
+        monkeypatch.setattr("haniel_orch.hub._ABSENT_SWEEP_INTERVAL_SEC", 0.01)
+
+        await hub.start_heartbeat_checker()
+        try:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 2.0
+            # 기동 직후 훑기 한 번은 실패로 끝났다. 그 뒤 주기가 돌면 다시 불려야 한다
+            while len(sweep_calls) < 2 or len(stale_calls) < 2:
+                assert loop.time() < deadline, (sweep_calls, stale_calls)
+                await asyncio.sleep(0.01)
+            assert not hub._heartbeat_task.done()
+        finally:
+            await hub.shutdown()
+
+
 class TestHeartbeatChecker:
     async def test_start_and_shutdown(self, hub: WebSocketHub):
         await hub.start_heartbeat_checker()

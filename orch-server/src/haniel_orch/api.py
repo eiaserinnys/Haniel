@@ -117,6 +117,8 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
             body: dict[str, Any] = {"error": str(exc), "deploy_id": deploy_id}
             if exc.blocking_self_update is not None:
                 body["blocking_self_update"] = exc.blocking_self_update
+            if exc.details is not None:
+                body.update(exc.details)
             return JSONResponse(body, status_code=exc.status_code)
 
     async def reject_deploy(request: Request) -> JSONResponse:

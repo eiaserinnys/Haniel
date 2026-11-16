@@ -182,6 +182,8 @@ async def test_unknown_row_and_legacy_row_are_no_transition(store: EventStore):
     assert await _full_snapshot(store) == before
 
 
+# 정의가 커지면 잎×사건×사실 조합이 늘어 기본 60초에 가까워진다(카드 #1260에서 대기 닫힘 사건 둘을 더했다)
+@pytest.mark.timeout(120)
 def test_introspected_transitions_equal_what_advance_allows():
     """생성기가 읽는 전이 목록과 실제로 일어나는 전이(모든 사실 조합)가 같다.
 

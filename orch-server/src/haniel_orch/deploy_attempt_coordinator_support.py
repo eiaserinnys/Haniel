@@ -17,9 +17,12 @@ class PlanRejected(RuntimeError):
         status_code: int,
         *,
         blocking_self_update: dict[str, Any] | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         self.status_code = status_code
         self.blocking_self_update = blocking_self_update
+        # 응답 본문에 함께 싣는 칸(노드가 답한 까닭과 요청을 닫았다는 표시)
+        self.details = details
         super().__init__(message)
 
 

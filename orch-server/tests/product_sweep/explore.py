@@ -2,7 +2,7 @@
 
 from collections import deque
 
-from .system import OPEN, System
+from .system import OPEN, WAIT, System
 
 def explore(sysm):
     start = sysm.initial()
@@ -55,8 +55,9 @@ def run(name, show_paths=False, **kw):
     parent, edges = explore(sysm)
     reach = list(parent)
 
-    success = [c for c in reach if c.st in ("success", "superseded")]
-    way = can_reach(edges, success, AUTO)                       # 사람 없이 닫힐 길이 있다 (성공, 또는 새 커밋에 밀림)
+    closed = [c for c in reach if c.st in ("success", "superseded", "rejected")]
+    # 사람 없이 닫힐 길이 있다 (성공, 새 커밋에 밀림, 또는 노드가 기한 넘게 없어 거절로 닫힘)
+    way = can_reach(edges, closed, AUTO)
     no_way = [c for c in reach if c not in way]
     may_fail = can_reach(edges, no_way, AUTO)                   # 사람 없이 가다가 길이 없는 구성에 빠질 수 있다
 
@@ -89,6 +90,11 @@ def run(name, show_paths=False, **kw):
     lock_bad = [c for c in reach if (c.st == "retry") != (c.lk == "l_on") and c.st in ("pending", "again", "retry")]
     failed_open = [c for c in reach if c.ff and c.st in ("pending", "again") and c.bl == "b_none"
                    and not c.qno and not any(i[2] == "r_owed" for i in c.inst)]      # 실패했는데 잠기지 않은 채 가라앉은 대기
+    wait_exit = can_reach(edges, [c for c in reach if c.st not in WAIT], NOLINK)
+    absent_wait = [c for c in reach if c.st in WAIT and c.ph != "up"]               # 노드가 끊긴 채 요청이 기다린다
+    absent_stay = [c for c in absent_wait if c not in wait_exit]                     # 노드가 돌아오지 않으면 대기에 끝내 남는다(H5)
+    declined = [c for c in reach if c.dc]                                            # 노드가 계획 묻기에 실행하지 않겠다고 답했다(fail_closed)
+    declined_stay = [c for c in declined if c.st in WAIT]                            # 그런데도 요청이 대기에 남아 있다
 
     row = [("구성", len(reach)), ("가 길 없음", len(a_way)), ("가 반드시 아님", len(a_must)),
            ("나 길 없음", len(b_way)), ("나 반드시 아님", len(b_must)),
@@ -98,7 +104,9 @@ def run(name, show_paths=False, **kw):
            ("갇힘 중 다시 대기", len(stuck_again)), ("갇힘 중 실패 뒤 대기", len(stuck_retry)),
            ("갇힘 중 다시 대기에 남음", len(stuck_again_stay)),
            ("다시 대기", len(again_n)), ("다시 대기에 남음", len(again_stay)),
-           ("약속 다", len(promise3)), ("잠금 불일치", len(lock_bad)), ("실패했는데 안 잠긴 대기", len(failed_open))]
+           ("약속 다", len(promise3)), ("잠금 불일치", len(lock_bad)), ("실패했는데 안 잠긴 대기", len(failed_open)),
+           ("노드 없이 기다림", len(absent_wait)), ("끊긴 노드의 대기가 남음", len(absent_stay)),
+           ("계획 거절", len(declined)), ("계획 거절 뒤 대기에 남음", len(declined_stay))]
     print(f"{name}: " + " | ".join(f"{k} {v}" for k, v in row))
     for key, cnt in sorted(sysm.holes.items(), key=lambda kv: -kv[1])[:8]:
         print(f"      빈칸: {key} ({cnt}번)")
@@ -106,7 +114,8 @@ def run(name, show_paths=False, **kw):
         for nm, bad in (("가 길 없음", a_way), ("가 반드시 아님", a_must), ("나 길 없음", b_way),
                         ("나 반드시 아님", b_must), ("돌아오지 않으면 갇힘", b_gone), ("거짓 성공", false_ok), ("두 번 실행", double),
                         ("남는 빚", debt),
-                        ("약속 다", promise3), ("잠금 불일치", lock_bad), ("실패했는데 안 잠긴 대기", failed_open)):
+                        ("약속 다", promise3), ("잠금 불일치", lock_bad), ("실패했는데 안 잠긴 대기", failed_open),
+                        ("끊긴 노드의 대기가 남음", absent_stay), ("계획 거절 뒤 대기에 남음", declined_stay)):
             if bad:
                 c = min(bad, key=lambda x: len(path_to(parent, x)))
                 print(f"      {nm}: " + " → ".join(path_to(parent, c)))

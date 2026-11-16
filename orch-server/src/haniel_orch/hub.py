@@ -6,6 +6,8 @@ import asyncio
 import hmac
 import json
 import logging
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -47,6 +49,11 @@ _ATTEMPT_BOUND = (
     DeployAttemptReceived,
 )
 
+# 하트비트 확인 주기. 끊김 판정과 노드 없음 훑기가 이 주기로 돈다
+_HEARTBEAT_INTERVAL_SEC = 30.0
+# 노드 없음 훑기 간격(기동 직후 한 번은 그와 별개로 돈다)
+_ABSENT_SWEEP_INTERVAL_SEC = 3600.0
+
 
 class WebSocketHub(HubCanonicalFlows, HubServiceCommands):
     """Central hub managing node and dashboard WebSocket connections."""
@@ -61,12 +68,14 @@ class WebSocketHub(HubCanonicalFlows, HubServiceCommands):
         command_timeout_sec: float = 30.0,
         deploy_timeout_sec: float = 300.0,
         self_update_postpone_sec: float = 21600.0,
+        pending_node_absent_sec: float = 1209600.0,
     ) -> None:
         self._registry = registry
         self._store = store
         self._token = token
         self._push: PushService = push_service or NullPushService()
         self._auth_bearer_token = auth_bearer_token
+        self._pending_node_absent_sec = pending_node_absent_sec
         self._dashboard_connections: set[WebSocket] = set()
         self._heartbeat_task: asyncio.Task | None = None
         self._background_tasks: set[asyncio.Task[None]] = set()
@@ -395,16 +404,59 @@ class WebSocketHub(HubCanonicalFlows, HubServiceCommands):
         )
         await self._cleanup_orphan_commands(node_id, error=error)
 
+    async def _sweep_absent_node_requests(self) -> None:
+        """기한 넘게 연결되지 않은 노드의 대기 요청을 내린다(어긋남 7).
+
+        지금 연결된 노드의 요청은 내리지 않는다. 기준 시각은 nodes.last_seen이고, nodes 표에 없는 노드의 요청은
+        그 요청의 created_at이다. 닫힘은 정의의 node_absent 사건으로만 일어난다.
+        """
+        absent_before = (
+            datetime.now(timezone.utc) - timedelta(seconds=self._pending_node_absent_sec)
+        ).isoformat()
+        closed = await self._store.close_absent_node_requests(
+            absent_before=absent_before,
+            connected_node_ids={
+                node.node_id for node in self._registry.get_connected_nodes()
+            },
+        )
+        if not closed:
+            return
+        await self.deploy_coordinator.resolve_terminal_canonicals(
+            {event["deploy_id"] for event in closed},
+            message="request closed because its node stayed absent",
+        )
+        for event in closed:
+            await self.broadcast_to_dashboards(
+                {
+                    "type": "status_change",
+                    "deploy_id": event["deploy_id"],
+                    "status": "rejected",
+                    "node_id": event["node_id"],
+                    "reject_reason": event["reject_reason"],
+                }
+            )
+
+    async def _sweep_absent_node_requests_safely(self) -> None:
+        """훑기 실패가 끊김 판정을 맡은 하트비트 작업을 멈추지 않게 한다(카드 #1260 검수)."""
+        try:
+            await self._sweep_absent_node_requests()
+        except Exception:
+            logger.exception("Absent node request sweep failed")
+
     async def start_heartbeat_checker(self) -> None:
         """Start periodic heartbeat check task (30s interval)."""
         # One explicit startup repair closes duplicate pending canonicals left by
         # pre-generation-time servers. Read APIs stay mutation-free.
         await self._store.supersede_stale_pending_deploys()
         await self.deploy_coordinator.restore_deadlines()
+        # 기동 직후 한 번, 그 뒤 한 시간에 한 번 노드 없음 훑기(어긋남 7).
+        # 훑기가 실패해도 끊김 판정은 계속 돌아야 한다
+        await self._sweep_absent_node_requests_safely()
 
         async def _check_loop() -> None:
+            next_absent_sweep = time.monotonic() + _ABSENT_SWEEP_INTERVAL_SEC
             while True:
-                await asyncio.sleep(30)
+                await asyncio.sleep(_HEARTBEAT_INTERVAL_SEC)
                 stale_nodes = await self._registry.check_stale_connections()
                 for node in stale_nodes:
                     await self._disconnect_node(
@@ -416,6 +468,10 @@ class WebSocketHub(HubCanonicalFlows, HubServiceCommands):
                         expected_generation=node.connection_generation,
                         expected_connection_token=node.connection_token,
                     )
+                if time.monotonic() >= next_absent_sweep:
+                    # 실패해도 다음 시각을 한 시간 뒤로 민다. 30초마다 다시 시도하며 로그를 쏟지 않게 한다
+                    next_absent_sweep = time.monotonic() + _ABSENT_SWEEP_INTERVAL_SEC
+                    await self._sweep_absent_node_requests_safely()
 
         self._heartbeat_task = asyncio.create_task(_check_loop())
 

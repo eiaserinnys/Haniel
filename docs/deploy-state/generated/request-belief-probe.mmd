@@ -16,6 +16,8 @@ stateDiagram-v2
         b_probe --> b_none: 계획 묻기의 마감이 지난다
         b_probe --> b_none: 노드가 끊긴 것을 안다
         b_probe --> b_none: 거절한다
+        b_probe --> b_none: 노드가 정해진 기간 넘게 연결되지 않았다
+        b_probe --> b_none: 노드가 계획 묻기에 실행하지 않겠다고 답한다
         b_probe --> b_none: 더 새 커밋이 들어온다
         b_unknown --> b_unknown: 노드가 끊긴 것을 안다
         b_queued --> b_queued: 노드가 끊긴 것을 안다

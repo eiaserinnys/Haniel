@@ -11,17 +11,21 @@ QMAX = 10
 OWN = 0       # 노드가 스스로 한 배포의 번호
 ASK = 9       # 허가를 청하고 기다리는 실행의 임시 번호
 
-C = namedtuple("C", "st bl lk tag cur opened pk pcnt pa ev sm newer inst slot tgt cut boot dbl rs asks qon qno ph ors au ff v3 jf unconfirmed")
+C = namedtuple("C", "st bl lk tag cur opened pk pcnt pa ev sm newer inst slot tgt cut boot dbl rs asks qon qno ph ors au ff v3 jf unconfirmed dc")
 # lk: 사람 승인 필요. au: 자동 허가로 연 시도 번호들. ff: 실제 실행 실패가 있었고 그 뒤 사람 승인이 연 시도가 없다.
 # v3: 약속 다를 어겼다(ff인데 자동 허가로 실행을 시작했다). jf: 저널이 「시도의 실행이 실패했다」로 남아 있다(journal을 켠 갈래만)
+# dc: 노드가 계획 묻기에 fail_closed(실행하지 않음)로 답한 횟수
 OPEN = {"pending", "again", "retry", "deploying"}
+WAIT = {"pending", "again", "retry"}
 # ph: up, o(오케스트레이터만 끊김을 앎), n(노드만 앎), both, or(오케스트레이터가 재시작함. 노드는 아직 모르고, 죽기 전에 보낸 글은 닿는다)
 
 
 class System:
-    def __init__(self, *, auto=False, restart=None, asym=False, newer=False, orestart=False, without=()):
+    def __init__(self, *, auto=False, restart=None, asym=False, newer=False, orestart=False, without=(), decline=False):
         self.auto, self.restart, self.asym, self.newer = auto, restart, asym, newer
         self.orestart = orestart
+        # decline: 노드가 계획 묻기에 fail_closed(실행하지 않음)로 답한다
+        self.decline = decline
         self.without = set(without)     # 장치를 하나씩 빼 본다: hello, grace, refuse, startrule, p81, p83, journal
         self.journal = restart == "manifest" and "journal" not in self.without
         self.holes: dict = {}
@@ -29,7 +33,7 @@ class System:
 
     def initial(self):
         return C("pending", "b_none", "l_off", "t_off", 0, 0, 0, 0, False, ("ev_none",) * MAXA, (), False, (), None,
-                 False, False, False, False, 0, 0, (), (), "up", 0, (), False, False, 0, ())
+                 False, False, False, False, 0, 0, (), (), "up", 0, (), False, False, 0, (), 0)
 
     # ── 보내기 ──
     def osend(self, c, msg, k):
@@ -193,6 +197,8 @@ class System:
         if msg == "probe":
             if c.cut:
                 return self.nsend(c, "plan_closed", k)
+            if self.decline:
+                return self.nsend(c, "plan_declined", k)      # 노드가 실행하지 않겠다고 답한다(fail_closed)
             return self.nsend(c, f"plan_exec_f:{c.jf}" if (self.journal and c.jf) else "plan_exec", k)
         if msg in ("permit", "apermit"):
             asking = self.inst_get(c, ASK)
@@ -249,12 +255,14 @@ class System:
                 c2 = c2._replace(pk=pid, pcnt=pid, pa=True)
                 return self.osend(c2, "probe", pid)
             return [c2]
-        if msg in ("plan_exec", "plan_closed") or msg.startswith("plan_exec_f:"):
+        if msg in ("plan_exec", "plan_closed", "plan_declined") or msg.startswith("plan_exec_f:"):
             if c.bl != "b_probe" or c.pk != k:
                 return [c]              # 닫힌 계획 묻기의 답
             auto = c.pa
             if msg == "plan_closed":
                 event = "plan_closed"
+            elif msg == "plan_declined":
+                event = "node_declined"
             elif msg.startswith("plan_exec_f:") and auto:
                 from .plan_rule import failed_journal_applies, plan_requires_inspection
                 linked = int(msg.split(":", 1)[1])
@@ -268,6 +276,8 @@ class System:
             if not r:
                 return [c]
             c2, todo = r
+            if msg == "plan_declined":
+                c2 = c2._replace(dc=c2.dc + 1)
             if "send_permit" in todo:
                 return self.open_attempt(c2, auto)
             return [c2]
@@ -374,6 +384,10 @@ class System:
             if not renewing:
                 r = self.orch(c, "lease_deadline")
                 add("실행 임대의 마감이 지난다", "time", r and r[0])
+        # 노드 없음: 오케스트레이터가 끊김을 아는 노드가 기한 넘게 돌아오지 않으면 대기 셋을 거절 모양으로 닫는다(어긋남 7)
+        if c.st in WAIT and c.ph in ("o", "both", "or"):
+            r = self.orch(c, "node_absent")
+            add("노드가 기한 넘게 돌아오지 않는다", "time", r and r[0])
         a = self.inst_get(c, ASK)
         if a and a[1] == "asking":
             add("노드가 허가를 기다리다 포기한다", "time", self.node(c, ASK, "give_up"))

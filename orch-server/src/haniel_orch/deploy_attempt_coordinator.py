@@ -320,9 +320,17 @@ class DeployAttemptCoordinator(
             if result["status"] == "duplicate_begun":
                 return
             if result["status"] != "begun":
+                details = None
+                if result.get("request_closed"):
+                    # 노드가 계획을 거절해 요청을 닫았다. 본문에 노드가 답한 까닭을 싣는다(어긋남 13)
+                    details = {
+                        "terminal_reason": result.get("terminal_reason"),
+                        "terminal_error": result.get("terminal_error"),
+                        "request_closed": True,
+                    }
                 self._resolve_probe(
                     proposal.probe_id,
-                    PlanRejected(result.get("kind", "preflight rejected"), 422),
+                    PlanRejected(result.get("kind", "preflight rejected"), 422, details=details),
                 )
                 if "auto_reject" in result.get("todo", ()):
                     # 점검 필요가 자동 탐침을 막았다(섰거나 실패 저널이 실려 왔다). 노드가 시간 초과까지 기다리지 않게 답한다
