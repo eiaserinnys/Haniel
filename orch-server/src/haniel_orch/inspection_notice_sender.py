@@ -146,7 +146,7 @@ class InspectionNoticeSender:
         bundles = await self._store.due_inspection_notice_bundles()
         for group in bundles:
             notice_ids = [row["notice_id"] for row in group]
-            text = compose_notice_message([row["text"] for row in group])
+            text = compose_notice_message(group)
             sent, error = await self._post(text, delivery_id_for(notice_ids))
             if sent:
                 await self._store.mark_inspection_notices_sent(notice_ids)

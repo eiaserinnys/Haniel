@@ -1,8 +1,8 @@
 """점검 필요 알림의 본문(카드 #1260).
 
-받는 쪽(소울스트림 세션)에 그대로 보이는 한국어 글이다. 맨 앞의 지시문은 코드 상수로 두고, 그 뒤에
-요청 한 줄마다 구조 필드를 붙인다. 값이 없으면 「미확인」이고, reason과 error는 비밀값을 가린다.
-이 모듈은 DB나 설정을 모른다(순수 함수만 둔다).
+받는 쪽(소울스트림 세션)에 그대로 보이는 한국어 글이다. 맨 첫 줄은 고정 말머리와 묶음 요약이고, 그
+다음 줄부터 지시문은 코드 상수로 두며, 그 뒤에 요청 한 줄마다 구조 필드를 붙인다. 값이 없으면
+「미확인」이고, reason과 error는 비밀값을 가린다. 이 모듈은 DB나 설정을 모른다(순수 함수만 둔다).
 """
 
 from __future__ import annotations
@@ -12,15 +12,18 @@ from typing import Any, Mapping
 
 UNKNOWN = "미확인"
 ERROR_LIMIT = 1500
+HEADER = "[하니엘 점검 필요]"
 
 INSTRUCTION_TEXT = "\n".join(
     (
-        "하니엘 배포가 실패해 점검 필요 잠금이 걸렸다. 🪽 하니엘 폴더에 서소영(카드 담당) 점검 카드를 열어 맡긴다.",
+        "하니엘 배포가 실패해 점검 필요 잠금이 걸렸다. 이 알림을 받은 쪽은 현 상태를 스스로 판단하지 않고, "
+        "🪽 하니엘 폴더에 서소영(카드 담당) 점검 카드를 열어 넘긴다. 카드 제목은 첫 줄 묶음 요약을 쓸 수 있다.",
+        "요청이 이미 닫혔는지, 더 새 요청이 있는지, 노드 설정에서 이미 걷어낸 저장소인지는 "
+        "점검 카드 담당이 첫 일로 확인한다.",
         "점검 담당은 원인을 찾고, 무엇이 바뀌어 다음 시도가 다르게 끝날지를 카드에 적은 뒤에만 "
         "haniel_approve.py --inspected-card로 하나씩 다시 승인한다.",
         "노드의 로컬 작업을 지워야 할 때, 원인을 찾지 못했을 때, 점검 뒤 다시 승인했는데 또 실패했을 때는 "
         "디렉터께 카드 질문으로 올린다.",
-        "요청이 이미 닫혔거나 더 새 요청이 있으면 현 상태부터 확인한다.",
     )
 )
 
@@ -104,6 +107,16 @@ def render_notice_text(
     )
 
 
-def compose_notice_message(texts: list[str]) -> str:
-    """맨 앞 지시문 + 요청 블록들. 같은 묶음은 언제 보내도 같은 본문이 된다."""
-    return "\n\n".join((INSTRUCTION_TEXT, *texts))
+def _bundle_summary(notices: list[Mapping[str, Any]]) -> str:
+    """묶음의 줄들만으로 정해지는 첫 줄. 시각이나 시도 수처럼 바뀌는 값은 넣지 않는다."""
+    first = notices[0]
+    count = len(notices)
+    rest = f" 외 {count - 1}" if count > 1 else ""
+    return f"{HEADER} {_shown(first.get('node_id'))} {count}건: {_shown(first.get('repo'))}{rest}"
+
+
+def compose_notice_message(notices: list[Mapping[str, Any]]) -> str:
+    """첫 줄 묶음 요약 + 지시문 + 요청 블록들. 같은 묶음은 언제 보내도 같은 본문이 된다."""
+    return "\n\n".join(
+        (_bundle_summary(notices), INSTRUCTION_TEXT, *(notice["text"] for notice in notices))
+    )
