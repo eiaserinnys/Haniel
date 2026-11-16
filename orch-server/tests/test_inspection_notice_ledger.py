@@ -441,16 +441,17 @@ async def test_notice_text_snapshots_the_last_failure_with_redaction(
     assert len(error_line) == len("error: ") + 1500
 
 
-async def test_notice_message_starts_with_the_instruction(store: EventStore):
+async def test_notice_message_starts_with_the_bundle_summary(store: EventStore):
     from haniel_orch.inspection_notice_sender import compose_notice_message
 
     await new_request(store)
     await fire_locking_event(store, "plan_failed_journal")
     row = (await notice_rows(store))[0]
 
-    message = compose_notice_message([row["text"]])
+    message = compose_notice_message([row])
 
-    assert message.startswith(INSTRUCTION_TEXT)
+    assert message.splitlines()[0] == "[하니엘 점검 필요] n 1건: r"
+    assert INSTRUCTION_TEXT in message
     assert "node_id: n" in message
 
 

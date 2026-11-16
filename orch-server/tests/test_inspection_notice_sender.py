@@ -137,9 +137,11 @@ async def test_sends_a_node_bundle_once_and_marks_it_sent(store: EventStore, fak
     assert request.headers["authorization"] == f"Bearer {TOKEN}"
     payload = fake.payloads()[0]
     assert set(payload) == {"text", "delivery_id"}
-    assert payload["text"].startswith(INSTRUCTION_TEXT)
-    assert payload["text"].count("node_id: n1") == 2
-    assert "n1:r:main:a" in payload["text"] and "n1:r:main:b" in payload["text"]
+    text = payload["text"]
+    assert text.splitlines()[0] == "[하니엘 점검 필요] n1 2건: r 외 1"
+    assert text.count(INSTRUCTION_TEXT) == 1
+    assert text.count("node_id: n1") == 2
+    assert "n1:r:main:a" in text and "n1:r:main:b" in text
     assert payload["delivery_id"].startswith("haniel-inspection-")
 
     rows = await notice_rows(store)
@@ -175,6 +177,7 @@ async def test_delivery_id_is_fixed_for_the_same_bundle(store: EventStore, fake_
     await sender.send_pass()
     first = fake.payloads()[0]["delivery_id"]
     first_text = fake.payloads()[0]["text"]
+    assert first_text.splitlines()[0] == "[하니엘 점검 필요] n1 1건: r"
     row = (await notice_rows(store))[0]
     await make_due(store, row["notice_id"])
     await sender.send_pass()
@@ -442,7 +445,50 @@ async def test_pending_api_shows_sent_state_after_delivery(
     assert notice["sent_at"] is not None
 
 
-def test_compose_puts_the_instruction_first():
-    message = compose_notice_message(["node_id: n", "node_id: m"])
-    assert message.startswith(INSTRUCTION_TEXT)
-    assert message.index("node_id: n") < message.index("node_id: m")
+def compose_rows(*repos: str, node_id: str = "n1") -> list[dict]:
+    return [
+        {"node_id": node_id, "repo": repo, "text": f"node_id: {node_id}\nrepo: {repo}"}
+        for repo in repos
+    ]
+
+
+def test_the_first_line_is_the_header_and_the_bundle_summary():
+    message = compose_notice_message(compose_rows("r"))
+    lines = message.splitlines()
+
+    assert lines[0] == "[하니엘 점검 필요] n1 1건: r"
+    assert "외" not in lines[0]
+    assert message.startswith(lines[0] + "\n")
+    assert message.index(INSTRUCTION_TEXT) > len(lines[0])
+
+
+def test_the_summary_names_the_first_repo_and_the_rest_of_the_bundle():
+    message = compose_notice_message(
+        compose_rows(
+            "seosoyoung-workspace", "a", "b", "c", "d", node_id="silent-manari-ts"
+        )
+    )
+
+    assert message.splitlines()[0] == (
+        "[하니엘 점검 필요] silent-manari-ts 5건: seosoyoung-workspace 외 4"
+    )
+
+
+def test_the_instruction_appears_once_after_the_first_line():
+    message = compose_notice_message(compose_rows("r", "s"))
+
+    assert message.count(INSTRUCTION_TEXT) == 1
+    assert not message.startswith(INSTRUCTION_TEXT)
+    assert message.index("node_id: n1") > message.index(INSTRUCTION_TEXT)
+
+
+def test_the_same_rows_compose_the_same_message():
+    rows = compose_rows("r", "s")
+
+    assert compose_notice_message(rows) == compose_notice_message(rows)
+
+
+def test_the_instruction_hands_the_check_to_a_card_owner():
+    assert "현 상태를 스스로 판단하지 않고" in INSTRUCTION_TEXT
+    assert "점검 카드 담당이 첫 일로 확인한다" in INSTRUCTION_TEXT
+    assert "요청이 이미 닫혔거나 더 새 요청이 있으면 현 상태부터 확인한다" not in INSTRUCTION_TEXT
