@@ -1175,6 +1175,40 @@ class TestAbsentNodeSweep:
 
         await hub.shutdown()
 
+    async def test_sweep_failure_does_not_stop_the_heartbeat_loop(
+        self, hub: WebSocketHub, monkeypatch
+    ):
+        """훑기가 예외를 던져도 끊김 판정은 계속 돌고 다음 주기에 훑기가 다시 불린다."""
+        sweep_calls: list[str] = []
+
+        async def failing_sweep() -> None:
+            sweep_calls.append("sweep")
+            raise RuntimeError("sweep failed")
+
+        stale_calls: list[str] = []
+        real_stale = hub._registry.check_stale_connections
+
+        async def counting_stale():
+            stale_calls.append("stale")
+            return await real_stale()
+
+        monkeypatch.setattr(hub, "_sweep_absent_node_requests", failing_sweep)
+        monkeypatch.setattr(hub._registry, "check_stale_connections", counting_stale)
+        monkeypatch.setattr("haniel_orch.hub._HEARTBEAT_INTERVAL_SEC", 0.01)
+        monkeypatch.setattr("haniel_orch.hub._ABSENT_SWEEP_INTERVAL_SEC", 0.01)
+
+        await hub.start_heartbeat_checker()
+        try:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 2.0
+            # 기동 직후 훑기 한 번은 실패로 끝났다. 그 뒤 주기가 돌면 다시 불려야 한다
+            while len(sweep_calls) < 2 or len(stale_calls) < 2:
+                assert loop.time() < deadline, (sweep_calls, stale_calls)
+                await asyncio.sleep(0.01)
+            assert not hub._heartbeat_task.done()
+        finally:
+            await hub.shutdown()
+
 
 class TestHeartbeatChecker:
     async def test_start_and_shutdown(self, hub: WebSocketHub):

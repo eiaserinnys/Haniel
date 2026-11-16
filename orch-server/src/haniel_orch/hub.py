@@ -49,6 +49,8 @@ _ATTEMPT_BOUND = (
     DeployAttemptReceived,
 )
 
+# 하트비트 확인 주기. 끊김 판정과 노드 없음 훑기가 이 주기로 돈다
+_HEARTBEAT_INTERVAL_SEC = 30.0
 # 노드 없음 훑기 간격(기동 직후 한 번은 그와 별개로 돈다)
 _ABSENT_SWEEP_INTERVAL_SEC = 3600.0
 
@@ -434,19 +436,27 @@ class WebSocketHub(HubCanonicalFlows, HubServiceCommands):
                 }
             )
 
+    async def _sweep_absent_node_requests_safely(self) -> None:
+        """훑기 실패가 끊김 판정을 맡은 하트비트 작업을 멈추지 않게 한다(카드 #1260 검수)."""
+        try:
+            await self._sweep_absent_node_requests()
+        except Exception:
+            logger.exception("Absent node request sweep failed")
+
     async def start_heartbeat_checker(self) -> None:
         """Start periodic heartbeat check task (30s interval)."""
         # One explicit startup repair closes duplicate pending canonicals left by
         # pre-generation-time servers. Read APIs stay mutation-free.
         await self._store.supersede_stale_pending_deploys()
         await self.deploy_coordinator.restore_deadlines()
-        # 기동 직후 한 번, 그 뒤 한 시간에 한 번 노드 없음 훑기(어긋남 7)
-        await self._sweep_absent_node_requests()
+        # 기동 직후 한 번, 그 뒤 한 시간에 한 번 노드 없음 훑기(어긋남 7).
+        # 훑기가 실패해도 끊김 판정은 계속 돌아야 한다
+        await self._sweep_absent_node_requests_safely()
 
         async def _check_loop() -> None:
             next_absent_sweep = time.monotonic() + _ABSENT_SWEEP_INTERVAL_SEC
             while True:
-                await asyncio.sleep(30)
+                await asyncio.sleep(_HEARTBEAT_INTERVAL_SEC)
                 stale_nodes = await self._registry.check_stale_connections()
                 for node in stale_nodes:
                     await self._disconnect_node(
@@ -459,8 +469,9 @@ class WebSocketHub(HubCanonicalFlows, HubServiceCommands):
                         expected_connection_token=node.connection_token,
                     )
                 if time.monotonic() >= next_absent_sweep:
+                    # 실패해도 다음 시각을 한 시간 뒤로 민다. 30초마다 다시 시도하며 로그를 쏟지 않게 한다
                     next_absent_sweep = time.monotonic() + _ABSENT_SWEEP_INTERVAL_SEC
-                    await self._sweep_absent_node_requests()
+                    await self._sweep_absent_node_requests_safely()
 
         self._heartbeat_task = asyncio.create_task(_check_loop())
 
