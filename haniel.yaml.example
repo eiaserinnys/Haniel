@@ -10,6 +10,8 @@
 #       +-- my-lib/            <- cloned repo
 
 poll_interval: 60
+# Create this dotenv file with WEBHOOK_URL and SLACK_BOT_TOKEN assignments.
+secrets_file: .secrets/haniel.env
 
 shutdown:
   timeout: 10
@@ -22,7 +24,7 @@ backoff:
   circuit_window: 300
 
 webhooks:
-  - url: https://hooks.slack.com/services/T.../B.../...
+  - url: ${secret:WEBHOOK_URL}
     format: slack
 
 mcp:
@@ -112,8 +114,7 @@ install:
       path: ./.services/my-app/.env
       keys:
         - key: SLACK_BOT_TOKEN
-          prompt: "Slack Bot Token (xoxb-...)"
-          guide: "https://api.slack.com/apps -> select app -> OAuth & Permissions -> Bot User OAuth Token"
+          default: ${secret:SLACK_BOT_TOKEN}
         - key: DEBUG
           default: "false"
 

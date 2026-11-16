@@ -27,6 +27,7 @@ This is enough to run haniel with self-update only. See [`haniel.yaml.example`](
 |-------|------|---------|-------------|
 | `poll_interval` | int | `60` | Seconds between git fetch polls |
 | `auto_apply` | bool | `true` | If `false`, detected changes are shown in dashboard but not auto-applied. Manual "Update" from dashboard is still possible |
+| `secrets_file` | string | — | dotenv file containing values for secret references |
 | `shutdown` | object | — | Global shutdown behavior |
 | `backoff` | object | — | Restart backoff and circuit breaker |
 | `webhooks` | list | — | Notification endpoints |
@@ -37,6 +38,46 @@ This is enough to run haniel with self-update only. See [`haniel.yaml.example`](
 | `self` | object | — | Self-update mechanism |
 | `orchestrator_client` | object | — | Remote orchestrator node connection |
 | `install` | object | — | Installation phase (used only by `haniel install`) |
+
+## Secret references
+
+Set `secrets_file` to a dotenv file, using a path relative to the directory
+containing `haniel.yaml` (or an absolute path). The file uses `NAME=value`
+assignments. Its values are read without environment-variable interpolation
+and are not added to the Haniel process environment.
+
+```yaml
+secrets_file: .secrets/haniel.env
+webhooks:
+  - url: ${secret:WEBHOOK_URL}
+slack:
+  bot_token: ${secret:SLACK_BOT_TOKEN}
+  app_token: ${secret:SLACK_APP_TOKEN}
+  notify_user: U123456
+install:
+  configs:
+    app-env:
+      path: .services/app/.env
+      keys:
+        - key: API_KEY
+          default: ${secret:APP_API_KEY}
+```
+
+References can occupy a whole value or be embedded in a string. They are
+supported in `webhooks[].url`, `slack.bot_token`, `slack.app_token`,
+`orchestrator_client.token`, `dashboard.token`,
+`install.service.service_account.password`, and `install.configs` key defaults
+and content. Other placeholders such as `${VAR}`, `$VAR`, and `{root}` keep
+their existing meaning. A missing file or name prevents the configuration from
+loading. The configuration model and edits retain references; install output
+files receive the resolved values where needed.
+`haniel install` writes the first resolved webhook URL to the private
+`haniel-runner.conf` file (mode `600` on POSIX).
+
+Run `haniel validate --no-plain-secrets haniel.yaml` to reject plain values in
+Haniel's own secret fields and values of eight or more characters from the
+secrets file appearing literally anywhere in the configuration. Existing plain
+configurations continue to work without this option.
 
 ## `shutdown`
 

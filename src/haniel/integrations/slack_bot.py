@@ -121,8 +121,8 @@ class SlackBot:
         try:
             self._dm_channel = self._open_dm_channel()
             logger.info("SlackBot DM channel: %s", self._dm_channel)
-        except SlackApiError as e:
-            logger.error("SlackBot failed to open DM channel: %s", e)
+        except SlackApiError:
+            logger.error("SlackBot failed to open DM channel")
             # Continue — notifications are nice-to-have; don't abort runner startup
 
         # SocketModeHandler.start() is blocking, so run in a daemon thread

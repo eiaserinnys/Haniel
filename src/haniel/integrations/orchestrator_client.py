@@ -591,8 +591,8 @@ class OrchestratorClient:
         asyncio.set_event_loop(self._loop)
         try:
             self._loop.run_until_complete(self._run())
-        except Exception as e:
-            logger.error(f"Orchestrator client loop crashed: {e}")
+        except Exception:
+            logger.error("Orchestrator client loop crashed")
         finally:
             self._loop.close()
             self._loop = None
@@ -609,11 +609,11 @@ class OrchestratorClient:
             while not self._stop_event.is_set():
                 try:
                     await self._connect_and_listen()
-                except Exception as e:
+                except Exception:
                     if self._stop_event.is_set():
                         break
                     logger.warning(
-                        f"Orchestrator connection failed: {e}. "
+                        "Orchestrator connection failed. "
                         f"Reconnecting in {self._reconnect_delay:.1f}s"
                     )
                 finally:

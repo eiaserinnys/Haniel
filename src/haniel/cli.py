@@ -439,7 +439,10 @@ def status(config: Path | None, as_json: bool) -> None:
 
 @main.command()
 @click.argument("config", required=False, callback=validate_config_file)
-def validate(config: Path | None) -> None:
+@click.option(
+    "--no-plain-secrets", is_flag=True, help="Reject plain secrets in config."
+)
+def validate(config: Path | None, no_plain_secrets: bool) -> None:
     """Validate configuration file.
 
     Checks:
@@ -458,6 +461,13 @@ def validate(config: Path | None) -> None:
     click.echo()
 
     haniel_config, errors = load_and_validate(config)
+
+    if not errors and no_plain_secrets:
+        from .config.secrets import plain_secret_errors
+
+        errors.extend(
+            plain_secret_errors(haniel_config, config.read_text(encoding="utf-8"))
+        )
 
     if errors:
         click.echo(click.style("Validation FAILED", fg="red", bold=True))

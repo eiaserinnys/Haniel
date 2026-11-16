@@ -296,13 +296,11 @@ class WebhookNotifier:
 
             response = await client.post(webhook["url"], json=payload)
             if response.status_code >= 400:
-                logger.warning(
-                    f"Webhook returned status {response.status_code}: {_mask_url(webhook['url'])}"
-                )
+                logger.warning("Webhook returned status %s", response.status_code)
         except httpx.TimeoutException:
-            logger.warning(f"Webhook timed out: {_mask_url(webhook['url'])}")
-        except Exception as e:
-            logger.warning(f"Webhook failed: {_mask_url(webhook['url'])} - {e}")
+            logger.warning("Webhook timed out")
+        except Exception:
+            logger.warning("Webhook failed")
 
     def notify_sync(self, msg: WebhookMessage) -> None:
         """Synchronous wrapper for notify().
