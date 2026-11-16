@@ -6,6 +6,7 @@ import hmac
 import logging
 import os
 import pathlib
+import re
 import subprocess
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -31,6 +32,29 @@ from .push import NullPushService, PushService, RelayPushService
 logger = logging.getLogger(__name__)
 
 _MAX_DASHBOARD_PATH_DECODE_PASSES = 8
+
+
+def _read_source_commit(root: pathlib.Path) -> str | None:
+    release_sha = root / ".release-sha"
+    try:
+        revision = release_sha.read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    except UnicodeDecodeError:
+        logger.warning("Invalid release SHA file: %s", release_sha)
+    else:
+        if re.fullmatch(r"[0-9a-f]{40}", revision):
+            return revision
+        logger.warning("Invalid release SHA file: %s", release_sha)
+
+    try:
+        revision = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True, timeout=5,
+        ).stdout.strip()
+        return revision if re.fullmatch(r"[0-9a-f]{40}", revision) else None
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def _resolve_dashboard_path(
@@ -299,21 +323,9 @@ def create_app() -> Starlette:
     if not token:
         raise RuntimeError("TOKEN environment variable is required")
 
-    try:
-        revision = subprocess.run(
-            ["git", "-C", str(pathlib.Path(__file__).resolve().parent.parent.parent),
-             "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True, timeout=5,
-        ).stdout.strip()
-        source_commit = (
-            revision if len(revision) == 40 and all(c in "0123456789abcdef" for c in revision) else None
-        )
-    except (OSError, subprocess.SubprocessError):
-        source_commit = None
-
     config = OrchestratorConfig(
         token=token,
-        source_commit=source_commit,
+        source_commit=_read_source_commit(pathlib.Path(__file__).resolve().parent.parent.parent),
         auth_bearer_token=os.environ.get("AUTH_BEARER_TOKEN", ""),
         db_path=os.environ.get("DB_PATH", "orchestrator.db"),
         host=os.environ.get("HOST", "0.0.0.0"),
