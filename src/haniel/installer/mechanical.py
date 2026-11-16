@@ -780,7 +780,9 @@ class MechanicalInstaller:
                 # Substitute {root} with config_dir (forward slashes for portability,
                 # avoids breaking JSON/YAML with backslash escapes on Windows)
                 root_str = self.config_dir.as_posix()
-                content = cfg.content.replace("{root}", root_str)
+                content = self.config.resolve_secret(
+                    cfg.content, f"install.configs.{name}.content"
+                ).replace("{root}", root_str)
 
                 config_path.write_text(content, encoding="utf-8")
                 logger.info(f"Created static config: {config_path}")

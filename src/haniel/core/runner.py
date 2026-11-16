@@ -2094,18 +2094,28 @@ class ServiceRunner:
 
         try:
             self._slack_bot = SlackBot(
-                config=config.slack,
+                config=config.slack.model_copy(
+                    update={
+                        "bot_token": config.resolve_secret(
+                            config.slack.bot_token, "slack.bot_token"
+                        ),
+                        "app_token": config.resolve_secret(
+                            config.slack.app_token, "slack.app_token"
+                        ),
+                    }
+                ),
                 approve_callback=self.trigger_pull,
                 app_home_controller=self,
             )
             self._slack_bot.start()
         except Exception as e:
-            logger.error("Failed to start Slack bot: %s", e)
+            logger.error("Failed to start Slack bot: %s", config.redact_secrets(str(e)))
             self._slack_bot = None
 
     def _start_orch_client(self) -> None:
         """Start orchestrator client if configured."""
-        orch_cfg = self._snapshot_config_state().config.orchestrator_client
+        config = self._snapshot_config_state().config
+        orch_cfg = config.orchestrator_client
         if orch_cfg is None or not orch_cfg.enabled:
             return
         try:
@@ -2113,7 +2123,13 @@ class ServiceRunner:
             import haniel
 
             self._orch_client = OrchestratorClient(
-                config=orch_cfg,
+                config=orch_cfg.model_copy(
+                    update={
+                        "token": config.resolve_secret(
+                            orch_cfg.token, "orchestrator_client.token"
+                        ),
+                    }
+                ),
                 haniel_version=haniel.__version__,
                 get_services_info=self._collect_services_info,
                 service_command_handler=self._handle_service_command,
@@ -2140,7 +2156,9 @@ class ServiceRunner:
             self._orch_client.start()
             logger.info("Orchestrator client started")
         except Exception as e:
-            logger.warning(f"Failed to start orchestrator client: {e}")
+            logger.warning(
+                "Failed to start orchestrator client: %s", config.redact_secrets(str(e))
+            )
             self._orch_client = None
 
     def _collect_services_info(self) -> list[dict]:
@@ -4794,6 +4812,7 @@ class ServiceRunner:
             message: Human-readable message
             details: Optional details dict
         """
+        config = self._snapshot_config_state().config
         try:
             from ..integrations.webhook import (
                 EventType,
@@ -4801,7 +4820,7 @@ class ServiceRunner:
                 WebhookNotifier,
             )
 
-            webhooks = self._snapshot_config_state().config.webhooks
+            webhooks = config.webhooks
             if not webhooks:
                 return
 
@@ -4812,10 +4831,24 @@ class ServiceRunner:
                 message=message,
                 details=details or {},
             )
-            notifier = WebhookNotifier(webhooks)
+            notifier = WebhookNotifier(
+                [
+                    webhook.model_copy(
+                        update={
+                            "url": config.resolve_secret(
+                                webhook.url, f"webhooks.{index}.url"
+                            )
+                        }
+                    )
+                    for index, webhook in enumerate(webhooks)
+                ]
+            )
             notifier.notify_sync(msg)
         except Exception as e:
-            logger.warning(f"Failed to send self-update notification: {e}")
+            logger.warning(
+                "Failed to send self-update notification: %s",
+                config.redact_secrets(str(e)),
+            )
 
     def _notify_self_update_detected(self, *, auto: bool) -> None:
         """Send webhook notification for self-update detection."""

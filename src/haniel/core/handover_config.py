@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from ..config import HanielConfig
+from ..config.secrets import SecretReferenceError, parse_config, resolved_config
 from .deployment_errors import StableDeploymentError
 from .path_identity import canonical_path_text
 from .service_environment import (
@@ -75,6 +76,8 @@ def handover_config_digest(config_path: Path) -> str:
         _config, digest, _bindings = _load_config_identity(resolved)
     except HandoverConfigError:
         raise
+    except SecretReferenceError as error:
+        raise HandoverConfigError("CONFIG_RELOAD_FAILED", str(error)) from None
     except Exception as error:
         raise HandoverConfigError(
             "CONFIG_RELOAD_FAILED", "configuration could not be loaded"
@@ -90,6 +93,8 @@ def load_handover_config(config_path: Path) -> tuple[HanielConfig, str]:
         config, digest, _bindings = _load_config_identity(resolved)
     except HandoverConfigError:
         raise
+    except SecretReferenceError as error:
+        raise HandoverConfigError("CONFIG_RELOAD_FAILED", str(error)) from None
     except Exception as error:
         raise HandoverConfigError(
             "CONFIG_RELOAD_FAILED", "configuration could not be loaded"
@@ -148,6 +153,8 @@ def prepare_runner_handover_config(
             )
         except HandoverConfigError:
             raise
+        except SecretReferenceError as error:
+            raise HandoverConfigError("CONFIG_RELOAD_FAILED", str(error)) from None
         except Exception as error:
             raise HandoverConfigError(
                 "CONFIG_RELOAD_FAILED", "configuration could not be loaded"
@@ -194,10 +201,12 @@ def prepare_runner_handover_config(
                 "repository fetch identity, path, or manifest changed",
             )
 
+        resolved_resident = resolved_config(resident.config)
+        resolved_candidate = resolved_config(candidate)
         changed_non_reloadable = [
             field
             for field in _NON_RELOADABLE_CONFIG_FIELDS
-            if getattr(resident.config, field) != getattr(candidate, field)
+            if getattr(resolved_resident, field) != getattr(resolved_candidate, field)
         ]
         if changed_non_reloadable:
             raise HandoverConfigError(
@@ -304,7 +313,7 @@ def _load_config_projection(
 
     raw = resolved.read_bytes()
     data = yaml.safe_load(raw.decode("utf-8"))
-    config = HanielConfig.model_validate(data or {})
+    config = parse_config(data, resolved.parent)
     projection, environment_snapshots = _canonical_projection(config, resolved.parent)
     if resolved.read_bytes() != raw:
         raise HandoverConfigError(

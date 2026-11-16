@@ -1155,7 +1155,9 @@ class HanielMcpServer:
                     dashboard_routes, dashboard_middleware, ws_handler = (
                         setup_dashboard(
                             self.runner,
-                            token=dashboard_cfg.token,
+                            token=self.runner.config.resolve_secret(
+                                dashboard_cfg.token, "dashboard.token"
+                            ),
                             claude_session_manager=sm,
                             slack_bot=self.runner._slack_bot,
                         )
@@ -1167,7 +1169,10 @@ class HanielMcpServer:
                         self.runner._ws_handler = ws_handler
                     logger.info("Dashboard routes attached to MCP server")
                 except Exception as e:
-                    logger.warning(f"Failed to set up dashboard: {e}")
+                    logger.warning(
+                        "Failed to set up dashboard: %s",
+                        self.runner.config.redact_secrets(str(e)),
+                    )
 
             # Create lifespan for session manager
             @contextlib.asynccontextmanager

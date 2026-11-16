@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from ..defaults import DEFAULT_GIT_TIMEOUT, MAX_STAGING_CHECKOUT_TIMEOUT
 
@@ -379,6 +379,20 @@ class OrchestratorClientConfig(BaseModel):
 class HanielConfig(BaseModel):
     """Root configuration for haniel.yaml."""
 
+    secrets_file: str | None = Field(default=None, description="Private dotenv file")
+    _secret_values: dict[str, str] = PrivateAttr(default_factory=dict)
+
+    def resolve_secret(self, value: str | None, field_path: str) -> str | None:
+        from .secrets import resolve_secret
+
+        return resolve_secret(value, field_path, self._secret_values)
+
+    def redact_secrets(self, message: str) -> str:
+        for value in self._secret_values.values():
+            if value:
+                message = message.replace(value, "[REDACTED]")
+        return message
+
     auto_apply: bool = Field(
         default=True,
         description="If false, detected changes are shown in dashboard but not auto-applied. "
@@ -448,4 +462,6 @@ def load_config(path: Path) -> HanielConfig:
     if data is None:
         data = {}
 
-    return HanielConfig.model_validate(data)
+    from .secrets import parse_config
+
+    return parse_config(data, path.parent)

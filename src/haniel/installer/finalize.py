@@ -132,6 +132,10 @@ class Finalizer:
                     value = key_cfg.default
 
                 if value is not None:
+                    if value == key_cfg.default:
+                        value = self.config.resolve_secret(
+                            value, f"install.configs.{name}.{key_cfg.key}.default"
+                        )
                     # Substitute {root} placeholder in all values, not just defaults.
                     # Interactive phase may store default values (containing {root})
                     # into state as-is.
@@ -324,7 +328,10 @@ class Finalizer:
             lines.append(f"    <domain>{xml_escape(domain)}</domain>")
             lines.append(f"    <user>{xml_escape(username)}</user>")
             if sa.password is not None:
-                lines.append(f"    <password>{xml_escape(sa.password)}</password>")
+                password = self.config.resolve_secret(
+                    sa.password, "install.service.service_account.password"
+                )
+                lines.append(f"    <password>{xml_escape(password)}</password>")
             if sa.allow_service_logon:
                 lines.append("    <allowservicelogon>true</allowservicelogon>")
             lines.append("  </serviceaccount>")
