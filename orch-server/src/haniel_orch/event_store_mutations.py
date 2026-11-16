@@ -14,6 +14,7 @@ import aiosqlite
 from .protocol import DeployStatus
 from .statechart import steps
 from .statechart.columns import LEAF_COLUMNS
+from .statechart.restore import NoTransition
 
 
 def _now_iso() -> str:
@@ -128,6 +129,45 @@ async def reject_pending_deploys_for_nodes(
             )
         await _close_probes(db, [item["deploy_id"] for item in rejected])
     return rejected
+
+
+async def close_absent_node_requests(
+    db: aiosqlite.Connection,
+    *,
+    absent_before: str,
+    connected_node_ids: set[str],
+    now: str,
+) -> list[dict[str, Any]]:
+    """기한 넘게 연결되지 않은 노드의 대기 요청(처음 대기, 다시 대기, 실패 뒤 대기)을 거절 모양으로 닫는다(어긋남 7).
+
+    기준 시각은 nodes.last_seen이고, nodes 표에 없는 노드의 요청은 그 요청의 created_at이다. 지금 연결된 노드의
+    요청은 내리지 않는다. 배포 중은 믿음별 마감이 닫으므로 여기서 다루지 않는다.
+    """
+    cursor = await db.execute(
+        "SELECT e.deploy_id, e.node_id, e.created_at, n.last_seen "
+        "FROM deploy_events e LEFT JOIN nodes n ON n.node_id = e.node_id "
+        "WHERE e.sm_status IN ('pending', 'again', 'retry')"
+    )
+    closed: list[dict[str, Any]] = []
+    for deploy_id, node_id, created_at, last_seen in await cursor.fetchall():
+        if node_id in connected_node_ids:
+            continue
+        seen_at = last_seen or created_at
+        if seen_at >= absent_before:
+            continue
+        reason = f"node absent since {seen_at}"
+        try:
+            await steps.step_request(
+                db, deploy_id, "node_absent", data={"reason": reason}, now=now
+            )
+        except NoTransition as exc:
+            exc.warn("node_absent")
+            continue
+        closed.append(
+            {"deploy_id": deploy_id, "node_id": node_id, "reject_reason": reason}
+        )
+    await _close_probes(db, [item["deploy_id"] for item in closed])
+    return closed
 
 
 async def _close_probes(db: aiosqlite.Connection, deploy_ids: list[str]) -> None:

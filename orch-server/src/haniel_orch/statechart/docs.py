@@ -271,6 +271,8 @@ _STATUS_CLOSINGS = frozenset(
         "lease_deadline",
         "grace_deadline",
         "hello_missing",
+        "node_absent",
+        "node_declined",
     }
 )
 _STATUS_AUTO = frozenset({"auto_request", "plan_failed_journal"})
@@ -286,6 +288,8 @@ _BELIEF_PROBE = frozenset(
         "probe_deadline",
         "link_down",
         "reject",
+        "node_absent",
+        "node_declined",
         "newer_commit",
     }
 )

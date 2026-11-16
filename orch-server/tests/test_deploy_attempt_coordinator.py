@@ -536,6 +536,88 @@ class TestManualRetryPreflight:
             await harness.close()
 
 
+class TestFailClosedPlanAnswer:
+    """어긋남 13: 노드가 계획 묻기에 fail_closed로 답하면 요청을 대기에서 내리고 까닭을 응답에 싣는다."""
+
+    async def test_manual_approval_returns_422_with_the_node_reason_and_closes_the_request(
+        self, store: EventStore
+    ):
+        event = await seed(store)
+        harness = Harness(store)
+        try:
+            await make_retry(store, harness.generation)
+            approval_task = asyncio.create_task(
+                harness.coordinator.approve_manual(
+                    event, approved_by="director", source="manual_single"
+                )
+            )
+            probe = await wait_for_send(harness)
+            assert isinstance(probe, DeployPlanProbe)
+
+            await harness.handle_proposal(
+                DeployPlanProposal(
+                    mode="fail_closed",
+                    probe_id=probe.probe_id,
+                    connection_generation=harness.generation,
+                    deploy_id=probe.deploy_id,
+                    node_id="n",
+                    repo="r",
+                    branch="main",
+                    target_head="target",
+                    current_head="target",
+                    reason="journal_missing",
+                    error="test closed",
+                    fingerprint="fp-declined",
+                )
+            )
+            with pytest.raises(PlanRejected) as raised:
+                await approval_task
+            assert raised.value.status_code == 422
+            assert raised.value.details == {
+                "terminal_reason": "journal_missing",
+                "terminal_error": "test closed",
+                "request_closed": True,
+            }
+            assert (await store.get_deploy_event("n:r:main:target"))["status"] == "rejected"
+            assert (
+                await store.get_deploy_event("n:r:main:target")
+            )["reject_reason"] == "node declined re-run: journal_missing"
+        finally:
+            await harness.close()
+
+    async def test_automatic_probe_answer_also_closes_the_waiting_request(
+        self, store: EventStore
+    ):
+        await seed(store)
+        harness = Harness(store)
+        try:
+            await harness.coordinator.handle_auto_request(auto_request("auto-declined"))
+            probe = harness.sent[-1][1]
+            assert isinstance(probe, DeployPlanProbe)
+
+            await harness.handle_proposal(
+                DeployPlanProposal(
+                    mode="fail_closed",
+                    probe_id=probe.probe_id,
+                    connection_generation=harness.generation,
+                    deploy_id=probe.deploy_id,
+                    node_id="n",
+                    repo="r",
+                    branch="main",
+                    target_head="target",
+                    current_head="target",
+                    reason="journal_manifest_mismatch",
+                    error=None,
+                    fingerprint="fp-auto-declined",
+                )
+            )
+            closed = await store.get_deploy_event("n:r:main:target")
+            assert closed["status"] == "rejected"
+            assert closed["reject_reason"] == "node declined re-run: journal_manifest_mismatch"
+        finally:
+            await harness.close()
+
+
 class TestConnectionGenerationAuthority:
     async def test_late_g1_proposal_after_g2_reconnect_is_stale_without_begin(
         self, store: EventStore
@@ -988,9 +1070,10 @@ class TestManualRetryPreflightContinuation:
             assert len(rows) == 1
             assert rows[0]["terminal_kind"] == "preflight_fail_closed"
             assert rows[0]["error"] == "manifest retry journal is missing"
+            # fail_closed 답은 요청을 대기에서 내린다(어긋남 13)
             assert (await store.get_deploy_event(probe.deploy_id))[
                 "status"
-            ] == "pending"
+            ] == "rejected"
         finally:
             await harness.close()
 
@@ -1046,9 +1129,10 @@ class TestManualRetryPreflightContinuation:
             assert rows[0]["terminal_error"] == error
             assert len(harness.sent) == sent_before_proposal
             assert await store.attempts.get_active_attempts() == []
+            # fail_closed 답은 요청을 대기에서 내린다(어긋남 13)
             assert (await store.get_deploy_event(probe.deploy_id))[
                 "status"
-            ] == "pending"
+            ] == "rejected"
         finally:
             await harness.close()
 

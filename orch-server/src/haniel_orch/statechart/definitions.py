@@ -1,6 +1,7 @@
 """배포 요청과 시도의 상태 정의(카드 #1259 PR 1에서 정의로 옮기고, PR 2a가 「점검 필요」 영역을, PR 2b-1이
 닫힌 시도의 늦은 글 규칙과 「닫힌 뒤 적용」 꼬리표 영역을, PR 2b-2가 「지금 시도에 대한 믿음」 영역과 다시 대기(again),
-닫힘 일곱, hello 대조, 믿음별 마감 사건, 할 일 기호를 더했다).
+닫힘 일곱, hello 대조, 믿음별 마감 사건, 할 일 기호를 더했다. 카드 #1260은 대기를 닫는 끝 둘(노드 없음, 노드가 계획을
+거절함)을 더했다).
 
 설계 정의(fable_r4_product.py의 OrchReq, AttemptEvidence)와 다른 전이는 `divergence.DIVERGENCE`에 표시를 달고
 그림에도 드러낸다. 이 정의의 전이는 모두 저장소 변경 잠금 안의 한 걸음(`steps`, `attempt_steps`)으로만 일어난다.
@@ -202,6 +203,21 @@ class OrchRequest(_Base):
         | req.belief.b_running.to.itself()
     )
     reject = (
+        req.status.open_.pending.to(req.status.closed.rejected)
+        | req.status.open_.again.to(req.status.closed.rejected)
+        | req.status.open_.retry.to(req.status.closed.rejected)
+        | req.belief.b_probe.to(req.belief.b_none)
+    )
+    # 노드가 정해진 기간 넘게 연결되지 않았다. 대기 셋을 거절 모양으로 닫는다(어긋남 7). 배포 중은 믿음별 마감이 닫는다.
+    # 지금 연결된 노드의 요청은 호출부가 고르지 않는다. 닫힌 뒤 노드가 적용하면 지금처럼 꼬리표로 드러난다
+    node_absent = (
+        req.status.open_.pending.to(req.status.closed.rejected)
+        | req.status.open_.again.to(req.status.closed.rejected)
+        | req.status.open_.retry.to(req.status.closed.rejected)
+        | req.belief.b_probe.to(req.belief.b_none)
+    )
+    # 노드가 계획 묻기에 fail_closed로 답했다(어긋남 13). 요청을 대기에서 내린다. 계획 묻기 줄은 저장소가 함께 닫는다
+    node_declined = (
         req.status.open_.pending.to(req.status.closed.rejected)
         | req.status.open_.again.to(req.status.closed.rejected)
         | req.status.open_.retry.to(req.status.closed.rejected)
@@ -428,6 +444,8 @@ REQUIRED_FACTS: dict[type, dict[str, tuple[str, ...]]] = {
         "hello_missing": ("newer",),
         "hello_holds": (),
         "reject": (),
+        "node_absent": (),
+        "node_declined": (),
         "newer_commit": (),
         "node_succeeded": (),
         "node_failed": ("no_active_attempt",),
