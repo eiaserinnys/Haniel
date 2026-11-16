@@ -153,6 +153,8 @@ repos:
 | `url` | string | *required* | Git clone URL (HTTPS or SSH) |
 | `branch` | string | `main` | Branch to track |
 | `path` | string | *required* | Local path, relative to `haniel.yaml` location |
+| `hooks.post_pull` | string | — | Legacy repository build command, run once from the repository directory |
+| `hooks.timeout` | int | `900` | Maximum seconds allowed for each repository hook |
 | `release_manifest` | string | — | Repository-relative path to a `haniel.release.v1` deployment contract |
 | `staging_checkout_timeout` | integer (1–7200) | `300` | Limit for this repository's detached release checkout only |
 
@@ -161,6 +163,11 @@ repos:
 **Auto-clone**: During `haniel install` or first `haniel run`, missing repos are cloned automatically.
 
 `staging_checkout_timeout` applies only to `git worktree add --detach` while a manifest release target is staged. It does not alter `git_fetch_timeout` or the timeouts for other Git operations. A slow Windows checkout can therefore set `1800` for its one repository without widening the rest of the node.
+
+For legacy startup updates and approved pulls, the repository `post_pull` runs
+once before its service hooks, even if no service belongs to the repository.
+Manifest deployments warn and do not run the repository hook; configure build
+steps for that path as service hooks instead.
 
 ### Migration-aware release manifests
 
@@ -333,7 +340,8 @@ After a repository changes, `post_pull` runs only for affected services whose
 `repo` points to that repository. Dependency-only services still participate in
 stop/start and readiness ordering, but their unchanged repositories are not rebuilt.
 
-Non-zero exit codes trigger a webhook notification. Service startup continues regardless.
+Hook failures are reported; the startup and rollback rules below determine
+whether services can start.
 
 For startup updates, haniel fetches every managed repository in parallel but
 keeps pulls, manifest activation, and build records serialized per repository.
@@ -344,7 +352,9 @@ in `.haniel/legacy_post_pull.json` and flushes the checkout and marker to disk
 before starting services. On the next start, a checkout whose HEAD differs from
 that record is treated as an interrupted update and rebuilt once (`force`
 strategy discards tracked changes first). If a startup pull's `post_pull` fails,
-haniel returns to the pre-pull commit and reruns the build; when that also fails
+haniel returns to the pre-pull commit and reruns the repository and service builds;
+if a merge checkout has uncommitted tracked changes, it does not reset and the
+repository's services remain blocked. When rebuilding after rollback also fails
 and the repository had a completed build record, services using the repository
 are not started. A repository without any record (the first start of this
 version, or a newly added repository) is not rebuilt: haniel records its current

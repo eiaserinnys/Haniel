@@ -374,7 +374,7 @@ class Finalizer:
             # Generate XML configuration
             xml_path = self.config_dir / f"{service_name}.xml"
             xml_content = self._generate_winsw_xml(service_cfg, working_dir)
-            xml_path.write_text(xml_content, encoding="utf-8")
+            _write_private_text(xml_path, xml_content)
 
             # Generate wrapper config if self-update is enabled
             if self.config.self_update is not None:
@@ -452,7 +452,7 @@ class Finalizer:
             lines.append(f"PYTHON_BIN={Path(sys.executable).absolute()}")
 
         conf_path = self.config_dir / "haniel-runner.conf"
-        conf_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _write_private_text(conf_path, "\n".join(lines) + "\n")
         logger.info(f"Generated wrapper configuration: {conf_path}")
 
     def _generate_systemd_unit(self, service_cfg) -> str:

@@ -280,7 +280,7 @@ class HanielMcpServer:
             },
             {
                 "name": "haniel_update",
-                "description": "Update a service (git pull + restart). For service='haniel', pulls haniel repo and restarts itself.",
+                "description": "Pull the service's repository and restart its affected services; do nothing if there are no pending changes. For service='haniel', update Haniel itself.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -763,7 +763,7 @@ class HanielMcpServer:
             return json.dumps({"error": f"Failed to register service '{name}': {e}"})
 
     async def _update_service(self, arguments: dict[str, Any]) -> str:
-        """Update a service: pull its repo, then restart."""
+        """Update the service's repository through the shared pull path."""
         service = arguments.get("service", "")
         if service == "haniel":
             return await self._self_update()
@@ -779,14 +779,7 @@ class HanielMcpServer:
         if not repo_name:
             return f"Error: Service '{service}' has no associated repo"
 
-        # Pull
-        loop = asyncio.get_running_loop()
-        pull_ok = await loop.run_in_executor(None, self.runner._pull_repo, repo_name)
-        if not pull_ok:
-            return f"Error: Pull failed for repo '{repo_name}'"
-
-        # Restart
-        return await self._restart_service(service)
+        return await self._pull_repo(repo_name)
 
     async def _self_update(self) -> str:
         """Pre-stage Haniel's exact remote target, then defer exit(10)."""

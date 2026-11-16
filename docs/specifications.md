@@ -424,8 +424,17 @@ repos:
     url: {git clone URL}           # Required. Clone and fetch target
     branch: {branch name}          # Default: main. Branch to track
     path: {local path}             # Required. Local path (relative to haniel.yaml)
+    hooks:                         # Optional. Legacy repository hook
+      post_pull: {command}         # Once per updated repo, before service hooks
+      timeout: 900                 # Per-hook timeout in seconds
     release_manifest: {path}       # Optional. Repository-relative haniel.release.v1 contract
 ```
+
+Legacy startup updates and approved pulls run the repository hook in the repo
+directory, including for repos without services. On startup rollback it runs
+again before service hooks. Manifest deployments warn and skip this hook.
+If a merge checkout has uncommitted tracked changes after a startup hook fails,
+Haniel leaves it untouched and blocks that repository's services.
 
 Repositories with a release manifest use the migration-aware deployment state machine during both approved pulls and startup updates. Build and migration preflight complete while old processes remain available during a live handover. Haniel then stops affected local processes, runs any declared backup gate, performs migration and process handover, waits for every affected service readiness condition, executes the manifest's post-start verification commands, and only then reports success. Stopping local services does not prove that a shared database is quiescent; a destructive restore fallback requires repository-owned cluster-wide write-fence evidence. Failures enter the manifest's declared automatic recovery path and remain a failed deployment even when availability is restored.
 
@@ -506,7 +515,8 @@ hooks:
 ```
 
 haniel doesn't care what hooks do.
-Non-zero exit codes trigger a webhook notification; service startup continues regardless.
+Hook failures are reported; startup rollback and completed-build records
+determine whether services can start.
 For repository deploys, dependency-only services are restarted in order but do not
 run `post_pull` unless their own `repo` is the repository being changed.
 

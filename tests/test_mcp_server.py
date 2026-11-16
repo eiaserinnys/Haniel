@@ -344,6 +344,24 @@ class TestMcpTools:
         mock_runner.trigger_pull.assert_called_with("main")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("fails", [False, True])
+    async def test_update_uses_canonical_repo_pull(
+        self, mcp_server, mock_runner, fails
+    ):
+        mock_runner.get_status.return_value["services"]["web"]["config"] = {
+            "repo": "main"
+        }
+        if fails:
+            mock_runner.trigger_pull.side_effect = RuntimeError("pull failed")
+
+        result = await mcp_server.call_tool("haniel_update", {"service": "web"})
+
+        mock_runner.trigger_pull.assert_called_once_with("main")
+        mock_runner._pull_repo.assert_not_called()
+        mock_runner.restart_service.assert_not_called()
+        assert ("pull failed" in result.lower()) == fails
+
+    @pytest.mark.asyncio
     async def test_pull_repo_while_pulling(self, mcp_server, mock_runner):
         """Test haniel_pull returns success even when is_pulling guard silently returns.
 

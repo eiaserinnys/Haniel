@@ -10,6 +10,7 @@ Tests cover:
 """
 
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -457,6 +458,9 @@ class TestFinalizer:
             state = InstallState()
             finalizer = Finalizer(finalizer_config, config_dir, state)
 
+            xml_path = config_dir / "haniel.xml"
+            xml_path.write_text("old", encoding="utf-8")
+            xml_path.chmod(0o644)
             finalizer.register_service()
 
             # Verify service exe was copied
@@ -464,8 +468,9 @@ class TestFinalizer:
             assert service_exe.exists()
 
             # Verify XML was generated
-            xml_path = config_dir / "haniel.xml"
             assert xml_path.exists()
+            if os.name == "posix":
+                assert xml_path.stat().st_mode & 0o777 == 0o600
             xml_content = xml_path.read_text(encoding="utf-8")
             assert "<id>haniel</id>" in xml_content
             assert "<executable>" in xml_content
