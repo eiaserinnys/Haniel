@@ -47,7 +47,9 @@ def test_repo_hook_uses_repo_cwd_and_timeout(tmp_path):
         assert runner.execute_repo_hook("app", "post_pull")
     assert run.call_args.kwargs["cwd"] == tmp_path / "app"
     assert run.call_args.kwargs["timeout"] == 73
-    assert run.call_args.args[0] == ["build-repo"]
+    assert run.call_args.args[0] == (
+        "build-repo" if os.name == "nt" else ["build-repo"]
+    )
 
 
 @pytest.mark.parametrize("success", [True, False])
