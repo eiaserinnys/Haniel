@@ -212,19 +212,39 @@ async def backfill_locked_requests(db: aiosqlite.Connection, now: str) -> int:
     return len(rows)
 
 
-async def due_unsent_notices(
+async def due_notice_bundles(
     db: aiosqlite.Connection, now: str
-) -> list[dict[str, Any]]:
-    """보낼 차례가 된 보내지 않은 줄. 노드별 묶기는 보내는 쪽이 한다."""
+) -> list[list[dict[str, Any]]]:
+    """보낼 차례인 노드마다 그 노드의 보내지 않은 줄 전부를 한 묶음으로 돌려준다.
+
+    줄마다 다음 시각을 보지 않고 노드 하나라도 보낼 차례면 그 노드의 보내지 않은 줄을 모두 묶는다.
+    그래서 새 줄(다음 시각 없음)이 생긴 노드는 기다리던 줄까지 곧바로 함께 나가고, 같은 줄 집합은
+    언제 다시 보내도 같은 delivery_id와 본문이 된다.
+    """
     cursor = await db.execute(
-        """SELECT * FROM inspection_notices
+        """SELECT DISTINCT node_id FROM inspection_notices
            WHERE state = ? AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-           ORDER BY created_at, rowid""",
+           ORDER BY node_id""",
         (STATE_UNSENT, now),
     )
-    rows = await cursor.fetchall()
+    node_ids = [row[0] for row in await cursor.fetchall()]
+    if not node_ids:
+        return []
+    placeholders = ", ".join("?" for _ in node_ids)
+    cursor = await db.execute(
+        f"""SELECT * FROM inspection_notices
+            WHERE state = ? AND node_id IN ({placeholders})
+            ORDER BY node_id, created_at, rowid""",
+        (STATE_UNSENT, *node_ids),
+    )
     names = [description[0] for description in cursor.description]
-    return [dict(zip(names, row)) for row in rows]
+    bundles: list[list[dict[str, Any]]] = []
+    for row in await cursor.fetchall():
+        item = dict(zip(names, row))
+        if not bundles or bundles[-1][0]["node_id"] != item["node_id"]:
+            bundles.append([])
+        bundles[-1].append(item)
+    return bundles
 
 
 async def mark_sent(
@@ -242,8 +262,17 @@ async def mark_sent(
 
 
 def retry_delay_sec(attempts: int, base_sec: float, cap_sec: float) -> float:
-    """첫 실패 1분, 그 뒤 두 배씩, 1시간에서 멈춘다."""
-    return min(cap_sec, base_sec * (2 ** max(0, attempts - 1)))
+    """첫 실패 1분, 그 뒤 두 배씩, 1시간에서 멈춘다.
+
+    시도 수가 아주 커져도 지수를 상한에 닿는 값에서 자른다. `2 ** (attempts-1)`의 폭발과
+    float 넘침이 나지 않게 하려는 것이다.
+    """
+    ceiling = 0
+    value = base_sec
+    while value < cap_sec and ceiling < 64:
+        value *= 2
+        ceiling += 1
+    return min(cap_sec, base_sec * (2 ** min(max(0, attempts - 1), ceiling)))
 
 
 async def record_failure(
@@ -255,7 +284,11 @@ async def record_failure(
     base_sec: float,
     cap_sec: float,
 ) -> None:
-    """보내기 실패를 시도 수와 다음 시각으로 적는다. 요청 상태와 잠금은 건드리지 않는다."""
+    """보내기 실패를 적는다. 요청 상태와 잠금은 건드리지 않는다.
+
+    한 묶음의 모든 줄에 같은 시도 수와 같은 다음 시각을 적는다(노드 단위 간격). 묶음의 줄마다
+    간격을 따로 세면 묶음이 갈라져 같은 알림이 다른 delivery_id로 다시 나가기 때문이다.
+    """
     if not notice_ids:
         return
     placeholders = ", ".join("?" for _ in notice_ids)
@@ -264,10 +297,12 @@ async def record_failure(
         notice_ids,
     )
     rows = await cursor.fetchall()
-    for notice_id, attempts in rows:
-        new_attempts = int(attempts) + 1
-        delay = retry_delay_sec(new_attempts, base_sec, cap_sec)
-        next_attempt_at = (now + timedelta(seconds=delay)).isoformat()
+    if not rows:
+        return
+    new_attempts = max(int(attempts) for _, attempts in rows) + 1
+    delay = retry_delay_sec(new_attempts, base_sec, cap_sec)
+    next_attempt_at = (now + timedelta(seconds=delay)).isoformat()
+    for notice_id, _attempts in rows:
         await db.execute(
             """UPDATE inspection_notices
                SET attempts = ?, last_error = ?, next_attempt_at = ?

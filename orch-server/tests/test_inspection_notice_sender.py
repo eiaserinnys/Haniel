@@ -43,13 +43,16 @@ class FakeSoulstream:
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
         self.status = 200
-        self.payload: dict = {"outcome": "queued"}
+        self.payload: object = {"outcome": "queued"}
+        self.json_body = True
         self.error: Exception | None = None
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         if self.error is not None:
             raise self.error
+        if not self.json_body:
+            return httpx.Response(self.status)
         return httpx.Response(self.status, json=self.payload)
 
     def payloads(self) -> list[dict]:
@@ -81,13 +84,17 @@ def make_sender(
 
 
 async def locked_request(
-    store: EventStore, deploy_id: str = "n1:r:main:aaa", node_id: str = "n1"
+    store: EventStore,
+    deploy_id: str = "n1:r:main:aaa",
+    node_id: str = "n1",
+    *,
+    branch: str = "main",
 ) -> None:
     await store.create_deploy_event(
         deploy_id=deploy_id,
         node_id=node_id,
         repo="r",
-        branch="main",
+        branch=branch,
         commits=["c"],
         affected_services=[],
         diff_stat=None,
@@ -188,16 +195,19 @@ async def test_failure_keeps_the_notice_unsent_and_backs_off(store: EventStore, 
     fake, client = fake_stream
     fake.status = 500
     fake.payload = {"detail": "down"}
-    await locked_request(store)
+    await locked_request(store, "n1:r:main:a", "n1")
+    await locked_request(store, "n1:r:dev:b", "n1", branch="dev")
     sender = make_sender(store, client)
 
     await sender.send_pass()
 
-    row = (await notice_rows(store))[0]
-    assert row["state"] == "unsent"
-    assert row["attempts"] == 1
-    assert row["last_error"].startswith("HTTP 500")
-    due = datetime.fromisoformat(row["next_attempt_at"])
+    rows = await notice_rows(store)
+    assert [row["state"] for row in rows] == ["unsent", "unsent"]
+    # 한 묶음의 줄은 같은 시도 수와 같은 다음 시각을 갖는다(노드 단위 간격)
+    assert [row["attempts"] for row in rows] == [1, 1]
+    assert len({row["next_attempt_at"] for row in rows}) == 1
+    assert all(row["last_error"].startswith("HTTP 500") for row in rows)
+    due = datetime.fromisoformat(rows[0]["next_attempt_at"])
     delay = (due - datetime.now(timezone.utc)).total_seconds()
     assert 55 <= delay <= 65
 
@@ -205,14 +215,45 @@ async def test_failure_keeps_the_notice_unsent_and_backs_off(store: EventStore, 
     await sender.send_pass()
     assert len(fake.requests) == 1
 
-    await make_due(store, row["notice_id"])
+    await make_due(store, rows[0]["notice_id"])
     await sender.send_pass()
 
-    row = (await notice_rows(store))[0]
-    assert row["attempts"] == 2
-    due = datetime.fromisoformat(row["next_attempt_at"])
+    rows = await notice_rows(store)
+    assert [row["attempts"] for row in rows] == [2, 2]
+    assert len({row["next_attempt_at"] for row in rows}) == 1
+    due = datetime.fromisoformat(rows[0]["next_attempt_at"])
     delay = (due - datetime.now(timezone.utc)).total_seconds()
     assert 115 <= delay <= 125
+
+
+async def test_a_new_row_makes_the_whole_node_bundle_due(store: EventStore, fake_stream):
+    fake, client = fake_stream
+    await locked_request(store, "n1:r:main:a", "n1")
+    sender = make_sender(store, client)
+
+    fake.status = 500
+    await sender.send_pass()
+    assert (await notice_rows(store))[0]["attempts"] == 1
+
+    # 새 줄은 다음 시각이 없어 그 노드를 곧바로 보낼 차례로 만든다. 기다리던 줄까지 한 묶음으로 나간다
+    fake.status = 200
+    await locked_request(store, "n1:r:dev:b", "n1", branch="dev")
+    await sender.send_pass()
+
+    assert len(fake.requests) == 2
+    payload = fake.payloads()[1]
+    assert "n1:r:main:a" in payload["text"]
+    assert "n1:r:dev:b" in payload["text"]
+    assert [row["state"] for row in await notice_rows(store)] == ["sent", "sent"]
+
+
+def test_retry_delay_is_capped_without_overflow():
+    from haniel_orch.statechart.inspection_notice import retry_delay_sec
+
+    assert retry_delay_sec(1, 60.0, 3600.0) == 60.0
+    assert retry_delay_sec(2, 60.0, 3600.0) == 120.0
+    # 시도 수가 아주 커져도 지수 폭발과 float 넘침 없이 상한에서 멈춘다
+    assert retry_delay_sec(10**9, 60.0, 3600.0) == 3600.0
 
 
 async def test_outcome_unknown_is_not_marked_sent(store: EventStore, fake_stream):
@@ -227,6 +268,37 @@ async def test_outcome_unknown_is_not_marked_sent(store: EventStore, fake_stream
     assert row["attempts"] == 1
     assert "outcome unknown" in row["last_error"]
     assert row["sent_at"] is None
+
+
+async def test_2xx_without_a_body_is_treated_as_sent(
+    store: EventStore, fake_stream, caplog
+):
+    fake, client = fake_stream
+    fake.status = 204
+    fake.json_body = False
+    await locked_request(store)
+
+    with caplog.at_level(logging.WARNING):
+        await make_sender(store, client).send_pass()
+
+    row = (await notice_rows(store))[0]
+    assert row["state"] == "sent" and row["sent_at"]
+    assert "without a JSON body" in caplog.text
+
+
+async def test_2xx_without_an_outcome_is_treated_as_sent(
+    store: EventStore, fake_stream, caplog
+):
+    fake, client = fake_stream
+    fake.payload = {"queued": True}
+    await locked_request(store)
+
+    with caplog.at_level(logging.WARNING):
+        await make_sender(store, client).send_pass()
+
+    row = (await notice_rows(store))[0]
+    assert row["state"] == "sent" and row["sent_at"]
+    assert "without an outcome" in caplog.text
 
 
 async def test_connection_error_keeps_the_deploy_unchanged(store: EventStore, fake_stream):
@@ -298,6 +370,31 @@ async def test_configured_sender_starts_a_loop(store: EventStore, fake_stream):
     finally:
         await sender.stop()
     assert sender._task is None
+
+
+# ---------------------------------------------------------------- 깨움에서 전달까지
+
+
+async def test_lock_transition_wakes_the_sender_and_delivers_once(
+    store: EventStore, fake_stream
+):
+    fake, client = fake_stream
+    sender = make_sender(store, client, poll_interval_sec=60.0)
+    sender.start()
+    try:
+        # 잠금 전이가 커밋되고 깨우기가 보내기 루프를 깨운다. 가짜 받는 쪽이 한 번 받는다
+        await locked_request(store)
+        for _ in range(300):
+            if fake.requests:
+                break
+            await asyncio.sleep(0.01)
+        assert len(fake.requests) == 1
+        assert "n1:r:main:aaa" in fake.payloads()[0]["text"]
+        assert [row["state"] for row in await notice_rows(store)] == ["sent"]
+        await asyncio.sleep(0.05)
+        assert len(fake.requests) == 1
+    finally:
+        await sender.stop()
 
 
 # ---------------------------------------------------------------- 루프 생존

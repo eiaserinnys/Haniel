@@ -143,13 +143,8 @@ class InspectionNoticeSender:
             logger.exception("Inspection notice send pass failed")
 
     async def send_pass(self) -> None:
-        rows = await self._store.due_unsent_inspection_notices()
-        if not rows:
-            return
-        groups: dict[str, list[dict[str, Any]]] = {}
-        for row in rows:
-            groups.setdefault(row["node_id"], []).append(row)
-        for group in groups.values():
+        bundles = await self._store.due_inspection_notice_bundles()
+        for group in bundles:
             notice_ids = [row["notice_id"] for row in group]
             text = compose_notice_message([row["text"] for row in group])
             sent, error = await self._post(text, delivery_id_for(notice_ids))
@@ -193,10 +188,16 @@ class InspectionNoticeSender:
         try:
             payload = response.json()
         except ValueError:
-            error = f"HTTP {status}: response body is not JSON"
-            logger.info("Inspection notice delivery failed: %s", error)
-            return False, error
+            logger.warning(
+                "Inspection notice accepted without a JSON body (HTTP %s)", status
+            )
+            return True, None
         outcome = payload.get("outcome") if isinstance(payload, dict) else None
+        if outcome is None:
+            logger.warning(
+                "Inspection notice accepted without an outcome (HTTP %s)", status
+            )
+            return True, None
         if outcome == OUTCOME_UNKNOWN:
             error = f"HTTP {status}: outcome {OUTCOME_UNKNOWN}"
             logger.info("Inspection notice delivery failed: %s", error)

@@ -35,11 +35,12 @@ class InspectionNoticeStoreMixin:
                 await db.rollback()
                 raise
 
-    async def due_unsent_inspection_notices(self) -> list[dict[str, Any]]:
+    async def due_inspection_notice_bundles(self) -> list[list[dict[str, Any]]]:
+        """보낼 차례인 노드마다 그 노드의 보내지 않은 줄 전부(한 묶음)."""
         async with self._mutation_lock:
             db = self._db
             assert db is not None
-            return await inspection_notice.due_unsent_notices(db, now_iso())
+            return await inspection_notice.due_notice_bundles(db, now_iso())
 
     async def mark_inspection_notices_sent(self, notice_ids: list[str]) -> None:
         if not notice_ids:

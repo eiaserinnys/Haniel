@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
+
 import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
@@ -231,6 +234,54 @@ async def test_notice_is_recorded_when_the_lock_turns_on_as_the_request_closes(
     assert rows[0]["sm_status"] == "superseded"
 
 
+# ---------------------------------------------------------------- 기동 순서
+
+
+async def test_startup_order_is_sweep_then_backfill_then_sender(store: EventStore):
+    order: list[str] = []
+
+    async def supersede() -> None:
+        order.append("supersede")
+
+    async def restore() -> None:
+        order.append("restore")
+
+    async def sweep() -> None:
+        order.append("sweep")
+
+    async def backfill() -> int:
+        order.append("backfill")
+        return 0
+
+    class FakeSender:
+        def start(self) -> None:
+            order.append("start")
+
+        async def stop(self) -> None:
+            order.append("stop")
+
+    store.supersede_stale_pending_deploys = supersede  # type: ignore[method-assign]
+    store.record_startup_inspection_notices = backfill  # type: ignore[method-assign]
+    hub = WebSocketHub(
+        NodeRegistry(store),
+        store,
+        token="t",
+        inspection_notice_sender=FakeSender(),  # type: ignore[arg-type]
+    )
+    hub.deploy_coordinator.restore_deadlines = restore  # type: ignore[method-assign]
+    hub._sweep_absent_node_requests = sweep  # type: ignore[method-assign]
+
+    await hub.start_heartbeat_checker()
+    try:
+        # 노드 부재 훑기 → 기동 보충 → 보내기 시작
+        assert order == ["supersede", "restore", "sweep", "backfill", "start"]
+    finally:
+        assert hub._heartbeat_task is not None
+        hub._heartbeat_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await hub._heartbeat_task
+
+
 # ---------------------------------------------------------------- 기동 보충
 
 
@@ -438,4 +489,19 @@ async def test_pending_list_notice_is_null_when_no_ledger_row_exists(store: Even
 
     deploy = client.get("/api/orch/pending").json()["deploys"][0]
     assert deploy["inspection_required"] is True
+    assert deploy["inspection_notice"] is None
+
+
+async def test_pending_notice_is_null_after_the_lock_is_released(store: EventStore):
+    await new_request(store)
+    await fire_locking_event(store, "plan_failed_journal")
+    # 단건 승인이 잠금을 내린다. 원장 줄은 남지만 대기 목록의 칸은 null이다
+    await begin_deploying(store)
+    assert len(await notice_rows(store)) == 1
+
+    hub = WebSocketHub(NodeRegistry(store), store, token="t")
+    client = TestClient(Starlette(routes=create_api_routes(hub, store)))
+
+    deploy = client.get("/api/orch/pending").json()["deploys"][0]
+    assert deploy["inspection_required"] is False
     assert deploy["inspection_notice"] is None
