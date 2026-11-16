@@ -3258,6 +3258,7 @@ class TestStartupUpdates:
             patch.object(
                 runner, "execute_hook", side_effect=[False, True]
             ) as mock_hook,
+            patch("haniel.core.runner._tracked_worktree_dirty", return_value=False),
             patch.object(runner, "_start_service", return_value=True) as mock_start,
         ):
             runner.start_services()
@@ -3297,6 +3298,7 @@ class TestStartupUpdates:
 
         with (
             patch.object(runner, "execute_hook", return_value=False) as mock_hook,
+            patch("haniel.core.runner._tracked_worktree_dirty", return_value=False),
             patch.object(runner, "_start_service", return_value=True) as mock_start,
         ):
             runner.start_services()
@@ -3329,6 +3331,7 @@ class TestStartupUpdates:
 
         with (
             patch.object(runner, "execute_hook", return_value=False) as mock_hook,
+            patch("haniel.core.runner._tracked_worktree_dirty", return_value=False),
             patch.object(runner, "_start_service", return_value=True) as mock_start,
         ):
             runner.start_services()

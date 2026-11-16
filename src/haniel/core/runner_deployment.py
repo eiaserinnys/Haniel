@@ -230,6 +230,12 @@ class RunnerDeploymentAdapter:
 
     def build(self) -> None:
         self.require_current_config()
+        hooks = self.repo_runtime_snapshot.config.hooks
+        if hooks and hooks.post_pull:
+            logger.warning(
+                "Repository %s post_pull hook is ignored for release manifest deployments",
+                self.repo_name,
+            )
         failed = [
             service
             for service in repo_owned_services(

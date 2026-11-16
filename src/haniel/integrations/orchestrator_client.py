@@ -4,8 +4,8 @@ Runs in a background thread with its own asyncio event loop.
 Maintains a persistent WebSocket connection to the orchestrator server
 with exponential backoff reconnection.
 
-If the orchestrator is unreachable, all operations degrade gracefully
-— the node continues to operate independently.
+If the orchestrator is unreachable, service operation and startup pulls continue.
+Automatic deployment requires permission before it starts.
 
 The existing client exceeds 500 lines because connection lifecycle, message
 dispatch and its single event loop are coupled here. Node execution state and
@@ -183,8 +183,8 @@ class OrchestratorClient:
     ) -> None:
         """Notify the orchestrator of detected changes. Thread-safe.
 
-        If not connected, the notification is silently dropped
-        (graceful degradation — the node operates independently).
+        If not connected, the notification is silently dropped. Service operation
+        and startup pulls continue; automatic deployment requires permission.
         """
         if not self._connected or not self._ws or not self._loop:
             return

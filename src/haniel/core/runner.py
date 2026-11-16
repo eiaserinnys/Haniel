@@ -811,6 +811,29 @@ class ServiceRunner:
         if config.cwd:
             cwd = self.config_dir / config.cwd
 
+        return self._execute_hook_command(
+            service_name, hook_name, hook_cmd, cwd, config.hooks.timeout
+        )
+
+    def execute_repo_hook(self, repo_name: str, hook_name: str) -> bool:
+        """Run a repository hook from the repository directory."""
+        config = self._snapshot_repo_runtime(repo_name).config
+        if not config.hooks:
+            return True
+        hook_cmd = getattr(config.hooks, hook_name, None)
+        if not hook_cmd:
+            return True
+        return self._execute_hook_command(
+            repo_name,
+            hook_name,
+            hook_cmd,
+            self.config_dir / config.path,
+            config.hooks.timeout,
+        )
+
+    def _execute_hook_command(
+        self, owner: str, hook_name: str, hook_cmd: str, cwd: Path, timeout: int
+    ) -> bool:
         # Substitute {root} placeholder with the absolute config directory path,
         # mirroring the same pattern used in installer/mechanical.py _apply_config_template
         hook_cmd = hook_cmd.replace("{root}", str(self.config_dir))
@@ -826,7 +849,7 @@ class ServiceRunner:
         logger.info(
             "Executing %s hook for %s: %s",
             hook_name,
-            service_name,
+            owner,
             redact_text(hook_cmd, redaction_values),
         )
 
@@ -848,17 +871,17 @@ class ServiceRunner:
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=config.hooks.timeout,
+                timeout=timeout,
                 shell=shell,
                 env=sanitized_child_env(),
             )
-            logger.info(f"Hook {hook_name} for {service_name} completed successfully")
+            logger.info(f"Hook {hook_name} for {owner} completed successfully")
             return True
         except subprocess.CalledProcessError as e:
             logger.error(
                 "Hook %s for %s failed: %s",
                 hook_name,
-                service_name,
+                owner,
                 _command_failure_message(
                     CommandSpec(name="lifecycle-hook", command=hook_cmd),
                     e,
@@ -867,13 +890,13 @@ class ServiceRunner:
             )
             return False
         except subprocess.TimeoutExpired:
-            logger.error(f"Hook {hook_name} for {service_name} timed out")
+            logger.error(f"Hook {hook_name} for {owner} timed out")
             return False
         except Exception as e:
             logger.error(
                 "Hook %s for %s failed: %s",
                 hook_name,
-                service_name,
+                owner,
                 redact_text(str(e), redaction_values),
             )
             return False
@@ -1233,6 +1256,15 @@ class ServiceRunner:
         if not legacy_repos:
             return set()
         hook_failures: dict[str, list[str]] = {}
+        for repo_name in sorted(legacy_repos):
+            if self._stop_event.is_set():
+                logger.info("Stopping startup hooks because shutdown was requested")
+                return set()
+            if not self.execute_repo_hook(repo_name, "post_pull"):
+                hook_failures.setdefault(repo_name, []).append(repo_name)
+                startup_report_errors.setdefault(repo_name, []).append(
+                    f"post_pull hook failed for repository {repo_name}"
+                )
         for name in lane.services:
             if self._stop_event.is_set():
                 logger.info("Stopping startup hooks because shutdown was requested")
@@ -1522,6 +1554,17 @@ class ServiceRunner:
 
             rerun_failed: list[str] = []
             if recover_to is not None:
+                if (
+                    runtime.config.pull_strategy or "merge"
+                ) == "merge" and _tracked_worktree_dirty(repo_path):
+                    blocked.add(repo_name)
+                    message = (
+                        f"post_pull failed; not rolling back {repo_name}: "
+                        "merge checkout has uncommitted tracked changes"
+                    )
+                    startup_report_errors.setdefault(repo_name, []).append(message)
+                    logger.error(message)
+                    continue
                 try:
                     reset_repo_to(repo_path, recover_to)
                 except GitError as error:
@@ -1533,12 +1576,14 @@ class ServiceRunner:
                     )
                     rerun_failed = ["rollback failed"]
                 else:
-                    rerun_failed = [
+                    if not self.execute_repo_hook(repo_name, "post_pull"):
+                        rerun_failed.append(repo_name)
+                    rerun_failed.extend(
                         name
                         for name in startup_order
                         if enabled_services[name].repo == repo_name
                         and not self.execute_hook(name, "post_pull")
-                    ]
+                    )
 
             if recover_to is not None and not rerun_failed:
                 recovered[repo_name] = recover_to
@@ -3156,11 +3201,14 @@ class ServiceRunner:
             affected,
             snapshot.enabled_services,
         )
-        failed_hooks = [
+        failed_hooks = []
+        if not self.execute_repo_hook(repo_name, "post_pull"):
+            failed_hooks.append(repo_name)
+        failed_hooks.extend(
             service
             for service in hook_services
             if not self.execute_hook(service, "post_pull")
-        ]
+        )
         if failed_hooks:
             failed = ", ".join(sorted(failed_hooks))
             logger.error(

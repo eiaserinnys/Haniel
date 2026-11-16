@@ -145,6 +145,9 @@ Now Claude Code can operate your infrastructure:
 "Add a new service"                   → haniel_create_service_config(...)
 ```
 
+For a normal service, `haniel_update` pulls its repository and restarts the
+repository's affected services. If no changes are pending, it does nothing.
+
 ## Self-update
 
 haniel solves the "surgeon can't operate on themselves" problem with a two-loop design:

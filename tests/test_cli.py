@@ -1,6 +1,7 @@
 """Tests for haniel CLI commands."""
 
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -12,6 +13,25 @@ from click.testing import CliRunner
 
 from haniel.cli import main
 from haniel.core.lifecycle_control import LifecycleConflict
+
+
+def test_httpx_logging_is_warning_even_in_debug(cli_runner, tmp_config):
+    httpx_logger = logging.getLogger("httpx")
+    original_level = httpx_logger.level
+    root = logging.getLogger()
+    handlers = set(root.handlers)
+    try:
+        httpx_logger.setLevel(logging.NOTSET)
+        with patch(
+            "haniel.core.runner.ServiceRunner", side_effect=RuntimeError("stop")
+        ):
+            cli_runner.invoke(main, ["run", str(tmp_config), "--log-level", "DEBUG"])
+        assert httpx_logger.level == logging.WARNING
+    finally:
+        httpx_logger.setLevel(original_level)
+        for handler in set(root.handlers) - handlers:
+            root.removeHandler(handler)
+            handler.close()
 
 
 def test_active_self_head_comes_from_wrapper_environment(monkeypatch):

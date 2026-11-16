@@ -47,7 +47,7 @@ These apply to every workflow below. Internalize them — don't treat them as a 
 | `haniel_check_updates` | Checks all repos for pending upstream changes | None (read-only) |
 | `haniel_read_logs` | Reads service logs, optional grep filter | None (read-only) |
 | `haniel_pull` | Pulls a repo and restarts dependent services | **Restarts services** |
-| `haniel_update` | Pulls + restarts a single service (or Haniel itself) | **Restarts service** |
+| `haniel_update` | Pulls the service's repo and restarts its affected services, or updates Haniel itself | **Restarts affected services** when changes are pending |
 | `haniel_reload` | Reloads haniel.yaml without stopping anything | Applies config changes |
 | `haniel_start` | Starts a stopped service | Starts process |
 | `haniel_stop` | Stops a running service | **Stops process** |
@@ -186,7 +186,8 @@ haniel_pull(repo=<name>)
 
 Tell the user which services will restart before doing this.
 
-For a specific service only (pulls its repo and restarts just that service):
+For a service's repository (pulls the repo and restarts all affected services;
+does nothing when no changes are pending):
 
 ```
 haniel_update(service=<name>)
