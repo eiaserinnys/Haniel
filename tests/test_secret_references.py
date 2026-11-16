@@ -1,6 +1,7 @@
 """Secret references remain in config while consumers receive their values."""
 
 import os
+import stat
 from pathlib import Path
 from unittest.mock import patch
 
@@ -114,6 +115,48 @@ def test_install_uses_values_without_exposing_state(secret_config):
             config.install.service, str(secret_config.parent)
         )
     assert "<password>example-secret-value</password>" in xml
+
+
+def test_runner_conf_receives_resolved_webhook(secret_config):
+    from haniel.config import SelfUpdateConfig
+
+    config = load_config(secret_config)
+    config.self_update = SelfUpdateConfig(repo="app")
+    Finalizer(config, secret_config.parent, InstallState())._generate_runner_conf()
+    content = (secret_config.parent / "haniel-runner.conf").read_text()
+    assert "WEBHOOK_URL=https://example.invalid/example-secret-value" in content
+    assert "${secret:TOKEN}" not in content
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
+def test_static_secret_content_is_private(secret_config):
+    from haniel.config import ConfigFileConfig
+
+    config = load_config(secret_config)
+    target = secret_config.parent / "static.txt"
+    target.write_text("old", encoding="utf-8")
+    target.chmod(0o644)
+    plain = secret_config.parent / "plain.txt"
+    plain.write_text("old", encoding="utf-8")
+    plain.chmod(0o644)
+    config.install.configs["plain"] = ConfigFileConfig(
+        path="plain.txt", content="plain"
+    )
+    MechanicalInstaller(
+        config, secret_config.parent, InstallState()
+    ).create_static_configs()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert stat.S_IMODE(plain.stat().st_mode) == 0o644
+
+
+def test_install_default_error_uses_validation_path(secret_config):
+    config = load_config(secret_config)
+    config.install.configs["dynamic"].keys[0].default = "${secret:MISSING}"
+    finalizer = Finalizer(config, secret_config.parent, InstallState())
+    with pytest.raises(
+        ValueError, match=r"install\.configs\.dynamic\.keys\.0\.default"
+    ):
+        finalizer.generate_config_files()
 
 
 @pytest.mark.parametrize("secrets_file", [None, "missing.env", "secrets.env"])

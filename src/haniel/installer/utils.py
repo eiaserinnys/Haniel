@@ -13,6 +13,17 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def write_private_text(path: Path, text: str) -> None:
+    """Write a file that may carry secrets with owner-only permissions."""
+    if os.name != "posix":
+        path.write_text(text, encoding="utf-8")
+        return
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(descriptor, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(text)
+
+
 def _darwin_tool_directories() -> list[Path]:
     """Return the Darwin directories that commonly hold installer tools."""
     directories = [Path("/opt/homebrew/bin"), Path("/usr/local/bin")]

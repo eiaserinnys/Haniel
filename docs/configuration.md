@@ -71,6 +71,8 @@ and content. Other placeholders such as `${VAR}`, `$VAR`, and `{root}` keep
 their existing meaning. A missing file or name prevents the configuration from
 loading. The configuration model and edits retain references; install output
 files receive the resolved values where needed.
+`haniel install` writes the first resolved webhook URL to the private
+`haniel-runner.conf` file (mode `600` on POSIX).
 
 Run `haniel validate --no-plain-secrets haniel.yaml` to reject plain values in
 Haniel's own secret fields and values of eight or more characters from the

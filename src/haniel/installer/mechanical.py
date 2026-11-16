@@ -29,7 +29,13 @@ from ..config import HanielConfig
 from ..core.release_staging import initial_clone_path
 from ..core.safety_redaction import bounded_redact_text
 from .state import InstallState
-from .utils import detect_tool_paths, find_tool, find_winsw, get_tool_environment
+from .utils import (
+    detect_tool_paths,
+    find_tool,
+    find_winsw,
+    get_tool_environment,
+    write_private_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -784,7 +790,10 @@ class MechanicalInstaller:
                     cfg.content, f"install.configs.{name}.content"
                 ).replace("{root}", root_str)
 
-                config_path.write_text(content, encoding="utf-8")
+                if "${secret:" in cfg.content:
+                    write_private_text(config_path, content)
+                else:
+                    config_path.write_text(content, encoding="utf-8")
                 logger.info(f"Created static config: {config_path}")
 
     def determine_pending_configs(self) -> None:
