@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Sequence
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -373,6 +374,14 @@ class DeploymentStateStore:
         current["database_journal_path"] = database_journal_path
         if quiescence_receipt is not None:
             current["quiescence_receipt"] = deepcopy(quiescence_receipt)
+        self._write(repo_name, current)
+
+    def record_restart_skips(self, repo_name: str, services: Sequence[str]) -> None:
+        """Record services this attempt intentionally left running."""
+        current = self.read(repo_name)
+        if current is None:
+            raise ValueError(f"deployment journal does not exist for {repo_name}")
+        current["restart_skipped_services"] = sorted(services)
         self._write(repo_name, current)
 
     def record_database_result(

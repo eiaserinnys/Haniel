@@ -51,6 +51,7 @@ from .git import (
     activate_repo_target,
     fetch_repo,
     get_changed_paths,
+    get_changed_paths_between,
     get_head,
     get_pending_changes,
     get_remote_head,
@@ -95,6 +96,7 @@ from .runner_deployment import run_manifest_deployment
 from .one_shot_handover import probe_manifest_target
 from .release_staging import ReleaseStagingError
 from .release_manifest import ReleaseManifest
+from .restart_filter import RestartFilterCandidates, plan_restart_skips
 from .handover_config import (
     HandoverConfigError,
     require_handover_config_digest,
@@ -2675,6 +2677,42 @@ class ServiceRunner:
             lock.acquire()
             lock.release()
 
+    def _restart_filter_candidates(
+        self,
+        *,
+        repo_path: Path,
+        previous_head: str,
+        target_head: str,
+        manifest: ReleaseManifest,
+        affected: list[str],
+    ) -> RestartFilterCandidates | None:
+        """Plan which affected services this deployment may leave running.
+
+        Returns None when the target manifest declares no filters, both heads
+        are the same commit, the diff is unavailable or empty, or no affected
+        service matches every changed path.
+        """
+        filters = manifest.service_restart_filters
+        if not filters or previous_head == target_head:
+            return None
+        changed_paths = get_changed_paths_between(repo_path, previous_head, target_head)
+        if not changed_paths:
+            return None
+        services = plan_restart_skips(
+            affected=affected,
+            filters=filters,
+            changed_paths=changed_paths,
+            dependencies={
+                name: self._dependency_graph.get_dependencies(name) for name in affected
+            },
+        )
+        if not services:
+            return None
+        return RestartFilterCandidates(
+            services=services,
+            changed_path_count=len(changed_paths),
+        )
+
     def trigger_pull(
         self,
         repo_name: str,
@@ -2805,6 +2843,7 @@ class ServiceRunner:
                     reporting_node_id = (
                         config_snapshot.config.orchestrator_client.node_id
                     )
+                restart_candidates: RestartFilterCandidates | None = None
                 if runtime.config.release_manifest:
                     assert previous_head is not None
                     resolved_branch = branch or runtime.config.branch
@@ -2873,6 +2912,13 @@ class ServiceRunner:
                             "approved target changed during staging: "
                             f"approved={target_head} staged={staged.target_head}"
                         )
+                    restart_candidates = self._restart_filter_candidates(
+                        repo_path=repo_path,
+                        previous_head=previous_head,
+                        target_head=staged.target_head,
+                        manifest=staged.manifest,
+                        affected=affected,
+                    )
                 else:
                     journal_attempt_id = None
                     resolved_branch = branch or runtime.config.branch
@@ -3012,6 +3058,7 @@ class ServiceRunner:
                             else None
                         ),
                         config_snapshot=config_snapshot,
+                        restart_candidates=restart_candidates,
                         **progress_kwargs,
                     )
                 else:

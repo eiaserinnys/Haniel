@@ -37,6 +37,7 @@ from .release_manifest import (
     resolve_manifest_service_cwd,
     resolve_manifest_service_environment,
 )
+from .restart_filter import RestartFilterCandidates
 from .service_environment import ServiceEnvironmentFile
 from .safety_redaction import bounded_redact_text
 from .deployment_errors import StableDeploymentError
@@ -78,6 +79,7 @@ class RunnerDeploymentAdapter:
         ) = None,
         config_snapshot: RunnerConfigSnapshot | None = None,
         repo_runtime_snapshot: RepoRuntimeSnapshot | None = None,
+        restart_candidates: RestartFilterCandidates | None = None,
     ) -> None:
         self.runner = runner
         self.repo_name = repo_name
@@ -89,6 +91,8 @@ class RunnerDeploymentAdapter:
         self.quiescence_callback = quiescence_callback
         self.desired_running = desired_running
         self.quiesce_services = sorted(set(quiesce_services or affected))
+        self.restart_candidates = restart_candidates
+        self.restart_skipped: frozenset[str] = frozenset()
         self.config_digest = config_digest
         self.service_environment_bindings = service_environment_bindings
         if config_snapshot is None or repo_runtime_snapshot is None:
@@ -120,7 +124,41 @@ class RunnerDeploymentAdapter:
             quiescence_nonce=self.quiescence_nonce,
             config_digest=self.config_digest,
             acknowledge_quiesced=self.quiescence_callback,
+            restart_candidates=self.restart_candidates,
+            apply_restart_skips=self.apply_restart_skips,
         )
+
+    def apply_restart_skips(self, services: frozenset[str]) -> frozenset[str]:
+        """Keep confirmed services out of stops, starts, and recovery.
+
+        A candidate that is already stopped before the handover (crash backoff,
+        circuit breaker, or a manual stop) is not skipped: deployments have
+        always brought every affected service up, so leaving it out of the
+        start set would keep it down after a successful deployment.
+        """
+        running = frozenset(
+            service
+            for service in services
+            if self.runner.process_manager.is_running(service)
+        )
+        already_stopped = services - running
+        if already_stopped:
+            logger.info(
+                "Restart skips for %s not applied to services already stopped "
+                "before the deployment (crash backoff, circuit breaker, or "
+                "manual stop): %s; they stay in the stop and start sets",
+                self.repo_name,
+                ", ".join(sorted(already_stopped)),
+            )
+        self.restart_skipped = running
+        return running
+
+    def _effective_quiesce_services(self) -> list[str]:
+        return [
+            service
+            for service in self.quiesce_services
+            if service not in self.restart_skipped
+        ]
 
     def service_cwd(self, service_name: str) -> Path:
         resolved = resolve_manifest_service_cwd(
@@ -220,7 +258,7 @@ class RunnerDeploymentAdapter:
             "target_head": self.target_head,
             "stopped_services": stopped,
             "already_stopped_services": already_stopped,
-            "quiesced_services": self.quiesce_services,
+            "quiesced_services": self._effective_quiesce_services(),
             "owner_instance": self._owner_instance(),
             "quiescence_nonce": self.quiescence_nonce,
             "quiesced_at": datetime.now(timezone.utc).isoformat(),
@@ -231,6 +269,7 @@ class RunnerDeploymentAdapter:
 
     def start_and_wait(self, selected: set[str]) -> None:
         self.require_current_config()
+        selected = set(selected) - self.restart_skipped
         startup_order = [
             service
             for service in self.config_snapshot.startup_order
@@ -321,7 +360,7 @@ class RunnerDeploymentAdapter:
             self.desired_running
             if self.desired_running is not None
             else set(self.affected)
-        )
+        ) - self.restart_skipped
         if self.handover_started or self.desired_running is not None:
             try:
                 self.start_and_wait(recovery_services)
@@ -343,6 +382,7 @@ class RunnerDeploymentAdapter:
         selected = set(runtime.affected_services)
         if self.desired_running is not None:
             selected.intersection_update(self.desired_running)
+        selected -= self.restart_skipped
         hook_services = set(
             repo_owned_services(
                 self.repo_name,
@@ -398,16 +438,17 @@ class RunnerDeploymentAdapter:
         self._stop_running()
 
     def _stop_running(self) -> tuple[list[str], list[str]]:
+        writer_services = self._effective_quiesce_services()
         stopped: list[str] = []
         already_stopped: list[str] = []
         shutdown_order = [
             service
             for service in self.runner.get_shutdown_order()
-            if service in self.quiesce_services
+            if service in writer_services
         ]
         shutdown_order.extend(
             service
-            for service in sorted(self.quiesce_services, reverse=True)
+            for service in sorted(writer_services, reverse=True)
             if service not in shutdown_order
         )
         for service in shutdown_order:
@@ -421,7 +462,7 @@ class RunnerDeploymentAdapter:
             self.runner._cancel_pending_restart(service)
         remaining = [
             service
-            for service in self.quiesce_services
+            for service in writer_services
             if self.runner.process_manager.is_running(service)
         ]
         if remaining:
@@ -475,6 +516,7 @@ def run_manifest_deployment(
     config_digest: str | None = None,
     service_environment_bindings: dict[str, BoundServiceEnvironment] | None = None,
     config_snapshot: RunnerConfigSnapshot | None = None,
+    restart_candidates: RestartFilterCandidates | None = None,
 ) -> None:
     """Load the pulled release manifest and run the auditable handover."""
 
@@ -541,6 +583,7 @@ def run_manifest_deployment(
         service_environment_bindings=service_environment_bindings,
         config_snapshot=config_snapshot,
         repo_runtime_snapshot=repo_runtime,
+        restart_candidates=restart_candidates,
     )
     lifecycle = getattr(runner, "lifecycle_control", None)
     owner_instance = getattr(runner, "lifecycle_instance_id", None)

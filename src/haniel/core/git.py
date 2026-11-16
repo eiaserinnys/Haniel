@@ -480,6 +480,39 @@ def get_changed_paths(
     return paths or None
 
 
+def get_changed_paths_between(
+    path: Path,
+    base_ref: str,
+    target_ref: str,
+) -> list[str] | None:
+    """List paths changed between two commits.
+
+    ``--no-renames`` keeps a file moved between directories visible on both
+    paths, matching :func:`get_changed_paths`.
+
+    Returns:
+        Changed paths (possibly empty), or None when git cannot produce the
+        list (unknown refs, not a repository, or a git failure).
+    """
+    try:
+        result = _run_git(
+            [
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                f"{base_ref}..{target_ref}",
+            ],
+            cwd=path,
+            check=False,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    return [item for item in result.stdout.split("\0") if item]
+
+
 def has_changes(path: Path, branch: str, remote: str = "origin") -> bool:
     """Check if there are changes between local and remote.
 

@@ -25,7 +25,7 @@ def staged_release(target_head: str = "new-head") -> SimpleNamespace:
     return SimpleNamespace(
         target_head=target_head,
         manifest_digest="manifest-digest",
-        manifest=SimpleNamespace(release_id="release-1"),
+        manifest=SimpleNamespace(release_id="release-1", service_restart_filters={}),
     )
 
 
