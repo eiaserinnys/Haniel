@@ -13,6 +13,11 @@ def _build_app(monkeypatch, tmp_path):
     return create_app()
 
 
+def test_create_app_suppresses_httpx_info_logs(monkeypatch, tmp_path):
+    _build_app(monkeypatch, tmp_path)
+    assert logging.getLogger("httpx").level == logging.WARNING
+
+
 def test_uvicorn_websocket_log_redacts_query_token(monkeypatch, tmp_path, caplog):
     _build_app(monkeypatch, tmp_path)
     caplog.clear()

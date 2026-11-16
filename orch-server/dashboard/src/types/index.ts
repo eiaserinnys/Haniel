@@ -1,6 +1,6 @@
 // Haniel Orchestrator Dashboard — shared type definitions
 
-export type DeployStatus = 'pending' | 'approved' | 'rejected' | 'deploying' | 'success' | 'failed';
+export type DeployStatus = 'pending' | 'rejected' | 'deploying' | 'success' | 'failed';
 
 export interface Deploy {
   deploy_id: string;

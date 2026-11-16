@@ -33,7 +33,7 @@ export function HistoryView({
   const [expandedErrors, setExpandedErrors] = useState<Set<string>>(new Set());
 
   const counts = useMemo(() => {
-    const c = { all: deploys.length, pending: 0, approved: 0, deploying: 0, success: 0, failed: 0, rejected: 0 };
+    const c = { all: deploys.length, pending: 0, deploying: 0, success: 0, failed: 0, rejected: 0 };
     for (const d of deploys) { c[d.status]++; }
     return c;
   }, [deploys]);

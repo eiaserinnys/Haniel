@@ -429,6 +429,10 @@ class WebSocketHub(HubCanonicalFlows, HubServiceCommands):
             message="request closed because its node stayed absent",
         )
         for event in closed:
+            logger.info(
+                "Closed absent-node request deploy_id=%s node_id=%s reason=%s",
+                event["deploy_id"], event["node_id"], event["reject_reason"],
+            )
             await self.broadcast_to_dashboards(
                 {
                     "type": "status_change",

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from state_support import set_legacy_status, to_deploying, to_success
+from state_support import to_deploying, to_success
 from haniel_orch.connection_lifecycle import ActiveConnection, ConnectionLease
 from haniel_orch.deploy_attempt_coordinator import (
     DeployAttemptCoordinator,
@@ -213,7 +213,7 @@ class TestSelfUpdatePriority:
 
     @pytest.mark.parametrize(
         "terminal",
-        [DeployStatus.REJECTED, DeployStatus.FAILED, DeployStatus.SUCCESS],
+        [DeployStatus.REJECTED, DeployStatus.SUCCESS],
     )
     async def test_terminal_self_update_unblocks_other_repo(
         self, store: EventStore, terminal: DeployStatus
@@ -229,8 +229,6 @@ class TestSelfUpdatePriority:
             await store.reject_deploy("self")
         elif terminal is DeployStatus.SUCCESS:
             await to_success(store, "self")
-        else:
-            await set_legacy_status(store, "self", terminal.value)
         regular = await seed_named(
             store, deploy_id="regular", node_id="n", repo="soulstream"
         )
