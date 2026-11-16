@@ -49,7 +49,7 @@ class DeploymentCallbacks:
     config_digest: str | None = None
     acknowledge_quiesced: Callable[[dict[str, Any]], None] | None = None
     restart_candidates: RestartFilterCandidates | None = None
-    apply_restart_skips: Callable[[frozenset[str]], None] | None = None
+    apply_restart_skips: Callable[[frozenset[str]], frozenset[str]] | None = None
 
 
 @dataclass(frozen=True)
@@ -190,7 +190,7 @@ class DeploymentCoordinator:
                         database_journal_path=database_journal_path,
                     )
 
-            skipped_services = self._confirm_restart_skips(
+            confirmed_services = self._confirm_restart_skips(
                 repo_name=repo_name,
                 target_head=target_head,
                 callbacks=callbacks,
@@ -198,12 +198,20 @@ class DeploymentCoordinator:
                 operation=operation,
                 preflight=preflight,
             )
+            skipped_services = (
+                callbacks.apply_restart_skips(confirmed_services)
+                if confirmed_services and callbacks.apply_restart_skips is not None
+                else frozenset()
+            )
             if skipped_services:
-                if callbacks.apply_restart_skips is not None:
-                    callbacks.apply_restart_skips(skipped_services)
                 self.state_store.record_restart_skips(
                     repo_name, sorted(skipped_services)
                 )
+                candidates = callbacks.restart_candidates
+                if candidates is not None:
+                    self._log_restart_skips(
+                        repo_name, target_head, candidates, skipped_services
+                    )
 
             quiescence_receipt: dict[str, Any] | None = None
             if not contract_mode or operation == "upgrade":
@@ -296,9 +304,6 @@ class DeploymentCoordinator:
         if candidates is None or not candidates.services:
             return frozenset()
         if not contract_mode:
-            self._log_restart_skips(
-                repo_name, target_head, candidates, candidates.services
-            )
             return candidates.services
         if operation != "upgrade":
             self._log_restart_skips(
@@ -322,9 +327,6 @@ class DeploymentCoordinator:
         elif pending_count != 0:
             reason = f"contract preflight pending_count={pending_count}"
         else:
-            self._log_restart_skips(
-                repo_name, target_head, candidates, candidates.services
-            )
             return candidates.services
         self._log_restart_skips(
             repo_name, target_head, candidates, frozenset(), reason=reason

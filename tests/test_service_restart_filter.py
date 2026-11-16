@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 from pathlib import Path
@@ -277,6 +278,7 @@ def _execute(
     *,
     preflight_json: dict[str, object] | None = None,
     candidates: RestartFilterCandidates | None = None,
+    dropped: frozenset[str] = frozenset(),
     writer_services: tuple[str, ...] = (),
     stop_receipt: dict[str, object] | None = None,
 ) -> tuple[list[str], dict[str, object] | None, Exception | None]:
@@ -289,6 +291,12 @@ def _execute(
             return CommandResult(stdout="{}", json_data=preflight_json)
         return None
 
+    def apply_restart_skips(services: frozenset[str]) -> frozenset[str]:
+        applied = frozenset(services) - dropped
+        if applied:
+            events.append("skip:" + ",".join(sorted(applied)))
+        return applied
+
     callbacks = DeploymentCallbacks(
         build=lambda: events.append("build"),
         stop=lambda: (events.append("stop"), stop_receipt)[1],
@@ -297,9 +305,7 @@ def _execute(
         prepare_roll_forward=lambda: events.append("prepare-roll-forward"),
         writer_services=writer_services,
         restart_candidates=candidates,
-        apply_restart_skips=lambda services: events.append(
-            "skip:" + ",".join(sorted(services))
-        ),
+        apply_restart_skips=apply_restart_skips,
     )
     store = DeploymentStateStore(tmp_path / "state")
     coordinator = DeploymentCoordinator(state_store=store, command_runner=run)
@@ -335,14 +341,19 @@ def _candidates(*services: str) -> RestartFilterCandidates:
 def test_contract_upgrade_with_zero_pending_skips_stop_and_receipt(
     tmp_path: Path,
 ) -> None:
-    events, journal, error = _execute(
-        tmp_path,
-        _manifest_payload(contract=True),
-        preflight_json=_contract_preflight(pending_count=0),
-        candidates=_candidates("worker"),
-        writer_services=("app", "worker"),
-        stop_receipt=None,
-    )
+    validate = MagicMock()
+    with (
+        patch("haniel.core.deployment.validate_quiescence_receipt", validate),
+        patch.object(DeploymentStateStore, "write_quiescence_receipt") as write_receipt,
+    ):
+        events, journal, error = _execute(
+            tmp_path,
+            _manifest_payload(contract=True),
+            preflight_json=_contract_preflight(pending_count=0),
+            candidates=_candidates("worker"),
+            writer_services=("app", "worker"),
+            stop_receipt=None,
+        )
 
     assert error is None
     assert "skip:worker" in events
@@ -352,6 +363,55 @@ def test_contract_upgrade_with_zero_pending_skips_stop_and_receipt(
     assert journal is not None
     assert journal["state"] == "success"
     assert journal["restart_skipped_services"] == ["worker"]
+    validate.assert_not_called()
+    write_receipt.assert_not_called()
+    assert not (tmp_path / "state" / "app.quiescence.json").exists()
+    states = [entry["state"] for entry in journal["history"]]
+    assert states.index("migrating") < states.index("starting")
+
+
+def test_zero_pending_with_no_running_candidates_keeps_the_old_handover(
+    tmp_path: Path,
+) -> None:
+    events, journal, error = _execute(
+        tmp_path,
+        _manifest_payload(contract=True),
+        preflight_json=_contract_preflight(pending_count=0),
+        candidates=_candidates("standalone"),
+        dropped=frozenset({"standalone"}),
+        writer_services=("app", "standalone"),
+        stop_receipt=None,
+    )
+
+    assert isinstance(error, DeploymentError)
+    assert "QUIESCENCE_REQUIRED" in str(error)
+    assert "skip:" not in events
+    assert journal is not None
+    assert "restart_skipped_services" not in journal
+
+
+def test_only_applied_candidates_reach_the_journal_and_log(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="haniel.core.deployment")
+
+    events, journal, error = _execute(
+        tmp_path,
+        _manifest_payload(contract=True),
+        preflight_json=_contract_preflight(pending_count=0),
+        candidates=_candidates("worker", "standalone"),
+        dropped=frozenset({"standalone"}),
+        writer_services=("app", "worker", "standalone"),
+        stop_receipt=None,
+    )
+
+    assert error is None
+    assert "skip:worker" in events
+    assert "skip:standalone" not in events
+    assert journal is not None
+    assert journal["restart_skipped_services"] == ["worker"]
+    assert "left running: worker" in caplog.text
+    assert "standalone" not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -495,6 +555,47 @@ def test_skipped_service_stays_out_of_stop_and_start(tmp_path: Path) -> None:
 
     assert "start:standalone" not in events
     assert {"start:app", "start:worker"} <= set(events)
+
+
+def test_candidate_already_stopped_stays_in_stop_and_start_sets(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    runner, repo, head = _adapter_fixture(tmp_path)
+    events, running = _mock_processes(runner, ["app", "worker"])
+    running["standalone"] = False
+    affected = ["app", "worker", "standalone"]
+    adapter = RunnerDeploymentAdapter(
+        runner=runner,
+        repo_name="app",
+        affected=affected,
+        repo_path=repo,
+        previous_head=head,
+        target_head=head,
+        quiesce_services=affected,
+    )
+
+    with caplog.at_level(logging.INFO):
+        applied = adapter.apply_restart_skips(frozenset({"worker", "standalone"}))
+
+    assert applied == frozenset({"worker"})
+    assert adapter.restart_skipped == frozenset({"worker"})
+    assert "standalone" in caplog.text
+
+    receipt = adapter.stop()
+
+    assert "stop:worker" not in events
+    assert "stop:standalone" not in events
+    assert set(receipt["stopped_services"]) == {"app"}
+    assert set(receipt["already_stopped_services"]) == {"standalone"}
+    assert set(receipt["quiesced_services"]) == {"app", "standalone"}
+    assert running["worker"] is True
+
+    events.clear()
+    adapter.start_and_wait(set(affected))
+
+    assert "start:standalone" in events
+    assert "start:worker" not in events
+    assert running["standalone"] is True
 
 
 def test_rollback_does_not_start_a_skipped_service(tmp_path: Path) -> None:

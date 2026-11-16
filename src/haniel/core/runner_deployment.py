@@ -128,9 +128,30 @@ class RunnerDeploymentAdapter:
             apply_restart_skips=self.apply_restart_skips,
         )
 
-    def apply_restart_skips(self, services: frozenset[str]) -> None:
-        """Keep confirmed services out of stops, starts, and recovery."""
-        self.restart_skipped = frozenset(services)
+    def apply_restart_skips(self, services: frozenset[str]) -> frozenset[str]:
+        """Keep confirmed services out of stops, starts, and recovery.
+
+        A candidate that is already stopped before the handover (crash backoff,
+        circuit breaker, or a manual stop) is not skipped: deployments have
+        always brought every affected service up, so leaving it out of the
+        start set would keep it down after a successful deployment.
+        """
+        running = frozenset(
+            service
+            for service in services
+            if self.runner.process_manager.is_running(service)
+        )
+        already_stopped = services - running
+        if already_stopped:
+            logger.info(
+                "Restart skips for %s not applied to services already stopped "
+                "before the deployment (crash backoff, circuit breaker, or "
+                "manual stop): %s; they stay in the stop and start sets",
+                self.repo_name,
+                ", ".join(sorted(already_stopped)),
+            )
+        self.restart_skipped = running
+        return running
 
     def _effective_quiesce_services(self) -> list[str]:
         return [
