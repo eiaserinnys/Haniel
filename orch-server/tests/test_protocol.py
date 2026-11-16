@@ -28,29 +28,21 @@ from haniel_orch.protocol import (
 class TestDeployStatus:
     """DeployStatus enum tests."""
 
+    def test_only_current_request_states_are_exposed(self):
+        assert {status.value for status in DeployStatus} == {"pending", "rejected", "deploying", "success"}
+
     def test_all_members_exist(self):
         assert DeployStatus.PENDING == "pending"
-        assert DeployStatus.APPROVED == "approved"
         assert DeployStatus.REJECTED == "rejected"
         assert DeployStatus.DEPLOYING == "deploying"
         assert DeployStatus.SUCCESS == "success"
-        assert DeployStatus.FAILED == "failed"
 
     def test_member_count(self):
-        assert len(DeployStatus) == 6
+        assert len(DeployStatus) == 4
 
     def test_lookup_by_name(self):
-        """DeployStatus['SUCCESS'] — used in hub.py for DeployResult handling."""
+        """Current request states can be looked up by name."""
         assert DeployStatus["SUCCESS"] == DeployStatus.SUCCESS
-        assert DeployStatus["FAILED"] == DeployStatus.FAILED
-
-    def test_lookup_from_deploy_result_status(self):
-        """Simulate hub.py: DeployStatus[result.status.upper()]."""
-        result_status = "success"
-        assert DeployStatus[result_status.upper()] == DeployStatus.SUCCESS
-
-        result_status = "failed"
-        assert DeployStatus[result_status.upper()] == DeployStatus.FAILED
 
 
 class TestNodeHello:

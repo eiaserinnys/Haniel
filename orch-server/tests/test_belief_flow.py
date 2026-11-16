@@ -228,6 +228,43 @@ async def test_the_coordinator_arms_the_short_deadline_for_a_protocol_one_node(s
 # ---------------------------------------------------------------- 받았다, 시작했다
 
 
+@pytest.mark.parametrize("report_kind", ["result", "settled"])
+async def test_first_report_arms_a_lease_until_the_other_report_arrives(store: EventStore, report_kind):
+    await seed(store)
+    harness = p1(Harness(store))
+    try:
+        await begin(store)
+        await received(store)
+        if report_kind == "result":
+            await harness.coordinator.handle_result(result())
+        else:
+            await harness.coordinator.handle_settled(settled())
+        attempt = await store.attempts.get_attempt("a1")
+        assert attempt["deadline_kind"] == DEADLINE_LEASE
+        assert "attempt:a1" in harness.coordinator._timers
+        await expire(store)
+        assert (await leaf4(store))[3] == "l_on"
+    finally:
+        await harness.close()
+
+
+@pytest.mark.parametrize("report_kind", ["result", "settled"])
+async def test_first_legacy_report_keeps_its_original_deadline(store: EventStore, report_kind):
+    await seed(store)
+    harness = Harness(store)
+    try:
+        await begin(store, protocol=None)
+        before = await store.attempts.get_attempt("a1")
+        if report_kind == "result":
+            await harness.coordinator.handle_result(result())
+        else:
+            await harness.coordinator.handle_settled(settled())
+        after = await store.attempts.get_attempt("a1")
+        assert (after["deadline_kind"], after["deadline_at"]) == (before["deadline_kind"], before["deadline_at"])
+    finally:
+        await harness.close()
+
+
 async def test_received_moves_the_belief_to_queued_and_stops_the_short_deadline(store: EventStore):
     await seed(store)
     await begin(store)

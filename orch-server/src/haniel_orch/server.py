@@ -6,6 +6,7 @@ import hmac
 import logging
 import os
 import pathlib
+import subprocess
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Literal
@@ -113,6 +114,7 @@ class OrchestratorConfig(BaseModel):
     """Server configuration. All fields are required — no hidden defaults."""
 
     token: str  # shared secret for node authentication
+    source_commit: str | None = None
     auth_bearer_token: str = ""  # dashboard auth token; empty = auth disabled
     db_path: str = "orchestrator.db"
     host: str = "0.0.0.0"
@@ -248,8 +250,15 @@ class OrchestratorServer:
             await self._store.close()
             logger.info("Orchestrator shut down")
 
+        async def health(request: Request) -> JSONResponse:
+            return JSONResponse({
+                "status": "ok",
+                "service": "haniel-orchestrator",
+                "source_commit": self._config.source_commit,
+            })
+
         self._app = Starlette(
-            routes=auth_routes + api_routes + ws_routes + dashboard_routes,
+            routes=[Route("/health", health)] + auth_routes + api_routes + ws_routes + dashboard_routes,
             lifespan=lifespan,
         )
 
@@ -283,14 +292,28 @@ def create_app() -> Starlette:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     install_query_token_redaction()
 
     token = os.environ.get("TOKEN")
     if not token:
         raise RuntimeError("TOKEN environment variable is required")
 
+    try:
+        revision = subprocess.run(
+            ["git", "-C", str(pathlib.Path(__file__).resolve().parent.parent.parent),
+             "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True, timeout=5,
+        ).stdout.strip()
+        source_commit = (
+            revision if len(revision) == 40 and all(c in "0123456789abcdef" for c in revision) else None
+        )
+    except (OSError, subprocess.SubprocessError):
+        source_commit = None
+
     config = OrchestratorConfig(
         token=token,
+        source_commit=source_commit,
         auth_bearer_token=os.environ.get("AUTH_BEARER_TOKEN", ""),
         db_path=os.environ.get("DB_PATH", "orchestrator.db"),
         host=os.environ.get("HOST", "0.0.0.0"),

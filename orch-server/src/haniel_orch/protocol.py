@@ -15,11 +15,9 @@ class DeployStatus(str, Enum):
     """Deploy lifecycle states. Used by EventStore and Hub."""
 
     PENDING = "pending"
-    APPROVED = "approved"
     REJECTED = "rejected"
     DEPLOYING = "deploying"
     SUCCESS = "success"
-    FAILED = "failed"
 
 
 DeployPlanReason = Literal[

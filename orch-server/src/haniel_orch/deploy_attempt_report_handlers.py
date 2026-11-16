@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from .protocol import DeployAttemptTerminal, DeployResult, ManifestRecoveryEvidence, RepoReconciliation
 
 _SETTLED = frozenset({"terminal_ok", "terminal_fail"})
@@ -65,6 +67,10 @@ class DeployAttemptReportHandlers:
         await self._after_store_terminal(node_id, orchestrator_attempt_id, result)
 
     async def handle_result(self, msg: DeployResult) -> None:
+        attempt = await self.attempts.get_attempt(msg.orchestrator_attempt_id)
+        deadline_at = (
+            self._lease_deadline(attempt, datetime.now(timezone.utc)) if attempt else None
+        )
         result = await self.attempts.record_result(
             deploy_id=msg.deploy_id,
             orchestrator_attempt_id=msg.orchestrator_attempt_id,
@@ -72,7 +78,10 @@ class DeployAttemptReportHandlers:
             status=msg.status,
             error=msg.error,
             duration_ms=msg.duration_ms,
+            deadline_at=deadline_at,
         )
+        if result.get("status") == "recorded" and result.get("deadline_at"):
+            self._schedule_attempt(msg.orchestrator_attempt_id, result["deadline_at"])
         await self._after_bundle(
             node_id=msg.node_id,
             deploy_id=msg.deploy_id,
@@ -86,13 +95,20 @@ class DeployAttemptReportHandlers:
     async def handle_settled(self, msg: RepoReconciliation) -> None:
         if msg.orchestrator_attempt_id is None or msg.connection_generation is None:
             return
+        attempt = await self.attempts.get_attempt(msg.orchestrator_attempt_id)
+        deadline_at = (
+            self._lease_deadline(attempt, datetime.now(timezone.utc)) if attempt else None
+        )
         result = await self.attempts.record_settled(
             deploy_id=msg.deploy_id,
             orchestrator_attempt_id=msg.orchestrator_attempt_id,
             connection_generation=msg.connection_generation,
             local_head=msg.local_head,
             remote_head=msg.remote_head,
+            deadline_at=deadline_at,
         )
+        if result.get("status") == "recorded" and result.get("deadline_at"):
+            self._schedule_attempt(msg.orchestrator_attempt_id, result["deadline_at"])
         await self._after_bundle(
             node_id=msg.node_id,
             deploy_id=msg.deploy_id,

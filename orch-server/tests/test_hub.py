@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1118,7 +1119,7 @@ class TestAbsentNodeSweep:
         await store._db.commit()
 
     async def test_waiting_requests_of_an_absent_node_are_rejected_at_startup(
-        self, hub: WebSocketHub, store: EventStore
+        self, hub: WebSocketHub, store: EventStore, caplog
     ):
         await self._seed(store, "old:r:main:target", "n-old")
         await store.upsert_node(
@@ -1163,13 +1164,16 @@ class TestAbsentNodeSweep:
             store, "UPDATE nodes SET last_seen = ? WHERE node_id = ?", stale, "n-live"
         )
 
-        await hub.start_heartbeat_checker()
+        with caplog.at_level(logging.INFO, logger="haniel_orch.hub"):
+            await hub.start_heartbeat_checker()
         assert hub._heartbeat_task is not None
 
         for deploy_id in ("old:r:main:target", "gone:r:main:target"):
             event = await store.get_deploy_event(deploy_id)
             assert event["status"] == "rejected", deploy_id
             assert event["reject_reason"] == f"node absent since {stale}", deploy_id
+            assert any(deploy_id in record.message and event["node_id"] in record.message
+                       and event["reject_reason"] in record.message for record in caplog.records)
         live = await store.get_deploy_event("live:r:main:target")
         assert live["status"] == "pending", "지금 연결된 노드의 요청을 내렸다"
 
@@ -1762,7 +1766,7 @@ class TestDeployTimeout:
     async def test_progress_renews_idle_deadline_and_allows_success(
         self, registry, store
     ):
-        hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=0.08)
+        hub = WebSocketHub(registry, store, token="t", deploy_timeout_sec=300)
         ws_dash = AsyncMock()
         hub._dashboard_connections = {ws_dash}
         await store.create_deploy_event(
@@ -1775,16 +1779,13 @@ class TestDeployTimeout:
             diff_stat=None,
             detected_at="2026-01-01T00:00:00Z",
         )
+        initial_deadline = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
         await begin_attempt(
             store,
             "d1",
-            deadline_at=(
-                datetime.now(timezone.utc) + timedelta(milliseconds=45)
-            ).isoformat(),
+            deadline_at=initial_deadline,
         )
         bind_generation(hub)
-        await hub.deploy_coordinator.restore_deadlines()
-        await asyncio.sleep(0.03)
 
         await hub.deploy_coordinator.handle_progress(
             DeployProgress(
@@ -1795,9 +1796,14 @@ class TestDeployTimeout:
                 stage="build",
             )
         )
-        await asyncio.sleep(0.04)
-
-        assert (await store.attempts.get_attempt("attempt-d1"))["outcome"] == "active"
+        attempt = await store.attempts.get_attempt("attempt-d1")
+        assert attempt["deadline_kind"] == "lease"
+        assert attempt["deadline_at"] > initial_deadline
+        expired = await store.attempts.fail_attempt_if_deadline_due(
+            "attempt-d1", expected_deadline_at=initial_deadline, kind="k",
+            stage="deadline", reason="r", error="e",
+        )
+        assert expired["status"] == "deadline_changed"
         await hub._handle_deploy_result(deploy_result("d1", status="success"))
         await hub.deploy_coordinator.handle_settled(settled("d1"))
         assert (await store.get_deploy_event("d1"))["status"] == "success"

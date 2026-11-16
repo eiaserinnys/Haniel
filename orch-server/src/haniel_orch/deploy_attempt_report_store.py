@@ -11,7 +11,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from .deploy_attempt_intake import CLOSURE_NOT_EXECUTED, intake_terminal
+from .deploy_attempt_intake import (
+    CLOSURE_NOT_EXECUTED, DEADLINE_LEASE, intake_terminal, is_legacy,
+)
 from .protocol import DeployAttemptTerminal, ManifestRecoveryEvidence
 from .statechart import attempt_steps, steps
 from .statechart.restore import NoTransition
@@ -24,15 +26,24 @@ def _now_iso() -> str:
 class DeployAttemptReportStore:
     """Mixin that records node reports under the store lock."""
 
-    async def _mark_started_unlocked(self, attempt: dict[str, Any], now: str) -> None:
+    async def _mark_started_unlocked(
+        self, attempt: dict[str, Any], now: str, deadline_at: str | None
+    ) -> bool:
         """실제 실행의 증거가 닿았다. 시작 시각을 처음 한 번 적고, 도는 시도면 믿음을 시작했다로 옮긴다."""
         await attempt_steps.mark_execution_started(self._db, attempt["orchestrator_attempt_id"], now)
         if attempt["outcome"] != "active":
-            return
+            return False
+        lease_set = not is_legacy(attempt["node_protocol"]) and deadline_at is not None
+        if lease_set:
+            await attempt_steps.set_deadline(
+                self._db, attempt["orchestrator_attempt_id"],
+                kind=DEADLINE_LEASE, deadline_at=deadline_at,
+            )
         try:
             await steps.step_request(self._db, attempt["deploy_id"], "started", now=now)
         except NoTransition as exc:
             exc.warn("started")
+        return lease_set
 
     async def _record_evidence_unlocked(
         self,
@@ -81,6 +92,7 @@ class DeployAttemptReportStore:
         status: str,
         error: str | None,
         duration_ms: int | None,
+        deadline_at: str | None = None,
     ) -> dict[str, Any]:
         async with self._mutation_lock:
             try:
@@ -107,8 +119,8 @@ class DeployAttemptReportStore:
                     )
                     await self._db.commit()
                     return result
-                # 결과는 실제 실행의 증거다. 닫힌 시도에도 사실만 적는다(임대를 늘리거나 시도를 되살리지 않는다)
-                await self._mark_started_unlocked(attempt, _now_iso())
+                # 결과는 실제 실행의 증거다. 닫힌 시도에는 사실만 적고 시도를 되살리지 않는다.
+                lease_set = await self._mark_started_unlocked(attempt, _now_iso(), deadline_at)
                 if status == "failed" and active:
                     result = await self._fail_attempt_unlocked(
                         attempt={**attempt, "duration_ms": duration_ms},
@@ -131,6 +143,8 @@ class DeployAttemptReportStore:
                         "result_ok",
                         data={"duration_ms": duration_ms},
                     )
+                if lease_set and result.get("status") == "recorded":
+                    result["deadline_at"] = deadline_at
                 await self._db.commit()
                 return result
             except Exception:
@@ -145,6 +159,7 @@ class DeployAttemptReportStore:
         connection_generation: str,
         local_head: str,
         remote_head: str,
+        deadline_at: str | None = None,
     ) -> dict[str, Any]:
         async with self._mutation_lock:
             try:
@@ -171,7 +186,7 @@ class DeployAttemptReportStore:
                     await self._db.commit()
                     return result
                 # 실행 방식의 정착은 실제 실행의 증거다. 닫힌 시도에도 사실만 적는다
-                await self._mark_started_unlocked(attempt, _now_iso())
+                lease_set = await self._mark_started_unlocked(attempt, _now_iso(), deadline_at)
                 if local_head != attempt["target_head"] and attempt["outcome"] == "active":
                     result = await self._fail_attempt_unlocked(
                         attempt=attempt,
@@ -192,6 +207,8 @@ class DeployAttemptReportStore:
                     result = await self._record_evidence_unlocked(
                         attempt, "settled_ok", data=settled_data
                     )
+                if lease_set and result.get("status") == "recorded":
+                    result["deadline_at"] = deadline_at
                 await self._db.commit()
                 return result
             except Exception:

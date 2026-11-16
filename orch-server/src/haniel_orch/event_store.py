@@ -396,9 +396,7 @@ class EventStore(EventStoreLifecycleMixin, InspectionNoticeStoreMixin):
         """Get pending + deploying events (newest first).
 
         Used by /api/orch/pending so that PendingView keeps showing deploys
-        that have advanced to DEPLOYING after approval. APPROVED is transient
-        and not included — the hub flips APPROVED → DEPLOYING immediately
-        on send_to_node.
+        that have advanced to DEPLOYING after approval.
         """
         cursor = await self._db.execute(
             "SELECT * FROM deploy_events WHERE status IN (?, ?) "
