@@ -190,8 +190,18 @@ def _load_mapping(raw: bytes) -> dict[str, Any]:
 def _atomic_write(path: Path, content: bytes, permission_source: Path) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     mode = stat.S_IMODE(permission_source.stat().st_mode)
+    if os.name == "posix":
+        mode &= 0o600
     try:
-        with temporary.open("wb") as handle:
+        if os.name == "posix":
+            descriptor = os.open(
+                temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
+            )
+            os.fchmod(descriptor, 0o600)
+            handle = os.fdopen(descriptor, "wb")
+        else:
+            handle = temporary.open("wb")
+        with handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
