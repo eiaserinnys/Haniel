@@ -5,6 +5,7 @@ from __future__ import annotations
 import aiosqlite
 
 from .statechart.backfill import backfill_leaves
+from .statechart.inspection_notice import ensure_notice_schema
 
 
 ATTEMPT_TABLES_SQL = """
@@ -234,6 +235,8 @@ async def initialize_attempt_schema(db: aiosqlite.Connection) -> None:
                WHERE lower(repo) = 'haniel' AND status IN ('pending', 'deploying')"""
         )
     await db.executescript(ATTEMPT_TABLES_SQL)
+    # 점검 필요 알림 원장(카드 #1260). 기동 보충은 backfill_leaves가 잠금을 켠 뒤에 돈다
+    await ensure_notice_schema(db)
     await _migrate_retry_requirements(db)
     await _ensure_columns(db, "deploy_attempts", ATTEMPT_COLUMNS)
     # 잎이 비었거나 바깥 칸과 어긋난 줄만 옛 칸에서 다시 계산하고, 빈 순서 칸과 꼬리표 칸을 채운다

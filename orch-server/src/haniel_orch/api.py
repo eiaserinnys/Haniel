@@ -40,6 +40,21 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         approval (DEPLOYING) until the node reports a terminal result.
         """
         deploys = await store.get_active_deploys()
+        notices = await store.inspection_notice_summaries(
+            [deploy["deploy_id"] for deploy in deploys]
+        )
+        for deploy in deploys:
+            notice = notices.get(deploy["deploy_id"])
+            deploy["inspection_notice"] = (
+                {
+                    "notice_id": notice["notice_id"],
+                    "state": notice["state"],
+                    "sent_at": notice["sent_at"],
+                    "attempts": notice["attempts"],
+                }
+                if deploy.get("inspection_required") and notice is not None
+                else None
+            )
         return JSONResponse({"deploys": deploys})
 
     async def get_nodes(request: Request) -> JSONResponse:

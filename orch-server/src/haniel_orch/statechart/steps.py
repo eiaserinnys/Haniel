@@ -22,6 +22,7 @@ from typing import Any, NamedTuple
 
 import aiosqlite
 
+from . import inspection_notice
 from .columns import BELIEF_REGION, LOCK_ON, LOCK_REGION, REQUEST_REGION, TAG_REGION
 from .definitions import REQUEST_CLOSED, REQUEST_OUTER_STATUS, OrchRequest
 from .restore import (
@@ -210,7 +211,8 @@ async def step_request(
     data = data or {}
     now = now or now_iso()
     cursor = await db.execute(
-        "SELECT status, sm_status, sm_belief, sm_lock, sm_tag FROM deploy_events WHERE deploy_id = ?",
+        "SELECT status, sm_status, sm_belief, sm_lock, sm_tag, node_id, repo, branch, target_head "
+        "FROM deploy_events WHERE deploy_id = ?",
         (deploy_id,),
     )
     row = await cursor.fetchone()
@@ -222,7 +224,7 @@ async def step_request(
             REASON_NO_ROW,
             deploy_id,
         )
-    status, leaf, belief, lock, tag = row
+    status, leaf, belief, lock, tag, node_id, repo, branch, target_head = row
     before = {
         "status": status,
         "sm_status": leaf,
@@ -301,6 +303,21 @@ async def step_request(
     if updated.rowcount != 1:
         raise NoTransition(
             OrchRequest.__name__, before, event, REASON_UPDATE_ZERO, deploy_id
+        )
+
+    # 점검 필요가 꺼짐에서 켜짐으로 바뀌는 바로 그 트랜잭션에 알림 원장 한 줄을 적는다. 여덟 사건이 모두 이
+    # 한 곳을 지나므로 사건마다 따로 쓰지 않는다. 잠금이 유지되면(lock_changed 거짓) 새 줄이 없다.
+    if lock_changed and new_lock == LOCK_ON:
+        await inspection_notice.record_notice(
+            db,
+            deploy_id=deploy_id,
+            event=event,
+            now=now,
+            node_id=node_id,
+            repo=repo,
+            branch=branch,
+            target_head=target_head,
+            sm_status=new_leaf,
         )
 
     if new_leaf in REQUEST_CLOSED:
