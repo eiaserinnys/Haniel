@@ -30,8 +30,14 @@ async def test_mcp_bearer_auth(tmp_path, dashboard_enabled):
         assert client.get("/mcp", follow_redirects=False).status_code == 401
         assert client.get("/mcp/extra").status_code == 401
         assert client.get("/mcpx").status_code != 401
-        assert client.get("/mcp", headers={"Authorization": "Basic wrong"}).status_code == 401
-        assert client.get("/mcp", headers={"Authorization": "Bearer wrong"}).status_code == 403
+        assert (
+            client.get("/mcp", headers={"Authorization": "Basic wrong"}).status_code
+            == 401
+        )
+        assert (
+            client.get("/mcp", headers={"Authorization": "Bearer wrong"}).status_code
+            == 403
+        )
         assert client.get(
             "/mcp", headers={"Authorization": "Bearer resolved-test-token"}
         ).status_code not in (401, 403)

@@ -1135,7 +1135,9 @@ class HanielMcpServer:
             # Attach dashboard routes only when explicitly enabled in config
             dashboard_cfg = self.runner.config.dashboard
             token = (
-                self.runner.config.resolve_secret(dashboard_cfg.token, "dashboard.token")
+                self.runner.config.resolve_secret(
+                    dashboard_cfg.token, "dashboard.token"
+                )
                 if dashboard_cfg is not None
                 else None
             )
