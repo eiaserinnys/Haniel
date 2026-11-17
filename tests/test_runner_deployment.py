@@ -1061,6 +1061,40 @@ def test_quiescence_receipt_and_fresh_cleanup_use_real_managed_processes(
         runner.process_manager.stop_all(timeout=1)
 
 
+@pytest.mark.parametrize(
+    ("detail", "match"),
+    [
+        ("app process exited during readiness wait (exit code 7)", "exit code 7"),
+        (None, "readiness timeout for app"),
+    ],
+    ids=["process-exit", "timeout"],
+)
+def test_start_and_wait_reports_readiness_failure_reason(
+    tmp_path: Path, detail: str | None, match: str
+) -> None:
+    config = HanielConfig(
+        repos={"app": RepoConfig(url="git@example/app", path="./repo")},
+        services={"app": ServiceConfig(run="run-app", repo="app")},
+    )
+    runner = ServiceRunner(config, config_dir=tmp_path)
+    adapter = RunnerDeploymentAdapter(
+        runner,
+        "app",
+        ["app"],
+        tmp_path / "repo",
+        "previous",
+        "target",
+        "request-1",
+    )
+    runner._start_service = MagicMock(return_value=True)
+    runner.process_manager.is_running = MagicMock(return_value=False)
+    runner.process_manager.wait_for_ready = MagicMock(return_value=False)
+    runner.process_manager.readiness_failure_detail = MagicMock(return_value=detail)
+
+    with pytest.raises(RuntimeError, match=match):
+        adapter.start_and_wait({"app"})
+
+
 @pytest.mark.parametrize("failure", ["second-start", "readiness", "post-verify"])
 @pytest.mark.parametrize(
     "contract_mode", [True, False], ids=["contract", "legacy-optional-fields"]

@@ -22,10 +22,12 @@ from haniel.core.git import (
     get_head,
     get_remote_head,
 )
+from haniel.core.lifecycle_control import LifecycleControl
 from haniel.core.release_staging import (
     ReleaseIdentityError,
     ReleaseStagingError,
     stage_release,
+    sweep_staging_root,
 )
 from haniel.core.one_shot_handover import probe_manifest_target
 from haniel.core.runner import ServiceRunner
@@ -139,7 +141,7 @@ def test_real_malformed_probe_preserves_live_head_and_cleans_staging(
 
     assert getattr(raised.value, "code", None) == expected_code
     assert get_head(live) == previous
-    assert not (tmp_path / "staging" / "malformed-probe" / "app").exists()
+    assert not (tmp_path / "staging" / "malformed-probe").exists()
 
 
 def test_probe_identity_mismatch_preserves_live_head_and_cleans_staging(
@@ -234,7 +236,7 @@ def test_legacy_manifest_without_probe_stages_without_command_execution(
 
     assert get_head(live) == previous
     assert calls == []
-    assert not (tmp_path / "staging" / "request-1" / "app").exists()
+    assert not (tmp_path / "staging" / "request-1").exists()
 
 
 def test_repo_checkout_timeout_reaches_only_detached_checkout(tmp_path: Path) -> None:
@@ -288,7 +290,7 @@ def test_repo_checkout_timeout_reaches_only_detached_checkout(tmp_path: Path) ->
     assert get_head(live) == previous
 
 
-def test_checkout_timeout_reports_tree_cleanup_and_preserves_partial_stage(
+def test_checkout_timeout_reports_tree_cleanup_and_clears_partial_stage(
     tmp_path: Path,
 ) -> None:
     live, _remote, previous = make_remote(tmp_path, base_manifest(with_probe=False))
@@ -323,8 +325,75 @@ def test_checkout_timeout_reports_tree_cleanup_and_preserves_partial_stage(
     assert "PROCESS_TREE_TERMINATE_ATTEMPTED" in str(raised.value)
     checkout.assert_called_once()
     assert checkout.call_args.kwargs["timeout"] == 17
-    assert stage_path.exists()
+    assert not stage_path.exists()
+    assert not (tmp_path / "staging" / "checkout-timeout").exists()
     assert get_head(live) == previous
+
+
+def test_sweep_staging_root_removes_stale_and_keeps_inflight(tmp_path: Path) -> None:
+    live, _remote, _previous = make_remote(tmp_path, base_manifest(with_probe=False))
+    staging = tmp_path / "staging"
+    stale = staging / "runtime-old" / "app"
+    stale.mkdir(parents=True)
+    (stale / "leftover.txt").write_text("x", encoding="utf-8")
+    inflight = staging / "request-1" / "app"
+    inflight.mkdir(parents=True)
+    (inflight / "keep.txt").write_text("x", encoding="utf-8")
+    git(
+        live,
+        "worktree",
+        "add",
+        "--detach",
+        str(staging / "stale-worktree" / "app"),
+        "HEAD",
+    )
+
+    removed, kept = sweep_staging_root(
+        staging_root=staging,
+        repo_paths=[live],
+        keep_request_ids=["request-1"],
+    )
+
+    assert (removed, kept) == (2, 1)
+    assert not (staging / "runtime-old").exists()
+    assert not (staging / "stale-worktree").exists()
+    assert (inflight / "keep.txt").exists()
+    registered = [
+        line
+        for line in git(live, "worktree", "list", "--porcelain").splitlines()
+        if line.startswith("worktree ")
+    ]
+    assert len(registered) == 1
+
+
+def test_startup_sweep_keeps_queued_lifecycle_request_staging(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-b", "main")
+    config_path = tmp_path / "haniel.yaml"
+    runner = ServiceRunner(
+        HanielConfig(
+            repos={"app": RepoConfig(url="git@example/app", path="./repo")},
+            services={},
+        ),
+        config_dir=tmp_path,
+        config_path=config_path,
+    )
+    staging = tmp_path / ".haniel" / "staging"
+    for name in ["queued-request", "finished-request", "runtime-old"]:
+        (staging / name).mkdir(parents=True)
+    control = LifecycleControl(config_path)
+    control.submit_request("queued-request", {"kind": "deploy"})
+    control.submit_request("finished-request", {"kind": "deploy"})
+    control.ack("finished-request", "terminal", {"ok": True})
+
+    runner._sweep_stale_staging()
+
+    assert (staging / "queued-request").exists()
+    assert not (staging / "finished-request").exists()
+    assert not (staging / "runtime-old").exists()
 
 
 def test_required_manifest_without_config_identity_fails_before_live_activation(

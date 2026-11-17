@@ -15,6 +15,7 @@ from haniel.config import (
     BackoffConfig,
     HooksConfig,
 )
+from haniel.core.deployment_errors import StableDeploymentError
 from haniel.core.git import GitError, GitTimeoutError, get_head
 from haniel.core.health import ServiceState
 from haniel.core.legacy_build_marker import (
@@ -1956,6 +1957,70 @@ class TestServiceRunnerPollCycle:
         runner.process_manager.stop_service.assert_not_called()
         mock_start.assert_not_called()
 
+    @patch("haniel.core.runner.get_remote_head", return_value="target-head")
+    @patch("haniel.core.runner.run_manifest_deployment")
+    def test_failed_manifest_deployment_schedules_restart_for_stopped_service(
+        self, mock_deploy, _mock_remote_head, runner_with_mock_repo
+    ):
+        """A failed deployment that leaves a stopped service queues its restart."""
+        runner = runner_with_mock_repo
+        state = runner._repo_states["test-repo"]
+        state.config.release_manifest = "deploy/release.json"
+        state.pending_changes = {"commits": ["a"]}
+        previous_head = get_head(runner.config_dir / state.config.path)
+        running = {"test-service": True}
+        runner.process_manager.is_running = MagicMock(
+            side_effect=lambda name: running.get(name, False)
+        )
+
+        staged = MagicMock(
+            target_head="target-head",
+            manifest_digest="manifest-digest",
+        )
+        staged.manifest.release_id = "release-1"
+
+        def fail_after_handover(*_args, **_kwargs):
+            running["test-service"] = False
+            raise StableDeploymentError("RECOVERY_FAILED", "rollback failed")
+
+        mock_deploy.side_effect = fail_after_handover
+        with (
+            patch("haniel.core.runner.probe_manifest_target", return_value=staged),
+            patch("haniel.core.runner.activate_repo_target", return_value=[]),
+            patch(
+                "haniel.core.runner.get_head",
+                side_effect=[previous_head, "target-head"],
+            ),
+            pytest.raises(StableDeploymentError, match="rollback failed"),
+        ):
+            runner.trigger_pull("test-repo")
+
+        with runner._restart_lock:
+            assert "test-service" in runner._pending_restarts
+
+    def test_failed_deployment_restart_skips_disabled_and_unknown_services(
+        self, tmp_path: Path
+    ):
+        config = HanielConfig(
+            poll_interval=5,
+            repos={},
+            services={
+                "running": ServiceConfig(run="sleep 1"),
+                "disabled": ServiceConfig(run="sleep 1", enabled=False),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        runner.process_manager.is_running = MagicMock(return_value=False)
+
+        runner._schedule_restarts_after_failed_deployment(
+            {"running", "disabled", "missing"}
+        )
+
+        with runner._restart_lock:
+            assert "running" in runner._pending_restarts
+            assert "disabled" not in runner._pending_restarts
+            assert "missing" not in runner._pending_restarts
+
     @patch("haniel.core.runner.ServiceRunner._start_service")
     def test_process_pending_restarts(self, mock_start, tmp_path: Path):
         """Test processing pending restarts."""
@@ -2844,13 +2909,9 @@ class TestStartupUpdates:
         assert mock_pull.call_count == 2
         assert runner_with_repos._startup_updated_repos == {"service-repo", "dev-repo"}
 
-    @patch("haniel.core.runner.get_head", return_value="new_head")
-    @patch("haniel.core.runner.pull_repo")
-    @patch("haniel.core.runner.fetch_repo")
-    def test_startup_update_pulls_repo_with_auto_apply_false(
-        self, mock_fetch, mock_pull, mock_head, tmp_path: Path
-    ):
-        """Startup update should pull all repos, including auto_apply=false repos."""
+    def _startup_repo_runner(
+        self, tmp_path: Path, *, global_auto_apply: bool, repo_auto_apply: bool
+    ) -> ServiceRunner:
         for name in ["auto-repo", "manual-repo"]:
             repo_path = tmp_path / name
             repo_path.mkdir()
@@ -2858,6 +2919,7 @@ class TestStartupUpdates:
 
         config = HanielConfig(
             poll_interval=5,
+            auto_apply=global_auto_apply,
             repos={
                 "auto-repo": RepoConfig(
                     url="git@github.com:test/auto.git",
@@ -2868,23 +2930,69 @@ class TestStartupUpdates:
                     url="git@github.com:test/manual.git",
                     branch="main",
                     path="./manual-repo",
-                    auto_apply=False,
+                    auto_apply=repo_auto_apply,
                 ),
             },
             services={},
         )
         runner = ServiceRunner(config, config_dir=tmp_path)
-        mock_fetch.return_value = True
+        runner._repo_states["auto-repo"].last_head = "auto-head"
+        runner._repo_states["manual-repo"].last_head = "manual-head"
+        return runner
+
+    @patch("haniel.core.runner.get_head", return_value="new_head")
+    @patch("haniel.core.runner.pull_repo")
+    @patch("haniel.core.runner.fetch_repo", return_value=True)
+    def test_startup_update_pulls_when_global_and_repo_auto_apply(
+        self, mock_fetch, mock_pull, mock_head, tmp_path: Path
+    ):
+        """Both switches on: startup applies every repo with remote changes."""
+        runner = self._startup_repo_runner(
+            tmp_path, global_auto_apply=True, repo_auto_apply=True
+        )
 
         runner._apply_startup_updates()
 
-        fetched_paths = [
-            call.kwargs.get("path") or call.args[0]
-            for call in mock_fetch.call_args_list
-        ]
-        assert tmp_path / "auto-repo" in fetched_paths
-        assert tmp_path / "manual-repo" in fetched_paths
         assert mock_pull.call_count == 2
+        assert runner._startup_updated_repos == {"auto-repo", "manual-repo"}
+
+    @patch("haniel.core.runner.get_head", return_value="new_head")
+    @patch("haniel.core.runner.pull_repo")
+    @patch("haniel.core.runner.fetch_repo", return_value=True)
+    def test_startup_update_skips_every_repo_when_global_auto_apply_false(
+        self, mock_fetch, mock_pull, mock_head, tmp_path: Path
+    ):
+        """The global switch wins: startup pulls nothing and keeps HEAD records."""
+        runner = self._startup_repo_runner(
+            tmp_path, global_auto_apply=False, repo_auto_apply=True
+        )
+
+        runner._apply_startup_updates()
+
+        mock_pull.assert_not_called()
+        assert runner._startup_updated_repos == set()
+        assert runner._repo_states["auto-repo"].last_head == "auto-head"
+        assert runner._repo_states["manual-repo"].last_head == "manual-head"
+
+    @patch("haniel.core.runner.get_head", return_value="new_head")
+    @patch("haniel.core.runner.pull_repo")
+    @patch("haniel.core.runner.fetch_repo", return_value=True)
+    def test_startup_update_skips_repo_with_auto_apply_false(
+        self, mock_fetch, mock_pull, mock_head, tmp_path: Path
+    ):
+        """A repo-level opt-out keeps its remote changes pending for approval."""
+        runner = self._startup_repo_runner(
+            tmp_path, global_auto_apply=True, repo_auto_apply=False
+        )
+
+        runner._apply_startup_updates()
+
+        pulled_paths = [
+            call.kwargs.get("path") or call.args[0] for call in mock_pull.call_args_list
+        ]
+        assert pulled_paths == [tmp_path / "auto-repo"]
+        assert runner._startup_updated_repos == {"auto-repo"}
+        assert runner._repo_states["manual-repo"].last_head == "manual-head"
 
     @patch("haniel.core.runner.pull_repo")
     @patch("haniel.core.runner.fetch_repo", return_value=False)

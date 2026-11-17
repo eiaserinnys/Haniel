@@ -94,7 +94,7 @@ from .node_deploy_reporting import (
 )
 from .runner_deployment import run_manifest_deployment
 from .one_shot_handover import probe_manifest_target
-from .release_staging import ReleaseStagingError
+from .release_staging import ReleaseStagingError, sweep_staging_root
 from .release_manifest import ReleaseManifest
 from .restart_filter import RestartFilterCandidates, plan_restart_skips
 from .handover_config import (
@@ -1894,6 +1894,44 @@ class ServiceRunner:
             for name in names:
                 self._restart_suppressed.discard(name)
 
+    def _schedule_restarts_after_failed_deployment(
+        self, stopped_services: set[str]
+    ) -> None:
+        """Bring back services a failed deployment stopped and left down.
+
+        Recovery can fail after the handover stopped its writers, and the
+        stop/start paths cancel their queued restarts. Suppression is already
+        released when this runs, so the ordinary crash restart (with backoff)
+        can take over. Services that were already stopped before the deployment
+        and services that were disabled are left alone.
+        """
+        if not stopped_services:
+            return
+
+        snapshot = self._snapshot_config_state()
+        for name in sorted(stopped_services):
+            if name not in snapshot.enabled_services:
+                logger.info(
+                    "Not restarting %s after the failed deployment: service is "
+                    "disabled",
+                    name,
+                )
+                continue
+            if self.process_manager.is_running(name):
+                continue
+            with self._restart_lock:
+                suppressed = name in self._restart_suppressed
+                queued = name in self._pending_restarts
+            if suppressed or queued:
+                continue
+            logger.warning(
+                "Scheduling restart of %s after the failed deployment left it stopped",
+                name,
+            )
+            self._record_start_failure(
+                name, "deployment failed while the service was stopped"
+            )
+
     def stop_services(self) -> bool:
         """Stop all services in reverse dependency order."""
         shutdown_order = self.get_shutdown_order()
@@ -1935,6 +1973,7 @@ class ServiceRunner:
         # Initialize repo states (get current HEAD)
         self._init_repo_states()
         self._recover_interrupted_deployment_journals()
+        self._sweep_stale_staging()
 
         # Consume self-update result from previous wrapper iteration (if any).
         # Done before MCP server starts so ws_handler.setup(loop) can broadcast it.
@@ -2834,6 +2873,7 @@ class ServiceRunner:
         captured_changes: dict | None = None
         deployment_lease: DeploymentLease | None = None
         node_report_context: NodeDeployReportContext | None = None
+        deployment_running: set[str] = set()
         lifecycle_request_id = orchestrator_attempt_id or f"runtime-{uuid4()}"
         try:
             deployment_lease = self.lifecycle_control.acquire_deployment(
@@ -2881,6 +2921,13 @@ class ServiceRunner:
                 if reload_plan is not None
                 else affected
             )
+            # Services this deployment may stop. A failed deployment must be
+            # able to bring back whatever it took down.
+            deployment_running = {
+                service
+                for service in set(quiesce_services) | set(affected)
+                if self.process_manager.is_running(service)
+            }
             self._suppress_pending_restarts(quiesce_services)
             # Hold every service this deployment may stop, start, or restore
             # for the whole execution section. Sorted acquisition keeps
@@ -3199,6 +3246,7 @@ class ServiceRunner:
                     pending_changes=captured_changes,
                     error=bounded_redact_text(str(e)),
                 )
+            self._schedule_restarts_after_failed_deployment(deployment_running)
             raise
         finally:
             # Broadcast before release to preserve state propagation order
@@ -3416,13 +3464,16 @@ class ServiceRunner:
         return prefetched
 
     def _apply_startup_updates(self) -> None:
-        """Fetch and pull all repos that have pending remote changes.
+        """Fetch and pull repos whose effective auto_apply allows it.
 
         Called once during start(), before start_services().
         Self-update repo is excluded (handled by haniel-runner.ps1).
-        Repo-level auto_apply is intentionally ignored here: when Haniel
-        restarts, all services are already down, so pulling every managed repo is
-        the least surprising recovery/deploy behavior.
+        Startup follows the same approval policy as polling: a repo is pulled
+        only when the global auto_apply and the repo-level auto_apply are both
+        on. Repos that may not apply keep their remote changes pending for
+        approval, and their observed HEAD is left untouched so the next poll
+        still detects and reports the change. Manifest activation and resuming
+        an interrupted manifest deployment still run either way.
         Individual repo failures are logged but do not block other repos.
         """
         logger.info("Checking for pending updates on startup...")
@@ -3502,7 +3553,8 @@ class ServiceRunner:
                     marker_repos,
                     markers.get(name),
                 )
-                if has_updates:
+                auto_apply_allowed = self._effective_auto_apply(name, config_snapshot)
+                if has_updates and auto_apply_allowed:
                     logger.info("Startup update: pulling %s", name)
                     previous_head = get_head(repo_path)
                     startup_target: str | None = None
@@ -3679,6 +3731,14 @@ class ServiceRunner:
                         assert previous_head is not None
                         self._startup_updated_repo_heads[name] = previous_head
                 else:
+                    if has_updates:
+                        logger.info(
+                            "Startup update: %s has remote changes but auto_apply is "
+                            "off; leaving them pending for approval",
+                            name,
+                        )
+                    else:
+                        logger.debug("Startup update: %s is up to date", name)
                     if interrupted_legacy_update:
                         self._startup_updated_repos.add(name)
                     self._commit_repo_observation(
@@ -3692,7 +3752,6 @@ class ServiceRunner:
                             pending_changes=runtime.pending_changes,
                         )
                     )
-                    logger.debug("Startup update: %s is up to date", name)
                     self._queue_interrupted_manifest_deployment(
                         name,
                         activated,
@@ -3905,6 +3964,51 @@ class ServiceRunner:
                     repo_name,
                     prior_state,
                 )
+
+    def _sweep_stale_staging(self) -> None:
+        """Remove staging checkouts left behind by earlier processes.
+
+        Staging folders of lifecycle requests that are still queued (a request
+        record without a terminal result) are kept for their owner.
+        """
+        snapshot = self._snapshot_config_state()
+        repo_paths = []
+        for repo_config in snapshot.repo_identity.values():
+            repo_path = self.config_dir / repo_config.path
+            if repo_path.exists():
+                repo_paths.append(repo_path)
+        removed, kept = sweep_staging_root(
+            staging_root=self.config_dir / ".haniel" / "staging",
+            repo_paths=repo_paths,
+            keep_request_ids=self._inflight_staging_request_ids(),
+        )
+        logger.info(
+            "Startup staging sweep: removed %d, kept %d in-progress request(s)",
+            removed,
+            kept,
+        )
+
+    def _inflight_staging_request_ids(self) -> set[str]:
+        """Request ids whose lifecycle record has no terminal result yet."""
+        control = self.lifecycle_control
+        requests_dir = control.requests_dir
+        if not requests_dir.is_dir():
+            return set()
+        inflight: set[str] = set()
+        for path in requests_dir.glob("*.json"):
+            try:
+                result = control.read_result(path.stem)
+            except Exception as error:
+                logger.warning(
+                    "Cannot read lifecycle result for %s; keeping its staging: %s",
+                    path.stem,
+                    error,
+                )
+                inflight.add(path.stem)
+                continue
+            if not result.get("terminal"):
+                inflight.add(path.stem)
+        return inflight
 
     def _record_manifest_deployment_intent(
         self,
@@ -4418,6 +4522,21 @@ class ServiceRunner:
             return
         self._orch_client.notify_repo_reconciliation(snapshot, "observed", wait=True)
 
+    def _effective_auto_apply(
+        self, repo_name: str, config_snapshot: RunnerConfigSnapshot
+    ) -> bool:
+        """Return whether changes for this repo may be applied without approval.
+
+        The global switch wins: when it is off no repo applies on its own. A
+        repo can disable itself even when the global switch is on.
+        """
+        if not config_snapshot.config.auto_apply:
+            return False
+        try:
+            return self._snapshot_repo_runtime(repo_name).config.auto_apply
+        except ValueError:
+            return True
+
     def _apply_changes(self, changed_repos: list[str]) -> None:
         """Apply changes from the specified repositories.
 
@@ -4444,14 +4563,10 @@ class ServiceRunner:
             logger.info("auto_apply=false, skipping apply for: %s", changed_repos)
             return
 
-        repo_auto_apply: dict[str, bool] = {}
-        for repo in changed_repos:
-            try:
-                repo_auto_apply[repo] = self._snapshot_repo_runtime(
-                    repo
-                ).config.auto_apply
-            except ValueError:
-                repo_auto_apply[repo] = True
+        repo_auto_apply = {
+            repo: self._effective_auto_apply(repo, config_snapshot)
+            for repo in changed_repos
+        }
         manual_repos = [repo for repo in changed_repos if not repo_auto_apply[repo]]
         changed_repos = [repo for repo in changed_repos if repo_auto_apply[repo]]
         if manual_repos:

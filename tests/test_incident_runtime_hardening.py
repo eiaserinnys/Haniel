@@ -167,7 +167,9 @@ def _runner_with_failed_and_healthy_repo(
     )
     runner = ServiceRunner(
         HanielConfig(
-            auto_apply=False,
+            # Startup applies only repos whose effective auto_apply is on, so
+            # these isolation scenarios need the global switch enabled.
+            auto_apply=True,
             repos={
                 "failed": RepoConfig(
                     url=str(failed_remote),

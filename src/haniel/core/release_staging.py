@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
+import shutil
 import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator, Literal
+from typing import Callable, Collection, Iterable, Iterator, Literal
 
 from ..defaults import DEFAULT_GIT_TIMEOUT
 from .deployment import ReleaseManifest
@@ -17,6 +19,8 @@ from .deployment_command_runner import run_bounded_process_tree
 from .deployment_command_runner import subprocess_command_runner
 from .deployment_errors import StableDeploymentError
 from .safety_redaction import redact_text
+
+logger = logging.getLogger(__name__)
 
 
 class ReleaseStagingError(StableDeploymentError):
@@ -49,6 +53,121 @@ def initial_clone_path(repo_path: Path) -> Path:
     return repo_path.with_name(f".{repo_path.name}.haniel-initial")
 
 
+def sweep_staging_root(
+    *,
+    staging_root: Path,
+    repo_paths: Iterable[Path],
+    keep_request_ids: Collection[str],
+) -> tuple[int, int]:
+    """Remove staging request folders that no in-flight request owns.
+
+    Returns the number of removed and kept request folders. A folder that
+    cannot be removed completely is counted as kept and only warns.
+    """
+    if not staging_root.is_dir():
+        return 0, 0
+    repos = [Path(repo_path) for repo_path in repo_paths]
+    owners = _registered_worktree_owners(repos)
+    keep = {_safe(request_id) for request_id in keep_request_ids}
+    removed = 0
+    kept = 0
+    for request_root in sorted(staging_root.iterdir()):
+        if request_root.is_symlink() or not request_root.is_dir():
+            continue
+        if request_root.name in keep:
+            kept += 1
+            continue
+        _clear_request_root(request_root, owners)
+        if request_root.exists():
+            kept += 1
+        else:
+            removed += 1
+    for repo_path in repos:
+        _prune_worktrees(repo_path)
+    return removed, kept
+
+
+def _clear_request_root(request_root: Path, owners: dict[str, Path]) -> None:
+    for entry in list(request_root.iterdir()):
+        if entry.is_symlink() or not entry.is_dir():
+            try:
+                entry.unlink()
+            except OSError as error:
+                logger.warning("Cannot remove staging entry %s: %s", entry, error)
+            continue
+        owner = owners.get(_path_key(entry))
+        if owner is not None and _remove_worktree(owner, entry):
+            continue
+        _remove_tree(entry)
+    try:
+        request_root.rmdir()
+    except OSError:
+        # A failed child removal already logged its warning.
+        pass
+
+
+def _cleanup_stage(repo_path: Path, stage_path: Path) -> None:
+    """Release one request's staging checkout and its empty request folder."""
+    if _path_key(stage_path) in _registered_worktree_owners([repo_path]):
+        _remove_worktree(repo_path, stage_path)
+    elif stage_path.exists():
+        _remove_tree(stage_path)
+    _prune_worktrees(repo_path)
+    try:
+        stage_path.parent.rmdir()
+    except OSError:
+        # Other repositories still staged under this request, or removal failed.
+        pass
+
+
+def _registered_worktree_owners(repo_paths: Iterable[Path]) -> dict[str, Path]:
+    owners: dict[str, Path] = {}
+    for repo_path in repo_paths:
+        for path in _registered_worktrees(repo_path):
+            owners[_path_key(path)] = repo_path
+    return owners
+
+
+def _registered_worktrees(repo_path: Path) -> list[Path]:
+    try:
+        output = _git(repo_path, "worktree", "list", "--porcelain")
+    except ReleaseStagingError as error:
+        logger.warning("Cannot list worktrees for %s: %s", repo_path, error)
+        return []
+    return [
+        Path(line[len("worktree ") :])
+        for line in output.splitlines()
+        if line.startswith("worktree ")
+    ]
+
+
+def _remove_worktree(repo_path: Path, path: Path) -> bool:
+    try:
+        _git(repo_path, "worktree", "remove", "--force", str(path))
+        return True
+    except ReleaseStagingError as error:
+        logger.warning("Cannot remove staging worktree %s: %s", path, error)
+        return False
+
+
+def _prune_worktrees(repo_path: Path) -> None:
+    try:
+        _git(repo_path, "worktree", "prune")
+    except ReleaseStagingError as error:
+        logger.warning("Cannot prune worktrees for %s: %s", repo_path, error)
+
+
+def _remove_tree(path: Path) -> None:
+    try:
+        shutil.rmtree(path)
+    except OSError as error:
+        logger.warning("Cannot remove staging directory %s: %s", path, error)
+
+
+def _path_key(path: Path) -> str:
+    return os.path.normcase(os.path.realpath(path))
+
+
 @contextmanager
 def stage_release(
     *,
@@ -76,7 +195,6 @@ def stage_release(
     if stage_path.exists():
         raise ReleaseStagingError(f"staging path already exists: {stage_path}")
     stage_path.parent.mkdir(parents=True, exist_ok=True)
-    added = False
     try:
         _git(
             repo_path,
@@ -88,7 +206,6 @@ def stage_release(
             timeout=staging_checkout_timeout,
             use_process_tree=True,
         )
-        added = True
         resolved_manifest = (stage_path / manifest_path).resolve()
         if not resolved_manifest.is_relative_to(stage_path.resolve()):
             raise ReleaseStagingError(
@@ -137,9 +254,7 @@ def stage_release(
             probe_result=probe_payload,
         )
     finally:
-        if added:
-            _git(repo_path, "worktree", "remove", "--force", str(stage_path))
-            _git(repo_path, "worktree", "prune")
+        _cleanup_stage(repo_path, stage_path)
         if _git(repo_path, "rev-parse", "HEAD") != live_head:
             raise ReleaseStagingError("live HEAD changed while cleaning staging")
 
