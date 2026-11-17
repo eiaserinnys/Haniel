@@ -146,14 +146,16 @@ class RunnerDeploymentAdapter:
         """Choose overlap and recalculate filters after preflight is known."""
         assert self.manifest is not None
         previous = None
+        previous_reason = "no previous commit"
         if self.previous_head:
             try:
                 path = self.repo_runtime_snapshot.config.release_manifest
                 previous = ReleaseManifest.model_validate_json(
                     read_file_at_commit(self.repo_path, self.previous_head, path)
                 )
+                previous_reason = "previous manifest has no overlap declaration"
             except Exception as error:
-                logger.info("Previous manifest unavailable for overlap: %s", error)
+                previous_reason = f"cannot read previous manifest: {error}"
         eligible: set[str] = set()
         for name in sorted(
             set(self.affected) & self.manifest.service_restart_strategies.keys()
@@ -161,7 +163,7 @@ class RunnerDeploymentAdapter:
             if not safe:
                 reason = "contract preflight pending_count is not zero or operation is not upgrade"
             elif previous is None or name not in previous.service_restart_strategies:
-                reason = "previous manifest has no overlap declaration"
+                reason = previous_reason
             elif not self.runner.process_manager.is_running(name):
                 reason = "service is not running"
             else:
@@ -378,6 +380,15 @@ class RunnerDeploymentAdapter:
                 raise RuntimeError(
                     "SERVICE_ENV_FILE_CHANGED: request has no approved runtime env snapshot"
                 )
+            if (
+                service in self.overlap_services
+                and service not in self.overlap_started
+                and not self.runner.process_manager.is_running(service)
+            ):
+                logger.info(
+                    "Service %s uses stop/start: old process already exited", service
+                )
+                self.overlap_services = self.overlap_services - {service}
             if service in self.overlap_services and service not in self.overlap_started:
                 config = self.config_snapshot.enabled_services[service]
                 if not self.runner.execute_hook(service, "pre_start"):
@@ -386,7 +397,7 @@ class RunnerDeploymentAdapter:
                     config, self.runner.process_manager.DEFAULT_READY_TIMEOUT
                 )
                 try:
-                    self.runner.process_manager.overlap_service(
+                    overlapped = self.runner.process_manager.overlap_service(
                         service,
                         config,
                         ready_timeout=ready_timeout,
@@ -402,10 +413,18 @@ class RunnerDeploymentAdapter:
                         approved_env_snapshot=binding.snapshot if binding else None,
                     )
                 except Exception:
-                    self.restart_skipped = self.restart_skipped | {service}
+                    if self.runner.process_manager.is_running(service):
+                        self.restart_skipped = self.restart_skipped | {service}
+                    else:
+                        self.overlap_services = self.overlap_services - {service}
                     raise
-                self.overlap_started.add(service)
-                continue
+                if overlapped:
+                    self.overlap_started.add(service)
+                    continue
+                logger.info(
+                    "Service %s uses stop/start: old process already exited", service
+                )
+                self.overlap_services = self.overlap_services - {service}
             started = (
                 self.runner._start_service(service)
                 if binding is None

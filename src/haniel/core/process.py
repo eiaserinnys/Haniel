@@ -340,13 +340,13 @@ class ProcessManager:
         expected_env_path: str | None = None,
         expected_env_sha256: str | None = None,
         approved_env_snapshot: ServiceEnvironmentFile | None = None,
-    ) -> None:
+    ) -> bool:
         """Prepare a replacement before retiring the current service process."""
         with self.service_locks.hold(name):
             with self._lock:
-                old = self._processes[name]
-            if old.process is None or old.process.poll() is not None:
-                raise RuntimeError(f"{name} is no longer running")
+                old = self._processes.get(name)
+            if old is None or old.process is None or old.process.poll() is not None:
+                return False
             # The old process may exit as soon as the new process announces itself.
             old.intentional_stop = True
             started = time.monotonic()
@@ -385,7 +385,15 @@ class ProcessManager:
                 self._pending_processes.pop(name, None)
             self.log_manager.replace_capture(name, new.log_capture)
             self._start_crash_monitor(new, on_crash)
-            self._retire_overlap_process(old, exit_timeout)
+            try:
+                self._retire_overlap_process(old, exit_timeout)
+            except Exception:
+                logger.exception(
+                    "Failed to retire old overlap process for %s: pid=%s",
+                    name,
+                    old.process.pid,
+                )
+            return True
 
     def _retire_overlap_process(self, managed: ManagedProcess, wait: float) -> None:
         process = managed.process

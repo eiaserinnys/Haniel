@@ -289,7 +289,7 @@ def test_coordinator_applies_overlap_and_filtered_dependent(tmp_path, monkeypatc
     adapter.build = lambda: None
     runner._blocked_start_dependencies = MagicMock(return_value=[])
     runner.process_manager.overlap_service = MagicMock(
-        side_effect=lambda *args, **kwargs: events.append("overlap:app")
+        side_effect=lambda *args, **kwargs: events.append("overlap:app") or True
     )
     store = DeploymentStateStore(tmp_path / "journal")
     coordinator = DeploymentCoordinator(
@@ -379,3 +379,184 @@ def test_old_process_ignoring_term_is_killed_after_shutdown_timeout(tmp_path, ca
         assert "method=SIGKILL" in caplog.text
     finally:
         manager.stop_service("app", timeout=1)
+
+
+@pytest.fixture
+def real_deployment(tmp_path):
+    from haniel.config import HanielConfig, RepoConfig
+    from haniel.core.runner import ServiceRunner
+    from haniel.core.runner_deployment import RunnerDeploymentAdapter
+    from tests.test_service_restart_filter import _commit, _init_repo
+
+    repo = _init_repo(tmp_path / "repo")
+    payload = manifest({"mode": "overlap", "exit_timeout_sec": 1}).model_dump(
+        mode="json"
+    )
+    (repo / "release.json").write_text(json.dumps(payload), encoding="utf-8")
+    (repo / "version").write_text("old", encoding="utf-8")
+    previous = _commit(repo, "old")
+    (repo / "version").write_text("new", encoding="utf-8")
+    target = _commit(repo, "new")
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    script = tmp_path / "service.py"
+    script.write_text(
+        """import socket, sys, time\nfrom pathlib import Path\nroot = Path(sys.argv[1])\ncount = root / "count"\nn = int(count.read_text()) + 1 if count.exists() else 1\ncount.write_text(str(n))\nif n == 2 and (root / "fail-new").exists():\n    (root / "exit-old").touch()\n    while not (root / "old-exited").exists(): time.sleep(.02)\n    time.sleep(.2)\n    sys.exit(1)\ns = socket.socket()\ns.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)\ns.bind(("127.0.0.1", int(sys.argv[2])))\ns.listen()\nwhile not (n == 1 and (root / "exit-old").exists()): time.sleep(.02)\n(root / "old-exited").touch()\n""",
+        encoding="utf-8",
+    )
+    config = HanielConfig(
+        repos={
+            "app": RepoConfig(
+                url="git@example.com:app.git",
+                path="repo",
+                release_manifest="release.json",
+            )
+        },
+        services={
+            "app": ServiceConfig(
+                run=f"{sys.executable} {script} {tmp_path} {port}",
+                repo="app",
+                ready=f"port:{port}",
+                ready_timeout=3,
+            )
+        },
+    )
+    runner = ServiceRunner(config, config_dir=tmp_path)
+    runner.process_manager.immediate_exit_window = 0
+    assert runner._start_service("app")
+    assert runner.process_manager.wait_for_ready("app", timeout=3)
+    old = runner.process_manager._processes["app"].process
+    adapter = RunnerDeploymentAdapter(
+        runner, "app", ["app"], repo, previous, target_head=target
+    )
+    adapter.manifest = ReleaseManifest.model_validate(payload)
+    yield runner, adapter, old, tmp_path
+    (tmp_path / "exit-old").touch()
+    runner.process_manager.stop_service("app", timeout=1)
+    if old.poll() is None:
+        runner.process_manager.platform.kill_process(old)
+        old.wait(timeout=3)
+
+
+def _run_real_deployment(runner, adapter, stop=None):
+    from dataclasses import replace
+    from haniel.core.deployment import DeploymentCoordinator, subprocess_command_runner
+    from haniel.core.deployment_state import DeploymentStateStore
+
+    callbacks = adapter.callbacks()
+    if stop is not None:
+        callbacks = replace(callbacks, stop=stop)
+    coordinator = DeploymentCoordinator(
+        state_store=DeploymentStateStore(runner.config_dir / "journal"),
+        command_runner=subprocess_command_runner(adapter.repo_path),
+    )
+    return coordinator.execute(
+        repo_name="app",
+        previous_head=adapter.previous_head,
+        target_head=adapter.target_head,
+        manifest=adapter.manifest,
+        callbacks=callbacks,
+    )
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux SO_REUSEPORT fixture")
+def test_real_adapter_handover_path(real_deployment):
+    runner, adapter, old, root = real_deployment
+    threading.Timer(0.8, (root / "exit-old").touch).start()
+    result = _run_real_deployment(runner, adapter)
+    assert result.status == "success"
+    assert old.poll() is not None
+    assert runner.process_manager.is_running("app")
+    assert runner.process_manager.get_pid("app") != old.pid
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux SO_REUSEPORT fixture")
+def test_real_adapter_recovers_when_old_exits_and_replacement_fails(real_deployment):
+    from haniel.core.deployment import DeploymentError
+
+    runner, adapter, old, root = real_deployment
+    (root / "fail-new").touch()
+    with pytest.raises(DeploymentError) as error:
+        _run_real_deployment(runner, adapter)
+    assert error.value.recovered
+    assert old.poll() is not None
+    assert runner.process_manager.is_running("app")
+    assert int((root / "count").read_text()) == 3
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux SO_REUSEPORT fixture")
+def test_real_adapter_starts_normally_if_old_exits_after_planning(real_deployment):
+    runner, adapter, old, root = real_deployment
+
+    def stop_and_exit_old():
+        receipt = adapter.stop()
+        (root / "exit-old").touch()
+        old.wait(timeout=3)
+        return receipt
+
+    result = _run_real_deployment(runner, adapter, stop=stop_and_exit_old)
+    assert result.status == "success"
+    assert runner.process_manager.is_running("app")
+    assert runner.process_manager.get_pid("app") != old.pid
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux SO_REUSEPORT fixture")
+def test_real_adapter_retirement_error_keeps_replacement(
+    real_deployment, monkeypatch, caplog
+):
+    runner, adapter, old, root = real_deployment
+
+    def fail_retirement(managed, wait):
+        assert managed.process is old
+        raise OSError("cannot retire")
+
+    monkeypatch.setattr(
+        runner.process_manager, "_retire_overlap_process", fail_retirement
+    )
+    with caplog.at_level("ERROR"):
+        result = _run_real_deployment(runner, adapter)
+    assert result.status == "success"
+    assert runner.process_manager.is_running("app")
+    assert runner.process_manager.get_pid("app") != old.pid
+    assert str(old.pid) in caplog.text
+
+
+@pytest.mark.parametrize(
+    "kind,reason",
+    [
+        ("no_head", "no previous commit"),
+        ("unreadable", "cannot read previous manifest"),
+        ("undeclared", "previous manifest has no overlap declaration"),
+    ],
+)
+def test_plan_logs_distinct_previous_manifest_reasons(
+    tmp_path, monkeypatch, caplog, kind, reason
+):
+    from tests.test_service_restart_filter import _adapter_fixture
+    from haniel.core.runner_deployment import RunnerDeploymentAdapter
+
+    runner, repo, head = _adapter_fixture(tmp_path)
+    adapter = RunnerDeploymentAdapter(
+        runner,
+        "app",
+        ["app"],
+        repo,
+        "" if kind == "no_head" else head,
+        target_head="new",
+    )
+    adapter.manifest = manifest({"mode": "overlap"})
+    if kind == "unreadable":
+        monkeypatch.setattr(
+            "haniel.core.runner_deployment.read_file_at_commit",
+            MagicMock(side_effect=ValueError("bad")),
+        )
+    elif kind == "undeclared":
+        monkeypatch.setattr(
+            "haniel.core.runner_deployment.read_file_at_commit",
+            lambda *args: manifest().model_dump_json().encode(),
+        )
+    with caplog.at_level("INFO"):
+        adapter.plan_overlap(True)
+    assert reason in caplog.text
