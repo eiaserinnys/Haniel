@@ -11,6 +11,8 @@ chcp 65001 | Out-Null
 # Force UTF-8 stdio on Python children so their stderr matches the console
 # encoding above. Stdio only — does not change file I/O defaults (PEP 528/540).
 $env:PYTHONIOENCODING = "utf-8"
+$handoffCommit = $env:HANIEL_RUNNER_HANDOFF_COMMIT
+Remove-Item Env:HANIEL_RUNNER_HANDOFF_COMMIT -ErrorAction SilentlyContinue
 
 $ErrorActionPreference = "Continue"
 
@@ -117,6 +119,7 @@ $script:ActivePython = $BootstrapPython
 $script:ActiveCommit = $null
 $script:PreparationResult = $null
 $script:UsePreparedUpdate = $false
+$script:FirstPreparation = $true
 
 function Send-Webhook {
     param([string]$Message, [string]$Level = "info")
@@ -170,12 +173,15 @@ function Write-SelfUpdateMarker {
 }
 
 function Get-PreparedTarget {
+    param([switch]$Switched)
     if (-not (Test-Path $PreparationResultPath -PathType Leaf)) {
         return $null
     }
     try {
         $result = Get-Content $PreparationResultPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        if (-not $result.ok -or -not $result.pre_staged -or $result.switched -or
+        if (-not $result.ok -or
+            (-not $Switched -and (-not $result.pre_staged -or $result.switched)) -or
+            ($Switched -and -not $result.switched) -or
             -not ($result.target_commit -match '^[0-9a-f]{40}$') -or
             -not $result.prepared_release) {
             return $null
@@ -198,16 +204,44 @@ function Get-PreparedTarget {
     }
 }
 
+function Get-SwitchedTarget {
+    if (Test-Path $SelfUpdateExitMarker -PathType Leaf) {
+        return Get-PreparedTarget -Switched
+    }
+    return $null
+}
+
+function Get-PendingDeployTarget {
+    try {
+        $pendingFile = Get-Item (Join-Path $RootDir ".local/orch_pending_deploy.json") -ErrorAction Stop
+        if ($pendingFile.LastWriteTimeUtc -lt $launchStartedAt) { return $null }
+        $pending = Get-Content $pendingFile.FullName -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+        $parts = ([string]$pending.deploy_id).Split(':', 4)
+        if ($parts.Count -eq 4 -and $parts[3] -cmatch '^[0-9a-fA-F]{40}$') {
+            return $parts[3].ToLowerInvariant()
+        }
+    } catch { return $null }
+    return $null
+}
+
 function Update-HanielRelease {
     $preparedTarget = $null
-    if ($script:UsePreparedUpdate) {
+    if ($script:FirstPreparation) {
+        if ($handoffCommit -cmatch '^[0-9a-fA-F]{40}$') {
+            $preparedTarget = $handoffCommit.ToLowerInvariant()
+        } elseif (-not $handoffCommit) {
+            $preparedTarget = Get-SwitchedTarget
+        }
+    } elseif ($script:UsePreparedUpdate) {
         $preparedTarget = Get-PreparedTarget
         if ($preparedTarget) {
             Write-Host "[haniel-runner] Reusing pre-staged release $($preparedTarget.Substring(0, 12))."
         } else {
-            Write-Host "[haniel-runner] Pre-stage handoff unavailable; using full preparation fallback."
+            $preparedTarget = Get-PendingDeployTarget
+            Write-Host "[haniel-runner] Pre-stage handoff unavailable; using approved target or full preparation fallback."
         }
     }
+    $script:FirstPreparation = $false
     $script:UsePreparedUpdate = $false
     if (Test-Path $PreparationResultPath) {
         Remove-Item $PreparationResultPath -Force
@@ -414,6 +448,7 @@ while ($true) {
             $activeRunnerPath = (Resolve-Path $activeRunner).Path
             if ($RunnerScriptPath -ne $activeRunnerPath) {
                 Write-Host "[haniel-runner] Re-executing current release wrapper."
+                $env:HANIEL_RUNNER_HANDOFF_COMMIT = $script:ActiveCommit
                 & $activeRunner
                 exit $LASTEXITCODE
             }
@@ -425,6 +460,7 @@ while ($true) {
     $env:HANIEL_ACTIVE_SELF_HEAD = $script:ActiveCommit
     $runArguments = @("-m", "haniel.cli", "run", $ConfigPath)
     try {
+        $launchStartedAt = [DateTime]::UtcNow
         $hanielProcess = Start-RunnerProcess -Arguments $runArguments
     } catch {
         Write-Error "Failed to launch Haniel: $_"

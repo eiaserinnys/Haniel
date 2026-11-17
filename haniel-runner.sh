@@ -13,6 +13,8 @@
 
 set -u
 unset NODE_CHANNEL_FD
+handoff_commit="${HANIEL_RUNNER_HANDOFF_COMMIT:-}"
+unset HANIEL_RUNNER_HANDOFF_COMMIT
 
 if (( $# > 1 )); then
   echo "Usage: haniel-runner.sh [runner-conf-path]" >&2
@@ -299,7 +301,7 @@ load_prepared_target() {
   if [[ ! -f "$PREPARATION_RESULT_PATH" ]]; then
     return 1
   fi
-  "$PYTHON_BIN" - "$PREPARATION_RESULT_PATH" "$RELEASE_ROOT" <<'PY'
+  "$PYTHON_BIN" - "$PREPARATION_RESULT_PATH" "$RELEASE_ROOT" "${1:-pre_staged}" <<'PY'
 import json
 import pathlib
 import re
@@ -317,16 +319,38 @@ try:
     )
 except (OSError, ValueError, TypeError):
     raise SystemExit(1)
+mode = sys.argv[3]
 if (
     payload.get("ok") is not True
-    or payload.get("pre_staged") is not True
-    or payload.get("switched") is not False
+    or (mode == "pre_staged" and (payload.get("pre_staged") is not True or payload.get("switched") is not False))
+    or (mode == "switched" and payload.get("switched") is not True)
     or not isinstance(target, str)
     or re.fullmatch(r"[0-9a-f]{40}", target) is None
     or ready.get("commit") != target
 ):
     raise SystemExit(1)
 print(target)
+PY
+}
+
+load_pending_deploy_target() {
+  "$PYTHON_BIN" - "$ROOT_DIR/.local/orch_pending_deploy.json" "$launch_started_at_ns" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+try:
+    pending_path = pathlib.Path(sys.argv[1])
+    if pending_path.stat().st_mtime_ns < int(sys.argv[2]):
+        raise SystemExit(1)
+    deploy_id = json.loads(pending_path.read_text(encoding="utf-8"))["deploy_id"]
+    target = deploy_id.split(":", 3)[3]
+except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError):
+    raise SystemExit(1)
+if re.fullmatch(r"[0-9a-fA-F]{40}", target) is None:
+    raise SystemExit(1)
+print(target.lower())
 PY
 }
 
@@ -362,14 +386,21 @@ PY
 
 update_haniel_release() {
   local prepared_target=""
-  if [[ "$use_prepared_update" == "true" ]]; then
+  if [[ "$first_preparation" == "true" ]]; then
+    if [[ "$handoff_commit" =~ ^[0-9a-fA-F]{40}$ ]]; then
+      prepared_target="$(printf '%s' "$handoff_commit" | tr 'A-F' 'a-f')"
+    elif [[ -z "$handoff_commit" && -f "$SELF_UPDATE_EXIT_MARKER" ]]; then
+      prepared_target="$(load_prepared_target switched)" || prepared_target=""
+    fi
+  elif [[ "$use_prepared_update" == "true" ]]; then
     if prepared_target="$(load_prepared_target)"; then
       echo "[haniel-runner] Reusing pre-staged release ${prepared_target:0:12}."
     else
-      echo "[haniel-runner] Pre-stage handoff unavailable; using full preparation fallback."
-      prepared_target=""
+      prepared_target="$(load_pending_deploy_target)" || prepared_target=""
+      echo "[haniel-runner] Pre-stage handoff unavailable; using approved target or full preparation fallback."
     fi
   fi
+  first_preparation=false
   use_prepared_update=false
   local arguments=(
     "$PYTHON_BIN"
@@ -481,6 +512,7 @@ EXIT_RESTART=11
 skip_update=false
 write_self_update_marker=false
 use_prepared_update=false
+first_preparation=true
 crash_restart_count=0
 CHILD_PID=""
 WATCHDOG_PID=""
@@ -561,7 +593,7 @@ while true; do
       fi
       if [[ "$RUNNER_SCRIPT_PATH" != "$active_runner_path" ]]; then
         echo "[haniel-runner] Re-executing current release wrapper."
-        exec /bin/bash "$active_runner" "$CONF_PATH"
+        HANIEL_RUNNER_HANDOFF_COMMIT="$ACTIVE_COMMIT" exec /bin/bash "$active_runner" "$CONF_PATH"
       fi
     fi
   fi
@@ -570,6 +602,7 @@ while true; do
   echo "[haniel-runner] Launching haniel..."
   rm -f "$SELF_UPDATE_EXIT_MARKER" "$FORCED_SELF_UPDATE_MARKER"
   launch_started_at="$(date +%s)"
+  launch_started_at_ns="$("$PYTHON_BIN" -c 'import time; print(time.time_ns())')"
   HANIEL_ACTIVE_SELF_HEAD="$ACTIVE_COMMIT" \
     "$ACTIVE_PYTHON" -m haniel.cli run "$CONFIG_PATH" &
   CHILD_PID=$!
@@ -620,6 +653,7 @@ while true; do
       echo "[haniel-runner] Forced self-update recovery after shutdown timeout."
       send_webhook "Self-update shutdown timed out; process was killed and will be updated." "error"
       write_self_update_marker=true
+      use_prepared_update=true
     else
       send_webhook "haniel exited with unexpected code $exit_code; recovering after ${restart_delay}s." "error"
     fi

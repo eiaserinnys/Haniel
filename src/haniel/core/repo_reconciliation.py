@@ -16,6 +16,7 @@ class RepoReconciliationSnapshot:
     local_head: str
     remote_head: str
     deploy_id: str
+    local_ancestors: list[str] | None = None
 
     @property
     def in_sync(self) -> bool:

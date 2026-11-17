@@ -8,6 +8,7 @@ import textwrap
 import aiosqlite
 
 from state_support import (
+    fire,
     set_legacy_status,
     to_deploying,
     to_pending_again,
@@ -241,6 +242,64 @@ class TestSelfUpdateObservedResolution:
 
     DEPLOY_ID = "n1:haniel:main:target"
 
+    async def test_descendant_closes_every_reached_self_update(self, store: EventStore):
+        ids = [f"n1:haniel:main:{target}" for target in ("a", "b", "unrelated")]
+        for index, (deploy_id, target) in enumerate(zip(ids, ("a", "b", "unrelated"))):
+            await store.create_deploy_event(
+                deploy_id=deploy_id,
+                node_id="n1",
+                repo=f"temp{index}",
+                branch="main",
+                commits=[],
+                affected_services=[],
+                diff_stat=None,
+                detected_at=f"2026-01-0{index + 1}T00:00:00Z",
+                target_head=target,
+                is_self_update=True,
+            )
+        await store._db.execute("UPDATE deploy_events SET repo = 'haniel'")
+        await store._db.commit()
+        for deploy_id, legacy in zip(ids[:2], (False, True)):
+            await to_deploying(store, deploy_id)
+            await fire(
+                store, deploy_id, "send_failed",
+                facts={"newer": False, "legacy": legacy},
+                data={"stable_source": deploy_id, "failed_attempt_id": deploy_id, "marker_created_at": None},
+            )
+        cursor = await store._db.execute(
+            "SELECT deploy_id, sm_status FROM deploy_events WHERE deploy_id IN (?, ?)",
+            ids[:2],
+        )
+        assert dict(await cursor.fetchall()) == {ids[0]: "again", ids[1]: "retry"}
+        resolved = await store.resolve_observed_pending(
+            deploy_id="n1:haniel:main:descendant",
+            node_id="n1",
+            repo="haniel",
+            branch="main",
+            local_head="descendant",
+            remote_head="remote",
+            local_ancestors=["descendant", "b", "a"],
+        )
+        assert set(resolved) == set(ids[:2])
+        assert [(await store.get_deploy_event(item))["status"] for item in ids] == [
+            "success",
+            "success",
+            "pending",
+        ]
+
+    async def test_missing_ancestors_keeps_unmatched_target(self, store: EventStore):
+        await self._seed_self_update(store)
+        resolved = await store.resolve_observed_pending(
+            deploy_id="n1:haniel:main:newer",
+            node_id="n1",
+            repo="haniel",
+            branch="main",
+            local_head="descendant",
+            remote_head="newer",
+        )
+        assert not resolved
+        assert (await store.get_deploy_event(self.DEPLOY_ID))["status"] == "pending"
+
     async def _seed_self_update(self, store: EventStore) -> None:
         await store.create_deploy_event(
             deploy_id=self.DEPLOY_ID,
@@ -255,7 +314,9 @@ class TestSelfUpdateObservedResolution:
             is_self_update=True,
         )
 
-    async def _add_retry_marker_and_failed_node_attempt(self, store: EventStore) -> None:
+    async def _add_retry_marker_and_failed_node_attempt(
+        self, store: EventStore
+    ) -> None:
         assert store.attempts is not None
         await store.attempts.begin_normal_attempt(
             orchestrator_attempt_id="timed-out-source",
@@ -322,7 +383,7 @@ class TestSelfUpdateObservedResolution:
             remote_head="newer",
         )
 
-        assert resolved == self.DEPLOY_ID
+        assert resolved == [self.DEPLOY_ID]
         assert (await store.get_deploy_event(self.DEPLOY_ID))["status"] == "success"
         assert await store.attempts.has_retry_requirement(self.DEPLOY_ID) is False
 
@@ -351,7 +412,7 @@ class TestSelfUpdateObservedResolution:
             remote_head="newer",
         )
 
-        assert resolved is False
+        assert resolved == []
         assert (await store.get_deploy_event(self.DEPLOY_ID))["status"] == "pending"
 
     async def test_regular_retry_row_is_not_closed(self, store: EventStore):
@@ -394,7 +455,7 @@ class TestSelfUpdateObservedResolution:
             remote_head="target",
         )
 
-        assert resolved is False
+        assert resolved == []
         assert (await store.get_deploy_event(deploy_id))["status"] == "pending"
 
 
@@ -522,7 +583,7 @@ class TestNodeDeployReportReconciliation:
             remote_head="target",
         )
 
-        assert resolved is False
+        assert resolved == []
         assert (await store.get_deploy_event(deploy_id))["status"] == "pending"
 
     async def test_other_target_success_does_not_touch_pending(self, store: EventStore):

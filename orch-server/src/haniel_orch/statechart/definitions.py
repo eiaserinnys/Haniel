@@ -281,15 +281,15 @@ class OrchRequest(_Base):
     observed_self_update = (
         req.status.open_.pending.to(
             req.status.closed.success,
-            cond=["self_update", "heads_equal", "no_active_attempt"],
+            cond=["self_update", "target_reached", "no_active_attempt"],
         )
         | req.status.open_.again.to(
             req.status.closed.success,
-            cond=["self_update", "heads_equal", "no_active_attempt"],
+            cond=["self_update", "target_reached", "no_active_attempt"],
         )
         | req.status.open_.retry.to(
             req.status.closed.success,
-            cond=["self_update", "heads_equal", "no_active_attempt"],
+            cond=["self_update", "target_reached", "no_active_attempt"],
         )
     )
     # 보류 자기 갱신 되살림. 점검 필요가 켜져 있으면 표시 줄 있는 대기로 되살린다(점검 필요는 그대로 켜져 있다)
@@ -386,6 +386,9 @@ class OrchRequest(_Base):
     def heads_equal(self) -> bool:
         return self.fact("heads_equal")
 
+    def target_reached(self) -> bool:
+        return self.fact("target_reached")
+
     def no_active_attempt(self) -> bool:
         return self.fact("no_active_attempt")
 
@@ -452,7 +455,7 @@ REQUIRED_FACTS: dict[type, dict[str, tuple[str, ...]]] = {
         "success_evidence": ("no_later",),
         "late_failed": (),
         "observed": ("heads_equal", "no_active_attempt", "no_failed_node_attempt"),
-        "observed_self_update": ("self_update", "heads_equal", "no_active_attempt"),
+        "observed_self_update": ("self_update", "target_reached", "no_active_attempt"),
         "reopen": ("self_update", "postponed_due", "no_other_open"),
     },
     AttemptEvidence: {

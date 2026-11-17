@@ -201,18 +201,17 @@ class EventStore(EventStoreLifecycleMixin, InspectionNoticeStoreMixin):
         branch: str,
         local_head: str,
         remote_head: str,
-    ) -> str | bool:
-        """Resolve one stale row from observed Git truth.
+        local_ancestors: list[str] | None = None,
+    ) -> list[str]:
+        """Resolve stale rows from observed Git truth.
 
-        Returns the deploy_id of the row that was closed, or False when no
-        row matched. The exact non-retry path is unchanged. A timed-out
-        self-update keeps a deploy_id built from an older remote head, so it
-        closes on a newer observation whose local_head is its target_head.
+        The exact non-retry path is unchanged. Self-update rows also close
+        when the observation proves their target is an ancestor of local HEAD.
         """
         async with self._mutation_lock:
             try:
                 now = now_iso()
-                closed_id: str | None = None
+                closed_ids: list[str] = []
                 cursor = await self._db.execute(
                     """SELECT deploy_id, target_head FROM deploy_events
                        WHERE deploy_id = ? AND node_id = ? AND repo = ? AND branch = ?
@@ -237,20 +236,21 @@ class EventStore(EventStoreLifecycleMixin, InspectionNoticeStoreMixin):
                             },
                             now=now,
                         )
-                        closed_id = deploy_id
+                        closed_ids.append(deploy_id)
                     except NoTransition as exc:
                         exc.warn("observed")
-                        closed_id = None
-                if closed_id is None:
-                    closed_id = await self._close_observed_self_update(
+                closed_ids.extend(
+                    await self._close_observed_self_update(
                         node_id=node_id,
                         repo=repo,
                         branch=branch,
                         local_head=local_head,
+                        local_ancestors=local_ancestors,
                         now=now,
                     )
+                )
                 await self._db.commit()
-                return closed_id or False
+                return closed_ids
             except Exception:
                 await self._db.rollback()
                 raise
@@ -277,8 +277,9 @@ class EventStore(EventStoreLifecycleMixin, InspectionNoticeStoreMixin):
         repo: str,
         branch: str,
         local_head: str,
+        local_ancestors: list[str] | None,
         now: str,
-    ) -> str | None:
+    ) -> list[str]:
         """Close a timed-out self-update that a newer observation proves done.
 
         Retry markers and failed node reports do not block this path: the
@@ -291,7 +292,7 @@ class EventStore(EventStoreLifecycleMixin, InspectionNoticeStoreMixin):
                ORDER BY detected_at DESC, created_at DESC, deploy_id DESC""",
             (node_id, repo, branch, DeployStatus.PENDING.value),
         )
-        # 가장 새 줄부터 보고, 조건을 처음 맞춘 줄을 닫는다(조건은 정의가 판단한다)
+        closed_ids: list[str] = []
         for candidate_id, is_self_update, target_head in await cursor.fetchall():
             try:
                 await steps.step_request(
@@ -300,7 +301,8 @@ class EventStore(EventStoreLifecycleMixin, InspectionNoticeStoreMixin):
                     "observed_self_update",
                     facts={
                         "self_update": bool(is_self_update),
-                        "heads_equal": target_head == local_head,
+                        "target_reached": target_head == local_head
+                        or target_head in (local_ancestors or []),
                         "no_active_attempt": not await self._has_active_attempt(
                             candidate_id
                         ),
@@ -311,8 +313,8 @@ class EventStore(EventStoreLifecycleMixin, InspectionNoticeStoreMixin):
                 if exc.reason != REASON_NO_TRANSITION:
                     exc.warn("observed_self_update")
                 continue
-            return candidate_id
-        return None
+            closed_ids.append(candidate_id)
+        return closed_ids
 
     async def reopen_postponed_self_update(self, deploy_id: str) -> bool:
         """Return one due postponed self-update to pending.

@@ -49,6 +49,11 @@ def _run_wrapper(
     conf_argument: str | None = None,
     run_cwd: Path | None = None,
     fail_readlink: bool = False,
+    handoff_target: str | None = None,
+    legacy_target: str | None = None,
+    pending_target: str | None = None,
+    stale_pending_target: str | None = None,
+    missing_commit: str | None = None,
 ):
     base = tmp_path / root_name if root_name else tmp_path
     base.mkdir(parents=True, exist_ok=True)
@@ -62,6 +67,7 @@ def _run_wrapper(
     launch_log = base / "launches"
     release_env_log = base / "release-env"
     reexec_log = base / "reexec-args"
+    prepare_log = base / "prepare-args"
     source_script = Path(__file__).resolve().parents[1] / "haniel-runner.sh"
     source_scripts = Path(__file__).resolve().parents[1] / "scripts"
     script = base / "haniel-runner.sh"
@@ -94,6 +100,7 @@ def _run_wrapper(
             f"""#!/usr/bin/env bash
 printf '%s\\n' "$0" > "{reexec_log}"
 printf '%s\\n' "${{1:-}}" >> "{reexec_log}"
+printf '%s\\n' "${{HANIEL_RUNNER_HANDOFF_COMMIT:-unset}}" >> "{reexec_log}"
 exit 0
 """,
         )
@@ -104,6 +111,10 @@ if [[ "$3" == "fetch" ]]; then printf 'fetch\\n' >> "{fetch_log}"; fi
 if [[ "$3" == "rev-parse" ]]; then
   ref="${{@: -1}}"
   candidate="${{ref:0:40}}"
+  if [[ -n "{missing_commit or ""}" && "$candidate" == "{missing_commit or ""}" ]]; then
+    echo 'unknown commit' >&2
+    exit 1
+  fi
   if [[ "$candidate" =~ ^[0-9a-f]{{40}}$ ]]; then
     printf '%s\\n' "$candidate"
   else
@@ -121,6 +132,7 @@ exit 0
         fake_bin / "python",
         f"""#!/usr/bin/env bash
 if [[ "${{1:-}}" == *"haniel_atomic_release.py" ]]; then
+  printf '%s\\n' "$*" >> "{prepare_log}"
   printf '%s\\n' "${{NODE_CHANNEL_FD:-unset}}" > "{release_env_log}"
   if [[ -n "{switch_commit}" ]]; then
     mkdir -p "{switch_release_root}/.venv/bin"
@@ -137,6 +149,7 @@ if [[ "${{1:-}}" == *"haniel_atomic_release.py" ]]; then
 fi
 if [[ "${{1:-}}" == "-" ]]; then exec "{sys.executable}" "$@"; fi
 if [[ "${{1:-}}" == "-c" ]]; then
+  if [[ "${{2:-}}" == *"time.time_ns()"* ]]; then exec "{sys.executable}" "$@"; fi
   if [[ "${{2:-}}" == *"haniel.cli"* ]]; then exit 0; fi
   printf '2026-08-10T00:00:00+00:00\\n'
   exit 0
@@ -146,12 +159,16 @@ if [[ "${{1:-}}" == "-m" && "${{2:-}}" == "haniel.cli" ]]; then
   tail -n +2 "{state}" > "{state}.next"
   mv "{state}.next" "{state}"
   printf '%s|active-self-head=%s|%s\\n' "$code" "${{HANIEL_ACTIVE_SELF_HEAD:-unset}}" "$*" >> "{launch_log}"
-  if [[ "$code" == "10" && -n "{prestage_commit}" ]]; then
+  if [[ ( "$code" == "10" || ( "$code" == "99" && "{1 if hang_first else 0}" == "1" ) ) && -n "{prestage_commit}" ]]; then
     prepared="{base}/.local/haniel-releases/releases/{prestage_commit[:12]}"
     mkdir -p "$prepared/.venv/bin" "{base}/.local"
     cp "$0" "$prepared/.venv/bin/python"
     printf '{{"version":1,"commit":"{prestage_commit}"}}' > "$prepared/.haniel-release-ready.json"
     printf '{{"version":1,"ok":true,"pre_staged":true,"switched":false,"target_commit":"{prestage_commit}","prepared_release":"%s","active_repo":"{base}/.local/haniel-releases/releases/{release_commit}","active_python":"{base}/.local/haniel-releases/releases/{release_commit}/.venv/bin/python","active_commit":"{release_commit}","steps":[],"warnings":[],"error":null}}' "$prepared" > "{base}/.local/haniel_release_preparation.json"
+  fi
+  if [[ "$code" == "10" && -n "{pending_target or ""}" ]]; then
+    mkdir -p "{base}/.local"
+    printf '{{"deploy_id":"node:haniel:main:{pending_target or ""}"}}' > "{base}/.local/orch_pending_deploy.json"
   fi
   if [[ "{1 if hang_first else 0}" == "1" && "$code" == "99" ]]; then
     mkdir -p "{base}/.local"
@@ -177,6 +194,27 @@ exit 0
         f"{release_commit}\n",
         encoding="utf-8",
     )
+    if legacy_target:
+        (release / ".haniel-release-ready.json").write_text(
+            json.dumps({"version": 1, "commit": legacy_target})
+        )
+        (base / ".local" / "self_update_exit_requested").touch()
+        (base / ".local" / "haniel_release_preparation.json").write_text(
+            json.dumps(
+                {
+                    "ok": True,
+                    "switched": True,
+                    "target_commit": legacy_target,
+                    "prepared_release": str(release),
+                }
+            )
+        )
+    if stale_pending_target:
+        pending = base / ".local" / "orch_pending_deploy.json"
+        pending.write_text(
+            json.dumps({"deploy_id": f"node:haniel:main:{stale_pending_target}"})
+        )
+        os.utime(pending, (1, 1))
 
     if conf_text is None:
         conf_text = "\n".join(_conf_lines(base, fake_bin)) + "\n"
@@ -185,6 +223,8 @@ exit 0
 
     env = os.environ.copy()
     env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    if handoff_target:
+        env["HANIEL_RUNNER_HANDOFF_COMMIT"] = handoff_target
     if node_channel_fd is not None:
         env["NODE_CHANNEL_FD"] = node_channel_fd
     command = [
@@ -386,7 +426,11 @@ def test_self_update_reexec_passes_absolute_conf_to_new_release(
         tmp_path / ".local" / "haniel-releases" / "releases" / target
     ) / "haniel-runner.sh"
     reexec_args = (tmp_path / "reexec-args").read_text(encoding="utf-8").splitlines()
-    assert reexec_args == [str(release_runner), str(tmp_path / "haniel-runner.conf")]
+    assert reexec_args == [
+        str(release_runner),
+        str(tmp_path / "haniel-runner.conf"),
+        target,
+    ]
 
 
 @pytest.mark.parametrize(
@@ -441,6 +485,73 @@ def test_self_update_exit_reuses_prestaged_exact_target_without_fetch(
         f"10|active-self-head={'a' * 40}|-m haniel.cli run {config_path}",
         f"0|active-self-head={target}|-m haniel.cli run {config_path}",
     ]
+
+
+def test_reexecuted_wrapper_uses_handoff_commit(tmp_path: Path) -> None:
+    target = "a" * 40
+    result, fetches, _ = _run_wrapper(tmp_path, [0], handoff_target=target)
+    assert result.returncode == 0, result.stderr
+    assert f"--target-commit {target}" in (tmp_path / "prepare-args").read_text()
+    assert fetches == []
+
+
+def test_old_wrapper_handoff_uses_switched_result(tmp_path: Path) -> None:
+    target = "a" * 40
+    result, fetches, _ = _run_wrapper(tmp_path, [0], legacy_target=target)
+    assert result.returncode == 0, result.stderr
+    assert f"--target-commit {target}" in (tmp_path / "prepare-args").read_text()
+    assert fetches == []
+
+
+def test_missing_prestage_uses_approved_commit(tmp_path: Path) -> None:
+    target = "a" * 40
+    result, fetches, _ = _run_wrapper(tmp_path, [10, 0], pending_target=target)
+    assert result.returncode == 0, result.stderr
+    preparations = (tmp_path / "prepare-args").read_text().splitlines()
+    assert "--target-commit" not in preparations[0]
+    assert f"--target-commit {target}" in preparations[1]
+    assert fetches == ["fetch"]
+
+
+def test_stale_pending_record_does_not_select_old_commit(tmp_path: Path) -> None:
+    target = "b" * 40
+    result, fetches, _ = _run_wrapper(tmp_path, [10, 0], stale_pending_target=target)
+    assert result.returncode == 0, result.stderr
+    preparations = (tmp_path / "prepare-args").read_text().splitlines()
+    assert len(preparations) == 2
+    assert "--target-commit" not in preparations[1]
+    assert fetches == ["fetch", "fetch"]
+    assert (tmp_path / ".local" / "orch_pending_deploy.json").exists()
+
+
+def test_forced_self_update_reuses_prestaged_commit(tmp_path: Path) -> None:
+    target = "b" * 40
+    result, fetches, _ = _run_wrapper(
+        tmp_path, [99, 0], hang_first=True, prestage_target=target
+    )
+    assert result.returncode == 0, result.stderr
+    preparations = [
+        line
+        for line in (tmp_path / "prepare-args").read_text().splitlines()
+        if "--source" in line
+    ]
+    assert len(preparations) == 2
+    assert f"--target-commit {target}" in preparations[1]
+    assert fetches == ["fetch"]
+
+
+def test_missing_approved_commit_does_not_retry_remote_head(tmp_path: Path) -> None:
+    target = "b" * 40
+    result, fetches, _ = _run_wrapper(
+        tmp_path, [10, 0], pending_target=target, missing_commit=target
+    )
+    assert result.returncode == 0, result.stderr
+    preparations = (tmp_path / "prepare-args").read_text().splitlines()
+    assert len(preparations) == 2
+    assert f"--target-commit {target}" in preparations[1]
+    assert fetches == ["fetch"]
+    marker = json.loads((tmp_path / ".local" / "self_update_result.json").read_text())
+    assert marker["ok"] is False
 
 
 def test_self_update_exit_watchdog_sigkills_and_recovers(tmp_path: Path) -> None:

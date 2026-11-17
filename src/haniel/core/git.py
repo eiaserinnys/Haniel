@@ -140,6 +140,17 @@ def get_remote_head(path: Path, branch: str, remote: str = "origin") -> str:
         ) from e
 
 
+def get_local_ancestors(path: Path, head: str) -> list[str] | None:
+    """Read recent ancestors from the source checkout for an observation."""
+    try:
+        return _run_git(
+            ["rev-list", "--max-count=100", head], cwd=path
+        ).stdout.splitlines()
+    except (subprocess.CalledProcessError, GitTimeoutError, OSError) as exc:
+        logger.warning("Cannot read local ancestors for %s: %s", path, exc)
+        return None
+
+
 def read_file_at_commit(path: Path, commit: str, relative_path: str) -> bytes:
     """Read one tracked file without changing the checkout."""
     try:
