@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -531,6 +532,23 @@ class TestAutoDeployReconciliation:
         runner._apply_changes(["appA"])
 
         runner._run_auto_deploy.assert_called_once_with("appA")
+
+    def test_global_auto_apply_false_overrides_repo_auto_apply(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        runner = _build_runner(tmp_path)
+        assert runner.config.repos["appA"].auto_apply is True
+        runner.config.auto_apply = False
+        runner._run_auto_deploy = MagicMock()  # type: ignore[method-assign]
+
+        with caplog.at_level(logging.INFO, logger="haniel.core.runner"):
+            runner._apply_changes(["appA"])
+
+        runner._run_auto_deploy.assert_not_called()
+        assert (
+            "global auto_apply=false overrides repo auto_apply, "
+            "pending manual approval for: ['appA']" in caplog.text
+        )
 
     def test_attempt_started_precedes_execution_and_settled_report(
         self, tmp_path: Path

@@ -118,7 +118,11 @@ class RepoConfig(BaseModel):
     hooks: HooksConfig | None = Field(default=None, description="Lifecycle hooks")
     auto_apply: bool = Field(
         default=True,
-        description="Whether Haniel should automatically fetch/apply updates for this repo",
+        description=(
+            "Whether Haniel may apply this repo's updates without approval "
+            "while the global auto_apply is on. A repo can only disable "
+            "itself; the value is ignored when the global auto_apply is off"
+        ),
     )
     pull_strategy: Literal["merge", "force"] | None = Field(
         default=None,

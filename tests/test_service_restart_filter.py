@@ -304,6 +304,7 @@ def _execute(
         rollback=lambda: events.append("rollback"),
         prepare_roll_forward=lambda: events.append("prepare-roll-forward"),
         writer_services=writer_services,
+        affected_services=writer_services,
         restart_candidates=candidates,
         apply_restart_skips=apply_restart_skips,
     )
@@ -410,8 +411,32 @@ def test_only_applied_candidates_reach_the_journal_and_log(
     assert "skip:standalone" not in events
     assert journal is not None
     assert journal["restart_skipped_services"] == ["worker"]
-    assert "left running: worker" in caplog.text
-    assert "standalone" not in caplog.text
+    assert (
+        "Skipping restarts for app at new: left running: worker; "
+        "restarting: app, standalone (2 changed path(s) all matched the "
+        "ignore_paths of the services left running)" in caplog.text
+    )
+
+
+def test_all_affected_services_skipped_reports_restarting_none(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="haniel.core.deployment")
+
+    events, journal, error = _execute(
+        tmp_path,
+        _manifest_payload(contract=True),
+        preflight_json=_contract_preflight(pending_count=0),
+        candidates=_candidates("worker"),
+        writer_services=("worker",),
+        stop_receipt=None,
+    )
+
+    assert error is None
+    assert "skip:worker" in events
+    assert journal is not None
+    assert journal["restart_skipped_services"] == ["worker"]
+    assert "restarting: none" in caplog.text
 
 
 @pytest.mark.parametrize(
