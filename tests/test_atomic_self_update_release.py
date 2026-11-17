@@ -480,6 +480,8 @@ def test_powershell_wrapper_validates_pre_staged_target_and_keeps_fallback() -> 
     assert "Remove-Item Env:HANIEL_RUNNER_HANDOFF_COMMIT" in script
     assert "Get-SwitchedTarget" in script
     assert "Get-PendingDeployTarget" in script
+    assert "$launchStartedAt = [DateTime]::UtcNow" in script
+    assert "$pendingFile.LastWriteTimeUtc -lt $launchStartedAt" in script
 
 
 def _run_atomic_wrapper(

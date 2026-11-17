@@ -213,7 +213,9 @@ function Get-SwitchedTarget {
 
 function Get-PendingDeployTarget {
     try {
-        $pending = Get-Content (Join-Path $RootDir ".local/orch_pending_deploy.json") -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+        $pendingFile = Get-Item (Join-Path $RootDir ".local/orch_pending_deploy.json") -ErrorAction Stop
+        if ($pendingFile.LastWriteTimeUtc -lt $launchStartedAt) { return $null }
+        $pending = Get-Content $pendingFile.FullName -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
         $parts = ([string]$pending.deploy_id).Split(':', 4)
         if ($parts.Count -eq 4 -and $parts[3] -cmatch '^[0-9a-fA-F]{40}$') {
             return $parts[3].ToLowerInvariant()
@@ -458,6 +460,7 @@ while ($true) {
     $env:HANIEL_ACTIVE_SELF_HEAD = $script:ActiveCommit
     $runArguments = @("-m", "haniel.cli", "run", $ConfigPath)
     try {
+        $launchStartedAt = [DateTime]::UtcNow
         $hanielProcess = Start-RunnerProcess -Arguments $runArguments
     } catch {
         Write-Error "Failed to launch Haniel: $_"

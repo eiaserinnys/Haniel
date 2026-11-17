@@ -52,6 +52,8 @@ def _run_wrapper(
     handoff_target: str | None = None,
     legacy_target: str | None = None,
     pending_target: str | None = None,
+    stale_pending_target: str | None = None,
+    missing_commit: str | None = None,
 ):
     base = tmp_path / root_name if root_name else tmp_path
     base.mkdir(parents=True, exist_ok=True)
@@ -109,6 +111,10 @@ if [[ "$3" == "fetch" ]]; then printf 'fetch\\n' >> "{fetch_log}"; fi
 if [[ "$3" == "rev-parse" ]]; then
   ref="${{@: -1}}"
   candidate="${{ref:0:40}}"
+  if [[ -n "{missing_commit or ""}" && "$candidate" == "{missing_commit or ""}" ]]; then
+    echo 'unknown commit' >&2
+    exit 1
+  fi
   if [[ "$candidate" =~ ^[0-9a-f]{{40}}$ ]]; then
     printf '%s\\n' "$candidate"
   else
@@ -143,6 +149,7 @@ if [[ "${{1:-}}" == *"haniel_atomic_release.py" ]]; then
 fi
 if [[ "${{1:-}}" == "-" ]]; then exec "{sys.executable}" "$@"; fi
 if [[ "${{1:-}}" == "-c" ]]; then
+  if [[ "${{2:-}}" == *"time.time_ns()"* ]]; then exec "{sys.executable}" "$@"; fi
   if [[ "${{2:-}}" == *"haniel.cli"* ]]; then exit 0; fi
   printf '2026-08-10T00:00:00+00:00\\n'
   exit 0
@@ -152,7 +159,7 @@ if [[ "${{1:-}}" == "-m" && "${{2:-}}" == "haniel.cli" ]]; then
   tail -n +2 "{state}" > "{state}.next"
   mv "{state}.next" "{state}"
   printf '%s|active-self-head=%s|%s\\n' "$code" "${{HANIEL_ACTIVE_SELF_HEAD:-unset}}" "$*" >> "{launch_log}"
-  if [[ "$code" == "10" && -n "{prestage_commit}" ]]; then
+  if [[ ( "$code" == "10" || ( "$code" == "99" && "{1 if hang_first else 0}" == "1" ) ) && -n "{prestage_commit}" ]]; then
     prepared="{base}/.local/haniel-releases/releases/{prestage_commit[:12]}"
     mkdir -p "$prepared/.venv/bin" "{base}/.local"
     cp "$0" "$prepared/.venv/bin/python"
@@ -202,6 +209,12 @@ exit 0
                 }
             )
         )
+    if stale_pending_target:
+        pending = base / ".local" / "orch_pending_deploy.json"
+        pending.write_text(
+            json.dumps({"deploy_id": f"node:haniel:main:{stale_pending_target}"})
+        )
+        os.utime(pending, (1, 1))
 
     if conf_text is None:
         conf_text = "\n".join(_conf_lines(base, fake_bin)) + "\n"
@@ -498,6 +511,47 @@ def test_missing_prestage_uses_approved_commit(tmp_path: Path) -> None:
     assert "--target-commit" not in preparations[0]
     assert f"--target-commit {target}" in preparations[1]
     assert fetches == ["fetch"]
+
+
+def test_stale_pending_record_does_not_select_old_commit(tmp_path: Path) -> None:
+    target = "b" * 40
+    result, fetches, _ = _run_wrapper(tmp_path, [10, 0], stale_pending_target=target)
+    assert result.returncode == 0, result.stderr
+    preparations = (tmp_path / "prepare-args").read_text().splitlines()
+    assert len(preparations) == 2
+    assert "--target-commit" not in preparations[1]
+    assert fetches == ["fetch", "fetch"]
+    assert (tmp_path / ".local" / "orch_pending_deploy.json").exists()
+
+
+def test_forced_self_update_reuses_prestaged_commit(tmp_path: Path) -> None:
+    target = "b" * 40
+    result, fetches, _ = _run_wrapper(
+        tmp_path, [99, 0], hang_first=True, prestage_target=target
+    )
+    assert result.returncode == 0, result.stderr
+    preparations = [
+        line
+        for line in (tmp_path / "prepare-args").read_text().splitlines()
+        if "--source" in line
+    ]
+    assert len(preparations) == 2
+    assert f"--target-commit {target}" in preparations[1]
+    assert fetches == ["fetch"]
+
+
+def test_missing_approved_commit_does_not_retry_remote_head(tmp_path: Path) -> None:
+    target = "b" * 40
+    result, fetches, _ = _run_wrapper(
+        tmp_path, [10, 0], pending_target=target, missing_commit=target
+    )
+    assert result.returncode == 0, result.stderr
+    preparations = (tmp_path / "prepare-args").read_text().splitlines()
+    assert len(preparations) == 2
+    assert f"--target-commit {target}" in preparations[1]
+    assert fetches == ["fetch"]
+    marker = json.loads((tmp_path / ".local" / "self_update_result.json").read_text())
+    assert marker["ok"] is False
 
 
 def test_self_update_exit_watchdog_sigkills_and_recovers(tmp_path: Path) -> None:

@@ -8,6 +8,7 @@ import textwrap
 import aiosqlite
 
 from state_support import (
+    fire,
     set_legacy_status,
     to_deploying,
     to_pending_again,
@@ -258,6 +259,16 @@ class TestSelfUpdateObservedResolution:
             )
         await store._db.execute("UPDATE deploy_events SET repo = 'haniel'")
         await store._db.commit()
+        for deploy_id, legacy in zip(ids[:2], (False, True)):
+            await to_deploying(store, deploy_id)
+            await fire(
+                store, deploy_id, "send_failed",
+                facts={"newer": False, "legacy": legacy},
+                data={"stable_source": deploy_id, "failed_attempt_id": deploy_id, "marker_created_at": None},
+            )
+        assert [
+            (await store.get_deploy_event(item))["sm_status"] for item in ids[:2]
+        ] == ["again", "retry"]
         resolved = await store.resolve_observed_pending(
             deploy_id="n1:haniel:main:descendant",
             node_id="n1",

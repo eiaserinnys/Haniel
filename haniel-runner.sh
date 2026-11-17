@@ -334,14 +334,17 @@ PY
 }
 
 load_pending_deploy_target() {
-  "$PYTHON_BIN" - "$ROOT_DIR/.local/orch_pending_deploy.json" <<'PY'
+  "$PYTHON_BIN" - "$ROOT_DIR/.local/orch_pending_deploy.json" "$launch_started_at_ns" <<'PY'
 import json
 import pathlib
 import re
 import sys
 
 try:
-    deploy_id = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["deploy_id"]
+    pending_path = pathlib.Path(sys.argv[1])
+    if pending_path.stat().st_mtime_ns < int(sys.argv[2]):
+        raise SystemExit(1)
+    deploy_id = json.loads(pending_path.read_text(encoding="utf-8"))["deploy_id"]
     target = deploy_id.split(":", 3)[3]
 except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError):
     raise SystemExit(1)
@@ -599,6 +602,7 @@ while true; do
   echo "[haniel-runner] Launching haniel..."
   rm -f "$SELF_UPDATE_EXIT_MARKER" "$FORCED_SELF_UPDATE_MARKER"
   launch_started_at="$(date +%s)"
+  launch_started_at_ns="$("$PYTHON_BIN" -c 'import time; print(time.time_ns())')"
   HANIEL_ACTIVE_SELF_HEAD="$ACTIVE_COMMIT" \
     "$ACTIVE_PYTHON" -m haniel.cli run "$CONFIG_PATH" &
   CHILD_PID=$!
@@ -649,6 +653,7 @@ while true; do
       echo "[haniel-runner] Forced self-update recovery after shutdown timeout."
       send_webhook "Self-update shutdown timed out; process was killed and will be updated." "error"
       write_self_update_marker=true
+      use_prepared_update=true
     else
       send_webhook "haniel exited with unexpected code $exit_code; recovering after ${restart_delay}s." "error"
     fi
