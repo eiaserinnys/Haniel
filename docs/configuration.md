@@ -26,6 +26,7 @@ This is enough to run haniel with self-update only. See [`haniel.yaml.example`](
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `poll_interval` | int | `60` | Seconds between git fetch polls |
+| `git_fetch_timeout` | int | `900` | Maximum seconds for each polling Git fetch |
 | `auto_apply` | bool | `true` | If `false`, detected changes are shown in dashboard but not auto-applied. Manual "Update" from dashboard is still possible |
 | `secrets_file` | string | — | dotenv file containing values for secret references |
 | `shutdown` | object | — | Global shutdown behavior |
@@ -212,13 +213,17 @@ repos:
 | `hooks.post_pull` | string | — | Legacy repository build command, run once from the repository directory |
 | `hooks.timeout` | int | `900` | Maximum seconds allowed for each repository hook |
 | `release_manifest` | string | — | Repository-relative path to a `haniel.release.v1` deployment contract |
-| `staging_checkout_timeout` | integer (1–7200) | `300` | Limit for this repository's detached release checkout only |
+| `staging_checkout_timeout` | integer (1–7200) | `900` | Limit for this repository's detached release checkout only |
 
 **Poll behavior**: Every `poll_interval` seconds, haniel runs `git fetch` and compares local HEAD with remote. If they differ, changes are detected.
 
 **Auto-clone**: During `haniel install` or first `haniel run`, missing repos are cloned automatically.
 
 `staging_checkout_timeout` applies only to `git worktree add --detach` while a manifest release target is staged. It does not alter `git_fetch_timeout` or the timeouts for other Git operations. A slow Windows checkout can therefore set `1800` for its one repository without widening the rest of the node.
+
+Other Git operations without an explicit timeout, including `git reset --hard`,
+have a 900-second limit. A manifest deployment's declared budget includes the
+repository's staging checkout limit and, for force activation, the reset limit.
 
 For legacy startup updates and approved pulls, the repository `post_pull` runs
 once before its service hooks, even if no service belongs to the repository.

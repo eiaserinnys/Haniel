@@ -287,7 +287,7 @@ def test_repo_checkout_timeout_reaches_only_detached_checkout(tmp_path: Path) ->
     assert checkout.call_args.args[0][:4] == ["git", "worktree", "add", "--detach"]
     assert checkout.call_args.kwargs["timeout"] == 1800
     assert regular_git.call_args_list
-    assert all(call.kwargs["timeout"] == 300 for call in regular_git.call_args_list)
+    assert all(call.kwargs["timeout"] == 900 for call in regular_git.call_args_list)
     assert get_head(live) == previous
 
 

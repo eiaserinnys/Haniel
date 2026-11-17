@@ -47,7 +47,7 @@ class TestHanielConfigParsing:
             {"git_fetch_timeout": 45, "repos": {}, "services": {}}
         )
 
-        assert config.git_fetch_timeout == 300
+        assert config.git_fetch_timeout == 900
         assert overridden.git_fetch_timeout == 45
 
     def test_repos_parsing(self):
@@ -96,7 +96,7 @@ class TestHanielConfigParsing:
         )
 
         assert config.repos["slow-checkout"].staging_checkout_timeout == 1800
-        assert config.repos["default-checkout"].staging_checkout_timeout == 300
+        assert config.repos["default-checkout"].staging_checkout_timeout == 900
 
         with pytest.raises(ValidationError):
             RepoConfig(

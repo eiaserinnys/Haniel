@@ -44,6 +44,7 @@ from ..config.release_activation import (
     discover_remote_release_manifest,
     plan_release_manifest_activation,
 )
+from ..defaults import DEFAULT_GIT_TIMEOUT
 from .child_env import sanitized_child_env
 from .change_evidence import get_applied_change_evidence
 from .git import (
@@ -2448,14 +2449,19 @@ class ServiceRunner:
             services=config_snapshot.enabled_services,
             manifest=manifest,
         )
+        staging_sec = runtime.config.staging_checkout_timeout
+        activation_sec = DEFAULT_GIT_TIMEOUT if runtime.config.pull_strategy == "force" else 0
+        total_sec = budget.total_sec + staging_sec + activation_sec
         self._require_config_generation(config_snapshot)
         logger.info(
-            "Declaring expected deployment budget for %s: %ss (%s)",
+            "Declaring expected deployment budget for %s: %ss (%s + staging=%ss + activation=%ss)",
             deploy_id,
-            budget.total_sec,
+            total_sec,
             budget.breakdown(),
+            staging_sec,
+            activation_sec,
         )
-        return budget.total_sec
+        return total_sec
 
     def _capture_orchestrator_repo_snapshot(
         self,
