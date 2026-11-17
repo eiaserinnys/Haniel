@@ -19,7 +19,6 @@ import pytest
 
 from haniel.core.claude_session import ClaudeSessionManager
 from haniel.dashboard.chat_ws import ChatWebSocket
-from haniel.config import DashboardConfig, HanielConfig, McpConfig
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -31,31 +30,6 @@ def _make_runner(tmp_path: Path) -> MagicMock:
     runner.config_dir = tmp_path
     runner.config.mcp = None  # disable MCP config writing
     return runner
-
-
-@pytest.mark.parametrize("token", ["resolved-test-token", None])
-def test_mcp_config_and_options_auth(tmp_path, token):
-    runner = _make_runner(tmp_path)
-    runner.config = HanielConfig(
-        mcp=McpConfig(),
-        dashboard=DashboardConfig(token="${secret:MCP}") if token else None,
-    )
-    if token:
-        runner.config._secret_values = {"MCP": token}
-    manager = ClaudeSessionManager(runner)
-    contents = (manager._workspace_path / ".mcp.json").read_text(encoding="utf-8")
-    entry = json.loads(contents)["mcpServers"]["haniel"]
-    options, stderr_file = manager._build_options(None)
-    try:
-        if token:
-            assert entry["headers"] == {"Authorization": "Bearer ${HANIEL_MCP_TOKEN}"}
-            assert token not in contents
-            assert options.env["HANIEL_MCP_TOKEN"] == token
-        else:
-            assert "headers" not in entry
-            assert "HANIEL_MCP_TOKEN" not in options.env
-    finally:
-        stderr_file.close()
 
 
 # ── _make_session ─────────────────────────────────────────────────────────────

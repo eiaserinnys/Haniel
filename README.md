@@ -135,7 +135,7 @@ repo, which prepares a release and relaunches on exit codes 10 and 11.
 }
 ```
 
-When `dashboard.token` is set, add `"headers": {"Authorization": "Bearer ${HANIEL_MCP_TOKEN}"}` to the `haniel` entry and supply `HANIEL_MCP_TOKEN` in the client environment.
+For connections from another computer when `dashboard.token` is set, add `"headers": {"Authorization": "Bearer ${HANIEL_MCP_TOKEN}"}` to the `haniel` entry and supply `HANIEL_MCP_TOKEN` in the client environment.
 
 Now Claude Code can operate your infrastructure:
 

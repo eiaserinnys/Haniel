@@ -184,9 +184,10 @@ dashboard:
 | `port` | int | — | Dedicated port. If omitted, shares the MCP server port |
 | `token` | string | — | Bearer token for API/WebSocket authentication. If omitted, dashboard is accessible without auth (a warning is logged) |
 
-When a token is set, `/api/*`, `/mcp`, and `/mcp/*` require
-`Authorization: Bearer <token>`, including when the dashboard is disabled.
-Dashboard WebSocket connections use the token query parameter.
+When a token is set, `/api/*` requires `Authorization: Bearer <token>`,
+including for local requests. `/mcp` and `/mcp/*` require the same header only
+for connections from outside the local computer, including when the dashboard
+is disabled. Dashboard WebSocket connections use the token query parameter.
 
 ## `repos`
 

@@ -6,6 +6,7 @@ Integrated into the Starlette server used by the MCP Streamable HTTP transport.
 """
 
 import hmac
+import ipaddress
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -54,10 +55,22 @@ class AuthMiddleware:
 
         path: str = scope.get("path", "")
 
+        is_mcp = path == "/mcp" or path.startswith("/mcp/")
         # /ws/*, /auth/*, /dashboard SPA assets and root pass through.
-        if not (path.startswith("/api/") or path == "/mcp" or path.startswith("/mcp/")):
+        if not (path.startswith("/api/") or is_mcp):
             await self._app(scope, receive, send)
             return
+
+        if is_mcp and scope.get("client"):
+            try:
+                address = ipaddress.ip_address(scope["client"][0])
+                if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+                    address = address.ipv4_mapped
+                if address.is_loopback:
+                    await self._app(scope, receive, send)
+                    return
+            except ValueError:
+                pass  # An unparseable client address is treated as remote.
 
         # Check Authorization: Bearer header
         headers = dict(scope.get("headers", []))
