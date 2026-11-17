@@ -894,3 +894,132 @@ def test_vanished_request_file_is_forgotten(tmp_path: Path) -> None:
         )
         server.process_pending_once()
         assert _read_result_ids(probe) == ["done-1"]
+
+
+# Lifecycle result files: Windows share-mode rejections are retried briefly.
+
+
+def _short_permission_retry(monkeypatch) -> None:
+    from haniel.core import lifecycle_storage
+
+    monkeypatch.setattr(lifecycle_storage, "PERMISSION_RETRY_WINDOW_SECONDS", 0.05)
+    monkeypatch.setattr(lifecycle_storage, "PERMISSION_RETRY_INTERVAL_SECONDS", 0.001)
+
+
+def test_read_json_retries_transient_permission_error(tmp_path, monkeypatch):
+    from haniel.core.lifecycle_storage import read_json
+
+    _short_permission_retry(monkeypatch)
+    path = tmp_path / "result.json"
+    path.write_text('{"ok": true}', encoding="utf-8")
+    original = Path.read_text
+    attempts = {"count": 0}
+
+    def flaky_read_text(self, *args, **kwargs):
+        if self == path:
+            attempts["count"] += 1
+            if attempts["count"] < 3:
+                raise PermissionError(13, "file is locked")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky_read_text)
+
+    assert read_json(path) == {"ok": True}
+    assert attempts["count"] == 3
+
+
+def test_read_json_raises_permission_error_after_retry_window(tmp_path, monkeypatch):
+    from haniel.core.lifecycle_storage import read_json
+
+    _short_permission_retry(monkeypatch)
+    path = tmp_path / "result.json"
+    attempts = {"count": 0}
+
+    def denied_read_text(self, *args, **kwargs):
+        attempts["count"] += 1
+        raise PermissionError(13, "file is locked")
+
+    monkeypatch.setattr(Path, "read_text", denied_read_text)
+
+    with pytest.raises(PermissionError, match="file is locked"):
+        read_json(path)
+    assert attempts["count"] > 1
+
+
+def test_read_json_does_not_retry_other_errors(tmp_path, monkeypatch):
+    from haniel.core.lifecycle_storage import read_json
+
+    _short_permission_retry(monkeypatch)
+    path = tmp_path / "result.json"
+    attempts = {"count": 0}
+
+    def missing_read_text(self, *args, **kwargs):
+        attempts["count"] += 1
+        raise FileNotFoundError(2, "gone")
+
+    monkeypatch.setattr(Path, "read_text", missing_read_text)
+
+    with pytest.raises(FileNotFoundError):
+        read_json(path)
+    assert attempts["count"] == 1
+
+
+def test_atomic_json_retries_replace_permission_error(tmp_path, monkeypatch):
+    from haniel.core import lifecycle_storage
+
+    _short_permission_retry(monkeypatch)
+    target = tmp_path / "result.json"
+    real_replace = os.replace
+    attempts = {"count": 0}
+
+    def flaky_replace(source, destination):
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise PermissionError(13, "file is locked")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(lifecycle_storage.os, "replace", flaky_replace)
+
+    lifecycle_storage.atomic_json(target, {"ok": True})
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {"ok": True}
+    assert attempts["count"] == 3
+
+
+def test_atomic_json_surfaces_persistent_permission_error(tmp_path, monkeypatch):
+    from haniel.core import lifecycle_storage
+
+    _short_permission_retry(monkeypatch)
+    target = tmp_path / "result.json"
+
+    def denied_replace(source, destination):
+        raise PermissionError(13, "file is locked")
+
+    monkeypatch.setattr(lifecycle_storage.os, "replace", denied_replace)
+
+    with pytest.raises(PermissionError, match="file is locked"):
+        lifecycle_storage.atomic_json(target, {"ok": True})
+    assert not target.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_deployment_receipt_retries_transient_permission_error(tmp_path, monkeypatch):
+    from haniel.core import lifecycle_storage
+    from haniel.core.deployment_state import DeploymentStateStore
+
+    _short_permission_retry(monkeypatch)
+    real_replace = os.replace
+    attempts = {"count": 0}
+
+    def flaky_replace(source, destination):
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise PermissionError(13, "file is locked")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(lifecycle_storage.os, "replace", flaky_replace)
+
+    path = DeploymentStateStore(tmp_path).write_quiescence_receipt("app", {"ok": True})
+
+    assert json.loads(path.read_text(encoding="utf-8"))["ok"] is True
+    assert attempts["count"] == 3

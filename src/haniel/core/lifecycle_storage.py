@@ -7,12 +7,22 @@ import os
 import subprocess
 import sys
 import threading
+import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from uuid import uuid4
 
 _PROCESS_START_FALLBACK = uuid4().hex
+
+# Windows briefly rejects reads and replacements while another thread has the
+# result file open. Retry those transient share-mode rejections, but keep the
+# total wait short so a real permission problem still surfaces.
+PERMISSION_RETRY_WINDOW_SECONDS = 2.0
+PERMISSION_RETRY_INTERVAL_SECONDS = 0.05
+
+_Result = TypeVar("_Result")
 
 _PS_WEEKDAYS = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
 _PS_MONTHS = {
@@ -31,8 +41,22 @@ _PS_MONTHS = {
 }
 
 
+def retry_on_permission_error(operation: Callable[[], _Result]) -> _Result:
+    """Run an operation, retrying transient PermissionError without swallowing it."""
+    deadline = time.monotonic() + PERMISSION_RETRY_WINDOW_SECONDS
+    while True:
+        try:
+            return operation()
+        except PermissionError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(PERMISSION_RETRY_INTERVAL_SECONDS, remaining))
+
+
 def read_json(path: Path) -> dict[str, Any]:
-    value = json.loads(path.read_text(encoding="utf-8"))
+    text = retry_on_permission_error(lambda: path.read_text(encoding="utf-8"))
+    value = json.loads(text)
     if not isinstance(value, dict):
         raise ValueError(f"JSON root is not an object: {path}")
     return value
@@ -49,7 +73,7 @@ def atomic_json(path: Path, value: dict[str, Any]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        retry_on_permission_error(lambda: os.replace(temporary, path))
         _fsync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)

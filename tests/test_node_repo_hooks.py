@@ -209,6 +209,48 @@ def test_manifest_warns_without_running_repo_hook(tmp_path, caplog):
     assert "post_pull" in caplog.text and "app" in caplog.text
 
 
+def test_service_registration_repo_hook_uses_configured_timeout(tmp_path):
+    from haniel.core import service_lifecycle
+
+    repo_path = tmp_path / "app"
+    repo_path.mkdir()
+    repo_config = RepoConfig(
+        url="git@example/app",
+        path="app",
+        hooks=HooksConfig(post_pull="build-repo", timeout=42),
+    )
+    with patch("haniel.core.service_lifecycle.subprocess.run") as run:
+        assert service_lifecycle._maybe_run_repo_post_pull(
+            "app", repo_config, repo_path, tmp_path
+        )
+    assert run.call_args.kwargs["timeout"] == 42
+
+
+def test_service_registration_hook_defaults_to_model_timeout(tmp_path):
+    from haniel.core import service_lifecycle
+
+    repo_path = tmp_path / "app"
+    repo_path.mkdir()
+    with patch("haniel.core.service_lifecycle.subprocess.run") as run:
+        service_lifecycle._run_shell_hook(
+            "app", "post_pull", "build-repo", repo_path, tmp_path
+        )
+    assert run.call_args.kwargs["timeout"] == HooksConfig().timeout
+
+
+def test_service_registration_skips_repo_hook_without_block(tmp_path):
+    from haniel.core import service_lifecycle
+
+    repo_path = tmp_path / "app"
+    repo_path.mkdir()
+    repo_config = RepoConfig(url="git@example/app", path="app")
+    with patch("haniel.core.service_lifecycle.subprocess.run") as run:
+        assert not service_lifecycle._maybe_run_repo_post_pull(
+            "app", repo_config, repo_path, tmp_path
+        )
+    run.assert_not_called()
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits")
 def test_runner_conf_overwrites_existing_permissions(tmp_path):
     from haniel.installer.finalize import Finalizer

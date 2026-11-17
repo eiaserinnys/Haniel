@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from ..config import HanielConfig
+from ..config import HanielConfig, HooksConfig
 from ..core.release_staging import initial_clone_path
 from ..core.safety_redaction import bounded_redact_text
 from .state import InstallState
@@ -344,7 +344,11 @@ class MechanicalInstaller:
                             )
                             if repo.hooks and repo.hooks.post_pull:
                                 self._run_repo_hook(
-                                    name, "post_pull", repo.hooks.post_pull, repo_path
+                                    name,
+                                    "post_pull",
+                                    repo.hooks.post_pull,
+                                    repo_path,
+                                    timeout=repo.hooks.timeout,
                                 )
                     except subprocess.TimeoutExpired:
                         logger.warning(
@@ -433,7 +437,11 @@ class MechanicalInstaller:
                         and not (self.defer_manifest_handover and repo.release_manifest)
                     ):
                         self._run_repo_hook(
-                            name, "post_pull", repo.hooks.post_pull, clone_path
+                            name,
+                            "post_pull",
+                            repo.hooks.post_pull,
+                            clone_path,
+                            timeout=repo.hooks.timeout,
                         )
             except subprocess.TimeoutExpired:
                 self.state.mark_failed(f"repos:{name}", "Clone timed out")
@@ -701,8 +709,17 @@ class MechanicalInstaller:
             self.state.mark_failed(f"environments:{name}", str(e))
             return False
 
-    def _run_repo_hook(self, name: str, hook_name: str, cmd: str, cwd: Path) -> None:
+    def _run_repo_hook(
+        self,
+        name: str,
+        hook_name: str,
+        cmd: str,
+        cwd: Path,
+        *,
+        timeout: int | None = None,
+    ) -> None:
         """Run a lifecycle hook for a repository."""
+        limit = HooksConfig().timeout if timeout is None else timeout
         try:
             logger.info(f"Running {hook_name} hook for repo {name}: {cmd}")
             env = self._env_with_tool_paths(["node", "pnpm", "npm", "npx"])
@@ -710,7 +727,7 @@ class MechanicalInstaller:
                 cmd,
                 cwd=str(cwd),
                 check=True,
-                timeout=300,
+                timeout=limit,
                 env=env,
                 shell=True,
             )
