@@ -266,9 +266,11 @@ class TestSelfUpdateObservedResolution:
                 facts={"newer": False, "legacy": legacy},
                 data={"stable_source": deploy_id, "failed_attempt_id": deploy_id, "marker_created_at": None},
             )
-        assert [
-            (await store.get_deploy_event(item))["sm_status"] for item in ids[:2]
-        ] == ["again", "retry"]
+        cursor = await store._db.execute(
+            "SELECT deploy_id, sm_status FROM deploy_events WHERE deploy_id IN (?, ?)",
+            ids[:2],
+        )
+        assert dict(await cursor.fetchall()) == {ids[0]: "again", ids[1]: "retry"}
         resolved = await store.resolve_observed_pending(
             deploy_id="n1:haniel:main:descendant",
             node_id="n1",
