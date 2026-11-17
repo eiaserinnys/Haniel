@@ -828,7 +828,7 @@ async def test_repro_approve_all_skips_locked_requests_and_names_them(store: Eve
     body = response.json()
     assert body["approved"] == ["n1:r:dev:bbb"]
     assert body["failed"] == []
-    assert body["needs_inspection"] == [{"deploy_id": "n1:r:main:aaa", "reason": "점검한 뒤 하나씩 승인할 것"}]
+    assert body["needs_inspection"] == [{"deploy_id": "n1:r:main:aaa", "reason": "직전 배포가 실패해 일괄 승인에서 뺐다. 개별 승인으로 다시 돌린다."}]
     assert (await store.get_deploy_event("n1:r:main:aaa"))["status"] == "pending"
     assert await store.attempts.get_active_attempts() and len(await store.attempts.get_active_attempts()) == 1
 

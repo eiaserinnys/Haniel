@@ -282,18 +282,31 @@ def test_expected_deployment_budget_uses_owned_hooks_and_all_readiness() -> None
 
 
 @patch("haniel.core.runner.read_file_at_commit")
+@pytest.mark.parametrize(("strategy", "expected"), [("merge", 3138), ("force", 4038)])
 def test_runner_declares_budget_from_target_commit_manifest(
-    read_target: MagicMock, tmp_path: Path
+    read_target: MagicMock, tmp_path: Path, strategy: str, expected: int
 ) -> None:
     runner = _runner(tmp_path)
     runner._repo_states["app"].config = runner._repo_states["app"].config.model_copy(
-        update={"release_manifest": "haniel.release.json"}
+        update={
+            "release_manifest": "haniel.release.json",
+            "staging_checkout_timeout": 1800,
+            "pull_strategy": strategy,
+        }
     )
     read_target.return_value = _manifest().model_dump_json().encode("utf-8")
 
     declared = runner._expected_deployment_budget_sec("node-a:app:main:target-commit")
 
-    assert declared == 1338
+    assert declared == expected
     read_target.assert_called_once_with(
         tmp_path / "app", "target-commit", "haniel.release.json"
+    )
+
+
+def test_runner_does_not_declare_budget_without_manifest(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+
+    assert (
+        runner._expected_deployment_budget_sec("node-a:app:main:target-commit") is None
     )
