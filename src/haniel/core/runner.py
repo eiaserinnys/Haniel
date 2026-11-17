@@ -4468,9 +4468,9 @@ class ServiceRunner:
             if (
                 Path(manifest_path).is_absolute()
                 or PureWindowsPath(manifest_path).anchor
-                or not (repo_path / manifest_path).resolve().is_relative_to(
-                    repo_path.resolve()
-                )
+                or not (repo_path / manifest_path)
+                .resolve()
+                .is_relative_to(repo_path.resolve())
             ):
                 raise ValueError("manifest path must stay inside the repository")
             payload = read_file_at_commit(repo_path, f"origin/{branch}", manifest_path)

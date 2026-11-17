@@ -106,7 +106,9 @@ def test_unmatched_path_creates_pending(remote_change) -> None:
     runner._orch_client.notify_change.assert_called_once()
 
 
-@pytest.mark.parametrize("read_error", [True, False], ids=["read-error", "field-absent"])
+@pytest.mark.parametrize(
+    "read_error", [True, False], ids=["read-error", "field-absent"]
+)
 def test_unavailable_filter_creates_pending(remote_change, read_error, caplog) -> None:
     runner, _, read_manifest, changed_paths, _ = remote_change
     if read_error:
@@ -120,9 +122,9 @@ def test_unavailable_filter_creates_pending(remote_change, read_error, caplog) -
         assert runner._detect_changes() == ["app"]
     assert runner._repo_states["app"].pending_changes["commits"]
     assert runner._orch_client.notify_change.call_count == 2
-    assert sum("Cannot filter changes" in record.message for record in caplog.records) == (
-        1 if read_error else 0
-    )
+    assert sum(
+        "Cannot filter changes" in record.message for record in caplog.records
+    ) == (1 if read_error else 0)
 
 
 def test_manifest_accepts_change_ignore_paths_and_defaults_to_empty() -> None:
