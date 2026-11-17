@@ -60,6 +60,12 @@ class ClaudeSessionManager:
 
     def __init__(self, runner: "ServiceRunner"):
         self.runner = runner
+        dashboard = runner.config.dashboard if runner.config.mcp is not None else None
+        self._mcp_token = (
+            runner.config.resolve_secret(dashboard.token, "dashboard.token")
+            if dashboard is not None
+            else None
+        )
         self._sessions_path = runner.config_dir / _SESSIONS_FILE
         self._data: dict = {"sessions": [], "last_session_id": None}
         self._clients: dict[str, ClaudeSDKClient] = {}
@@ -415,6 +421,7 @@ class ClaudeSessionManager:
             extra_args={"debug-to-stderr": None},
             debug_stderr=stderr_file,
             hooks=hooks,
+            env={"HANIEL_MCP_TOKEN": self._mcp_token} if self._mcp_token else {},
         )
         if claude_session_id:
             opts.resume = claude_session_id
@@ -476,6 +483,10 @@ class ClaudeSessionManager:
                 }
             }
         }
+        if self._mcp_token:
+            config["mcpServers"]["haniel"]["headers"] = {
+                "Authorization": "Bearer ${HANIEL_MCP_TOKEN}"
+            }
         path = self._workspace_path / ".mcp.json"
         path.write_text(json.dumps(config, indent=2), encoding="utf-8")
         logger.info("MCP config written to %s (port %d)", path, mcp_port)

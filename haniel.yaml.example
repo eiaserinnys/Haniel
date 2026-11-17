@@ -29,6 +29,7 @@ webhooks:
 
 mcp:
   enabled: true
+  host: 127.0.0.1
   transport: sse
   port: 3200
 

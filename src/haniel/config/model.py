@@ -82,6 +82,7 @@ class McpConfig(BaseModel):
     """Configuration for MCP server."""
 
     enabled: bool = Field(default=True, description="Whether MCP server is enabled")
+    host: str = Field(default="127.0.0.1", description="MCP server bind address")
     transport: str = Field(
         default="streamable_http", description="Transport type: streamable_http, stdio"
     )

@@ -4898,6 +4898,7 @@ class ServiceRunner:
         Satisfies AppHomeController protocol (duck-typed, no import needed).
         """
         with self.service_locks.hold(name):
+            self._cancel_pending_restart(name)
             self.process_manager.stop_service(name)
 
     def enable_service(self, name: str) -> str:

@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 class AuthMiddleware:
-    """Pure ASGI middleware for Bearer token authentication on /api/* routes.
+    """Pure ASGI middleware for Bearer authentication on /api/* and /mcp routes.
 
     Pure-ASGI (not BaseHTTPMiddleware) so that the `scope["type"]` check below
     can short-circuit WebSocket upgrades — BaseHTTPMiddleware only sees HTTP
@@ -54,9 +54,8 @@ class AuthMiddleware:
 
         path: str = scope.get("path", "")
 
-        # Only guard /api/* routes. /ws/*, /auth/*, /dashboard SPA assets
-        # and root pass through.
-        if not path.startswith("/api/"):
+        # /ws/*, /auth/*, /dashboard SPA assets and root pass through.
+        if not (path.startswith("/api/") or path == "/mcp" or path.startswith("/mcp/")):
             await self._app(scope, receive, send)
             return
 

@@ -9,7 +9,7 @@ Tests the MCP server that provides Claude Code integration:
 import json
 import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from haniel.config import HanielConfig, McpConfig, ServiceConfig, RepoConfig
 from haniel.core.health import ServiceState
@@ -117,6 +117,13 @@ class TestHanielMcpServer:
     def test_get_port(self, mcp_server):
         """Test getting MCP port from config."""
         assert mcp_server.port == 3200
+
+    async def test_start_uses_configured_host(self, mcp_server, mock_runner):
+        mock_runner.config.mcp = McpConfig(host="192.0.2.1")
+        with patch("uvicorn.Config") as config, patch("uvicorn.Server") as server:
+            server.return_value.serve = AsyncMock()
+            await mcp_server.start()
+        assert config.call_args.kwargs["host"] == "192.0.2.1"
 
 
 class TestMcpResources:
