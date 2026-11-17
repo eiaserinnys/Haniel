@@ -27,7 +27,7 @@ This is enough to run haniel with self-update only. See [`haniel.yaml.example`](
 |-------|------|---------|-------------|
 | `poll_interval` | int | `60` | Seconds between git fetch polls |
 | `git_fetch_timeout` | int | `900` | Maximum seconds for each polling Git fetch |
-| `auto_apply` | bool | `true` | If `false`, detected changes are shown in dashboard but not auto-applied. Manual "Update" from dashboard is still possible |
+| `auto_apply` | bool | `true` | If `false`, detected changes are shown in dashboard but not auto-applied. Manual "Update" from dashboard is still possible. Repository-level `auto_apply` values are ignored while this is `false` |
 | `secrets_file` | string | — | dotenv file containing values for secret references |
 | `shutdown` | object | — | Global shutdown behavior |
 | `backoff` | object | — | Restart backoff and circuit breaker |
@@ -210,6 +210,7 @@ repos:
 | `url` | string | *required* | Git clone URL (HTTPS or SSH) |
 | `branch` | string | `main` | Branch to track |
 | `path` | string | *required* | Local path, relative to `haniel.yaml` location |
+| `auto_apply` | boolean | `true` | Whether this repository may apply changes without approval while the global `auto_apply` is on. A repository can only disable its own updates; the value is ignored when the global switch is off |
 | `hooks.post_pull` | string | — | Legacy repository build command, run once from the repository directory |
 | `hooks.timeout` | int | `900` | Maximum seconds allowed for each repository hook |
 | `release_manifest` | string | — | Repository-relative path to a `haniel.release.v1` deployment contract |
@@ -308,7 +309,7 @@ python -m haniel.config.release_activation check --config /path/to/haniel.yaml -
 python -m haniel.config.release_activation apply --config /path/to/haniel.yaml --repo soulstream --expected-sha256 <sha256-from-check>
 ```
 
-The same state machine is used by an approved pull and by Haniel startup updates. Startup updates pull only repositories whose effective `auto_apply` is enabled (both the global `auto_apply` and the repository-level `auto_apply` must be true) and fetch those repositories in parallel. Repositories that may not apply keep their remote changes pending for approval, and their recorded HEAD is not advanced, so the next poll still detects and reports them. Services whose repositories were not updated start first; each updated repository then builds on its own startup lane, and only that lane's services start after its build and deployment. A slow `post_pull` in one lane therefore does not hold up services in other lanes. Startup does not rerun legacy `post_pull` or start calls for manifest-owned services; the handover starts and verifies those services exactly once. The journal under `.haniel/deployments/` records `build`, `preflight`, `migrating`, `starting`, `verifying`, `recovering`, and the terminal state. A repeated approval of the same successful target commit and release ID is a no-op. Haniel reports success only after every affected service is ready and every post-start verification succeeds. A recovered deployment still reports failure, preserving the distinction between release success and restored availability.
+The same state machine is used by an approved pull and by Haniel startup updates. Startup updates pull only repositories whose effective `auto_apply` is enabled (both the global `auto_apply` and the repository-level `auto_apply` must be true; the repository-level value can only disable and is ignored while the global switch is off) and fetch those repositories in parallel. Repositories that may not apply keep their remote changes pending for approval, and their recorded HEAD is not advanced, so the next poll still detects and reports them. Services whose repositories were not updated start first; each updated repository then builds on its own startup lane, and only that lane's services start after its build and deployment. A slow `post_pull` in one lane therefore does not hold up services in other lanes. Startup does not rerun legacy `post_pull` or start calls for manifest-owned services; the handover starts and verifies those services exactly once. The journal under `.haniel/deployments/` records `build`, `preflight`, `migrating`, `starting`, `verifying`, `recovering`, and the terminal state. A repeated approval of the same successful target commit and release ID is a no-op. Haniel reports success only after every affected service is ready and every post-start verification succeeds. A recovered deployment still reports failure, preserving the distinction between release success and restored availability.
 
 ### Handover wait note
 

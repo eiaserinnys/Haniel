@@ -4659,7 +4659,11 @@ class ServiceRunner:
 
         # auto_apply=false: detection only, skip stop→pull→restart
         if not config_snapshot.config.auto_apply:
-            logger.info("auto_apply=false, skipping apply for: %s", changed_repos)
+            logger.info(
+                "global auto_apply=false overrides repo auto_apply, "
+                "pending manual approval for: %s",
+                changed_repos,
+            )
             return
 
         repo_auto_apply = {

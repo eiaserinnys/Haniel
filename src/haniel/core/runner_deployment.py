@@ -129,6 +129,7 @@ class RunnerDeploymentAdapter:
             prepare_roll_forward=self.prepare_roll_forward,
             stop_partial=self.stop_partial,
             writer_services=tuple(self.quiesce_services),
+            affected_services=tuple(self.affected),
             owner_instance=self._owner_instance(),
             quiescence_nonce=self.quiescence_nonce,
             config_digest=self.config_digest,

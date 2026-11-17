@@ -44,6 +44,7 @@ class DeploymentCallbacks:
     prepare_roll_forward: Callable[[], None]
     stop_partial: Callable[[], None] | None = None
     writer_services: tuple[str, ...] = ()
+    affected_services: tuple[str, ...] = ()
     owner_instance: str | None = None
     quiescence_nonce: str | None = None
     config_digest: str | None = None
@@ -228,7 +229,12 @@ class DeploymentCoordinator:
                 candidates = callbacks.restart_candidates
                 if candidates is not None:
                     self._log_restart_skips(
-                        repo_name, target_head, candidates, skipped_services
+                        repo_name,
+                        target_head,
+                        candidates,
+                        skipped_services,
+                        restarting=frozenset(callbacks.affected_services)
+                        - skipped_services,
                     )
 
             quiescence_receipt: dict[str, Any] | None = None
@@ -362,16 +368,19 @@ class DeploymentCoordinator:
         candidates: RestartFilterCandidates,
         skipped: frozenset[str],
         *,
+        restarting: frozenset[str] = frozenset(),
         reason: str | None = None,
     ) -> None:
         if skipped:
             logger.info(
-                "Skipping restarts for %s at %s: %d changed path(s) matched "
-                "filters; left running: %s",
+                "Skipping restarts for %s at %s: left running: %s; "
+                "restarting: %s (%d changed path(s) all matched the "
+                "ignore_paths of the services left running)",
                 repo_name,
                 target_head[:12],
-                candidates.changed_path_count,
                 ", ".join(sorted(skipped)),
+                ", ".join(sorted(restarting)) or "none",
+                candidates.changed_path_count,
             )
             return
         logger.info(
