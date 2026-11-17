@@ -58,6 +58,9 @@ def test_overlap_dependency_does_not_force_filtered_service_restart():
     ) == frozenset({"worker"})
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="Linux SO_REUSEPORT and /proc ownership"
+)
 def test_real_overlap_uses_new_port_owner_and_keeps_new_handle(tmp_path: Path):
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
@@ -107,6 +110,7 @@ def test_real_overlap_uses_new_port_owner_and_keeps_new_handle(tmp_path: Path):
         manager.stop_service("app", timeout=1)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux process fixture")
 def test_failed_new_readiness_preserves_old_process(tmp_path: Path):
     manager = ProcessManager(tmp_path)
     manager.immediate_exit_window = 0
@@ -124,6 +128,7 @@ def test_failed_new_readiness_preserves_old_process(tmp_path: Path):
         manager.stop_service("app", timeout=1)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux signal behavior")
 def test_timeout_sends_sigterm_without_marking_old_as_crashed(tmp_path: Path, caplog):
     manager = ProcessManager(tmp_path)
     manager.immediate_exit_window = 0
@@ -345,6 +350,7 @@ def test_budget_includes_overlap_exit_wait():
     assert "overlap_exit=60s" in overlap.breakdown()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux signal behavior")
 def test_old_process_ignoring_term_is_killed_after_shutdown_timeout(tmp_path, caplog):
     script = tmp_path / "ignore_term.py"
     marker = tmp_path / "ready"
