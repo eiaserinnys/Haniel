@@ -26,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Callable
 from uuid import uuid4
 
@@ -97,7 +97,11 @@ from .runner_deployment import run_manifest_deployment
 from .one_shot_handover import probe_manifest_target
 from .release_staging import ReleaseStagingError, sweep_staging_root
 from .release_manifest import ReleaseManifest
-from .restart_filter import RestartFilterCandidates, plan_restart_skips
+from .restart_filter import (
+    RestartFilterCandidates,
+    paths_all_ignored,
+    plan_restart_skips,
+)
 from .handover_config import (
     HandoverConfigError,
     require_handover_config_digest,
@@ -487,6 +491,8 @@ class ServiceRunner:
         # Last self-repo remote head skipped because it only touched paths a
         # node never runs; keeps the info log to one line per head.
         self._self_update_unused_head: str | None = None
+        self._change_ignore_info_heads: dict[str, str] = {}
+        self._change_ignore_warning_heads: dict[str, str] = {}
 
         # Track whether startup post_pull hooks have been considered.
         self._post_pull_executed = False
@@ -4366,6 +4372,24 @@ class ServiceRunner:
                     repo_changed = False
                     pending_changes = None
 
+                if (
+                    name != config_snapshot.self_repo
+                    and runtime.config.release_manifest
+                    and current_head == runtime.last_head
+                    and pending_scope_base == "HEAD"
+                    and pending_changes
+                    and self._only_ignored_remote_changes(
+                        name,
+                        repo_path,
+                        runtime.config.branch,
+                        runtime.config.release_manifest,
+                        remote_head,
+                    )
+                ):
+                    changed.remove(name)
+                    repo_changed = False
+                    pending_changes = None
+
                 observation = RepoObservation(
                     generation=runtime.generation,
                     repo_name=name,
@@ -4430,6 +4454,51 @@ class ServiceRunner:
                 )
 
         return changed
+
+    def _only_ignored_remote_changes(
+        self,
+        name: str,
+        repo_path: Path,
+        branch: str,
+        manifest_path: str,
+        target_head: str,
+    ) -> bool:
+        """Skip remote changes only when their manifest and paths are known."""
+        try:
+            if (
+                Path(manifest_path).is_absolute()
+                or PureWindowsPath(manifest_path).anchor
+                or not (repo_path / manifest_path)
+                .resolve()
+                .is_relative_to(repo_path.resolve())
+            ):
+                raise ValueError("manifest path must stay inside the repository")
+            payload = read_file_at_commit(repo_path, f"origin/{branch}", manifest_path)
+            manifest = ReleaseManifest.model_validate_json(payload)
+            if not manifest.change_ignore_paths:
+                return False
+            paths = get_changed_paths(path=repo_path, branch=branch, local_ref="HEAD")
+            if not paths:
+                raise ValueError("cannot determine changed paths")
+            if not paths_all_ignored(paths, manifest.change_ignore_paths):
+                return False
+        except Exception as exc:
+            if self._change_ignore_warning_heads.get(name) != target_head:
+                self._change_ignore_warning_heads[name] = target_head
+                logger.warning(
+                    "Cannot filter changes for %s at %s: %s", name, target_head[:8], exc
+                )
+            return False
+
+        if self._change_ignore_info_heads.get(name) != target_head:
+            self._change_ignore_info_heads[name] = target_head
+            logger.info(
+                "Ignoring changes for %s at %s: all changed paths match "
+                "change_ignore_paths",
+                name,
+                target_head[:8],
+            )
+        return True
 
     def _only_unused_self_update_paths(
         self,
