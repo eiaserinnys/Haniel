@@ -1139,18 +1139,19 @@ async def s17_legacy_rows(store: EventStore) -> list:
                 store,
                 await store.record_node_deploy_report(report),
             )
+        observed = await store.resolve_observed_pending(
+            deploy_id=deploy_id,
+            node_id="n",
+            repo=repo,
+            branch="main",
+            local_head=tag,
+            remote_head=tag,
+        )
         await _step(
             out,
             f"observed-on-{tag}",
             store,
-            await store.resolve_observed_pending(
-                deploy_id=deploy_id,
-                node_id="n",
-                repo=repo,
-                branch="main",
-                local_head=tag,
-                remote_head=tag,
-            ),
+            observed[0] if observed else False,
         )
         await _step(
             out,

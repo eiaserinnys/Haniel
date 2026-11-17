@@ -34,14 +34,14 @@ class RepoReconciler:
             branch=msg.branch,
             local_head=msg.local_head,
             remote_head=msg.remote_head,
+            local_ancestors=msg.local_ancestors,
         )
-        if resolved is False:
-            return
-        await self._broadcast(
-            {
-                "type": "status_change",
-                "deploy_id": resolved,
-                "status": DeployStatus.SUCCESS.value,
-                "node_id": msg.node_id,
-            }
-        )
+        for deploy_id in resolved:
+            await self._broadcast(
+                {
+                    "type": "status_change",
+                    "deploy_id": deploy_id,
+                    "status": DeployStatus.SUCCESS.value,
+                    "node_id": msg.node_id,
+                }
+            )

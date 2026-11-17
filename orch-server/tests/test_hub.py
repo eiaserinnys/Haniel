@@ -1467,6 +1467,27 @@ class TestRepoReconciliation:
             }
         ]
 
+    async def test_descendant_observation_broadcasts_each_closed_self_update(self, hub, store):
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        ids = [f"n1:haniel:main:{target}" for target in ("older", "target")]
+        for index, deploy_id in enumerate(ids):
+            await store.create_deploy_event(
+                deploy_id=deploy_id, node_id="n1", repo=f"temp{index}", branch="main",
+                commits=[], affected_services=[], diff_stat=None,
+                detected_at=f"2026-01-0{index + 1}T00:00:00Z",
+                target_head=deploy_id.rsplit(":", 1)[1], is_self_update=True,
+            )
+        await store._db.execute("UPDATE deploy_events SET repo = 'haniel'")
+        await store._db.commit()
+        await hub._repo_reconciler.handle(RepoReconciliation(
+            phase="observed", deploy_id="n1:haniel:main:newer", node_id="n1",
+            repo="haniel", branch="main", local_head="newer", remote_head="newer",
+            local_ancestors=["newer", "target", "older"],
+        ))
+        sent = [json.loads(call.args[0]) for call in ws_dash.send_text.call_args_list]
+        assert {message["deploy_id"] for message in sent} == set(ids)
+
     async def test_failed_equal_observation_stays_retryable_and_late_result_is_ignored(
         self, hub, store
     ):

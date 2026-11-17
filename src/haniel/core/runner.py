@@ -24,7 +24,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -53,6 +53,7 @@ from .git import (
     get_changed_paths,
     get_changed_paths_between,
     get_head,
+    get_local_ancestors,
     get_pending_changes,
     get_remote_head,
     read_file_at_commit,
@@ -4534,6 +4535,13 @@ class ServiceRunner:
                 name,
             )
             return
+        if name == config_snapshot.self_repo:
+            snapshot = replace(
+                snapshot,
+                local_ancestors=get_local_ancestors(
+                    self.config_dir / state.config.path, snapshot.local_head
+                ),
+            )
         self._orch_client.notify_repo_reconciliation(snapshot, "observed", wait=True)
 
     def _effective_auto_apply(

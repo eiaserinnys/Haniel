@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +29,7 @@ from haniel.core.orchestrated_deploy_execution import (
 from haniel.integrations.deploy_reporting import (
     ApprovalRevalidationError,
     DeployReporter,
+    reconciliation_message,
 )
 
 
@@ -71,6 +73,45 @@ def _build_runner(tmp_path: Path, with_self_repo: bool = False) -> ServiceRunner
         payload["self"] = {"repo": "haniel", "auto_update": False}
     config = HanielConfig.model_validate(payload)
     return ServiceRunner(config=config, config_dir=tmp_path)
+
+
+def test_self_observation_reports_source_checkout_ancestors(tmp_path: Path) -> None:
+    repo = tmp_path / "haniel"
+    repo.mkdir()
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    git("init", "-b", "main")
+    git("config", "user.email", "test@example.test")
+    git("config", "user.name", "Test")
+    git("commit", "--allow-empty", "-m", "first")
+    first = git("rev-parse", "HEAD")
+    git("commit", "--allow-empty", "-m", "second")
+    head = git("rev-parse", "HEAD")
+    git("update-ref", "refs/remotes/origin/main", head)
+    runner = _build_runner(tmp_path, with_self_repo=True)
+    runner._active_self_head = head
+    runner._orch_client = MagicMock()
+    runner._notify_orchestrator_change("haniel")
+    snapshot = runner._orch_client.notify_repo_reconciliation.call_args.args[0]
+    assert reconciliation_message(snapshot, "observed")["local_ancestors"] == [
+        head,
+        first,
+    ]
+    assert "local_ancestors" not in reconciliation_message(snapshot, "settled")
+
+    app = tmp_path / "appA"
+    app.mkdir()
+    with (
+        patch("haniel.core.runner.get_head", return_value=head),
+        patch("haniel.core.repo_reconciliation.get_remote_head", return_value=head),
+    ):
+        runner._notify_orchestrator_change("appA")
+    other = runner._orch_client.notify_repo_reconciliation.call_args.args[0]
+    assert "local_ancestors" not in reconciliation_message(other, "observed")
 
 
 def _approval(

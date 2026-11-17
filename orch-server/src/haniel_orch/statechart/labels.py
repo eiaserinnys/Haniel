@@ -111,6 +111,7 @@ COND_LABELS: dict[str, dict[str, str]] = {
         "locked": "점검 필요 켜짐",
         "unlocked": "점검 필요 꺼짐",
         "heads_equal": "머리 셋이 같음",
+        "target_reached": "목표가 현재 머리 또는 그 조상임",
         "no_active_attempt": "도는 시도 없음",
         "no_failed_node_attempt": "실패한 노드 보고 없음",
         "no_later": "판 1은 뒤 시도가 실행을 시작하지 않음, 판 없음은 뒤 시도를 연 적이 없음",

@@ -103,6 +103,8 @@ def reconciliation_message(
     }
     if connection_generation is not None:
         payload["connection_generation"] = connection_generation
+    if phase == "observed" and snapshot.local_ancestors is not None:
+        payload["local_ancestors"] = snapshot.local_ancestors
     return payload
 
 

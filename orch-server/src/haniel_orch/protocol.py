@@ -208,6 +208,7 @@ class RepoReconciliation(StrictMessage):
     branch: str
     local_head: str
     remote_head: str
+    local_ancestors: list[str] | None = Field(default=None, max_length=100)
     orchestrator_attempt_id: str | None = None
     connection_generation: str | None = None
 
