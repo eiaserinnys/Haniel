@@ -1,6 +1,7 @@
 """Non-interactive install-state policy and immutable handover provenance."""
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -163,3 +164,14 @@ def test_invalid_deferred_contract_does_not_archive_existing_state(
 
     assert state_file.read_bytes() == before
     assert list(tmp_path.glob("install.state.*.bak")) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
+@pytest.mark.parametrize("existing", [False, True])
+def test_save_install_state_is_private(tmp_path: Path, existing: bool) -> None:
+    state_file = tmp_path / "install.state"
+    if existing:
+        state_file.write_text("{}", encoding="utf-8")
+        state_file.chmod(0o644)
+    InstallState().save(state_file)
+    assert state_file.stat().st_mode & 0o777 == 0o600

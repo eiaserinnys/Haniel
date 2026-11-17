@@ -1023,3 +1023,44 @@ def test_deployment_receipt_retries_transient_permission_error(tmp_path, monkeyp
 
     assert json.loads(path.read_text(encoding="utf-8"))["ok"] is True
     assert attempts["count"] == 3
+
+
+def test_startup_cleanup_removes_old_terminal_and_keeps_active_and_recent(
+    tmp_path: Path,
+):
+    control = LifecycleControl(tmp_path / "haniel.yaml")
+    for name in ("old", "recent", "active", "missing", "unreadable"):
+        control.submit_request(name, {"kind": "deploy"})
+    for name in ("old", "recent"):
+        control.ack(name, "terminal", {"ok": True})
+    control.ack("active", "started", {})
+    control.result_path("unreadable").write_text("broken", encoding="utf-8")
+    old_time = time.time() - 15 * 86400
+    for name in ("old", "active", "unreadable"):
+        os.utime(control.result_path(name), (old_time, old_time))
+    for index in range(7):
+        (control.root / f"owner.json.stale-{index}").write_text("{}", encoding="utf-8")
+
+    from haniel.config import HanielConfig
+    from haniel.core.runner import ServiceRunner
+
+    runner = ServiceRunner(HanielConfig(services={}), config_dir=tmp_path)
+    with patch.object(runner, "_start_mcp_server", side_effect=RuntimeError("stop")):
+        with pytest.raises(RuntimeError, match="stop"):
+            runner.start()
+
+    for path in (
+        control.request_path("old"),
+        control.result_path("old"),
+        control.transactions_dir / "old.lock",
+    ):
+        assert not path.exists()
+    for name in ("recent", "active", "missing", "unreadable"):
+        assert control.request_path(name).exists()
+        assert (control.transactions_dir / f"{name}.lock").exists()
+    assert control.result_path("recent").exists()
+    assert control.result_path("active").exists()
+    assert control.result_path("unreadable").exists()
+    assert sorted(path.name for path in control.root.glob("owner.json.stale-*")) == [
+        f"owner.json.stale-{index}" for index in range(2, 7)
+    ]

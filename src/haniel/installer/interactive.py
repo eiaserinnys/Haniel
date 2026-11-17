@@ -356,8 +356,8 @@ JSON 외의 텍스트는 message 필드 안에 넣으세요.
             cwd=str(self.config_dir),
             mcp_servers={
                 "haniel": {
-                    "type": "sse",
-                    "url": f"http://localhost:{mcp_port}/sse",
+                    "type": "http",
+                    "url": f"http://localhost:{mcp_port}/mcp/",
                 }
             },
             max_turns=20,

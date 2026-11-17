@@ -136,7 +136,7 @@ class InstallMcpServer:
             # Start uvicorn server
             config = uvicorn.Config(
                 app,
-                host="0.0.0.0",
+                host="127.0.0.1",
                 port=self.port,
                 log_level="warning",
             )

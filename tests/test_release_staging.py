@@ -26,6 +26,7 @@ from haniel.core.lifecycle_control import LifecycleControl
 from haniel.core.release_staging import (
     ReleaseIdentityError,
     ReleaseStagingError,
+    _cleanup_stage,
     stage_release,
     sweep_staging_root,
 )
@@ -562,3 +563,22 @@ def test_exact_merge_activation_failure_preserves_existing_local_change(
 
     assert get_head(live) == previous
     assert (live / "app.txt").read_text(encoding="utf-8") == "local-change"
+
+
+@pytest.mark.parametrize("cleanup", ["sweep", "stage", "missing"])
+def test_cleanup_removes_locked_staging_worktree(tmp_path: Path, cleanup: str) -> None:
+    import shutil
+
+    live, _remote, _previous = make_remote(tmp_path, base_manifest(with_probe=False))
+    staging = tmp_path / "staging"
+    stage = staging / "request" / "app"
+    git(live, "worktree", "add", "--detach", str(stage), "HEAD")
+    git(live, "worktree", "lock", "--reason", "initializing", str(stage))
+    if cleanup == "missing":
+        shutil.rmtree(stage)
+    if cleanup == "stage":
+        _cleanup_stage(live, stage)
+    else:
+        sweep_staging_root(staging_root=staging, repo_paths=[live], keep_request_ids=[])
+    assert not stage.exists()
+    assert str(stage) not in git(live, "worktree", "list", "--porcelain")

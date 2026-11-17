@@ -17,7 +17,7 @@ webhooks:
 
 mcp:
   enabled: true
-  transport: sse
+  transport: streamable_http
   port: 3200
 
 repos:

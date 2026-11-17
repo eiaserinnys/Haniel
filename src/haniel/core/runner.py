@@ -1844,7 +1844,12 @@ class ServiceRunner:
         # so we just need to check if we should restart
         if self.health_manager.should_restart(name):
             health = self.health_manager.get_health(name)
-            delay = health.get_restart_delay()
+            service = self._snapshot_config_state().config.services.get(name)
+            delay = (
+                service.restart_delay
+                if service is not None and service.restart_delay is not None
+                else health.get_restart_delay()
+            )
             logger.info(f"Scheduling restart of {name} in {delay}s")
             self._schedule_restart(name, delay)
         else:
@@ -1970,10 +1975,19 @@ class ServiceRunner:
 
         logger.info("Starting ServiceRunner")
 
+        if os.name == "posix":
+            state_file = self.config_dir / "install.state"
+            try:
+                if state_file.exists() and state_file.stat().st_mode & 0o7177:
+                    state_file.chmod(0o600)
+            except OSError as error:
+                logger.warning("Cannot restrict install state permissions: %s", error)
+
         # Initialize repo states (get current HEAD)
         self._init_repo_states()
         self._recover_interrupted_deployment_journals()
         self._sweep_stale_staging()
+        self.lifecycle_control.cleanup_stale_runtime()
 
         # Consume self-update result from previous wrapper iteration (if any).
         # Done before MCP server starts so ws_handler.setup(loop) can broadcast it.

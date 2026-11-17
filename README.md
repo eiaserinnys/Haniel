@@ -129,7 +129,7 @@ repo, which prepares a release and relaunches on exit codes 10 and 11.
   "mcpServers": {
     "haniel": {
       "type": "http",
-      "url": "http://localhost:3200/mcp/http"
+      "url": "http://localhost:3200/mcp/"
     }
   }
 }

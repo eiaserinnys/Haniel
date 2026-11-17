@@ -3196,3 +3196,38 @@ class TestRepoHookTimeout:
         ]
         assert len(hook_calls) == 1
         assert hook_calls[0].kwargs["timeout"] == 42
+
+
+@pytest.mark.asyncio
+async def test_install_mcp_server_binds_loopback():
+    from haniel.installer.install_mcp_server import InstallMcpServer
+
+    server = InstallMcpServer(MagicMock())
+    with patch("uvicorn.Config") as config, patch("uvicorn.Server") as uvicorn_server:
+        uvicorn_server.return_value.serve = AsyncMock()
+        await server.start()
+    assert config.call_args.kwargs["host"] == "127.0.0.1"
+
+
+@pytest.mark.asyncio
+async def test_interactive_session_uses_streamable_mcp_url(tmp_path: Path):
+    from haniel.installer.interactive import InteractiveInstaller
+    from haniel.installer.state import InstallState
+
+    installer = InteractiveInstaller(HanielConfig(), tmp_path, InstallState())
+    client = MagicMock()
+    client.connect = AsyncMock()
+    client.query = AsyncMock()
+    client.disconnect = AsyncMock()
+    installer._receive_structured_response = AsyncMock(
+        return_value={"sufficient": True}
+    )
+    installer.finalize_install = MagicMock()
+    with patch(
+        "haniel.installer.interactive.ClaudeSDKClient", return_value=client
+    ) as factory:
+        await installer._run_sdk_session()
+    assert factory.call_args.kwargs["options"].mcp_servers["haniel"] == {
+        "type": "http",
+        "url": "http://localhost:3201/mcp/",
+    }
