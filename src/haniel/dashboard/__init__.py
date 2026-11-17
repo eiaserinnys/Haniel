@@ -6,6 +6,7 @@ Integrated into the Starlette server used by the MCP Streamable HTTP transport.
 """
 
 import hmac
+import ipaddress
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 class AuthMiddleware:
-    """Pure ASGI middleware for Bearer token authentication on /api/* routes.
+    """Pure ASGI middleware for Bearer authentication on /api/* and /mcp routes.
 
     Pure-ASGI (not BaseHTTPMiddleware) so that the `scope["type"]` check below
     can short-circuit WebSocket upgrades — BaseHTTPMiddleware only sees HTTP
@@ -54,11 +55,22 @@ class AuthMiddleware:
 
         path: str = scope.get("path", "")
 
-        # Only guard /api/* routes. /ws/*, /auth/*, /dashboard SPA assets
-        # and root pass through.
-        if not path.startswith("/api/"):
+        is_mcp = path == "/mcp" or path.startswith("/mcp/")
+        # /ws/*, /auth/*, /dashboard SPA assets and root pass through.
+        if not (path.startswith("/api/") or is_mcp):
             await self._app(scope, receive, send)
             return
+
+        if is_mcp and scope.get("client"):
+            try:
+                address = ipaddress.ip_address(scope["client"][0])
+                if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+                    address = address.ipv4_mapped
+                if address.is_loopback:
+                    await self._app(scope, receive, send)
+                    return
+            except ValueError:
+                pass  # An unparseable client address is treated as remote.
 
         # Check Authorization: Bearer header
         headers = dict(scope.get("headers", []))

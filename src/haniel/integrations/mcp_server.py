@@ -1134,6 +1134,13 @@ class HanielMcpServer:
 
             # Attach dashboard routes only when explicitly enabled in config
             dashboard_cfg = self.runner.config.dashboard
+            token = (
+                self.runner.config.resolve_secret(
+                    dashboard_cfg.token, "dashboard.token"
+                )
+                if dashboard_cfg is not None
+                else None
+            )
             ws_handler = None
             middleware = []
             if dashboard_cfg is not None and dashboard_cfg.enabled:
@@ -1155,9 +1162,7 @@ class HanielMcpServer:
                     dashboard_routes, dashboard_middleware, ws_handler = (
                         setup_dashboard(
                             self.runner,
-                            token=self.runner.config.resolve_secret(
-                                dashboard_cfg.token, "dashboard.token"
-                            ),
+                            token=token,
                             claude_session_manager=sm,
                             slack_bot=self.runner._slack_bot,
                         )
@@ -1173,6 +1178,12 @@ class HanielMcpServer:
                         "Failed to set up dashboard: %s",
                         self.runner.config.redact_secrets(str(e)),
                     )
+
+            if token and not middleware:
+                from starlette.middleware import Middleware
+                from ..dashboard import AuthMiddleware
+
+                middleware.append(Middleware(AuthMiddleware, token=token))
 
             # Create lifespan for session manager
             @contextlib.asynccontextmanager
@@ -1194,9 +1205,11 @@ class HanielMcpServer:
             logger.info(f"MCP server starting on port {self.port}")
 
             # Start uvicorn server
+            from ..config import McpConfig
+
             config = uvicorn.Config(
                 app,
-                host="0.0.0.0",
+                host=(self.runner.config.mcp or McpConfig()).host,
                 port=self.port,
                 log_level="warning",
             )

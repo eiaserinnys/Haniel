@@ -1632,6 +1632,19 @@ class TestServiceRunnerPollCycle:
         with runner._restart_lock:
             assert "test" not in runner._pending_restarts
 
+    def test_stop_service_cancels_pending_restart(self, tmp_path: Path):
+        config = HanielConfig(services={"test": ServiceConfig(run="sleep 100")})
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        deadline = time.time() + 5
+        runner._pending_restarts["test"] = deadline
+
+        with patch.object(runner, "_start_service") as start:
+            runner.stop_service("test")
+            assert "test" not in runner._pending_restarts
+            with patch("haniel.core.runner.time.time", return_value=deadline + 1):
+                runner._process_pending_restarts()
+            start.assert_not_called()
+
     @patch("haniel.core.runner.ServiceRunner._start_service")
     def test_trigger_pull_cancels_pending_restart_for_affected_service(
         self,

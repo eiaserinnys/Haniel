@@ -12,6 +12,7 @@ from haniel.config import (
     ServiceConfig,
     ShutdownConfig,
     BackoffConfig,
+    McpConfig,
     load_config,
 )
 from haniel.config.model import OrchestratorClientConfig
@@ -22,6 +23,12 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 class TestHanielConfigParsing:
     """Test configuration file parsing."""
+
+    def test_mcp_host_default_and_yaml_override(self, tmp_path):
+        assert McpConfig().host == "127.0.0.1"
+        path = tmp_path / "haniel.yaml"
+        path.write_text("mcp:\n  host: 192.0.2.1\n", encoding="utf-8")
+        assert load_config(path).mcp.host == "192.0.2.1"
 
     def test_load_valid_config(self):
         """Should successfully load a valid configuration file."""

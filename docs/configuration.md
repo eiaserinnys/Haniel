@@ -153,6 +153,7 @@ MCP (Model Context Protocol) server settings. Allows Claude Code to query status
 ```yaml
 mcp:
   enabled: true
+  host: 127.0.0.1
   transport: streamable_http
   port: 3200
 ```
@@ -160,6 +161,7 @@ mcp:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `true` | Whether the MCP server is active |
+| `host` | string | `127.0.0.1` | Bind address shared by MCP and dashboard |
 | `transport` | string | `streamable_http` | Transport type: `streamable_http` or `stdio` |
 | `port` | int | `3200` | Port for the MCP server |
 
@@ -182,7 +184,10 @@ dashboard:
 | `port` | int | — | Dedicated port. If omitted, shares the MCP server port |
 | `token` | string | — | Bearer token for API/WebSocket authentication. If omitted, dashboard is accessible without auth (a warning is logged) |
 
-All `/api/*` and `/ws` endpoints require `Authorization: Bearer <token>` when token is set.
+When a token is set, `/api/*` requires `Authorization: Bearer <token>`,
+including for local requests. `/mcp` and `/mcp/*` require the same header only
+for connections from outside the local computer, including when the dashboard
+is disabled. Dashboard WebSocket connections use the token query parameter.
 
 ## `repos`
 
