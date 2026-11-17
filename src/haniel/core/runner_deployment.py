@@ -328,9 +328,16 @@ class RunnerDeploymentAdapter:
             if not self.runner.process_manager.wait_for_ready(
                 service, timeout=ready_timeout
             ):
-                raise RuntimeError(f"readiness timeout for {service}")
+                raise self._readiness_failure(service)
             if not self.runner.process_manager.is_running(service):
                 raise RuntimeError(f"{service} exited before readiness verification")
+
+    def _readiness_failure(self, service: str) -> RuntimeError:
+        """Report a dead process distinctly from a readiness timeout."""
+        detail = self.runner.process_manager.readiness_failure_detail(service)
+        if detail is None:
+            return RuntimeError(f"readiness timeout for {service}")
+        return RuntimeError(f"readiness failed: {detail}")
 
     def rollback(self) -> None:
         generation_current = True
@@ -423,9 +430,12 @@ class RunnerDeploymentAdapter:
             if not self.runner.process_manager.wait_for_ready(
                 service, timeout=ready_timeout
             ):
+                detail = self.runner.process_manager.readiness_failure_detail(service)
+                if detail is None:
+                    detail = f"readiness timeout: {service}"
                 raise StableDeploymentError(
                     "RECOVERY_FAILED",
-                    f"current-generation readiness timeout: {service}",
+                    f"current-generation {detail}",
                 )
             if not self.runner.process_manager.is_running(service):
                 raise StableDeploymentError(

@@ -488,6 +488,45 @@ class TestProcessManager:
         assert not managed.ready_event.is_set()
         process_manager.health_manager.record_ready.assert_not_called()
 
+    def test_wait_for_ready_fails_fast_when_process_exits(
+        self, process_manager: ProcessManager, tmp_path: Path
+    ):
+        """A dead process fails the readiness wait instead of holding it."""
+        script = tmp_path / "exit_three.py"
+        script.write_text("import sys\nsys.exit(3)\n", encoding="utf-8")
+        process_manager.start_service(
+            "test",
+            ServiceConfig(run=f"{sys.executable} {script}", ready="port:4399"),
+        )
+
+        started = time.monotonic()
+        try:
+            assert process_manager.wait_for_ready("test", timeout=30) is False
+            elapsed = time.monotonic() - started
+            assert elapsed < 5
+            detail = process_manager.readiness_failure_detail("test")
+            assert detail is not None
+            assert "exit code 3" in detail
+        finally:
+            process_manager.stop_service("test", timeout=2)
+
+    def test_wait_for_ready_timeout_has_no_exit_detail(
+        self, process_manager: ProcessManager, tmp_path: Path
+    ):
+        """A live but unready process still reports a plain timeout."""
+        script = tmp_path / "stay_alive.py"
+        script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+        process_manager.start_service(
+            "test",
+            ServiceConfig(run=f"{sys.executable} {script}", ready="port:4398"),
+        )
+
+        try:
+            assert process_manager.wait_for_ready("test", timeout=0.2) is False
+            assert process_manager.readiness_failure_detail("test") is None
+        finally:
+            process_manager.stop_service("test", timeout=2)
+
     @pytest.mark.skipif(
         not DUMMY_SERVER.exists(),
         reason="Dummy server not found",

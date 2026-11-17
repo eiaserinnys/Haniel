@@ -88,6 +88,8 @@ class ManagedProcess:
     stdout_reader: StreamReader | None = None
     stderr_reader: StreamReader | None = None
     ready_event: threading.Event | None = None
+    ready_failure_event: threading.Event | None = None
+    ready_exit_code: int | None = None
     intentional_stop: bool = False
     _ready_callback_added: bool = False
 
@@ -267,6 +269,7 @@ class ProcessManager:
             process=process,
             log_capture=log_capture,
             ready_event=threading.Event(),
+            ready_failure_event=threading.Event(),
         )
 
         # Start stream readers
@@ -625,12 +628,16 @@ class ProcessManager:
     ) -> bool:
         """Wait for a service to become ready.
 
+        A process that exits while it is still being waited on fails the wait
+        instead of holding it for the whole timeout. Use
+        readiness_failure_detail() to tell that failure from a timeout.
+
         Args:
             name: Service name
             timeout: Maximum time to wait (default: 60s)
 
         Returns:
-            True if the service is ready, False if timeout
+            True if the service is ready, False if timeout or process exit
         """
         with self._lock:
             if name not in self._processes:
@@ -641,7 +648,34 @@ class ProcessManager:
             return True
 
         timeout = timeout or self.DEFAULT_READY_TIMEOUT
-        return managed.ready_event.wait(timeout=timeout)
+        deadline = time.monotonic() + timeout
+        failure_event = managed.ready_failure_event
+        if failure_event is None:
+            return managed.ready_event.wait(timeout=timeout)
+        while True:
+            remaining = deadline - time.monotonic()
+            wait_for = min(self.POLL_INTERVAL, max(remaining, 0.0))
+            if managed.ready_event.wait(timeout=wait_for):
+                return True
+            if failure_event.is_set():
+                return False
+            if remaining <= 0:
+                return False
+
+    def readiness_failure_detail(self, name: str) -> str | None:
+        """Describe a readiness wait that ended because the process exited."""
+        with self._lock:
+            managed = self._processes.get(name)
+        if managed is None or managed.ready_failure_event is None:
+            return None
+        if not managed.ready_failure_event.is_set():
+            return None
+        if managed.ready_exit_code is None:
+            return f"{name} process exited during readiness wait"
+        return (
+            f"{name} process exited during readiness wait "
+            f"(exit code {managed.ready_exit_code})"
+        )
 
     def _start_ready_monitor(
         self,
@@ -704,8 +738,13 @@ class ProcessManager:
         if condition.type == ReadyConditionType.DELAY:
             try:
                 delay = float(condition.value)
-                if delay > 0:
-                    time.sleep(min(delay, timeout))
+                remaining = min(delay, timeout) if delay > 0 else 0.0
+                while remaining > 0:
+                    if self._ready_monitor_should_stop(managed):
+                        return
+                    step = min(self.POLL_INTERVAL, remaining)
+                    time.sleep(step)
+                    remaining -= step
             except ValueError:
                 pass
             # Mark as ready after delay
@@ -742,7 +781,7 @@ class ProcessManager:
                     if now >= deadline
                     else min(self.ready_recheck_interval, max(deadline - now, 0.0))
                 )
-                if log_ready_event.wait(timeout=wait_for):
+                if log_ready_event.wait(timeout=min(wait_for, self.POLL_INTERVAL)):
                     self._record_ready(managed, start_time, timeout, on_ready)
                     return
                 if self._ready_monitor_should_stop(managed):
@@ -771,12 +810,26 @@ class ProcessManager:
             time.sleep(wait_for)
 
     def _ready_monitor_should_stop(self, managed: ManagedProcess) -> bool:
-        """Stop watching when the process or its ownership is gone."""
+        """Stop watching when the process or its ownership is gone.
+
+        A process that exits on its own fails the pending readiness wait; an
+        intentional stop or a replaced owner only ends the watch.
+        """
         if managed.intentional_stop:
             return True
         if managed.process is not None and managed.process.poll() is not None:
+            self._record_ready_failure(managed)
             return True
         return self._processes.get(managed.name) is not managed
+
+    def _record_ready_failure(self, managed: ManagedProcess) -> None:
+        """Wake readiness waiters with the exit code of a dead process."""
+        if managed.ready_failure_event is None:
+            return
+        managed.ready_exit_code = (
+            managed.process.poll() if managed.process is not None else None
+        )
+        managed.ready_failure_event.set()
 
     def _record_ready(
         self,
