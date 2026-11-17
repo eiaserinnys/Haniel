@@ -307,4 +307,6 @@ def test_runner_declares_budget_from_target_commit_manifest(
 def test_runner_does_not_declare_budget_without_manifest(tmp_path: Path) -> None:
     runner = _runner(tmp_path)
 
-    assert runner._expected_deployment_budget_sec("node-a:app:main:target-commit") is None
+    assert (
+        runner._expected_deployment_budget_sec("node-a:app:main:target-commit") is None
+    )

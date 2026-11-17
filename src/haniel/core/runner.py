@@ -2450,7 +2450,9 @@ class ServiceRunner:
             manifest=manifest,
         )
         staging_sec = runtime.config.staging_checkout_timeout
-        activation_sec = DEFAULT_GIT_TIMEOUT if runtime.config.pull_strategy == "force" else 0
+        activation_sec = (
+            DEFAULT_GIT_TIMEOUT if runtime.config.pull_strategy == "force" else 0
+        )
         total_sec = budget.total_sec + staging_sec + activation_sec
         self._require_config_generation(config_snapshot)
         logger.info(
