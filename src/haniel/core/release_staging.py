@@ -64,14 +64,26 @@ def sweep_staging_root(
     Returns the number of removed and kept request folders. A folder that
     cannot be removed completely is counted as kept and only warns.
     """
-    if not staging_root.is_dir():
-        return 0, 0
     repos = [Path(repo_path) for repo_path in repo_paths]
     owners = _registered_worktree_owners(repos)
     keep = {_safe(request_id) for request_id in keep_request_ids}
+    root = Path(_path_key(staging_root))
+    normalized_keep = {os.path.normcase(request_id) for request_id in keep}
+    for worktree, repo_path in owners.items():
+        path = Path(worktree)
+        try:
+            relative = path.relative_to(root)
+        except ValueError:
+            continue
+        if (
+            relative.parts
+            and os.path.normcase(relative.parts[0]) not in normalized_keep
+            and not path.exists()
+        ):
+            _remove_worktree(repo_path, path)
     removed = 0
     kept = 0
-    for request_root in sorted(staging_root.iterdir()):
+    for request_root in sorted(staging_root.iterdir()) if staging_root.is_dir() else []:
         if request_root.is_symlink() or not request_root.is_dir():
             continue
         if request_root.name in keep:
@@ -143,7 +155,7 @@ def _registered_worktrees(repo_path: Path) -> list[Path]:
 
 def _remove_worktree(repo_path: Path, path: Path) -> bool:
     try:
-        _git(repo_path, "worktree", "remove", "--force", str(path))
+        _git(repo_path, "worktree", "remove", "--force", "--force", str(path))
         return True
     except ReleaseStagingError as error:
         logger.warning("Cannot remove staging worktree %s: %s", path, error)

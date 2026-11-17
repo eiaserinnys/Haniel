@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import threading
+import time
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,6 +25,9 @@ from .lifecycle_locks import (
     SerialFileLock as _SerialFileLock,
 )
 from .safety_redaction import redact_value
+
+
+logger = logging.getLogger(__name__)
 
 
 def config_identity(config_path: Path) -> str:
@@ -125,6 +130,38 @@ class LifecycleControl:
         self.owner_path = self.root / "owner.json"
         self.owner_lock_path = self.root / "owner.lock"
         self.owner_metadata_lock_path = self.root / "owner.metadata.lock"
+
+    def cleanup_stale_runtime(self) -> None:
+        """Remove old terminal request records and retain five owner archives."""
+        cutoff = time.time() - 14 * 24 * 60 * 60
+        try:
+            results = list(self.results_dir.glob("*.json"))
+        except OSError as error:
+            logger.warning("Cannot list lifecycle results: %s", error)
+            results = []
+        for result_path in results:
+            try:
+                if result_path.stat().st_mtime >= cutoff or not read_json(
+                    result_path
+                ).get("terminal"):
+                    continue
+                request_id = result_path.stem
+                self.request_path(request_id).unlink(missing_ok=True)
+                result_path.unlink(missing_ok=True)
+                (self.transactions_dir / f"{request_id}.lock").unlink(missing_ok=True)
+            except (OSError, ValueError) as error:
+                logger.warning(
+                    "Cannot clean lifecycle result %s: %s", result_path, error
+                )
+        try:
+            archives = sorted(self.root.glob("owner.json.stale-*"))
+            for archive in archives[:-5]:
+                try:
+                    archive.unlink()
+                except OSError as error:
+                    logger.warning("Cannot remove stale owner %s: %s", archive, error)
+        except OSError as error:
+            logger.warning("Cannot list stale owners: %s", error)
 
     def acquire_owner(self, instance_id: str) -> ResidentOwner:
         return ResidentOwner(self, instance_id)

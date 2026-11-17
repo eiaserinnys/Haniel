@@ -25,7 +25,7 @@ class TestHanielMcpServer:
         runner = MagicMock()
         runner.config = HanielConfig(
             poll_interval=60,
-            mcp=McpConfig(enabled=True, transport="sse", port=3200),
+            mcp=McpConfig(enabled=True, transport="streamable_http", port=3200),
             services={
                 "web": ServiceConfig(run="python -m http.server"),
                 "worker": ServiceConfig(run="python worker.py"),
@@ -135,7 +135,7 @@ class TestMcpResources:
         runner = MagicMock()
         runner.config = HanielConfig(
             poll_interval=60,
-            mcp=McpConfig(enabled=True, transport="sse", port=3200),
+            mcp=McpConfig(enabled=True, transport="streamable_http", port=3200),
             services={
                 "web": ServiceConfig(run="python -m http.server"),
             },
@@ -252,7 +252,7 @@ class TestMcpTools:
         runner = MagicMock()
         runner.config = HanielConfig(
             poll_interval=60,
-            mcp=McpConfig(enabled=True, transport="sse", port=3200),
+            mcp=McpConfig(enabled=True, transport="streamable_http", port=3200),
             services={
                 "web": ServiceConfig(run="python -m http.server"),
             },
@@ -415,7 +415,7 @@ class TestMcpServerIntegration:
         runner = MagicMock()
         runner.config = HanielConfig(
             poll_interval=60,
-            mcp=McpConfig(enabled=True, transport="sse", port=3200),
+            mcp=McpConfig(enabled=True, transport="streamable_http", port=3200),
             services={},
             repos={},
         )
@@ -482,7 +482,7 @@ class TestMcpServerExtended:
         runner = MagicMock()
         runner.config = HanielConfig(
             poll_interval=60,
-            mcp=McpConfig(enabled=True, transport="sse", port=3200),
+            mcp=McpConfig(enabled=True, transport="streamable_http", port=3200),
             services={
                 "web": ServiceConfig(run="python -m http.server"),
             },

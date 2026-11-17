@@ -472,7 +472,7 @@ class ClaudeSessionManager:
             "mcpServers": {
                 "haniel": {
                     "type": "http",
-                    "url": f"http://localhost:{mcp_port}/mcp/http",
+                    "url": f"http://localhost:{mcp_port}/mcp/",
                 }
             }
         }

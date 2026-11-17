@@ -162,7 +162,7 @@ mcp:
 |-------|------|---------|-------------|
 | `enabled` | bool | `true` | Whether the MCP server is active |
 | `host` | string | `127.0.0.1` | Bind address shared by MCP and dashboard |
-| `transport` | string | `streamable_http` | Transport type: `streamable_http` or `stdio` |
+| `transport` | string | `streamable_http` | Transport type: `streamable_http` |
 | `port` | int | `3200` | Port for the MCP server |
 
 When the dashboard is enabled, it shares the same port and Starlette server.
@@ -540,7 +540,7 @@ install:
     app-mcp:
       path: ./.services/my-app/.mcp.json
       content: |
-        { "mcpServers": { "haniel": { "url": "http://localhost:3200/mcp/http" } } }
+        { "mcpServers": { "haniel": { "url": "http://localhost:3200/mcp/" } } }
 ```
 
 **Interactive** — collected by Claude Code in Phase 2:

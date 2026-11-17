@@ -194,7 +194,7 @@ class TestHanielConfigParsing:
         config = load_config(FIXTURES_DIR / "valid_config.yaml")
         assert config.mcp is not None
         assert config.mcp.enabled is True
-        assert config.mcp.transport == "sse"
+        assert config.mcp.transport == "streamable_http"
         assert config.mcp.port == 3200
 
     def test_install_config_requirements(self):

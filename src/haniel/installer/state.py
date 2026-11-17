@@ -18,6 +18,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from .utils import write_private_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -131,8 +133,9 @@ class InstallState(BaseModel):
         """
         self.updated_at = datetime.now().isoformat()
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.model_dump(), f, indent=2)
+        write_private_text(
+            path, json.dumps(self.model_dump(), ensure_ascii=False, indent=2)
+        )
         logger.debug(f"Saved install state to {path}")
 
     @classmethod

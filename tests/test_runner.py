@@ -1,5 +1,6 @@
 """Tests for the haniel runner module."""
 
+import os
 import subprocess
 import threading
 import time
@@ -2474,7 +2475,21 @@ class TestServiceRunnerCallbacks:
 
         runner._on_service_crash("test", 1)
 
-        mock_schedule.assert_called_once()
+        mock_schedule.assert_called_once_with("test", 1.0)
+
+    def test_on_service_crash_uses_latest_service_restart_delay(self, tmp_path: Path):
+        config = HanielConfig(services={"test": ServiceConfig(run="sleep 100")})
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        runner.config.services["test"].restart_delay = 7
+        runner.health_manager.should_restart = MagicMock(return_value=True)
+        runner.health_manager.get_health = MagicMock(
+            return_value=MagicMock(get_restart_delay=MagicMock(return_value=1.0))
+        )
+        runner._schedule_restart = MagicMock()
+
+        runner._on_service_crash("test", 1)
+
+        runner._schedule_restart.assert_called_once_with("test", 7)
 
     def test_on_service_crash_circuit_breaker_open(self, tmp_path: Path):
         """Test on_service_crash when circuit breaker is open."""
@@ -3585,3 +3600,15 @@ class TestServiceRunnerCollectServicesInfo:
             "legacy 'status' key must be removed — see atom "
             "260519.01.오케스트레이터-대시보드-supersede-status-history"
         )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
+def test_start_restricts_existing_install_state(tmp_path: Path):
+    state_file = tmp_path / "install.state"
+    state_file.write_text("{}", encoding="utf-8")
+    state_file.chmod(0o644)
+    runner = ServiceRunner(HanielConfig(services={}), config_dir=tmp_path)
+    with patch.object(runner, "_sweep_stale_staging", side_effect=RuntimeError("stop")):
+        with pytest.raises(RuntimeError, match="stop"):
+            runner.start()
+    assert state_file.stat().st_mode & 0o777 == 0o600

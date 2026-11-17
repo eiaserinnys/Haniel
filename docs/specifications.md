@@ -111,7 +111,7 @@ webhooks:
 
 mcp:
   enabled: true
-  transport: streamable_http   # Default. Also supports: stdio
+  transport: streamable_http   # Streamable HTTP transport
   port: 3200
 
 dashboard:
@@ -197,7 +197,7 @@ install:
     app-mcp:
       path: ./.services/my-app/.mcp.json
       content: |
-        { "mcpServers": { "haniel": { "url": "http://localhost:3200/mcp/http" } } }
+        { "mcpServers": { "haniel": { "url": "http://localhost:3200/mcp/" } } }
 
   service:
     name: haniel
@@ -705,7 +705,7 @@ haniel_approve_update()            -> Approve a pending self-update
   "mcpServers": {
     "haniel": {
       "type": "http",
-      "url": "http://localhost:3200/mcp/http"
+      "url": "http://localhost:3200/mcp/"
     }
   }
 }

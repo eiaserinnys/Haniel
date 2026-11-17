@@ -30,7 +30,7 @@ webhooks:
 mcp:
   enabled: true
   host: 127.0.0.1
-  transport: sse
+  transport: streamable_http
   port: 3200
 
 repos:
@@ -125,7 +125,7 @@ install:
         {
           "mcpServers": {
             "my-app-mcp": { "url": "http://localhost:3104/sse" },
-            "haniel": { "url": "http://localhost:3200/sse" },
+            "haniel": { "url": "http://localhost:3200/mcp/" },
             "slack": { "url": "http://localhost:3101/sse" }
           }
         }
