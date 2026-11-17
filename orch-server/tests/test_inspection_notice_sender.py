@@ -488,7 +488,15 @@ def test_the_same_rows_compose_the_same_message():
     assert compose_notice_message(rows) == compose_notice_message(rows)
 
 
-def test_the_instruction_hands_the_check_to_a_card_owner():
-    assert "현 상태를 스스로 판단하지 않고" in INSTRUCTION_TEXT
-    assert "점검 카드 담당이 첫 일로 확인한다" in INSTRUCTION_TEXT
-    assert "요청이 이미 닫혔거나 더 새 요청이 있으면 현 상태부터 확인한다" not in INSTRUCTION_TEXT
+def test_the_instruction_explains_retry_and_rejection():
+    assert "자동 배포와 일괄 승인" in INSTRUCTION_TEXT
+    assert "개별 승인" in INSTRUCTION_TEXT
+    assert "POST /api/orch/approve" in INSTRUCTION_TEXT
+    assert "haniel_approve.py" in INSTRUCTION_TEXT
+    assert "담당이 원인을 고친 뒤" in INSTRUCTION_TEXT
+    assert "POST /api/orch/reject" in INSTRUCTION_TEXT
+    assert "haniel_reject.py" in INSTRUCTION_TEXT
+    assert "--inspected-card" not in INSTRUCTION_TEXT
+    assert "점검 카드를 열어" not in INSTRUCTION_TEXT
+    assert "현 상태를 스스로 판단하지 않고" not in INSTRUCTION_TEXT
+    assert "디렉터께 카드 질문" not in INSTRUCTION_TEXT

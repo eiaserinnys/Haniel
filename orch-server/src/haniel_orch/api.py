@@ -18,7 +18,7 @@ from .protocol import DeployReject, DeployStatus, ServiceCommand
 
 logger = logging.getLogger(__name__)
 
-INSPECTION_REQUIRED_TEXT = "점검한 뒤 하나씩 승인할 것"
+INSPECTION_REQUIRED_TEXT = "직전 배포가 실패해 일괄 승인에서 뺐다. 개별 승인으로 다시 돌린다."
 
 SERVICE_SCOPED_COMMANDS = {"start", "restart", "stop", "reload"}
 CONFIG_COMMANDS = {"reload-config", "register-service", "register-repo"}
@@ -246,7 +246,7 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
         for event in to_approve:
             deploy_id = event["deploy_id"]
             if await store.attempts.inspection_required(deploy_id):
-                # 점검 필요가 선 요청은 일괄 승인이 시도를 열지 못한다. 점검한 뒤 하나씩 승인한다
+                # 실패 잠금이 선 요청은 일괄 승인에서 건너뛴다.
                 needs_inspection.append(
                     {"deploy_id": deploy_id, "reason": INSPECTION_REQUIRED_TEXT}
                 )
