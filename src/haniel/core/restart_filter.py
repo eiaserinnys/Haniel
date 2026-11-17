@@ -42,6 +42,7 @@ def plan_restart_skips(
     filters: Mapping[str, ServiceRestartFilter],
     changed_paths: Sequence[str],
     dependencies: Mapping[str, Sequence[str]],
+    overlapping: frozenset[str] = frozenset(),
 ) -> frozenset[str]:
     """Return affected services that can stay running for this deployment.
 
@@ -65,7 +66,9 @@ def plan_restart_skips(
         changed = False
         for name in sorted(candidates):
             if any(
-                dependency in services and dependency not in candidates
+                dependency in services
+                and dependency not in candidates
+                and dependency not in overlapping
                 for dependency in dependencies.get(name, ())
             ):
                 candidates.discard(name)

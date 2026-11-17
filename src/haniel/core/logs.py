@@ -214,6 +214,11 @@ class LogManager:
             if service_name in self._captures:
                 self._captures[service_name].stop()
 
+    def replace_capture(self, service_name: str, capture: LogCapture) -> None:
+        """Make a prepared process's capture the service's active capture."""
+        with self._lock:
+            self._captures[service_name] = capture
+
     def stop_all(self) -> None:
         """Stop all log captures."""
         with self._lock:

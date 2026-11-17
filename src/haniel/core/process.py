@@ -141,6 +141,7 @@ class ProcessManager:
         self.ready_recheck_interval = self.READY_RECHECK_INTERVAL
 
         self._processes: dict[str, ManagedProcess] = {}
+        self._pending_processes: dict[str, ManagedProcess] = {}
         self._lock = threading.Lock()
 
     def start_service(
@@ -195,9 +196,14 @@ class ProcessManager:
         expected_env_path: str | None,
         expected_env_sha256: str | None,
         approved_env_snapshot: ServiceEnvironmentFile | None,
+        overlap: bool = False,
     ) -> ManagedProcess:
         with self._lock:
-            if name in self._processes and self._processes[name].process:
+            if (
+                not overlap
+                and name in self._processes
+                and self._processes[name].process
+            ):
                 if self._processes[name].process.poll() is None:
                     raise RuntimeError(f"Service {name} is already running")
 
@@ -206,17 +212,25 @@ class ProcessManager:
         if config.cwd:
             cwd = self.config_dir / config.cwd
 
-        try:
-            self._cleanup_stale_instance_before_start(name, config, cwd)
-        except PortInUseError as e:
-            logger.error(str(e))
-            raise RuntimeError(str(e)) from e
+        if not overlap:
+            try:
+                self._cleanup_stale_instance_before_start(name, config, cwd)
+            except PortInUseError as e:
+                logger.error(str(e))
+                raise RuntimeError(str(e)) from e
 
         # Start log capture
-        log_capture = self.log_manager.start_capture(name)
+        log_capture = (
+            LogCapture(name, self.log_dir)
+            if overlap
+            else self.log_manager.start_capture(name)
+        )
+        if overlap:
+            log_capture.start()
 
         # Record service starting
-        self.health_manager.record_start(name)
+        if not overlap:
+            self.health_manager.record_start(name)
 
         # Parse command
         # On Windows, subprocess.Popen accepts a string directly and delegates
@@ -239,28 +253,39 @@ class ProcessManager:
             if resolved and resolved.lower().endswith((".cmd", ".bat")):
                 popen_kwargs["shell"] = True
 
-        child_env = service_process_environment(
-            self.config_dir,
-            config,
-            expected_env_path=expected_env_path,
-            expected_env_sha256=expected_env_sha256,
-            approved_snapshot=approved_env_snapshot,
-        )
-        process = self._spawn_process(name, cmd, cwd, popen_kwargs, child_env)
+        try:
+            child_env = service_process_environment(
+                self.config_dir,
+                config,
+                expected_env_path=expected_env_path,
+                expected_env_sha256=expected_env_sha256,
+                approved_snapshot=approved_env_snapshot,
+            )
+            if overlap:
+                process = self._spawn_process(
+                    name, cmd, cwd, popen_kwargs, child_env, record_failure=False
+                )
+            else:
+                process = self._spawn_process(name, cmd, cwd, popen_kwargs, child_env)
+        except Exception:
+            if overlap:
+                log_capture.stop()
+            raise
 
         # Set up process group
         self.platform.setup_process_group(process)
 
-        process = self._retry_after_immediate_port_exit(
-            name=name,
-            config=config,
-            cwd=cwd,
-            cmd=cmd,
-            popen_kwargs=popen_kwargs,
-            child_env=child_env,
-            process=process,
-            log_capture=log_capture,
-        )
+        if not overlap:
+            process = self._retry_after_immediate_port_exit(
+                name=name,
+                config=config,
+                cwd=cwd,
+                cmd=cmd,
+                popen_kwargs=popen_kwargs,
+                child_env=child_env,
+                process=process,
+                log_capture=log_capture,
+            )
 
         # Create managed process
         managed = ManagedProcess(
@@ -291,16 +316,120 @@ class ProcessManager:
 
         # Store the managed process
         with self._lock:
-            self._processes[name] = managed
+            (self._pending_processes if overlap else self._processes)[name] = managed
 
         # Start ready condition monitoring
         timeout = ready_timeout or self.DEFAULT_READY_TIMEOUT
         self._start_ready_monitor(managed, timeout, on_ready)
 
         # Start crash monitor
-        self._start_crash_monitor(managed, on_crash)
+        if not overlap:
+            self._start_crash_monitor(managed, on_crash)
 
         return managed
+
+    def overlap_service(
+        self,
+        name: str,
+        config: ServiceConfig,
+        *,
+        ready_timeout: float,
+        exit_timeout: float,
+        on_ready: Callable[[], None] | None = None,
+        on_crash: Callable[[int | None], None] | None = None,
+        expected_env_path: str | None = None,
+        expected_env_sha256: str | None = None,
+        approved_env_snapshot: ServiceEnvironmentFile | None = None,
+    ) -> bool:
+        """Prepare a replacement before retiring the current service process."""
+        with self.service_locks.hold(name):
+            with self._lock:
+                old = self._processes.get(name)
+            if old is None or old.process is None or old.process.poll() is not None:
+                return False
+            # The old process may exit as soon as the new process announces itself.
+            old.intentional_stop = True
+            started = time.monotonic()
+            try:
+                new = self._start_service_locked(
+                    name,
+                    config,
+                    ready_timeout,
+                    on_ready,
+                    on_crash,
+                    expected_env_path,
+                    expected_env_sha256,
+                    approved_env_snapshot,
+                    overlap=True,
+                )
+            except Exception:
+                old.intentional_stop = False
+                raise
+            if (
+                not self._wait_for_managed_ready(new, ready_timeout)
+                or new.process.poll() is not None
+            ):
+                self._retire_overlap_process(new, 0)
+                with self._lock:
+                    self._pending_processes.pop(name, None)
+                old.intentional_stop = False
+                raise RuntimeError(f"readiness failed for {name} replacement")
+            logger.info(
+                "Overlap ready for %s: pid=%s elapsed=%.2fs",
+                name,
+                new.process.pid,
+                time.monotonic() - started,
+            )
+            with self._lock:
+                self._processes[name] = new
+                self._pending_processes.pop(name, None)
+            self.log_manager.replace_capture(name, new.log_capture)
+            self._start_crash_monitor(new, on_crash)
+            try:
+                self._retire_overlap_process(old, exit_timeout)
+            except Exception:
+                logger.exception(
+                    "Failed to retire old overlap process for %s: pid=%s",
+                    name,
+                    old.process.pid,
+                )
+            return True
+
+    def _retire_overlap_process(self, managed: ManagedProcess, wait: float) -> None:
+        process = managed.process
+        assert process is not None
+        managed.intentional_stop = True
+        started = time.monotonic()
+        method = "self"
+        try:
+            process.wait(timeout=wait)
+        except subprocess.TimeoutExpired:
+            method = "SIGTERM"
+            self.platform.terminate_process(process)
+            timeout = (
+                managed.config.shutdown.timeout
+                if managed.config.shutdown
+                else self.shutdown_config.timeout
+            )
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                method = "SIGKILL"
+                self.platform.kill_process(process)
+                process.wait(timeout=self.shutdown_config.kill_timeout)
+        logger.info(
+            "Overlap exit for %s: pid=%s method=%s elapsed=%.2fs",
+            managed.name,
+            process.pid,
+            method,
+            time.monotonic() - started,
+        )
+        if managed.stdout_reader:
+            managed.stdout_reader.stop()
+        if managed.stderr_reader:
+            managed.stderr_reader.stop()
+        if managed.log_capture:
+            managed.log_capture.stop()
 
     def _spawn_process(
         self,
@@ -309,6 +438,8 @@ class ProcessManager:
         cwd: Path,
         popen_kwargs: dict,
         child_env: dict[str, str],
+        *,
+        record_failure: bool = True,
     ) -> subprocess.Popen:
         """Spawn a process, preserving Windows breakaway fallback behavior."""
         try:
@@ -345,19 +476,22 @@ class ProcessManager:
                             **retry_kwargs,
                         )
                     except (OSError, subprocess.SubprocessError) as e:
-                        self.health_manager.record_crash(
-                            name, exit_code=None, reason=str(e)
-                        )
+                        if record_failure:
+                            self.health_manager.record_crash(
+                                name, exit_code=None, reason=str(e)
+                            )
                         raise RuntimeError(
                             f"Failed to start service {name}: {e}"
                         ) from e
 
-            self.health_manager.record_crash(
-                name, exit_code=None, reason="PermissionError"
-            )
+            if record_failure:
+                self.health_manager.record_crash(
+                    name, exit_code=None, reason="PermissionError"
+                )
             raise RuntimeError(f"Failed to start service {name}: PermissionError")
         except (OSError, subprocess.SubprocessError) as e:
-            self.health_manager.record_crash(name, exit_code=None, reason=str(e))
+            if record_failure:
+                self.health_manager.record_crash(name, exit_code=None, reason=str(e))
             raise RuntimeError(f"Failed to start service {name}: {e}") from e
 
     def _cleanup_stale_instance_before_start(
@@ -644,6 +778,11 @@ class ProcessManager:
                 return False
             managed = self._processes[name]
 
+        return self._wait_for_managed_ready(managed, timeout)
+
+    def _wait_for_managed_ready(
+        self, managed: ManagedProcess, timeout: float | None
+    ) -> bool:
         if managed.ready_event is None:
             return True
 
@@ -820,7 +959,10 @@ class ProcessManager:
         if managed.process is not None and managed.process.poll() is not None:
             self._record_ready_failure(managed)
             return True
-        return self._processes.get(managed.name) is not managed
+        return (
+            self._processes.get(managed.name) is not managed
+            and self._pending_processes.get(managed.name) is not managed
+        )
 
     def _record_ready_failure(self, managed: ManagedProcess) -> None:
         """Wake readiness waiters with the exit code of a dead process."""
