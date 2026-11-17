@@ -109,6 +109,7 @@ class ReleaseManifest(BaseModel):
     post_start_verify: list[CommandSpec] = Field(min_length=1)
     post_start_verify_retry: RetrySpec = Field(default_factory=RetrySpec)
     recovery: RecoverySpec
+    change_ignore_paths: list[str] = Field(default_factory=list)
     service_restart_filters: dict[str, ServiceRestartFilter] = Field(
         default_factory=dict,
         description=(
