@@ -95,6 +95,15 @@ class ServiceRestartFilter(BaseModel):
     ignore_paths: list[str] = Field(min_length=1)
 
 
+class ServiceRestartStrategy(BaseModel):
+    """Opt in to process overlap during manifest deployment."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["overlap"]
+    exit_timeout_sec: int = Field(default=60, ge=1)
+
+
 class ReleaseManifest(BaseModel):
     """Repository-provided contract consumed by Haniel."""
 
@@ -117,6 +126,9 @@ class ReleaseManifest(BaseModel):
             "A service stays running when every changed path matches one of "
             "its ignore_paths."
         ),
+    )
+    service_restart_strategies: dict[str, ServiceRestartStrategy] = Field(
+        default_factory=dict
     )
 
     @classmethod

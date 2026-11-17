@@ -18,6 +18,7 @@ class DeploymentBudget:
     build_hooks_sec: int
     pre_start_hooks_sec: int
     readiness_sec: int
+    overlap_exit_sec: int
     verification_sec: int
     recovery_sec: int
     total_sec: int
@@ -29,7 +30,12 @@ class DeploymentBudget:
             f"build={self.build_hooks_sec}s + "
             f"pre_start={self.pre_start_hooks_sec}s + "
             f"readiness={self.readiness_sec}s + "
-            f"verification={self.verification_sec}s + "
+            + (
+                f"overlap_exit={self.overlap_exit_sec}s + "
+                if self.overlap_exit_sec
+                else ""
+            )
+            + f"verification={self.verification_sec}s + "
             f"recovery={self.recovery_sec}s"
         )
 
@@ -93,17 +99,24 @@ def expected_deployment_budget(
     verification_sec = sum(
         command.timeout_seconds for command in manifest.post_start_verify
     )
+    overlap_exit_sec = sum(
+        strategy.exit_timeout_sec
+        for name, strategy in manifest.service_restart_strategies.items()
+        if name in affected_services
+    )
     recovery_sec = one_build_attempt_sec + readiness_sec
     return DeploymentBudget(
         build_hooks_sec=build_hooks_sec,
         pre_start_hooks_sec=pre_start_hooks_sec,
         readiness_sec=readiness_sec,
+        overlap_exit_sec=overlap_exit_sec,
         verification_sec=verification_sec,
         recovery_sec=recovery_sec,
         total_sec=(
             build_hooks_sec
             + pre_start_hooks_sec
             + readiness_sec
+            + overlap_exit_sec
             + verification_sec
             + recovery_sec
         ),

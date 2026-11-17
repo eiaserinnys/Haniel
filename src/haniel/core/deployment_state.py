@@ -385,6 +385,14 @@ class DeploymentStateStore:
         current["restart_skipped_services"] = sorted(services)
         self._write(repo_name, current)
 
+    def record_overlap_services(self, repo_name: str, services: Sequence[str]) -> None:
+        """Record the services selected for overlap in this attempt."""
+        current = self.read(repo_name)
+        if current is None:
+            raise ValueError(f"deployment journal does not exist for {repo_name}")
+        current["overlap_services"] = sorted(services)
+        self._write(repo_name, current)
+
     def record_database_result(
         self,
         repo_name: str,

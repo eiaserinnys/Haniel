@@ -20,7 +20,13 @@ from .deployment import (
     ReleaseManifest,
     subprocess_command_runner,
 )
-from .git import get_head, reset_repo_to, sha256_file_at_commit
+from .git import (
+    get_head,
+    reset_repo_to,
+    sha256_file_at_commit,
+    read_file_at_commit,
+    get_changed_paths_between,
+)
 from .handover_config import BoundServiceEnvironment, require_handover_config_digest
 from .legacy_build_marker import sync_disk
 from .reporting_deployment_state import (
@@ -37,7 +43,7 @@ from .release_manifest import (
     resolve_manifest_service_cwd,
     resolve_manifest_service_environment,
 )
-from .restart_filter import RestartFilterCandidates
+from .restart_filter import RestartFilterCandidates, plan_restart_skips
 from .service_environment import ServiceEnvironmentFile
 from .safety_redaction import bounded_redact_text
 from .deployment_errors import StableDeploymentError
@@ -93,6 +99,9 @@ class RunnerDeploymentAdapter:
         self.quiesce_services = sorted(set(quiesce_services or affected))
         self.restart_candidates = restart_candidates
         self.restart_skipped: frozenset[str] = frozenset()
+        self.overlap_services: frozenset[str] = frozenset()
+        self.overlap_started: set[str] = set()
+        self.manifest: ReleaseManifest | None = None
         self.config_digest = config_digest
         self.service_environment_bindings = service_environment_bindings
         if config_snapshot is None or repo_runtime_snapshot is None:
@@ -126,7 +135,65 @@ class RunnerDeploymentAdapter:
             acknowledge_quiesced=self.quiescence_callback,
             restart_candidates=self.restart_candidates,
             apply_restart_skips=self.apply_restart_skips,
+            plan_overlap=self.plan_overlap
+            if self.manifest and self.manifest.service_restart_strategies
+            else None,
         )
+
+    def plan_overlap(
+        self, safe: bool
+    ) -> tuple[RestartFilterCandidates | None, frozenset[str]]:
+        """Choose overlap and recalculate filters after preflight is known."""
+        assert self.manifest is not None
+        previous = None
+        if self.previous_head:
+            try:
+                path = self.repo_runtime_snapshot.config.release_manifest
+                previous = ReleaseManifest.model_validate_json(
+                    read_file_at_commit(self.repo_path, self.previous_head, path)
+                )
+            except Exception as error:
+                logger.info("Previous manifest unavailable for overlap: %s", error)
+        eligible: set[str] = set()
+        for name in sorted(
+            set(self.affected) & self.manifest.service_restart_strategies.keys()
+        ):
+            if not safe:
+                reason = "contract preflight pending_count is not zero or operation is not upgrade"
+            elif previous is None or name not in previous.service_restart_strategies:
+                reason = "previous manifest has no overlap declaration"
+            elif not self.runner.process_manager.is_running(name):
+                reason = "service is not running"
+            else:
+                eligible.add(name)
+                continue
+            logger.info("Service %s uses stop/start: %s", name, reason)
+        paths = (
+            get_changed_paths_between(
+                self.repo_path, self.previous_head, self.target_head
+            )
+            if self.previous_head
+            and self.target_head
+            and self.previous_head != self.target_head
+            else None
+        )
+        skips = plan_restart_skips(
+            affected=self.affected,
+            filters=self.manifest.service_restart_filters,
+            changed_paths=paths or [],
+            dependencies={
+                name: self.runner._dependency_graph.get_dependencies(name)
+                for name in self.affected
+            },
+            overlapping=frozenset(eligible),
+        )
+        self.overlap_services = frozenset(eligible - skips)
+        for name in sorted(self.overlap_services):
+            logger.info("Service %s uses overlap", name)
+        candidates = (
+            RestartFilterCandidates(skips, len(paths)) if skips and paths else None
+        )
+        return candidates, self.overlap_services
 
     def apply_restart_skips(self, services: frozenset[str]) -> frozenset[str]:
         """Keep confirmed services out of stops, starts, and recovery.
@@ -158,6 +225,7 @@ class RunnerDeploymentAdapter:
             service
             for service in self.quiesce_services
             if service not in self.restart_skipped
+            and service not in (self.overlap_services - self.overlap_started)
         ]
 
     def service_cwd(self, service_name: str) -> Path:
@@ -289,7 +357,10 @@ class RunnerDeploymentAdapter:
                 raise RuntimeError(
                     f"{service} blocked by dependencies: {', '.join(blockers)}"
                 )
-            if self.runner.process_manager.is_running(service):
+            if (
+                service not in self.overlap_services
+                and self.runner.process_manager.is_running(service)
+            ):
                 if not self.runner.process_manager.stop_service(service):
                     raise RuntimeError(f"failed to stop already-running {service}")
                 self.runner._cancel_pending_restart(service)
@@ -307,6 +378,34 @@ class RunnerDeploymentAdapter:
                 raise RuntimeError(
                     "SERVICE_ENV_FILE_CHANGED: request has no approved runtime env snapshot"
                 )
+            if service in self.overlap_services and service not in self.overlap_started:
+                config = self.config_snapshot.enabled_services[service]
+                if not self.runner.execute_hook(service, "pre_start"):
+                    raise RuntimeError(f"pre_start hook failed for {service}")
+                ready_timeout = effective_ready_timeout(
+                    config, self.runner.process_manager.DEFAULT_READY_TIMEOUT
+                )
+                try:
+                    self.runner.process_manager.overlap_service(
+                        service,
+                        config,
+                        ready_timeout=ready_timeout,
+                        exit_timeout=self.manifest.service_restart_strategies[
+                            service
+                        ].exit_timeout_sec,
+                        on_ready=lambda n=service: self.runner._on_service_ready(n),
+                        on_crash=lambda code, n=service: self.runner._on_service_crash(
+                            n, code
+                        ),
+                        expected_env_path=binding.path if binding else None,
+                        expected_env_sha256=binding.sha256 if binding else None,
+                        approved_env_snapshot=binding.snapshot if binding else None,
+                    )
+                except Exception:
+                    self.restart_skipped = self.restart_skipped | {service}
+                    raise
+                self.overlap_started.add(service)
+                continue
             started = (
                 self.runner._start_service(service)
                 if binding is None
@@ -370,10 +469,14 @@ class RunnerDeploymentAdapter:
             return
         self.build()
         recovery_services = (
-            self.desired_running
-            if self.desired_running is not None
-            else set(self.affected)
-        ) - self.restart_skipped
+            (
+                self.desired_running
+                if self.desired_running is not None
+                else set(self.affected)
+            )
+            - self.restart_skipped
+            - (self.overlap_services - self.overlap_started)
+        )
         if self.handover_started or self.desired_running is not None:
             try:
                 self.start_and_wait(recovery_services)
@@ -395,7 +498,9 @@ class RunnerDeploymentAdapter:
         selected = set(runtime.affected_services)
         if self.desired_running is not None:
             selected.intersection_update(self.desired_running)
-        selected -= self.restart_skipped
+        selected -= self.restart_skipped | (
+            self.overlap_services - self.overlap_started
+        )
         hook_services = set(
             repo_owned_services(
                 self.repo_name,
@@ -678,6 +783,7 @@ def run_manifest_deployment(
             recovered=True,
         ) from error
 
+    adapter.manifest = manifest
     if manifest.requires_service_env_file and config_digest is None:
         raise RuntimeError(
             "CONFIG_DIGEST_REQUIRED: manifest service environment requires "

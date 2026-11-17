@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from .deployment_command_runner import (
@@ -50,6 +50,9 @@ class DeploymentCallbacks:
     acknowledge_quiesced: Callable[[dict[str, Any]], None] | None = None
     restart_candidates: RestartFilterCandidates | None = None
     apply_restart_skips: Callable[[frozenset[str]], frozenset[str]] | None = None
+    plan_overlap: (
+        Callable[[bool], tuple[RestartFilterCandidates | None, frozenset[str]]] | None
+    ) = None
 
 
 @dataclass(frozen=True)
@@ -190,6 +193,21 @@ class DeploymentCoordinator:
                         database_journal_path=database_journal_path,
                     )
 
+            overlap_services: frozenset[str] = frozenset()
+            if callbacks.plan_overlap is not None:
+                payload = preflight.json_data if preflight is not None else None
+                pending = (
+                    payload.get("pending_count") if isinstance(payload, dict) else None
+                )
+                safe = not contract_mode or (
+                    operation == "upgrade" and type(pending) is int and pending == 0
+                )
+                candidates, overlap_services = callbacks.plan_overlap(safe)
+                callbacks = replace(callbacks, restart_candidates=candidates)
+                if overlap_services:
+                    self.state_store.record_overlap_services(
+                        repo_name, sorted(overlap_services)
+                    )
             confirmed_services = self._confirm_restart_skips(
                 repo_name=repo_name,
                 target_head=target_head,
@@ -216,7 +234,11 @@ class DeploymentCoordinator:
             quiescence_receipt: dict[str, Any] | None = None
             if not contract_mode or operation == "upgrade":
                 quiescence_receipt = callbacks.stop()
-            if contract_mode and operation == "upgrade" and not skipped_services:
+            if (
+                contract_mode
+                and operation == "upgrade"
+                and not (skipped_services or overlap_services)
+            ):
                 validate_quiescence_receipt(
                     quiescence_receipt,
                     request_id=request_id,
