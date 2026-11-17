@@ -3143,3 +3143,56 @@ class TestInstallMcpServerUnit:
                 # Import will fail when trying to use the module
                 with pytest.raises(Exception):
                     await server.start()
+
+
+class TestRepoHookTimeout:
+    """Installer repo hooks follow the configured HooksConfig timeout."""
+
+    def _installer(self, config, config_dir):
+        from haniel.installer.mechanical import MechanicalInstaller
+        from haniel.installer.state import InstallState
+
+        return MechanicalInstaller(config, config_dir, InstallState())
+
+    def test_repo_hook_defaults_to_model_timeout(self, tmp_path):
+        from haniel.config import HooksConfig
+
+        installer = self._installer(HanielConfig(), tmp_path)
+        with patch(
+            "haniel.installer.mechanical.subprocess.run",
+            return_value=MagicMock(returncode=0),
+        ) as run:
+            installer._run_repo_hook("app", "post_pull", "echo ok", tmp_path)
+        assert run.call_args.kwargs["timeout"] == HooksConfig().timeout
+
+    @pytest.mark.parametrize("existing", [True, False])
+    def test_repo_hook_uses_configured_timeout(self, tmp_path, existing):
+        from haniel.config import HooksConfig
+
+        repo_path = tmp_path / ".projects" / "app"
+        if existing:
+            repo_path.mkdir(parents=True)
+            (repo_path / ".git").mkdir()
+        config = HanielConfig(
+            repos={
+                "app": RepoConfig(
+                    url="https://example.invalid/app.git",
+                    path="./.projects/app",
+                    hooks=HooksConfig(post_pull="echo hook", timeout=42),
+                )
+            }
+        )
+        installer = self._installer(config, tmp_path)
+        with (
+            patch(
+                "haniel.installer.mechanical.subprocess.run",
+                return_value=MagicMock(returncode=0, stdout="", stderr=""),
+            ) as run,
+            patch("haniel.installer.mechanical.detect_tool_paths", return_value=[]),
+        ):
+            installer.clone_repos()
+        hook_calls = [
+            call for call in run.call_args_list if call.args[0] == "echo hook"
+        ]
+        assert len(hook_calls) == 1
+        assert hook_calls[0].kwargs["timeout"] == 42

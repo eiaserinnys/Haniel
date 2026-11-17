@@ -16,6 +16,7 @@ from .deployment_errors import (
     KNOWN_DEPLOYMENT_ERROR_CODES,
     stable_deployment_error_code,
 )
+from .lifecycle_storage import retry_on_permission_error
 from .safety_redaction import bounded_redact_text, redact_value
 
 _JOURNAL_MESSAGE_MAX_CHARS = 16384
@@ -454,7 +455,7 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        retry_on_permission_error(lambda: os.replace(temporary, path))
         _fsync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)

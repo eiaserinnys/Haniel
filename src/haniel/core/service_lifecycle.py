@@ -16,7 +16,7 @@ from typing import Any, TYPE_CHECKING
 from .child_env import sanitized_child_env
 
 from ..config.io import backup_config, read_config, restore_config, write_config
-from ..config.model import HanielConfig, RepoConfig, ServiceConfig
+from ..config.model import HanielConfig, HooksConfig, RepoConfig, ServiceConfig
 from ..config.validators import validate_config
 from .git import clone_repo
 
@@ -95,9 +95,16 @@ def _ensure_repo_clone(repo_name: str, repo_config: RepoConfig, path: Path) -> s
 
 
 def _run_shell_hook(
-    name: str, hook_name: str, command: str, cwd: Path, root: Path
+    name: str,
+    hook_name: str,
+    command: str,
+    cwd: Path,
+    root: Path,
+    *,
+    timeout: int | None = None,
 ) -> None:
     command = command.replace("{root}", str(root))
+    limit = HooksConfig().timeout if timeout is None else timeout
     if os.name == "nt":
         config_prefix = str(root).replace("\\", "/") + "/"
         command = re.sub(r"(?<![.\w])\./", config_prefix, command)
@@ -117,7 +124,7 @@ def _run_shell_hook(
             check=True,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=limit,
             shell=shell,
             env=sanitized_child_env(),
         )
@@ -126,7 +133,9 @@ def _run_shell_hook(
             f"{hook_name} hook failed for {name}: {e.stderr.strip()}"
         ) from e
     except subprocess.TimeoutExpired as e:
-        raise RuntimeError(f"{hook_name} hook timed out for {name}") from e
+        raise RuntimeError(
+            f"{hook_name} hook timed out for {name} after {limit}s"
+        ) from e
 
 
 def _maybe_run_repo_post_pull(
@@ -143,6 +152,7 @@ def _maybe_run_repo_post_pull(
         repo_config.hooks.post_pull,
         repo_path,
         config_dir,
+        timeout=repo_config.hooks.timeout,
     )
     return True
 

@@ -71,8 +71,18 @@ and content. Other placeholders such as `${VAR}`, `$VAR`, and `{root}` keep
 their existing meaning. A missing file or name prevents the configuration from
 loading. The configuration model and edits retain references; install output
 files receive the resolved values where needed.
-`haniel install` writes the first resolved webhook URL to the private
-`haniel-runner.conf` file (mode `600` on POSIX).
+
+Install output keeps resolved plaintext values. The WinSW XML file for the
+service (`<service>.xml`) stores `install.service.service_account.password` in
+its `<password>` element, and `haniel-runner.conf` stores the first resolved
+webhook URL as `WEBHOOK_URL`. WinSW service registration and the bootstrap
+runner (`haniel-runner.sh`, `haniel-runner.ps1`) cannot resolve
+`${secret:...}` references themselves, so these files receive values.
+
+On POSIX, Haniel writes these files with mode `600`. On Windows it does not
+restrict their ACL, so on a machine shared by several users, narrow the
+permissions by hand (for example with `icacls`). After changing a secret
+value, re-run `haniel install` so the generated files receive the new value.
 
 Run `haniel validate --no-plain-secrets haniel.yaml` to reject plain values in
 Haniel's own secret fields and values of eight or more characters from the
