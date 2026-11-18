@@ -494,6 +494,10 @@ class ServiceRunner:
         self._self_update_unused_head: str | None = None
         self._change_ignore_info_heads: dict[str, str] = {}
         self._change_ignore_warning_heads: dict[str, str] = {}
+        self._pending_remote_heads: dict[str, str] = {}
+        self._pending_remote_info_heads: dict[str, str] = {}
+        self._pending_global_info_heads: dict[str, str] = {}
+        self._pending_repo_info_heads: dict[str, str] = {}
 
         # Track whether startup post_pull hooks have been considered.
         self._post_pull_executed = False
@@ -637,11 +641,18 @@ class ServiceRunner:
                 or state.config != observation.repo_config
             ):
                 return False
+            clear_pending_logs = (
+                observation.changed
+                and observation.pending_changes is None
+                and observation.last_head != state.last_head
+            )
             state.last_fetch = observation.last_fetch
             state.fetch_error = observation.fetch_error
             state.last_head = observation.last_head
             state.pending_changes = deepcopy(observation.pending_changes)
-            return True
+        if clear_pending_logs:
+            self._clear_pending_log_heads(observation.repo_name)
+        return True
 
     def _replace_config_snapshot(
         self,
@@ -4287,6 +4298,7 @@ class ServiceRunner:
 
                 if current_head != runtime.last_head:
                     # External pull or other process advanced HEAD
+                    self._clear_pending_log_heads(name)
                     previous_head = runtime.last_head
                     self_checkout_matches_remote = False
                     if (
@@ -4331,9 +4343,17 @@ class ServiceRunner:
                     # current == last_head, check if remote has new commits
                     remote_head = get_remote_head(repo_path, runtime.config.branch)
                     if remote_head != current_head:
-                        logger.info(
+                        self._pending_remote_heads[name] = remote_head
+                        level = (
+                            logging.DEBUG
+                            if self._pending_remote_info_heads.get(name) == remote_head
+                            else logging.INFO
+                        )
+                        self._pending_remote_info_heads[name] = remote_head
+                        logger.log(
+                            level,
                             f"Remote changes available for repo: {name} "
-                            f"(current={current_head[:8]} → remote={remote_head[:8]})"
+                            f"(current={current_head[:8]} → remote={remote_head[:8]})",
                         )
                         changed.append(name)
                         repo_changed = True
@@ -4351,6 +4371,7 @@ class ServiceRunner:
                             current_head if self_uses_active_release else "HEAD"
                         )
                     else:
+                        self._clear_pending_log_heads(name)
                         # A self checkout can already match origin while the running
                         # process still uses the previous code. Preserve the restart
                         # evidence so reconnecting orchestrators can recover the same
@@ -4462,6 +4483,13 @@ class ServiceRunner:
                 )
 
         return changed
+
+    def _clear_pending_log_heads(self, name: str) -> None:
+        """Forget pending log history after the repository catches up."""
+        self._pending_remote_heads.pop(name, None)
+        self._pending_remote_info_heads.pop(name, None)
+        self._pending_global_info_heads.pop(name, None)
+        self._pending_repo_info_heads.pop(name, None)
 
     def _only_ignored_remote_changes(
         self,
@@ -4636,6 +4664,28 @@ class ServiceRunner:
         except ValueError:
             return True
 
+    def _log_pending_manual_approval(
+        self,
+        repos: list[str],
+        message: str,
+        info_heads: dict[str, str],
+        other_info_heads: dict[str, str],
+    ) -> None:
+        """Log newly pending heads at INFO, and repeats at DEBUG."""
+        newly_pending = []
+        for repo in repos:
+            other_info_heads.pop(repo, None)
+            head = self._pending_remote_heads.get(repo)
+            if head is None or info_heads.get(repo) != head:
+                newly_pending.append(repo)
+                if head is not None:
+                    info_heads[repo] = head
+        logger.log(
+            logging.INFO if newly_pending else logging.DEBUG,
+            message,
+            newly_pending or repos,
+        )
+
     def _apply_changes(self, changed_repos: list[str]) -> None:
         """Apply changes from the specified repositories.
 
@@ -4659,10 +4709,12 @@ class ServiceRunner:
 
         # auto_apply=false: detection only, skip stop→pull→restart
         if not config_snapshot.config.auto_apply:
-            logger.info(
+            self._log_pending_manual_approval(
+                changed_repos,
                 "global auto_apply=false overrides repo auto_apply, "
                 "pending manual approval for: %s",
-                changed_repos,
+                self._pending_global_info_heads,
+                self._pending_repo_info_heads,
             )
             return
 
@@ -4673,9 +4725,11 @@ class ServiceRunner:
         manual_repos = [repo for repo in changed_repos if not repo_auto_apply[repo]]
         changed_repos = [repo for repo in changed_repos if repo_auto_apply[repo]]
         if manual_repos:
-            logger.info(
-                "repo auto_apply=false, pending manual approval for: %s",
+            self._log_pending_manual_approval(
                 manual_repos,
+                "repo auto_apply=false, pending manual approval for: %s",
+                self._pending_repo_info_heads,
+                self._pending_global_info_heads,
             )
         if not changed_repos:
             return
