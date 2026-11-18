@@ -641,17 +641,18 @@ class ServiceRunner:
                 or state.config != observation.repo_config
             ):
                 return False
-            if (
+            clear_pending_logs = (
                 observation.changed
                 and observation.pending_changes is None
                 and observation.last_head != state.last_head
-            ):
-                self._clear_pending_log_heads(observation.repo_name)
+            )
             state.last_fetch = observation.last_fetch
             state.fetch_error = observation.fetch_error
             state.last_head = observation.last_head
             state.pending_changes = deepcopy(observation.pending_changes)
-            return True
+        if clear_pending_logs:
+            self._clear_pending_log_heads(observation.repo_name)
+        return True
 
     def _replace_config_snapshot(
         self,
