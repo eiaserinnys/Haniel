@@ -68,7 +68,8 @@ from .legacy_build_marker import (
     sync_disk,
     write_completed_commits as write_legacy_post_pull_commits,
 )
-from .process import ProcessManager
+from .process import ProcessManager, relay_capable
+from .stale_instance import pid_matches_service
 from .deployment import DeploymentError, DeploymentStateStore
 from .deployment_command_runner import CommandSpec, _command_failure_message
 from .deployment_errors import (
@@ -127,6 +128,12 @@ from .orch_pending_deploy import (
     write as _write_orch_pending_deploy,
 )
 from .self_update_prestage import SelfUpdatePrestager, SelfUpdatePrestageResult
+from .self_update_handover import (
+    HandoverServiceState,
+    discard as discard_self_update_handover,
+    read_and_clear as read_self_update_handover,
+    write as write_self_update_handover,
+)
 from ..integrations.deploy_reporting import AdmissionRefused, ApprovalRevalidationError
 from ..integrations.deploy_attempt_gate import DeployPermissionError
 from .thread_shutdown import join_thread_with_timeout
@@ -524,6 +531,11 @@ class ServiceRunner:
         self._self_update_requested = threading.Event()
         self._restart_requested = threading.Event()
         self._self_update_prestager = SelfUpdatePrestager(self.config_dir)
+        # Relay-backed services kept alive through this process's own
+        # self-update, and the entries a previous Haniel left behind.
+        self._self_update_handover_services: frozenset[str] = frozenset()
+        self._pending_handover: dict[str, HandoverServiceState] = {}
+        self._handover_lock = threading.Lock()
 
         # Self-update result from previous wrapper iteration (consumed on start)
         self._last_self_update_result: SelfUpdateResult | None = None
@@ -922,6 +934,7 @@ class ServiceRunner:
 
     def start_services(self) -> None:
         """Start services and always release startup deployment leases."""
+        self._load_self_update_handover()
         try:
             self._start_services_in_dependency_order()
         finally:
@@ -938,6 +951,7 @@ class ServiceRunner:
                     error="startup deployment did not reach a terminal service state",
                 )
             self._release_startup_repo_locks()
+            self._discard_unclaimed_handover_entries()
 
     def _start_services_in_dependency_order(self) -> None:
         """Start all enabled services in dependency order.
@@ -1723,6 +1737,11 @@ class ServiceRunner:
                     logger.error(f"pre_start hook failed for {name}, aborting start")
                     self._record_start_failure(name, "pre_start hook failed")
                     return False
+                handover = self._take_handover_entry(name)
+                if handover is not None and self._adopt_self_update_handover(
+                    name, config, handover
+                ):
+                    return True
                 self.process_manager.start_service(
                     name=name,
                     config=config,
@@ -1737,6 +1756,7 @@ class ServiceRunner:
                     expected_env_path=expected_env_path,
                     expected_env_sha256=expected_env_sha256,
                     approved_env_snapshot=approved_env_snapshot,
+                    log_relay=self._is_log_relay_target(name, config),
                 )
                 return True
             except Exception as e:
@@ -1750,6 +1770,139 @@ class ServiceRunner:
                     return False
                 self._schedule_start_failure_retry(name, str(e))
                 return False
+
+    def _is_log_relay_target(self, name: str, config: ServiceConfig) -> bool:
+        """Whether this service's log stream must survive a Haniel replacement."""
+        if config.repo is None or not relay_capable(config):
+            return False
+        try:
+            runtime = self._snapshot_repo_runtime(config.repo)
+        except ValueError:
+            return False
+        if not runtime.config.release_manifest:
+            return False
+        try:
+            manifest = self._current_release_manifest(runtime)
+        except (OSError, ValueError) as error:
+            logger.warning(
+                "Cannot read the release manifest of %s for %s; using direct pipes: %s",
+                config.repo,
+                name,
+                error,
+            )
+            return False
+        strategy = manifest.service_restart_strategies.get(name)
+        return strategy is not None and strategy.mode == "overlap"
+
+    def _current_release_manifest(
+        self, runtime: RepoRuntimeSnapshot
+    ) -> ReleaseManifest:
+        assert runtime.config.release_manifest is not None
+        repo_path = self.config_dir / runtime.config.path
+        return ReleaseManifest.load(repo_path / runtime.config.release_manifest)
+
+    def _load_self_update_handover(self) -> None:
+        """Read and delete the handover state once before services start."""
+        entries = read_self_update_handover(self.config_dir)
+        with self._handover_lock:
+            self._pending_handover = {entry.name: entry for entry in entries}
+        if entries:
+            logger.info(
+                "Loaded self-update handover for: %s",
+                ", ".join(sorted(entry.name for entry in entries)),
+            )
+
+    def _take_handover_entry(self, name: str) -> HandoverServiceState | None:
+        with self._handover_lock:
+            return self._pending_handover.pop(name, None)
+
+    def _discard_unclaimed_handover_entries(self) -> None:
+        with self._handover_lock:
+            remaining = sorted(self._pending_handover)
+            self._pending_handover.clear()
+        for name in remaining:
+            logger.warning(
+                "Self-update handover for %s was not adopted because the "
+                "service did not start in this startup",
+                name,
+            )
+
+    def _adopt_self_update_handover(
+        self,
+        name: str,
+        config: ServiceConfig,
+        entry: HandoverServiceState,
+    ) -> bool:
+        """Start a replacement beside the process the previous Haniel kept."""
+        reason = self._handover_mismatch(name, config, entry)
+        if reason is not None:
+            logger.info(
+                "Self-update handover for %s skipped: %s; starting normally",
+                name,
+                reason,
+            )
+            return False
+        ready_timeout = effective_ready_timeout(
+            config, self.process_manager.DEFAULT_READY_TIMEOUT
+        )
+        try:
+            adopted = self.process_manager.adopt_handover_service(
+                name,
+                config,
+                previous_pid=entry.pid,
+                exit_timeout=entry.exit_timeout_sec,
+                ready_timeout=ready_timeout,
+                on_ready=lambda n=name: self._on_service_ready(n),
+                on_crash=lambda exit_code, n=name: self._on_service_crash(n, exit_code),
+                log_relay=self._is_log_relay_target(name, config),
+            )
+        except Exception as error:
+            logger.warning(
+                "Self-update handover for %s failed: %s; starting normally",
+                name,
+                bounded_redact_text(str(error)),
+            )
+            return False
+        if not adopted:
+            logger.info("Self-update handover for %s fell back to a normal start", name)
+        return adopted
+
+    def _handover_mismatch(
+        self,
+        name: str,
+        config: ServiceConfig,
+        entry: HandoverServiceState,
+    ) -> str | None:
+        """Return the first reason the recorded process cannot be adopted."""
+        if config.repo is None:
+            return "service has no repository"
+        if entry.repo != config.repo:
+            return f"repository changed from {entry.repo} to {config.repo}"
+        try:
+            runtime = self._snapshot_repo_runtime(config.repo)
+        except ValueError:
+            return f"repository {config.repo} is not configured"
+        if not runtime.config.release_manifest:
+            return f"repository {config.repo} has no release manifest"
+        try:
+            head = get_head(self.config_dir / runtime.config.path)
+        except GitError as error:
+            return f"cannot read the repository HEAD: {error}"
+        if head != entry.head:
+            return f"repository HEAD moved from {entry.head[:12]} to {head[:12]}"
+        try:
+            manifest = self._current_release_manifest(runtime)
+        except (OSError, ValueError) as error:
+            return f"cannot read the release manifest: {error}"
+        if name not in manifest.service_restart_strategies:
+            return "the release manifest no longer declares overlap"
+        if not self.process_manager.platform.is_pid_running(entry.pid):
+            return f"previous process {entry.pid} is gone"
+        if self.process_manager.platform.is_pid_zombie(entry.pid):
+            return f"previous process {entry.pid} is gone"
+        if not pid_matches_service(self.process_manager.platform, entry.pid, config):
+            return f"previous process {entry.pid} does not match the service"
+        return None
 
     def _on_service_ready(self, name: str) -> None:
         """Called when a service becomes ready."""
@@ -1956,14 +2109,22 @@ class ServiceRunner:
                 name, "deployment failed while the service was stopped"
             )
 
-    def stop_services(self) -> bool:
-        """Stop all services in reverse dependency order."""
+    def stop_services(self, skip: frozenset[str] = frozenset()) -> bool:
+        """Stop all services in reverse dependency order.
+
+        ``skip`` names relay-backed services that the self-update handover
+        keeps running; their pending restarts are still cancelled.
+        """
         shutdown_order = self.get_shutdown_order()
         logger.info(f"Stopping services in order: {shutdown_order}")
         all_stopped = True
 
         for name in shutdown_order:
             self._cancel_pending_restart(name)
+            if name in skip:
+                if self.process_manager.is_running(name):
+                    logger.info("Keeping %s running for the self-update handover", name)
+                continue
             if self.process_manager.is_running(name):
                 logger.info(f"Stopping service: {name}")
                 if not self.process_manager.stop_service(name):
@@ -1974,8 +2135,73 @@ class ServiceRunner:
 
     def _prepare_self_update_shutdown(self) -> None:
         """Stop managed services before allowing Haniel itself to update."""
-        if not self.stop_services():
+        kept = self._arm_self_update_handover()
+        if not self.stop_services(skip=kept):
             raise RuntimeError("Failed to stop all services for self-update")
+
+    def _arm_self_update_handover(self) -> frozenset[str]:
+        """Keep relay-backed services running and record what to adopt."""
+        self._self_update_handover_services = frozenset()
+        entries = self._self_update_handover_entries()
+        if not entries:
+            return frozenset()
+        try:
+            path = write_self_update_handover(self.config_dir, entries)
+        except OSError as error:
+            logger.warning(
+                "Cannot write the self-update handover state; stopping every "
+                "service: %s",
+                error,
+            )
+            return frozenset()
+        self._self_update_handover_services = frozenset(entry.name for entry in entries)
+        logger.info(
+            "Self-update handover prepared at %s for: %s",
+            path,
+            ", ".join(sorted(self._self_update_handover_services)),
+        )
+        return self._self_update_handover_services
+
+    def _discard_self_update_handover(self) -> None:
+        """Forget a prepared handover after the self-update was cancelled."""
+        if not self._self_update_handover_services:
+            return
+        discard_self_update_handover(self.config_dir)
+        self._self_update_handover_services = frozenset()
+        logger.info("Discarded the self-update handover state after cancellation")
+
+    def _self_update_handover_entries(self) -> list[HandoverServiceState]:
+        entries: list[HandoverServiceState] = []
+        for name, managed in self.process_manager.relay_backed_processes():
+            config = managed.config
+            if config.repo is None or managed.process is None:
+                continue
+            try:
+                runtime = self._snapshot_repo_runtime(config.repo)
+                if not runtime.config.release_manifest:
+                    continue
+                manifest = self._current_release_manifest(runtime)
+                strategy = manifest.service_restart_strategies.get(name)
+                if strategy is None:
+                    continue
+                head = get_head(self.config_dir / runtime.config.path)
+            except (ValueError, OSError, GitError) as error:
+                logger.warning(
+                    "Not handing over %s: cannot resolve its repository state: %s",
+                    name,
+                    error,
+                )
+                continue
+            entries.append(
+                HandoverServiceState(
+                    name=name,
+                    pid=managed.process.pid,
+                    repo=config.repo,
+                    head=head,
+                    exit_timeout_sec=strategy.exit_timeout_sec,
+                )
+            )
+        return entries
 
     def start(self) -> None:
         """Start the runner (services + poll loop + MCP server)."""
@@ -2119,7 +2345,12 @@ class ServiceRunner:
             if self._orch_client:
                 self._orch_client.stop()
 
-            self.stop_services()
+            handover = (
+                self._self_update_handover_services
+                if self._self_update_requested.is_set()
+                else frozenset()
+            )
+            self.stop_services(skip=handover)
         except BaseException as error:
             with self._state_lock:
                 self._stop_error = error
@@ -4961,6 +5192,7 @@ class ServiceRunner:
                 aborted.set()
                 ready.set()
                 worker.join()
+            self._discard_self_update_handover()
             self._self_update_prestager.discard_result()
             if handoff_started and on_abort is not None:
                 try:

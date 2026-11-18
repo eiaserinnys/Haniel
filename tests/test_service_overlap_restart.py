@@ -149,16 +149,22 @@ def test_timeout_sends_sigterm_without_marking_old_as_crashed(tmp_path: Path, ca
 
 
 @pytest.mark.parametrize(
-    "previous,safe,running,expected",
+    "previous,block_reason,running,expected",
     [
-        (True, True, True, True),
-        (False, True, True, False),
-        (True, False, True, False),
-        (True, True, False, False),
+        (True, None, True, True),
+        (False, None, True, False),
+        (
+            True,
+            "contract preflight pending_count is not zero "
+            "(operation=upgrade, pending_count=1)",
+            True,
+            False,
+        ),
+        (True, None, False, False),
     ],
 )
 def test_adapter_overlap_plan_and_dependent_filter(
-    tmp_path, monkeypatch, previous, safe, running, expected
+    tmp_path, monkeypatch, previous, block_reason, running, expected
 ):
     from tests.test_service_restart_filter import _adapter_fixture
     from haniel.core.runner_deployment import RunnerDeploymentAdapter
@@ -183,7 +189,7 @@ def test_adapter_overlap_plan_and_dependent_filter(
         "haniel.core.runner_deployment.get_changed_paths_between",
         lambda *args: ["src/app.py"],
     )
-    candidates, overlap = adapter.plan_overlap(safe)
+    candidates, overlap = adapter.plan_overlap(block_reason)
     assert ("app" in overlap) is expected
     assert (candidates is not None and "worker" in candidates.services) is expected
     if expected:
@@ -201,13 +207,13 @@ def test_previous_manifest_missing_or_unreadable_falls_back(tmp_path, monkeypatc
         runner, "app", ["app"], repo, "", target_head="new"
     )
     adapter.manifest = manifest({"mode": "overlap"})
-    assert adapter.plan_overlap(True)[1] == frozenset()
+    assert adapter.plan_overlap("contract preflight blocked")[1] == frozenset()
     adapter.previous_head = head
     monkeypatch.setattr(
         "haniel.core.runner_deployment.read_file_at_commit",
         MagicMock(side_effect=ValueError("bad manifest")),
     )
-    assert adapter.plan_overlap(True)[1] == frozenset()
+    assert adapter.plan_overlap("contract preflight blocked")[1] == frozenset()
 
 
 @pytest.mark.parametrize(
@@ -227,9 +233,9 @@ def test_preflight_controls_overlap_and_journal(tmp_path, pending, expected):
     payload["service_restart_strategies"] = {"app": {"mode": "overlap"}}
     seen = []
 
-    def plan(safe):
-        seen.append(safe)
-        return None, frozenset({"app"}) if safe else frozenset()
+    def plan(block_reason):
+        seen.append(block_reason)
+        return None, (frozenset({"app"}) if block_reason is None else frozenset())
 
     def command(spec, environment):
         if spec.name == "preflight":
@@ -259,7 +265,7 @@ def test_preflight_controls_overlap_and_journal(tmp_path, pending, expected):
         )
     except DeploymentError:
         assert not expected
-    assert seen == [expected]
+    assert [reason is None for reason in seen] == [expected]
     journal = store.read("app")
     assert journal.get("overlap_services", []) == (["app"] if expected else [])
 
@@ -558,5 +564,5 @@ def test_plan_logs_distinct_previous_manifest_reasons(
             lambda *args: manifest().model_dump_json().encode(),
         )
     with caplog.at_level("INFO"):
-        adapter.plan_overlap(True)
+        adapter.plan_overlap(None)
     assert reason in caplog.text

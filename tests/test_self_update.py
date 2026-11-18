@@ -166,6 +166,7 @@ class TestRunnerSelfUpdate:
         runner._stop_owner_thread_id = None
         runner._stop_error = None
         runner._self_update_requested = threading.Event()
+        runner._self_update_handover_services = frozenset()
         runner._self_update_prestager = MagicMock()
         runner._self_update_prestager.freeze_target.return_value = "a" * 40
         runner._self_update_prestager.prepare.return_value = SimpleNamespace(
@@ -183,6 +184,7 @@ class TestRunnerSelfUpdate:
         runner._pull_locks = {name: threading.Lock() for name in config.repos}
         runner.process_manager = MagicMock()
         runner.process_manager.is_running.return_value = False
+        runner.process_manager.relay_backed_processes.return_value = []
         runner._dependency_graph = MagicMock()
         runner._dependency_graph.get_dependencies.return_value = []
         runner._dependency_graph.get_dependents.return_value = []

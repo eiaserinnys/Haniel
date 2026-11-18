@@ -123,6 +123,19 @@ class PosixHandler(PlatformHandler):
         except OSError:
             return False
 
+    def is_pid_zombie(self, pid: int) -> bool:
+        """Return True when the PID is an exited process waiting to be reaped."""
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as stat_file:
+                data = stat_file.read()
+        except OSError:
+            return False
+        try:
+            state = data.rsplit(b")", 1)[1].split()[0]
+        except (IndexError, ValueError):
+            return False
+        return state == b"Z"
+
     def terminate_pid(self, pid: int) -> None:
         """Send SIGTERM to a PID."""
         try:

@@ -43,6 +43,7 @@ from .release_manifest import (
     resolve_manifest_service_cwd,
     resolve_manifest_service_environment,
 )
+from .process import relay_capable
 from .restart_filter import RestartFilterCandidates, plan_restart_skips
 from .service_environment import ServiceEnvironmentFile
 from .safety_redaction import bounded_redact_text
@@ -142,9 +143,14 @@ class RunnerDeploymentAdapter:
         )
 
     def plan_overlap(
-        self, safe: bool
+        self, block_reason: str | None
     ) -> tuple[RestartFilterCandidates | None, frozenset[str]]:
-        """Choose overlap and recalculate filters after preflight is known."""
+        """Choose overlap and recalculate filters after preflight is known.
+
+        ``block_reason`` is the contract preflight verdict from
+        :func:`haniel.core.deployment.contract_preflight_block_reason`;
+        ``None`` means overlap may proceed.
+        """
         assert self.manifest is not None
         previous = None
         previous_reason = "no previous commit"
@@ -161,8 +167,8 @@ class RunnerDeploymentAdapter:
         for name in sorted(
             set(self.affected) & self.manifest.service_restart_strategies.keys()
         ):
-            if not safe:
-                reason = "contract preflight pending_count is not zero or operation is not upgrade"
+            if block_reason is not None:
+                reason = block_reason
             elif previous is None or name not in previous.service_restart_strategies:
                 reason = previous_reason
             elif not self.runner.process_manager.is_running(name):
@@ -412,6 +418,9 @@ class RunnerDeploymentAdapter:
                         expected_env_path=binding.path if binding else None,
                         expected_env_sha256=binding.sha256 if binding else None,
                         approved_env_snapshot=binding.snapshot if binding else None,
+                        log_relay=relay_capable(
+                            self.config_snapshot.enabled_services[service]
+                        ),
                     )
                 except Exception:
                     if self.runner.process_manager.is_running(service):

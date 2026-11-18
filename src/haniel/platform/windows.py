@@ -206,6 +206,10 @@ $listeners | ForEach-Object {{ Write-Output $_ }}
 
         return result.returncode == 0 and bool(result.stdout.strip())
 
+    def is_pid_zombie(self, pid: int) -> bool:
+        """Windows has no zombie state; an exited PID is already gone."""
+        return False
+
     def terminate_pid(self, pid: int) -> None:
         """Ask a process tree to terminate without force."""
         try:
