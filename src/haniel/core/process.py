@@ -16,11 +16,12 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
 import urllib.error
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Callable
@@ -31,7 +32,12 @@ from .health import HealthManager, ServiceState
 from .logs import LogCapture, LogManager, StreamReader
 from .service_environment import ServiceEnvironmentFile, service_process_environment
 from .service_locks import ServiceLockRegistry
-from .stale_instance import PortInUseError, StaleInstanceCleaner, extract_ready_port
+from .stale_instance import (
+    PortInUseError,
+    StaleInstanceCleaner,
+    extract_ready_port,
+    pid_matches_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +97,7 @@ class ManagedProcess:
     ready_failure_event: threading.Event | None = None
     ready_exit_code: int | None = None
     intentional_stop: bool = False
+    relay_processes: list[subprocess.Popen] = field(default_factory=list)
     _ready_callback_added: bool = False
 
 
@@ -154,6 +161,7 @@ class ProcessManager:
         expected_env_path: str | None = None,
         expected_env_sha256: str | None = None,
         approved_env_snapshot: ServiceEnvironmentFile | None = None,
+        log_relay: bool = False,
     ) -> ManagedProcess:
         """Start a service process.
 
@@ -167,6 +175,8 @@ class ProcessManager:
             ready_timeout: Timeout for ready condition (default: 60s)
             on_ready: Callback when service is ready
             on_crash: Callback when service crashes
+            log_relay: Send stdout/stderr through log_sink relays so the log
+                stream survives a Haniel replacement
 
         Returns:
             ManagedProcess instance
@@ -184,6 +194,7 @@ class ProcessManager:
                 expected_env_path=expected_env_path,
                 expected_env_sha256=expected_env_sha256,
                 approved_env_snapshot=approved_env_snapshot,
+                log_relay=log_relay,
             )
 
     def _start_service_locked(
@@ -197,6 +208,7 @@ class ProcessManager:
         expected_env_sha256: str | None,
         approved_env_snapshot: ServiceEnvironmentFile | None,
         overlap: bool = False,
+        log_relay: bool = False,
     ) -> ManagedProcess:
         with self._lock:
             if (
@@ -253,6 +265,10 @@ class ProcessManager:
             if resolved and resolved.lower().endswith((".cmd", ".bat")):
                 popen_kwargs["shell"] = True
 
+        relay_processes = self._start_log_relays(name) if log_relay else []
+        for relay in relay_processes:
+            self._start_relay_reaper(relay)
+
         try:
             child_env = service_process_environment(
                 self.config_dir,
@@ -261,22 +277,33 @@ class ProcessManager:
                 expected_env_sha256=expected_env_sha256,
                 approved_snapshot=approved_env_snapshot,
             )
-            if overlap:
-                process = self._spawn_process(
-                    name, cmd, cwd, popen_kwargs, child_env, record_failure=False
-                )
-            else:
-                process = self._spawn_process(name, cmd, cwd, popen_kwargs, child_env)
+            process = self._spawn_process(
+                name,
+                cmd,
+                cwd,
+                popen_kwargs,
+                child_env,
+                record_failure=not overlap,
+                stdout=(
+                    relay_processes[0].stdin if relay_processes else subprocess.PIPE
+                ),
+                stderr=(
+                    relay_processes[1].stdin if relay_processes else subprocess.PIPE
+                ),
+            )
         except Exception:
+            self._abort_log_relays(relay_processes)
             if overlap:
                 log_capture.stop()
             raise
+
+        self._close_log_relay_stdin(relay_processes)
 
         # Set up process group
         self.platform.setup_process_group(process)
 
         if not overlap:
-            process = self._retry_after_immediate_port_exit(
+            process, relay_processes = self._retry_after_immediate_port_exit(
                 name=name,
                 config=config,
                 cwd=cwd,
@@ -285,6 +312,7 @@ class ProcessManager:
                 child_env=child_env,
                 process=process,
                 log_capture=log_capture,
+                relay_processes=relay_processes,
             )
 
         # Create managed process
@@ -295,6 +323,7 @@ class ProcessManager:
             log_capture=log_capture,
             ready_event=threading.Event(),
             ready_failure_event=threading.Event(),
+            relay_processes=relay_processes,
         )
 
         # Start stream readers
@@ -340,6 +369,7 @@ class ProcessManager:
         expected_env_path: str | None = None,
         expected_env_sha256: str | None = None,
         approved_env_snapshot: ServiceEnvironmentFile | None = None,
+        log_relay: bool = False,
     ) -> bool:
         """Prepare a replacement before retiring the current service process."""
         with self.service_locks.hold(name):
@@ -361,6 +391,7 @@ class ProcessManager:
                     expected_env_sha256,
                     approved_env_snapshot,
                     overlap=True,
+                    log_relay=log_relay,
                 )
             except Exception:
                 old.intentional_stop = False
@@ -431,6 +462,229 @@ class ProcessManager:
         if managed.log_capture:
             managed.log_capture.stop()
 
+    def adopt_handover_service(
+        self,
+        name: str,
+        config: ServiceConfig,
+        *,
+        previous_pid: int,
+        exit_timeout: float,
+        ready_timeout: float,
+        on_ready: Callable[[], None] | None = None,
+        on_crash: Callable[[int | None], None] | None = None,
+        expected_env_path: str | None = None,
+        expected_env_sha256: str | None = None,
+        approved_env_snapshot: ServiceEnvironmentFile | None = None,
+        log_relay: bool = False,
+    ) -> bool:
+        """Replace a service process inherited from the previous Haniel.
+
+        The inherited process is not a child here, so it is watched by PID
+        instead of ``Popen.wait()``. Once the replacement is ready it becomes
+        the managed process and the old PID is retired: wait for a self-exit,
+        then SIGTERM after re-checking the command line, then SIGKILL. A
+        replacement that never becomes ready is stopped together with the old
+        PID, and the caller falls back to the ordinary start path.
+        """
+        with self.service_locks.hold(name):
+            if not self._inherited_pid_running(previous_pid):
+                return False
+            started = time.monotonic()
+            new = self._start_service_locked(
+                name,
+                config,
+                ready_timeout,
+                on_ready,
+                on_crash,
+                expected_env_path,
+                expected_env_sha256,
+                approved_env_snapshot,
+                overlap=True,
+                log_relay=log_relay,
+            )
+            if (
+                not self._wait_for_managed_ready(new, ready_timeout)
+                or new.process.poll() is not None
+            ):
+                logger.warning(
+                    "Self-update handover for %s did not complete: replacement "
+                    "failed readiness; starting normally",
+                    name,
+                )
+                self._retire_overlap_process(new, 0)
+                with self._lock:
+                    self._pending_processes.pop(name, None)
+                self._stop_inherited_pid(config, previous_pid)
+                return False
+            with self._lock:
+                self._processes[name] = new
+                self._pending_processes.pop(name, None)
+            self.log_manager.replace_capture(name, new.log_capture)
+            self._start_crash_monitor(new, on_crash)
+            method = self._retire_inherited_pid(
+                name, config, previous_pid, exit_timeout
+            )
+            logger.info(
+                "Self-update handover for %s: pid=%s previous_pid=%s method=%s "
+                "elapsed=%.2fs",
+                name,
+                new.process.pid,
+                previous_pid,
+                method,
+                time.monotonic() - started,
+            )
+            return True
+
+    def relay_backed_processes(self) -> list[tuple[str, ManagedProcess]]:
+        """Return running services whose output goes through relay processes."""
+        with self._lock:
+            managed = [
+                (name, item)
+                for name, item in self._processes.items()
+                if item.relay_processes
+            ]
+        return [
+            (name, item)
+            for name, item in managed
+            if item.process is not None and item.process.poll() is None
+        ]
+
+    def _inherited_pid_running(self, pid: int) -> bool:
+        return self.platform.is_pid_running(pid) and not self.platform.is_pid_zombie(
+            pid
+        )
+
+    def _wait_for_pid_exit(self, pid: int, timeout: float) -> bool:
+        deadline = time.monotonic() + max(timeout, 0)
+        while True:
+            if not self._inherited_pid_running(pid):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(min(self.POLL_INTERVAL, max(deadline - time.monotonic(), 0)))
+
+    def _retire_inherited_pid(
+        self,
+        name: str,
+        config: ServiceConfig,
+        pid: int,
+        exit_timeout: float,
+    ) -> str:
+        if self._wait_for_pid_exit(pid, exit_timeout):
+            return "self"
+        if not self._inherited_pid_running(pid):
+            return "self"
+        if not pid_matches_service(self.platform, pid, config):
+            logger.warning(
+                "Self-update handover for %s: pid=%s no longer matches the "
+                "service; not terminating it",
+                name,
+                pid,
+            )
+            return "self"
+        self.platform.terminate_pid(pid)
+        shutdown_timeout = (
+            config.shutdown.timeout if config.shutdown else self.shutdown_config.timeout
+        )
+        if self._wait_for_pid_exit(pid, shutdown_timeout):
+            return "term"
+        if not pid_matches_service(self.platform, pid, config):
+            logger.warning(
+                "Self-update handover for %s: pid=%s no longer matches the "
+                "service; not killing it",
+                name,
+                pid,
+            )
+            return "term"
+        self.platform.kill_pid(pid)
+        self._wait_for_pid_exit(pid, self.shutdown_config.kill_timeout)
+        return "kill"
+
+    def _stop_inherited_pid(self, config: ServiceConfig, pid: int) -> None:
+        self.platform.terminate_pid(pid)
+        shutdown_timeout = (
+            config.shutdown.timeout if config.shutdown else self.shutdown_config.timeout
+        )
+        if not self._wait_for_pid_exit(pid, shutdown_timeout):
+            self.platform.kill_pid(pid)
+            self._wait_for_pid_exit(pid, self.shutdown_config.kill_timeout)
+
+    def _start_log_relays(self, name: str) -> list[subprocess.Popen]:
+        """Start one stand-in relay per stream for a relay-backed service."""
+        log_path = self.log_dir / f"{name}.log"
+        relays: list[subprocess.Popen] = []
+        try:
+            for source in ("stdout", "stderr"):
+                relays.append(self._spawn_log_relay(name, source, log_path))
+        except BaseException:
+            self._abort_log_relays(relays)
+            raise
+        return relays
+
+    def _spawn_log_relay(
+        self,
+        name: str,
+        source: str,
+        log_path: Path,
+    ) -> subprocess.Popen:
+        command = [
+            sys.executable,
+            "-m",
+            "haniel.core.log_sink",
+            "--service",
+            name,
+            "--source",
+            source,
+            "--log-file",
+            str(log_path),
+        ]
+        environment = _log_relay_environment()
+        popen_kwargs = self.platform.get_subprocess_kwargs()
+        try:
+            return _popen_log_relay(command, environment, popen_kwargs)
+        except PermissionError:
+            # CREATE_BREAKAWAY_FROM_JOB requires specific Job Object
+            # permissions. Retry without breakaway flag if denied.
+            if os.name == "nt" and "creationflags" in popen_kwargs:
+                from haniel.platform.windows import CREATE_BREAKAWAY_FROM_JOB
+
+                flags = popen_kwargs["creationflags"]
+                if flags & CREATE_BREAKAWAY_FROM_JOB:
+                    retry_kwargs = dict(popen_kwargs)
+                    retry_kwargs["creationflags"] = flags & ~CREATE_BREAKAWAY_FROM_JOB
+                    return _popen_log_relay(command, environment, retry_kwargs)
+            raise
+
+    @staticmethod
+    def _start_relay_reaper(relay: subprocess.Popen) -> None:
+        """Reap a relay process so it never stays a zombie."""
+
+        def reap() -> None:
+            try:
+                relay.wait()
+            except Exception:
+                pass
+
+        threading.Thread(target=reap, daemon=True, name="haniel-log-relay").start()
+
+    @staticmethod
+    def _close_log_relay_stdin(relays: list[subprocess.Popen]) -> None:
+        """Drop the parent's write ends so EOF follows the service exit."""
+        for relay in relays:
+            stream = relay.stdin
+            if stream is None:
+                continue
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+    def _abort_log_relays(self, relays: list[subprocess.Popen]) -> None:
+        self._close_log_relay_stdin(relays)
+        for relay in relays:
+            if relay.poll() is None:
+                relay.terminate()
+
     def _spawn_process(
         self,
         name: str,
@@ -440,14 +694,16 @@ class ProcessManager:
         child_env: dict[str, str],
         *,
         record_failure: bool = True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     ) -> subprocess.Popen:
         """Spawn a process, preserving Windows breakaway fallback behavior."""
         try:
             return subprocess.Popen(
                 cmd,
                 cwd=cwd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=stdout,
+                stderr=stderr,
                 text=True,
                 env=child_env,
                 **popen_kwargs,
@@ -469,8 +725,8 @@ class ProcessManager:
                         return subprocess.Popen(
                             cmd,
                             cwd=cwd,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
+                            stdout=stdout,
+                            stderr=stderr,
                             text=True,
                             env=child_env,
                             **retry_kwargs,
@@ -524,18 +780,19 @@ class ProcessManager:
         child_env: dict[str, str],
         process: subprocess.Popen,
         log_capture: LogCapture,
-    ) -> subprocess.Popen:
+        relay_processes: list[subprocess.Popen],
+    ) -> tuple[subprocess.Popen, list[subprocess.Popen]]:
         if extract_ready_port(config) is None:
-            return process
+            return process, relay_processes
 
         exit_code = self._wait_for_immediate_exit(process)
         if exit_code is None:
-            return process
+            return process, relay_processes
 
         self._capture_exited_process_output(process, log_capture)
         cleaner = StaleInstanceCleaner(self.platform)
         if not cleaner.has_ready_port_occupants(config):
-            return process
+            return process, relay_processes
 
         logger.warning(
             "Service %s exited within %.1fs while its ready port remains in use; "
@@ -555,9 +812,25 @@ class ProcessManager:
             logger.error(str(e))
             raise RuntimeError(str(e)) from e
 
-        retry = self._spawn_process(name, cmd, cwd, popen_kwargs, child_env)
+        retry_relays = self._start_log_relays(name) if relay_processes else []
+        for relay in retry_relays:
+            self._start_relay_reaper(relay)
+        try:
+            retry = self._spawn_process(
+                name,
+                cmd,
+                cwd,
+                popen_kwargs,
+                child_env,
+                stdout=retry_relays[0].stdin if retry_relays else subprocess.PIPE,
+                stderr=retry_relays[1].stdin if retry_relays else subprocess.PIPE,
+            )
+        except Exception:
+            self._abort_log_relays(retry_relays)
+            raise
+        self._close_log_relay_stdin(retry_relays)
         self.platform.setup_process_group(retry)
-        return retry
+        return retry, retry_relays
 
     def _wait_for_immediate_exit(self, process: subprocess.Popen) -> int | None:
         deadline = time.monotonic() + max(self.immediate_exit_window, 0)
@@ -1176,3 +1449,37 @@ class ProcessManager:
 
         # Clear process reference
         managed.process = None
+
+
+def _popen_log_relay(
+    command: list[str],
+    environment: dict[str, str],
+    popen_kwargs: dict,
+) -> subprocess.Popen:
+    return subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        env=environment,
+        **popen_kwargs,
+    )
+
+
+def _log_relay_environment() -> dict[str, str]:
+    """Make the haniel package importable by ``-m haniel.core.log_sink``."""
+    environment = os.environ.copy()
+    source_root = str(Path(__file__).resolve().parents[2])
+    existing = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = (
+        source_root if not existing else source_root + os.pathsep + existing
+    )
+    return environment
+
+
+def relay_capable(config: ServiceConfig) -> bool:
+    """Whether this service's output can go through a stand-in relay.
+
+    ``ready: log:`` conditions read lines through LogCapture, so those
+    services keep the direct pipe.
+    """
+    return not (config.ready or "").startswith("log:")

@@ -929,7 +929,7 @@ class TestServiceRunnerExtended:
         waiter_entered = threading.Event()
         waiter_returned = threading.Event()
 
-        def blocking_stop_services() -> bool:
+        def blocking_stop_services(skip=frozenset()) -> bool:
             cleanup_entered.set()
             assert release_cleanup.wait(timeout=2)
             return True

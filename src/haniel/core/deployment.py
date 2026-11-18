@@ -52,7 +52,8 @@ class DeploymentCallbacks:
     restart_candidates: RestartFilterCandidates | None = None
     apply_restart_skips: Callable[[frozenset[str]], frozenset[str]] | None = None
     plan_overlap: (
-        Callable[[bool], tuple[RestartFilterCandidates | None, frozenset[str]]] | None
+        Callable[[str | None], tuple[RestartFilterCandidates | None, frozenset[str]]]
+        | None
     ) = None
 
 
@@ -88,6 +89,57 @@ class DeploymentVerificationError(DeploymentError):
             f"deployment verification failed; target preserved: {error}",
             recovered=False,
         )
+
+
+def contract_preflight_block_reason(
+    *,
+    contract_mode: bool,
+    operation: str | None,
+    preflight: CommandResult | None,
+) -> str | None:
+    """Return why the contract preflight blocks overlap and restart skips.
+
+    ``None`` means neither is blocked. Each message names the cause and
+    carries the operation and the actual ``pending_count`` value so a log
+    line alone tells which of the four conditions applied.
+    """
+    if not contract_mode:
+        return None
+    payload = preflight.json_data if preflight is not None else None
+    pending_text = _pending_count_text(payload)
+    if operation != "upgrade":
+        return (
+            "contract operation is not an upgrade "
+            f"(operation={operation}, {pending_text})"
+        )
+    if not isinstance(payload, dict):
+        return (
+            "contract preflight returned no JSON object "
+            "(operation=upgrade, pending_count=missing)"
+        )
+    if "pending_count" not in payload:
+        return (
+            "contract preflight result has no pending_count "
+            "(operation=upgrade, pending_count=missing)"
+        )
+    pending = payload.get("pending_count")
+    if type(pending) is not int:
+        return (
+            "contract preflight pending_count is not an integer "
+            f"(operation=upgrade, pending_count={pending!r})"
+        )
+    if pending != 0:
+        return (
+            "contract preflight pending_count is not zero "
+            f"(operation=upgrade, pending_count={pending})"
+        )
+    return None
+
+
+def _pending_count_text(payload: object) -> str:
+    if not isinstance(payload, dict) or "pending_count" not in payload:
+        return "pending_count=missing"
+    return f"pending_count={payload.get('pending_count')!r}"
 
 
 class DeploymentCoordinator:
@@ -194,16 +246,14 @@ class DeploymentCoordinator:
                         database_journal_path=database_journal_path,
                     )
 
+            preflight_block = contract_preflight_block_reason(
+                contract_mode=contract_mode,
+                operation=operation,
+                preflight=preflight,
+            )
             overlap_services: frozenset[str] = frozenset()
             if callbacks.plan_overlap is not None:
-                payload = preflight.json_data if preflight is not None else None
-                pending = (
-                    payload.get("pending_count") if isinstance(payload, dict) else None
-                )
-                safe = not contract_mode or (
-                    operation == "upgrade" and type(pending) is int and pending == 0
-                )
-                candidates, overlap_services = callbacks.plan_overlap(safe)
+                candidates, overlap_services = callbacks.plan_overlap(preflight_block)
                 callbacks = replace(callbacks, restart_candidates=candidates)
                 if overlap_services:
                     self.state_store.record_overlap_services(
@@ -213,9 +263,7 @@ class DeploymentCoordinator:
                 repo_name=repo_name,
                 target_head=target_head,
                 callbacks=callbacks,
-                contract_mode=contract_mode,
-                operation=operation,
-                preflight=preflight,
+                block_reason=preflight_block,
             )
             skipped_services = (
                 callbacks.apply_restart_skips(confirmed_services)
@@ -323,41 +371,16 @@ class DeploymentCoordinator:
         repo_name: str,
         target_head: str,
         callbacks: DeploymentCallbacks,
-        contract_mode: bool,
-        operation: str | None,
-        preflight: CommandResult | None,
+        block_reason: str | None,
     ) -> frozenset[str]:
         """Decide which candidate services stay running for this attempt."""
         candidates = callbacks.restart_candidates
         if candidates is None or not candidates.services:
             return frozenset()
-        if not contract_mode:
-            return candidates.services
-        if operation != "upgrade":
-            self._log_restart_skips(
-                repo_name,
-                target_head,
-                candidates,
-                frozenset(),
-                reason="contract operation is not an upgrade",
-            )
-            return frozenset()
-        payload = preflight.json_data if preflight is not None else None
-        pending_count = (
-            payload.get("pending_count") if isinstance(payload, dict) else None
-        )
-        if not isinstance(payload, dict):
-            reason = "contract preflight returned no JSON object"
-        elif "pending_count" not in payload:
-            reason = "contract preflight result has no pending_count"
-        elif type(pending_count) is not int:
-            reason = "contract preflight pending_count is not an integer"
-        elif pending_count != 0:
-            reason = f"contract preflight pending_count={pending_count}"
-        else:
+        if block_reason is None:
             return candidates.services
         self._log_restart_skips(
-            repo_name, target_head, candidates, frozenset(), reason=reason
+            repo_name, target_head, candidates, frozenset(), reason=block_reason
         )
         return frozenset()
 

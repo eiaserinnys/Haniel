@@ -13,6 +13,17 @@ from io import TextIOWrapper
 from pathlib import Path
 from typing import Callable
 
+LOG_LINE_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def format_log_line(line: str, source: str = "stdout") -> str | None:
+    """Format one captured line with the shared timestamp/source head."""
+    line = line.rstrip("\n\r")
+    if not line:
+        return None
+    timestamp = datetime.now().strftime(LOG_LINE_TIME_FORMAT)
+    return f"[{timestamp}] [{source}] {line}"
+
 
 class LogCapture:
     """Captures and manages logs for a single service.
@@ -82,12 +93,10 @@ class LogCapture:
             source: Source of the line ("stdout" or "stderr")
         """
         # Strip trailing newline if present (we'll add our own)
-        line = line.rstrip("\n\r")
-        if not line:
+        formatted = format_log_line(line, source)
+        if formatted is None:
             return
-
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        formatted = f"[{timestamp}] [{source}] {line}"
+        line = line.rstrip("\n\r")
 
         with self._lock:
             # Add to buffer

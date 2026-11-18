@@ -71,6 +71,11 @@ class PlatformHandler(ABC):
         pass
 
     @abstractmethod
+    def is_pid_zombie(self, pid: int) -> bool:
+        """Return True when the PID only remains as an unreaped zombie."""
+        pass
+
+    @abstractmethod
     def terminate_pid(self, pid: int) -> None:
         """Ask an arbitrary process to terminate gracefully."""
         pass

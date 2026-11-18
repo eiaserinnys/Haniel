@@ -25,6 +25,20 @@ def extract_ready_port(config: ServiceConfig) -> int | None:
         return None
 
 
+def pid_matches_service(
+    platform: PlatformHandler,
+    pid: int,
+    config: ServiceConfig,
+) -> bool:
+    """Return True when the PID command line identifies the configured service."""
+    command_line = platform.get_process_command_line(pid)
+    if not command_line:
+        return False
+
+    command = _normalize(command_line)
+    return any(fragment in command for fragment in _identity_fragments(config))
+
+
 class StaleInstanceCleaner:
     """Terminate stale service processes before spawning a replacement."""
 
@@ -100,12 +114,7 @@ class StaleInstanceCleaner:
         pid: int,
         config: ServiceConfig,
     ) -> bool:
-        command_line = self.platform.get_process_command_line(pid)
-        if not command_line:
-            return False
-
-        command = _normalize(command_line)
-        return any(fragment in command for fragment in _identity_fragments(config))
+        return pid_matches_service(self.platform, pid, config)
 
     def _wait_until_exited(self, pids: set[int], timeout: float) -> bool:
         deadline = time.monotonic() + max(timeout, 0)
