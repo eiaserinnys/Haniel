@@ -371,6 +371,35 @@ def test_contract_upgrade_with_zero_pending_skips_stop_and_receipt(
     assert states.index("migrating") < states.index("starting")
 
 
+def test_contract_upgrade_with_additive_pending_skips_stop_and_receipt(
+    tmp_path: Path,
+) -> None:
+    validate = MagicMock()
+    with (
+        patch("haniel.core.deployment.validate_quiescence_receipt", validate),
+        patch.object(DeploymentStateStore, "write_quiescence_receipt") as write_receipt,
+    ):
+        events, journal, error = _execute(
+            tmp_path,
+            _manifest_payload(contract=True),
+            preflight_json=_contract_preflight(
+                pending_count=1, pending_additive_only=True
+            ),
+            candidates=_candidates("worker"),
+            writer_services=("app", "worker"),
+            stop_receipt=None,
+        )
+
+    assert error is None
+    assert "skip:worker" in events
+    assert "command:migrate" in events
+    assert journal is not None
+    assert journal["state"] == "success"
+    assert journal["restart_skipped_services"] == ["worker"]
+    validate.assert_not_called()
+    write_receipt.assert_not_called()
+
+
 def test_zero_pending_with_no_running_candidates_keeps_the_old_handover(
     tmp_path: Path,
 ) -> None:
@@ -444,8 +473,20 @@ def test_all_affected_services_skipped_reports_restarting_none(
     [
         pytest.param(_contract_preflight(), id="missing"),
         pytest.param(_contract_preflight(pending_count=1), id="one"),
+        pytest.param(
+            _contract_preflight(pending_count=1, pending_additive_only=False),
+            id="one-not-additive",
+        ),
+        pytest.param(
+            _contract_preflight(pending_count=1, pending_additive_only="true"),
+            id="one-string-true",
+        ),
         pytest.param(_contract_preflight(pending_count="0"), id="string-zero"),
         pytest.param(_contract_preflight(pending_count=False), id="false"),
+        pytest.param(
+            _contract_preflight(pending_count=-1, pending_additive_only=True),
+            id="negative-additive",
+        ),
     ],
 )
 def test_contract_upgrade_without_zero_pending_keeps_the_old_handover(

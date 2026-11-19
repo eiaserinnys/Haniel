@@ -217,9 +217,19 @@ def test_previous_manifest_missing_or_unreadable_falls_back(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize(
-    "pending,expected", [(0, True), (1, False), (None, False), (False, False)]
+    "pending,additive,expected",
+    [
+        (0, None, True),
+        (1, True, True),
+        (1, False, False),
+        (1, None, False),
+        (1, "true", False),
+        (None, True, False),
+        (False, True, False),
+        (-1, True, False),
+    ],
 )
-def test_preflight_controls_overlap_and_journal(tmp_path, pending, expected):
+def test_preflight_controls_overlap_and_journal(tmp_path, pending, additive, expected):
     from haniel.core.deployment import (
         CommandResult,
         DeploymentCallbacks,
@@ -242,6 +252,8 @@ def test_preflight_controls_overlap_and_journal(tmp_path, pending, expected):
             data = _contract_preflight()
             if pending is not None:
                 data["pending_count"] = pending
+            if additive is not None:
+                data["pending_additive_only"] = additive
             return CommandResult(stdout="{}", json_data=data)
 
     callbacks = DeploymentCallbacks(

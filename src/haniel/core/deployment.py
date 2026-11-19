@@ -128,6 +128,8 @@ def contract_preflight_block_reason(
             "contract preflight pending_count is not an integer "
             f"(operation=upgrade, pending_count={pending!r})"
         )
+    if pending > 0 and payload.get("pending_additive_only") is True:
+        return None
     if pending != 0:
         return (
             "contract preflight pending_count is not zero "
