@@ -1792,7 +1792,7 @@ class ServiceRunner:
             )
             return False
         strategy = manifest.service_restart_strategies.get(name)
-        return strategy is not None and strategy.mode == "overlap"
+        return strategy is not None and strategy.mode in ("overlap", "adopt")
 
     def _current_release_manifest(
         self, runtime: RepoRuntimeSnapshot
@@ -1833,7 +1833,11 @@ class ServiceRunner:
         config: ServiceConfig,
         entry: HandoverServiceState,
     ) -> bool:
-        """Start a replacement beside the process the previous Haniel kept."""
+        """Take over the process the previous Haniel kept.
+
+        ``overlap`` starts a replacement beside it; ``adopt`` keeps the same
+        PID and only checks that it is still the service.
+        """
         reason = self._handover_mismatch(name, config, entry)
         if reason is not None:
             logger.info(
@@ -1841,7 +1845,11 @@ class ServiceRunner:
                 name,
                 reason,
             )
+            if entry.mode == "adopt":
+                self.process_manager.retire_inherited_pid(name, config, entry.pid)
             return False
+        if entry.mode == "adopt":
+            return self._adopt_inherited_process(name, config, entry)
         ready_timeout = effective_ready_timeout(
             config, self.process_manager.DEFAULT_READY_TIMEOUT
         )
@@ -1862,6 +1870,33 @@ class ServiceRunner:
                 name,
                 bounded_redact_text(str(error)),
             )
+            return False
+        if not adopted:
+            logger.info("Self-update handover for %s fell back to a normal start", name)
+        return adopted
+
+    def _adopt_inherited_process(
+        self,
+        name: str,
+        config: ServiceConfig,
+        entry: HandoverServiceState,
+    ) -> bool:
+        """Keep the previous Haniel's process running under this Haniel."""
+        try:
+            adopted = self.process_manager.adopt_inherited_pid(
+                name,
+                config,
+                pid=entry.pid,
+                on_ready=lambda n=name: self._on_service_ready(n),
+                on_crash=lambda exit_code, n=name: self._on_service_crash(n, exit_code),
+            )
+        except Exception as error:
+            logger.warning(
+                "Self-update adoption of %s failed: %s; starting normally",
+                name,
+                bounded_redact_text(str(error)),
+            )
+            self.process_manager.retire_inherited_pid(name, config, entry.pid)
             return False
         if not adopted:
             logger.info("Self-update handover for %s fell back to a normal start", name)
@@ -1894,8 +1929,11 @@ class ServiceRunner:
             manifest = self._current_release_manifest(runtime)
         except (OSError, ValueError) as error:
             return f"cannot read the release manifest: {error}"
-        if name not in manifest.service_restart_strategies:
-            return "the release manifest no longer declares overlap"
+        strategy = manifest.service_restart_strategies.get(name)
+        if strategy is None:
+            return "the release manifest no longer declares a handover mode"
+        if strategy.mode != entry.mode:
+            return f"the handover mode changed from {entry.mode} to {strategy.mode}"
         if not self.process_manager.platform.is_pid_running(entry.pid):
             return f"previous process {entry.pid} is gone"
         if self.process_manager.platform.is_pid_zombie(entry.pid):
@@ -2199,6 +2237,7 @@ class ServiceRunner:
                     repo=config.repo,
                     head=head,
                     exit_timeout_sec=strategy.exit_timeout_sec,
+                    mode=strategy.mode,
                 )
             )
         return entries

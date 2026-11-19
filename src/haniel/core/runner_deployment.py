@@ -138,8 +138,17 @@ class RunnerDeploymentAdapter:
             restart_candidates=self.restart_candidates,
             apply_restart_skips=self.apply_restart_skips,
             plan_overlap=self.plan_overlap
-            if self.manifest and self.manifest.service_restart_strategies
+            if self.manifest and self._overlap_declared(self.manifest)
             else None,
+        )
+
+    @staticmethod
+    def _overlap_declared(manifest: ReleaseManifest) -> frozenset[str]:
+        """Services declared with mode ``overlap``; ``adopt`` only affects self-update."""
+        return frozenset(
+            name
+            for name, strategy in manifest.service_restart_strategies.items()
+            if strategy.mode == "overlap"
         )
 
     def plan_overlap(
@@ -153,6 +162,7 @@ class RunnerDeploymentAdapter:
         """
         assert self.manifest is not None
         previous = None
+        previous_overlap: frozenset[str] = frozenset()
         previous_reason = "no previous commit"
         if self.previous_head:
             try:
@@ -160,16 +170,15 @@ class RunnerDeploymentAdapter:
                 previous = ReleaseManifest.model_validate_json(
                     read_file_at_commit(self.repo_path, self.previous_head, path)
                 )
+                previous_overlap = self._overlap_declared(previous)
                 previous_reason = "previous manifest has no overlap declaration"
             except Exception as error:
                 previous_reason = f"cannot read previous manifest: {error}"
         eligible: set[str] = set()
-        for name in sorted(
-            set(self.affected) & self.manifest.service_restart_strategies.keys()
-        ):
+        for name in sorted(set(self.affected) & self._overlap_declared(self.manifest)):
             if block_reason is not None:
                 reason = block_reason
-            elif previous is None or name not in previous.service_restart_strategies:
+            elif previous is None or name not in previous_overlap:
                 reason = previous_reason
             elif not self.runner.process_manager.is_running(name):
                 reason = "service is not running"

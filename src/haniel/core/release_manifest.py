@@ -96,11 +96,19 @@ class ServiceRestartFilter(BaseModel):
 
 
 class ServiceRestartStrategy(BaseModel):
-    """Opt in to process overlap during manifest deployment."""
+    """Opt in to keeping a service running across a restart of Haniel or the service.
+
+    ``overlap`` starts a replacement beside the old process during a manifest
+    deployment and across a Haniel self-update; the service must support
+    concurrent binding. ``adopt`` only changes the Haniel self-update: the
+    running process is left alone and the new Haniel takes over the same PID.
+    A manifest deployment restarts an ``adopt`` service by the ordinary stop and
+    start. ``exit_timeout_sec`` only means something for ``overlap``.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal["overlap"]
+    mode: Literal["overlap", "adopt"]
     exit_timeout_sec: int = Field(default=60, ge=1)
 
 

@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 STATE_RELPATH = Path(".local") / "self_update_handover.json"
 STATE_VERSION = 1
+HANDOVER_MODES = ("overlap", "adopt")
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class HandoverServiceState:
     repo: str
     head: str
     exit_timeout_sec: int
+    mode: str = "overlap"
 
 
 def write(config_dir: Path, services: list[HandoverServiceState]) -> Path:
@@ -37,16 +39,7 @@ def write(config_dir: Path, services: list[HandoverServiceState]) -> Path:
     payload = {
         "version": STATE_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "services": [
-            {
-                "name": service.name,
-                "pid": service.pid,
-                "repo": service.repo,
-                "head": service.head,
-                "exit_timeout_sec": service.exit_timeout_sec,
-            }
-            for service in services
-        ],
+        "services": [_service_payload(service) for service in services],
     }
     path = config_dir / STATE_RELPATH
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -56,6 +49,20 @@ def write(config_dir: Path, services: list[HandoverServiceState]) -> Path:
     )
     os.replace(temporary, path)
     return path
+
+
+def _service_payload(service: HandoverServiceState) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "name": service.name,
+        "pid": service.pid,
+        "repo": service.repo,
+        "head": service.head,
+        "exit_timeout_sec": service.exit_timeout_sec,
+    }
+    # A missing mode means overlap, so overlap state files keep their old shape.
+    if service.mode != "overlap":
+        payload["mode"] = service.mode
+    return payload
 
 
 def read_and_clear(config_dir: Path) -> list[HandoverServiceState]:
@@ -122,6 +129,9 @@ def _parse_services(payload: object) -> list[HandoverServiceState]:
             raise ValueError("service head must be a non-empty string")
         if type(exit_timeout_sec) is not int or exit_timeout_sec <= 0:
             raise ValueError("service exit_timeout_sec must be a positive integer")
+        mode = raw.get("mode", "overlap")
+        if mode not in HANDOVER_MODES:
+            raise ValueError(f"service mode must be one of {HANDOVER_MODES}")
         services.append(
             HandoverServiceState(
                 name=name,
@@ -129,6 +139,7 @@ def _parse_services(payload: object) -> list[HandoverServiceState]:
                 repo=repo,
                 head=head,
                 exit_timeout_sec=exit_timeout_sec,
+                mode=mode,
             )
         )
     return services

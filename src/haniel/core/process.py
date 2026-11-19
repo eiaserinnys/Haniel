@@ -83,13 +83,72 @@ class ReadyCondition:
             raise ValueError(f"Unknown ready condition format: {condition}")
 
 
+class PidProcessHandle:
+    """Popen-like handle for a process this Haniel did not spawn.
+
+    A service adopted across a Haniel self-update is not a child of the new
+    Haniel, so ``Popen.wait()`` cannot see it exit. This handle exposes the
+    small Popen surface the manager uses (``pid``, ``poll``, ``wait``,
+    ``terminate``, ``kill``, ``returncode``) and judges liveness by PID with
+    the platform's ``is_pid_running`` and ``is_pid_zombie``. The exit code of
+    a process that is not our child cannot be read, so a vanished process
+    reports ``EXIT_CODE_UNKNOWN``.
+    """
+
+    EXIT_CODE_UNKNOWN = -1
+    # Windows ``is_pid_running`` starts powershell, so poll it far less often.
+    MONITOR_INTERVAL = 10.0 if os.name == "nt" else 2.0
+    WAIT_INTERVAL = 1.0 if os.name == "nt" else 0.1
+
+    def __init__(self, pid: int, platform) -> None:
+        self.pid = pid
+        self.platform = platform
+        self.returncode: int | None = None
+
+    def poll(self) -> int | None:
+        if self.returncode is not None:
+            return self.returncode
+        if self.platform.is_pid_running(self.pid) and not self.platform.is_pid_zombie(
+            self.pid
+        ):
+            return None
+        self.returncode = self.EXIT_CODE_UNKNOWN
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        """Wait for the PID to disappear.
+
+        Without a timeout (the crash monitor) the PID is checked every
+        ``MONITOR_INTERVAL``; with one (stop paths) every ``WAIT_INTERVAL``.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        interval = self.MONITOR_INTERVAL if timeout is None else self.WAIT_INTERVAL
+        while True:
+            returncode = self.poll()
+            if returncode is not None:
+                return returncode
+            if deadline is None:
+                time.sleep(interval)
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(f"pid {self.pid}", timeout)
+            time.sleep(min(interval, remaining))
+
+    def terminate(self) -> None:
+        self.platform.terminate_pid(self.pid)
+
+    def kill(self) -> None:
+        self.platform.kill_pid(self.pid)
+
+
 @dataclass
 class ManagedProcess:
     """A process managed by haniel."""
 
     name: str
     config: ServiceConfig
-    process: subprocess.Popen | None = None
+    process: subprocess.Popen | PidProcessHandle | None = None
     log_capture: LogCapture | None = None
     stdout_reader: StreamReader | None = None
     stderr_reader: StreamReader | None = None
@@ -98,6 +157,9 @@ class ManagedProcess:
     ready_exit_code: int | None = None
     intentional_stop: bool = False
     relay_processes: list[subprocess.Popen] = field(default_factory=list)
+    # True for an adopted process: its relays belong to the previous Haniel,
+    # but its output still goes through relays, so it can be handed over again.
+    relay_backed: bool = False
     _ready_callback_added: bool = False
 
 
@@ -535,13 +597,88 @@ class ProcessManager:
             )
             return True
 
+    def adopt_inherited_pid(
+        self,
+        name: str,
+        config: ServiceConfig,
+        *,
+        pid: int,
+        on_ready: Callable[[], None] | None = None,
+        on_crash: Callable[[int | None], None] | None = None,
+    ) -> bool:
+        """Take over a service the previous Haniel left running, without a restart.
+
+        No replacement is started. The inherited PID becomes the managed
+        process behind a ``PidProcessHandle`` and the service's ready
+        condition is checked once. When the PID is gone or the check fails the
+        PID is retired by the ordinary handover retirement and False is
+        returned so the caller starts the service normally.
+        """
+        with self.service_locks.hold(name):
+            handle = PidProcessHandle(pid, self.platform)
+            if handle.poll() is not None:
+                return False
+            managed = ManagedProcess(
+                name=name,
+                config=config,
+                process=handle,
+                ready_event=threading.Event(),
+                ready_failure_event=threading.Event(),
+                relay_backed=True,
+            )
+            if not self._adopted_service_ready(managed):
+                logger.warning(
+                    "Self-update handover for %s did not complete: pid=%s failed "
+                    "the ready check; retiring it and starting normally",
+                    name,
+                    pid,
+                )
+                self._retire_inherited_pid(name, config, pid, 0)
+                return False
+            with self._lock:
+                self._processes[name] = managed
+            self.health_manager.record_start(name)
+            if config.ready and self._parsed_ready(config.ready) is not None:
+                self.health_manager.record_ready(name)
+            else:
+                self.health_manager.record_running(name)
+            if managed.ready_event:
+                managed.ready_event.set()
+            self._start_crash_monitor(managed, on_crash)
+            logger.info("Adopted %s (pid %s) without restart", name, pid)
+            if on_ready:
+                on_ready()
+            return True
+
+    def retire_inherited_pid(self, name: str, config: ServiceConfig, pid: int) -> str:
+        """Stop a PID inherited from the previous Haniel that cannot be adopted."""
+        with self.service_locks.hold(name):
+            return self._retire_inherited_pid(name, config, pid, 0)
+
+    @staticmethod
+    def _parsed_ready(ready: str) -> ReadyCondition | None:
+        try:
+            return ReadyCondition.parse(ready)
+        except ValueError:
+            return None
+
+    def _adopted_service_ready(self, managed: ManagedProcess) -> bool:
+        """Run the ready check once; the service has been up, so it is not awaited."""
+        condition = self._parsed_ready(managed.config.ready or "")
+        if condition is None or condition.type not in (
+            ReadyConditionType.PORT,
+            ReadyConditionType.HTTP,
+        ):
+            return True
+        return self._check_ready_condition(condition, managed)
+
     def relay_backed_processes(self) -> list[tuple[str, ManagedProcess]]:
         """Return running services whose output goes through relay processes."""
         with self._lock:
             managed = [
                 (name, item)
                 for name, item in self._processes.items()
-                if item.relay_processes
+                if item.relay_processes or getattr(item, "relay_backed", False)
             ]
         return [
             (name, item)
@@ -1411,7 +1548,10 @@ class ProcessManager:
             return
 
         # Wait for process to exit
-        exit_code = process.wait()
+        exit_code: int | None = process.wait()
+        exit_code_known = not isinstance(process, PidProcessHandle)
+        if not exit_code_known:
+            exit_code = None
 
         # Check if this was a graceful stop
         health = self.health_manager.get_health(managed.name)
@@ -1420,6 +1560,12 @@ class ProcessManager:
             return
 
         # This is a crash
+        if not exit_code_known:
+            logger.warning(
+                "Adopted process of %s (pid %s) disappeared; its exit code is unknown",
+                managed.name,
+                process.pid,
+            )
         self.health_manager.record_crash(managed.name, exit_code)
 
         if on_crash:
