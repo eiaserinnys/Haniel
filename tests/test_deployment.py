@@ -11,6 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from haniel.core.deployment import (
+    CommandResult,
     CommandSpec,
     DeploymentCommandError,
     DeploymentCallbacks,
@@ -18,11 +19,50 @@ from haniel.core.deployment import (
     DeploymentError,
     DeploymentStateStore,
     ReleaseManifest,
+    contract_preflight_block_reason,
     subprocess_command_runner,
     stable_deployment_error_code,
 )
 from haniel.core.deployment_errors import KNOWN_DEPLOYMENT_ERROR_CODES
 from haniel.core.deployment_errors import StableDeploymentError
+
+
+@pytest.mark.parametrize(
+    "operation,payload,reason",
+    [
+        (
+            "fresh_install",
+            {"pending_count": 1, "pending_additive_only": True},
+            "contract operation is not an upgrade (operation=fresh_install, pending_count=1)",
+        ),
+        (
+            "upgrade",
+            {"pending_additive_only": True},
+            "contract preflight result has no pending_count "
+            "(operation=upgrade, pending_count=missing)",
+        ),
+        (
+            "upgrade",
+            {"pending_count": True, "pending_additive_only": True},
+            "contract preflight pending_count is not an integer "
+            "(operation=upgrade, pending_count=True)",
+        ),
+        (
+            "upgrade",
+            {"pending_count": -1, "pending_additive_only": True},
+            "contract preflight pending_count is not zero "
+            "(operation=upgrade, pending_count=-1)",
+        ),
+    ],
+)
+def test_additive_signal_preserves_other_preflight_blocks(operation, payload, reason):
+    result = CommandResult(stdout="{}", json_data=payload)
+    assert (
+        contract_preflight_block_reason(
+            contract_mode=True, operation=operation, preflight=result
+        )
+        == reason
+    )
 
 
 def command(name: str) -> CommandSpec:
