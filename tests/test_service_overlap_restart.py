@@ -578,3 +578,89 @@ def test_plan_logs_distinct_previous_manifest_reasons(
     with caplog.at_level("INFO"):
         adapter.plan_overlap(None)
     assert reason in caplog.text
+
+
+def test_manifest_accepts_adopt_mode():
+    strategy = manifest({"mode": "adopt"}).service_restart_strategies["app"]
+    assert strategy.mode == "adopt"
+
+
+def test_adopt_is_not_an_overlap_candidate_in_either_manifest(tmp_path, monkeypatch):
+    from tests.test_service_restart_filter import _adapter_fixture
+    from haniel.core.runner_deployment import RunnerDeploymentAdapter
+
+    runner, repo, head = _adapter_fixture(tmp_path)
+    runner.process_manager.is_running = MagicMock(return_value=True)
+    adapter = RunnerDeploymentAdapter(
+        runner, "app", ["app"], repo, head, target_head="new"
+    )
+    for current, previous in (
+        ("adopt", "adopt"),
+        ("adopt", "overlap"),
+        ("overlap", "adopt"),
+    ):
+        adapter.manifest = manifest({"mode": current})
+        monkeypatch.setattr(
+            "haniel.core.runner_deployment.read_file_at_commit",
+            lambda *args, m=previous: manifest({"mode": m}).model_dump_json().encode(),
+        )
+        assert adapter.plan_overlap(None) == (None, frozenset())
+    adapter.manifest = manifest({"mode": "adopt"})
+    assert adapter.callbacks().plan_overlap is None
+    adapter.manifest = manifest({"mode": "overlap"})
+    assert adapter.callbacks().plan_overlap is not None
+
+
+def test_adopt_service_restarts_by_stop_and_start_in_a_deployment(
+    tmp_path, monkeypatch
+):
+    from tests.test_service_restart_filter import _adapter_fixture, _mock_processes
+    from haniel.core.deployment import DeploymentCoordinator
+    from haniel.core.deployment_state import DeploymentStateStore
+    from haniel.core.runner_deployment import RunnerDeploymentAdapter
+
+    runner, repo, head = _adapter_fixture(tmp_path)
+    events, _ = _mock_processes(runner, ["app"])
+    adapter = RunnerDeploymentAdapter(
+        runner, "app", ["app"], repo, head, target_head="new"
+    )
+    adapter.manifest = manifest({"mode": "adopt"})
+    monkeypatch.setattr(
+        "haniel.core.runner_deployment.read_file_at_commit",
+        lambda *args: adapter.manifest.model_dump_json().encode(),
+    )
+    adapter.build = lambda: None
+    runner._blocked_start_dependencies = MagicMock(return_value=[])
+    runner.process_manager.overlap_service = MagicMock()
+    store = DeploymentStateStore(tmp_path / "journal")
+    coordinator = DeploymentCoordinator(
+        state_store=store, command_runner=lambda *args: None
+    )
+    result = coordinator.execute(
+        repo_name="app",
+        previous_head=head,
+        target_head="new",
+        manifest=adapter.manifest,
+        callbacks=adapter.callbacks(),
+    )
+    assert result.status == "success"
+    runner.process_manager.overlap_service.assert_not_called()
+    assert events == ["stop:app", "start:app", "ready:app"]
+    assert store.read("app").get("overlap_services", []) == []
+
+
+def test_budget_ignores_adopt_exit_timeout():
+    from haniel.core.deployment_budget import expected_deployment_budget
+
+    config = {"app": ServiceConfig(run="app", repo="repo")}
+    base = expected_deployment_budget(
+        repo_name="repo", affected=["app"], services=config, manifest=manifest()
+    )
+    adopt = expected_deployment_budget(
+        repo_name="repo",
+        affected=["app"],
+        services=config,
+        manifest=manifest({"mode": "adopt", "exit_timeout_sec": 60}),
+    )
+    assert adopt.total_sec == base.total_sec
+    assert "overlap_exit" not in adopt.breakdown()

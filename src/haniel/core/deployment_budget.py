@@ -102,7 +102,7 @@ def expected_deployment_budget(
     overlap_exit_sec = sum(
         strategy.exit_timeout_sec
         for name, strategy in manifest.service_restart_strategies.items()
-        if name in affected_services
+        if strategy.mode == "overlap" and name in affected_services
     )
     recovery_sec = one_build_attempt_sec + readiness_sec
     return DeploymentBudget(
