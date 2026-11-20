@@ -231,6 +231,110 @@ def test_reload_union_stops_removed_writer_with_real_process_manager(
         runner.process_manager.stop_all()
 
 
+def _stopped_dependent_scenario(tmp_path: Path, *, dependent_command: str):
+    """Old graph: dependent B (after A), removed service; new disk config drops both edges."""
+
+    module = importlib.import_module("haniel.core.handover_config")
+    sleeper = f"{sys.executable} sleeper.py"
+    config_path = tmp_path / "haniel.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "poll_interval: 60",
+                "repos:",
+                "  app:",
+                '    url: "https://example.invalid/app.git"',
+                "    branch: main",
+                "    path: ./repo",
+                "    release_manifest: deploy/release.json",
+                "services:",
+                "  svc-a:",
+                f"    run: {json.dumps(sleeper)}",
+                "    repo: app",
+                "  svc-b:",
+                f"    run: {json.dumps(dependent_command)}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    services = {
+        "svc-a": ServiceConfig(run=sleeper, repo="app"),
+        "svc-b": ServiceConfig(run=sleeper, after=["svc-a"]),
+        "svc-gone": ServiceConfig(run=sleeper, repo="app"),
+    }
+    old_config = HanielConfig(
+        repos={
+            "app": RepoConfig(
+                url="https://example.invalid/app.git",
+                path="./repo",
+                release_manifest="deploy/release.json",
+            )
+        },
+        services=services,
+    )
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "sleeper.py").write_text(
+        "import time\ntime.sleep(60)\n", encoding="utf-8"
+    )
+    runner = ServiceRunner(old_config, tmp_path, config_path=config_path)
+    for name, config in services.items():
+        runner.process_manager.start_service(name, config)
+    plan = runner.prepare_handover_config(
+        "app", module.handover_config_digest(config_path)
+    )
+    adapter = RunnerDeploymentAdapter(
+        runner,
+        "app",
+        list(plan.new_affected),
+        tmp_path / "repo",
+        "a" * 40,
+        "b" * 40,
+        "request-dependent",
+        quiesce_services=list(plan.quiesce_services),
+        config_digest=plan.config_digest,
+    )
+    return runner, adapter
+
+
+def test_start_and_wait_restarts_dependent_whose_after_edge_was_removed(
+    tmp_path: Path,
+) -> None:
+    runner, adapter = _stopped_dependent_scenario(
+        tmp_path, dependent_command=f"{sys.executable} sleeper.py"
+    )
+    try:
+        assert "svc-b" not in adapter.affected
+
+        receipt = adapter.stop()
+        assert {"svc-b", "svc-gone"} <= set(receipt["stopped_services"])
+        assert not runner.process_manager.is_running("svc-b")
+
+        adapter.callbacks().start_and_wait()
+
+        assert runner.process_manager.is_running("svc-b")
+        assert runner.process_manager.is_running("svc-a")
+        assert not runner.process_manager.is_running("svc-gone")
+    finally:
+        runner.process_manager.stop_all()
+
+
+def test_start_and_wait_raises_when_restarted_dependent_fails_to_start(
+    tmp_path: Path,
+) -> None:
+    runner, adapter = _stopped_dependent_scenario(
+        tmp_path,
+        dependent_command="/nonexistent/haniel-missing-binary",
+    )
+    try:
+        adapter.stop()
+
+        with pytest.raises(RuntimeError, match="svc-b"):
+            adapter.callbacks().start_and_wait()
+    finally:
+        runner.process_manager.stop_all()
+
+
 def test_retry_reload_keeps_still_running_removed_writer_in_quiescence(
     tmp_path: Path,
 ) -> None:

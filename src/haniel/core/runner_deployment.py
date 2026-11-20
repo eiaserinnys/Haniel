@@ -114,6 +114,7 @@ class RunnerDeploymentAdapter:
         self.config_snapshot = config_snapshot
         self.repo_runtime_snapshot = repo_runtime_snapshot
         self.handover_started = False
+        self.stopped_by_deployment: frozenset[str] = frozenset()
         self.quiescence_nonce = uuid4().hex
 
     def require_current_config(self) -> None:
@@ -125,7 +126,7 @@ class RunnerDeploymentAdapter:
         return DeploymentCallbacks(
             build=self.build,
             stop=self.stop,
-            start_and_wait=lambda: self.start_and_wait(set(self.affected)),
+            start_and_wait=lambda: self.start_and_wait(self._restart_selection()),
             rollback=self.rollback,
             prepare_roll_forward=self.prepare_roll_forward,
             stop_partial=self.stop_partial,
@@ -344,6 +345,7 @@ class RunnerDeploymentAdapter:
             require_handover_config_digest(self.runner.config_path, self.config_digest)
         self.handover_started = True
         stopped, already_stopped = self._stop_running()
+        self.stopped_by_deployment = frozenset(stopped)
         receipt = {
             "request_id": self.request_id,
             "repo": self.repo_name,
@@ -358,6 +360,20 @@ class RunnerDeploymentAdapter:
         if self.config_digest is not None:
             receipt["config_digest"] = self.config_digest
         return receipt
+
+    def _restart_selection(self) -> set[str]:
+        """Affected services plus services this deployment stopped and still declares.
+
+        The quiesce set unions the old and new dependency graphs, so a service
+        whose ``after`` edge to this repo was removed is stopped but is not in
+        the new ``affected`` set. Bring it back if the new config keeps it
+        enabled; removed or disabled services stay down.
+        """
+
+        enabled = self.config_snapshot.enabled_services
+        return set(self.affected) | {
+            service for service in self.stopped_by_deployment if service in enabled
+        }
 
     def start_and_wait(self, selected: set[str]) -> None:
         self.require_current_config()
