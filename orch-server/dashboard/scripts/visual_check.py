@@ -74,6 +74,20 @@ def pending_selected(S):
     S.settle(100)
 
 
+def pending_failed_open(S):
+    """A failed row opened (full reason), a manual-approval row opened, and the head of a failure that wraps."""
+    S.open()
+    expand_rows(S, "soulstream-server-src", "serendipity", "lore-search")
+
+
+def pending_batch_confirm(S):
+    S.open()
+    S.page.get_by_text("Select all").click()
+    S.page.locator(".page-tools .btn-primary").click()
+    S.page.wait_for_selector("[role=dialog]")
+    S.settle(300)
+
+
 def pending_reject(S):
     S.open()
     S.page.locator(".row", has_text="soulstream-server-src").get_by_role("button", name="Reject", exact=True).click()
@@ -85,6 +99,16 @@ def pending_postpone(S):
     S.open()
     S.page.get_by_role("button", name="Postpone", exact=True).first.click()
     S.settle(300)
+
+
+def nodes_restarting(S):
+    """A node's self-update deploy drops its connection: the chip waits instead of failing."""
+    nodes_page(S)
+    S.push({"type": "node_disconnected", "node_id": "eiaserinnys-canary", "reason": "closed",
+            "self_update_deploying": True, "self_update_deploy_id": "x"})
+    S.page.wait_for_selector(".toast")
+    S.page.locator(".row", has_text="eiaserinnys-canary").locator(".r-toggle").click()
+    S.settle(250)
 
 
 def with_mode(ep, mode, page_name, hold=False):
@@ -157,7 +181,6 @@ def history_superseded(S):
 
 
 def toasts(S):
-    S.api.approve_warning = "node eias-linegames-wsl is not connected"
     S.open()
     S.page.get_by_role("button", name="Approve", exact=True).first.click()
     for ev in (
@@ -165,7 +188,6 @@ def toasts(S):
         {"type": "node_connected", "node_id": "eias-linegames", "hostname": "LINEGAMES-PC"},
         {"type": "status_change", "deploy_id": "d1", "status": "success", "node_id": "eias-linegames"},
         {"type": "status_change", "deploy_id": "n:d2", "status": "deploying", "node_id": "eias-linegames"},
-        {"type": "status_change", "deploy_id": "d3", "status": "failed", "node_id": "eias-linegames", "reject_reason": "boom"},
         {"type": "status_change", "deploy_id": "d4", "status": "rejected", "node_id": "eias-linegames", "reject_reason": "superseded by a1b2c3d"},
         {"type": "new_pending", "deploy_id": "d5", "node_id": "eias-linegames", "repo": "haniel", "branch": "main", "detected_at": ""},
         {"type": "service_command_result", "command_id": "c1", "node_id": "eiaserinnys", "service_name": "soulstream-orch", "action": "restart", "success": True, "error": None},
@@ -173,6 +195,29 @@ def toasts(S):
     ):
         S.push(ev)
     S.page.wait_for_selector(".toast >> nth=8")
+    S.settle(250)
+
+
+def toasts_failures(S):
+    """What the director reads when a deploy fails or an approve is refused: the reason, never the raw JSON."""
+    S.open()
+    # the self-update that was deploying comes back as a pending request carrying last_failure
+    S.api.returned = True
+    S.push({"type": "status_change", "deploy_id": "eias-linegames:haniel:main:e9416d7", "status": "pending", "node_id": "eias-linegames"})
+    S.page.wait_for_selector(".toast")
+    S.api.approve_error = (503, '{"error": "node not connected", "deploy_id": "x"}')
+    # the top row's button: the toasts stack over the lower right and would cover a lower row's button
+    plain = S.page.locator(".row").first
+    plain.get_by_role("button", name="Approve", exact=True).click()
+    S.page.wait_for_selector(".toast >> nth=1")
+    S.api.approve_error = (409, '{"error": "self-update eias-linegames:haniel:main:e9416d7 is deploying on node eias-linegames; approve other deployments after it finishes", "blocking_self_update": {"status": "deploying"}}')
+    plain.get_by_role("button", name="Approve", exact=True).click()
+    S.page.wait_for_selector(".toast >> nth=2")
+    S.api.approve_error = (502, "Bad Gateway")
+    plain.get_by_role("button", name="Approve", exact=True).click()
+    S.page.wait_for_selector(".toast >> nth=3")
+    S.push({"type": "node_disconnected", "node_id": "silent-manari-ts", "reason": "closed", "self_update_deploying": True})
+    S.page.wait_for_selector(".toast >> nth=4")
     S.settle(250)
 
 
@@ -240,29 +285,37 @@ def history_counts(S, rep, scene):
 def scene_table():
     c_pend = [checks.frame, checks.pending, checks.pending_gap]
     return [
-        ("pending-default", pending_default, True, c_pend + [checks.status_markers], None, None, {}),
+        ("pending-default", pending_default, True,
+         c_pend + [checks.status_markers, checks.pending_failed, checks.self_update_note], None, None, {}),
         ("pending-expanded", pending_expanded, True, [], None, None, {}),
         ("pending-selected", pending_selected, True, [], None, None, {}),
-        ("pending-reject", pending_reject, False, [], None, None, {}),
-        ("pending-postpone", pending_postpone, False, [], None, None, {}),
-        ("pending-empty", with_mode("pending", "empty", "pending"), False, [], None, None, {}),
+        ("pending-failed-open", pending_failed_open, True, [checks.pending_gap, checks.status_markers], None, None, {}),
+        ("pending-batch-confirm", pending_batch_confirm, False, [checks.batch_dialog], None, None, {}),
+        ("pending-reject", pending_reject, False,
+         [checks.dialog_note("This commit won't come back. The next commit on this branch brings these changes again.")],
+         None, None, {}),
+        ("pending-postpone", pending_postpone, False,
+         [checks.dialog_note("Haniel asks again in 6 hours by default.")], None, None, {}),
+        ("pending-empty", with_mode("pending", "empty", "pending"), False, [checks.empty_line], None, None, {}),
         ("pending-error", with_mode("pending", "error", "pending"), False, [pending_counts], None, None, {}),
         ("pending-loading", with_mode("pending", "hold", "pending", hold=True), False, [pending_counts], None, None, {}),
         ("nodes-default", nodes_page, True, [], None, None, {}),
-        ("nodes-expanded", nodes_expanded, True, [checks.nodes, checks.status_markers], None, None, {}),
+        ("nodes-expanded", nodes_expanded, True, [checks.nodes, checks.nodes_ledger, checks.status_markers], None, None, {}),
+        ("nodes-restarting", nodes_restarting, True, [checks.restarting_node, checks.status_markers], None, None, {}),
         ("nodes-inflight", nodes_inflight, True, [], None, None, {}),
         ("nodes-filter-none", nodes_filter_none, False, [checks.native_clear_button], None, None, {}),
         ("nodes-empty", with_mode("nodes", "empty", "nodes"), False, [], None, None, {}),
         ("nodes-error", with_mode("nodes", "error", "nodes"), False, [nodes_counts], None, None, {}),
         ("nodes-loading", with_mode("nodes", "hold", "nodes", hold=True), False, [nodes_counts], None, None, {}),
-        ("history-default", history_page, True, [checks.history, checks.status_markers], None, None, {}),
+        ("history-default", history_page, True, [checks.history, checks.history_outcome, checks.status_markers], None, None, {}),
         ("history-open", history_open, True, [], None, None, {}),
-        ("history-failed", history_failed, True, [], None, None, {}),
+        ("history-failed", history_failed, True, [checks.history_outcome], None, None, {}),
         ("history-superseded", history_superseded, True, [], None, None, {}),
         ("history-empty", with_mode("history", "empty", "history"), False, [], None, None, {}),
         ("history-error", with_mode("history", "error", "history"), False, [history_counts], None, None, {}),
         ("history-loading", with_mode("history", "hold", "history", hold=True), False, [history_counts], None, None, {}),
         ("toasts", toasts, False, [checks.toast_markers], None, None, {}),
+        ("toasts-failures", toasts_failures, False, [checks.toast_markers_failures], None, None, {}),
         ("theme-menu", theme_menu, False, [], [1440], None, {}),
         ("drawer", drawer, False, [], [390], None, {}),
         ("conn-reconnecting", conn_reconnecting, False, [], None, None, {"ws_closed": True}),
@@ -376,6 +429,13 @@ def run_ops(browser, server, api, rep):
             except Exception as e:
                 rep.fail(scene, f"scene error: {type(e).__name__}: {str(e)[:200]}")
             S.close()
+        scene = f"ops-dialog-batch-{width}"
+        S = fresh()
+        try:
+            rows.append((width, ops.batch_dialog_ops(S, rep, scene)))
+        except Exception as e:
+            rep.fail(scene, f"scene error: {type(e).__name__}: {str(e)[:200]}")
+        S.close()
         if width <= 760:
             scene = f"ops-drawer-{width}"
             S = fresh()

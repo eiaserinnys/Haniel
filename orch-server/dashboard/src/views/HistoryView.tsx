@@ -1,6 +1,7 @@
 import { useState, useMemo, type KeyboardEvent } from 'react';
 import { Status } from '@/components/shared/Status';
 import { Empty, LoadError, Skeleton } from '@/components/shared/LoadStates';
+import { failureOutcome } from '@/lib/deployInfo';
 import { timeOfDay, dateLabel, durMs, parseCommit } from '@/lib/utils';
 import type { Deploy, DeployStatus, LoadState } from '@/types';
 
@@ -165,6 +166,7 @@ function HistoryRow({ deploy, showError, onToggleError }: HistoryRowProps) {
   const firstCommit = deploy.commits.length > 0 ? parseCommit(deploy.commits[0]) : null;
   const superseded = deploy.status === 'rejected' && Boolean(deploy.reject_reason?.startsWith('superseded by '));
   const detail = deploy.error || (!superseded ? deploy.reject_reason : null);
+  const outcome = failureOutcome(deploy);
   const hasMeta = deploy.approved_by || superseded || detail;
 
   return (
@@ -182,6 +184,7 @@ function HistoryRow({ deploy, showError, onToggleError }: HistoryRowProps) {
             <span className="h-msg">{firstCommit.message}</span>
           </span>
         )}
+        {outcome && <span className="r-meta h-outcome">{outcome}</span>}
         {hasMeta && (
           <span className="r-meta">
             {deploy.approved_by && <span>approved by {deploy.approved_by}</span>}

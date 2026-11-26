@@ -861,6 +861,29 @@ p {
   font-weight: 600;
 }
 
+.r-fail {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: var(--zero);
+  font-size: var(--meta-size);
+  line-height: 1.5;
+}
+
+.r-fail .st {
+  flex: none;
+  margin: var(--zero);
+}
+
+.r-fail-text {
+  flex: 0 1 auto;
+  min-width: var(--zero);
+  overflow: hidden;
+  color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .r-foot {
   display: contents;
 }
@@ -882,6 +905,28 @@ p {
   gap: var(--space-1);
   padding-inline-start: var(--space-3);
   white-space: nowrap;
+}
+
+.r-metric.has-sub {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-0);
+}
+
+.m-main {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+}
+
+.m-sub {
+  color: var(--ink-2);
+  font-size: var(--meta-size);
+  white-space: nowrap;
+}
+
+.m-sub .mono {
+  font-size: var(--meta-size);
 }
 
 .m-label {
@@ -993,6 +1038,51 @@ p {
 .kv-v {
   min-width: var(--zero);
   overflow-wrap: anywhere;
+}
+
+.mini {
+  display: grid;
+  gap: var(--space-1);
+  min-width: var(--zero);
+}
+
+.mini-note,
+.mini-empty {
+  color: var(--ink-2);
+  font-size: var(--meta-size);
+}
+
+.mini-rows {
+  display: grid;
+  margin: var(--zero);
+  padding: var(--zero);
+  border-top: var(--line) solid var(--rule);
+  list-style: none;
+}
+
+.mini-rows li {
+  display: grid;
+  grid-template-columns: minmax(var(--zero), 1fr) auto var(--label-col);
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--zero);
+  border-bottom: var(--line) solid var(--rule);
+}
+
+.mini-serving,
+.mini-checked {
+  color: var(--ink-2);
+  font-size: var(--meta-size);
+  white-space: nowrap;
+}
+
+.mini-serving .mono {
+  color: var(--ink);
+  font-size: var(--meta-size);
+}
+
+.mini-checked {
+  text-align: end;
 }
 
 .err-block {
@@ -1212,6 +1302,11 @@ p {
   flex-wrap: nowrap;
 }
 
+.h-outcome {
+  color: var(--ink);
+  font-weight: 600;
+}
+
 .h-msg {
   flex: 1 1 0;
   min-width: var(--zero);
@@ -1363,6 +1458,7 @@ p {
 
 .notice-text .mono {
   color: var(--ink-2);
+  white-space: nowrap;
   font-size: var(--meta-size);
 }
 
@@ -1507,6 +1603,41 @@ p {
   padding: var(--space-3);
   overflow: auto;
   overscroll-behavior: contain;
+}
+
+.dialog-note {
+  color: var(--ink-2);
+  font-size: var(--meta-size);
+}
+
+.targets {
+  display: grid;
+  margin: var(--zero);
+  padding: var(--zero);
+  border-top: var(--line) solid var(--rule);
+  list-style: none;
+}
+
+.targets li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: var(--zero);
+  padding: var(--space-1) var(--zero);
+  border-bottom: var(--line) solid var(--rule);
+}
+
+.targets .r-name {
+  flex: 1 1 auto;
+}
+
+.targets .r-node {
+  flex: 0 1 auto;
+  min-width: var(--zero);
+  overflow: hidden;
+  font-size: var(--meta-size);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dialog-foot {
@@ -1788,6 +1919,23 @@ p {
 
   .m-num {
     font-size: var(--row-title-size);
+  }
+
+  .r-metric.has-sub {
+    align-items: flex-start;
+  }
+
+  .mini-rows li {
+    grid-template-columns: minmax(var(--zero), 1fr) auto;
+    row-gap: var(--space-0);
+  }
+
+  .mini-rows li .r-name {
+    grid-column: 1 / -1;
+  }
+
+  .mini-checked {
+    text-align: start;
   }
 
   .r-actions:empty {

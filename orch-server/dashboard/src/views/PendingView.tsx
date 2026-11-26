@@ -1,9 +1,11 @@
 import { useState, useCallback, useMemo } from 'react';
 import { Icon } from '@/components/shared/Icon';
+import { ApproveConfirmModal } from '@/components/shared/ApproveConfirmModal';
 import { RejectModal } from '@/components/shared/RejectModal';
 import { RowToggle } from '@/components/shared/RowToggle';
 import { Status } from '@/components/shared/Status';
 import { Empty, LoadError, Skeleton } from '@/components/shared/LoadStates';
+import { deployingLabel, failureDetail, failureReason, hasFailed } from '@/lib/deployInfo';
 import { relTime, parseCommit, parseDiffSummary } from '@/lib/utils';
 import type { Deploy, LoadState } from '@/types';
 
@@ -29,6 +31,7 @@ export function PendingView({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [rejectTarget, setRejectTarget] = useState<Deploy | null>(null);
+  const [confirmingBatch, setConfirmingBatch] = useState(false);
 
   const selfUpdateDeploys = useMemo(
     () => deploys.filter(deploy => deploy.is_self_update),
@@ -103,17 +106,33 @@ export function PendingView({
     });
   }, []);
 
+  // A batch never carries a request whose last deploy failed; those are
+  // retried one by one from their own row.
+  const selectedDeploys = useMemo(
+    () => selectableDeploys.filter(deploy => activeSelected.has(deploy.deploy_id)),
+    [activeSelected, selectableDeploys],
+  );
+  const batchDeploys = useMemo(
+    () => selectedDeploys.filter(deploy => !deploy.inspection_required),
+    [selectedDeploys],
+  );
+  const needsLookDeploys = useMemo(
+    () => selectedDeploys.filter(deploy => deploy.inspection_required),
+    [selectedDeploys],
+  );
+
   const handleApproveAll = useCallback(async () => {
-    const accepted = await onApproveAll(Array.from(activeSelected));
+    setConfirmingBatch(false);
+    const accepted = await onApproveAll(batchDeploys.map(deploy => deploy.deploy_id));
     setSelected(current => {
       const next = new Set(current);
-      accepted.forEach(id => {
+      [...accepted, ...needsLookDeploys.map(deploy => deploy.deploy_id)].forEach(id => {
         const token = selectionTokens.get(id);
         if (token) next.delete(token);
       });
       return next;
     });
-  }, [activeSelected, onApproveAll, selectionTokens]);
+  }, [batchDeploys, needsLookDeploys, onApproveAll, selectionTokens]);
 
   const handleApproveOne = useCallback(async (deploy: Deploy) => {
     if (!await onApprove(deploy.deploy_id)) return;
@@ -145,7 +164,7 @@ export function PendingView({
             type="button"
             className="btn btn-primary"
             disabled={activeSelected.size === 0}
-            onClick={handleApproveAll}
+            onClick={() => setConfirmingBatch(true)}
           >
             {activeSelected.size > 0 ? `Approve ${activeSelected.size} selected` : 'Approve selected'}
           </button>
@@ -164,7 +183,9 @@ export function PendingView({
     return (
       <>
         {header(false)}
-        <div className="ledger"><Empty title="All clear" text="New changes show up here." /></div>
+        <div className="ledger">
+          <Empty text="Nothing waiting. Auto-applied repositories deploy without stopping here — see History." />
+        </div>
       </>
     );
   }
@@ -176,7 +197,7 @@ export function PendingView({
       {selfUpdateDeploys.length > 0 && (
         <PendingSection
           title="Self-updates"
-          description="Same-node updates wait for these."
+          description="Approving restarts Haniel on that node. Its services pause briefly (overlap and adopt services keep running). Approve the repository updates below after it finishes."
           priority
           deploys={selfUpdateDeploys}
           blockedNodeIds={blockedNodeIds}
@@ -200,6 +221,15 @@ export function PendingView({
           onToggleExpand={toggleExpand}
           onApprove={handleApproveOne}
           onReject={setRejectTarget}
+        />
+      )}
+
+      {confirmingBatch && (
+        <ApproveConfirmModal
+          approvable={batchDeploys}
+          needsLook={needsLookDeploys}
+          onConfirm={handleApproveAll}
+          onClose={() => setConfirmingBatch(false)}
         />
       )}
 
@@ -307,6 +337,8 @@ function PendingRow({
   const diffStatText = diffStatLines.join('\n');
   const diffSummary = parseDiffSummary(diffStatLines[diffStatLines.length - 1] ?? '');
   const blockedId = `blocked-${deploy.deploy_id}`;
+  const failed = !isDeploying && hasFailed(deploy);
+  const manualApproval = deploy.apply_policy === 'approval';
 
   return (
     <div className="row" data-open={isExpanded ? '' : undefined}>
@@ -331,17 +363,24 @@ function PendingRow({
             <span>{diffSummary.files} files <span className="mono">+{diffSummary.add} −{diffSummary.del}</span></span>
           )}
           <span className="mono">{relTime(deploy.detected_at)}</span>
+          {manualApproval && <Status state="manual" />}
           {isBlocked && !isDeploying && (
             <span className="r-blocked" id={blockedId}>
               <Icon name="lock" small />Waits for self-update
             </span>
           )}
         </span>
+        {failed && (
+          <span className="r-fail">
+            <Status state="failed" />
+            <span className="r-fail-text">Last deploy failed: {failureReason(deploy.last_failure)}</span>
+          </span>
+        )}
       </RowToggle>
       <div className="r-foot">
         <div className="r-actions">
           {isDeploying ? (
-            <Status state="deploying" />
+            <Status state="deploying" label={deployingLabel(deploy.progress_stage)} />
           ) : (
             <>
               <button type="button" className="btn btn-outline" onClick={onReject}>
@@ -354,19 +393,40 @@ function PendingRow({
                 disabled={isBlocked}
                 aria-describedby={isBlocked ? blockedId : undefined}
               >
-                Approve
+                {failed ? 'Retry' : 'Approve'}
               </button>
             </>
           )}
         </div>
-        <div className="r-metric">
-          <span className="m-label">commits</span>
-          <span className="m-num">{commits.length}</span>
+        <div className="r-metric has-sub">
+          <span className="m-main">
+            <span className="m-label">commits</span>
+            <span className="m-num">{commits.length}</span>
+          </span>
+          <span className="m-sub">
+            {deploy.is_self_update
+              ? 'Restarts Haniel'
+              : <><span className="mono">{deploy.affected_services.length}</span> {deploy.affected_services.length === 1 ? 'service' : 'services'}</>}
+          </span>
         </div>
       </div>
       {isExpanded && (
         <div className="r-body">
           <div className="dl">
+            {failed && (
+              <>
+                <span className="dl-k">Last failure</span>
+                <div className="dl-v">
+                  <pre className="err-block">{failureDetail(deploy.last_failure)}</pre>
+                </div>
+              </>
+            )}
+            {manualApproval && (
+              <>
+                <span className="dl-k">Approval</span>
+                <div className="dl-v">Manual approval: auto-apply is off for this repository</div>
+              </>
+            )}
             {deploy.affected_services.length > 0 && (
               <>
                 <span className="dl-k">Services</span>

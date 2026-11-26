@@ -3,6 +3,7 @@ import { Icon } from '@/components/shared/Icon';
 import { RowToggle } from '@/components/shared/RowToggle';
 import { Status } from '@/components/shared/Status';
 import { Empty, LoadError, Skeleton } from '@/components/shared/LoadStates';
+import { pollText, servingCommit, servingTime } from '@/lib/deployInfo';
 import { absTime, relTime, uptimeStr } from '@/lib/utils';
 import type { InFlightCommand, LoadState, NodeService, OrchestratorNode } from '@/types';
 
@@ -107,6 +108,8 @@ interface NodeRowProps {
 
 function NodeRow({ node, isExpanded, onToggleExpand, onServiceCommand, lookupInFlight }: NodeRowProps) {
   const isConnected = node.connected === 1;
+  const restarting = !isConnected && Boolean(node.self_update_deploying);
+  const status = isConnected ? 'connected' : restarting ? 'restarting' : 'disconnected';
   const serviceCount = node.services ? String(node.services.length) : '…';
 
   return (
@@ -117,7 +120,7 @@ function NodeRow({ node, isExpanded, onToggleExpand, onServiceCommand, lookupInF
           <span className="r-branch">{node.os}</span>
         </span>
         <span className="r-meta">
-          <Status state={isConnected ? 'connected' : 'disconnected'} />
+          <Status state={status} />
           <span>haniel <span className="mono">{node.haniel_version}</span></span>
           {!isConnected && <span>last seen <span className="mono">{relTime(node.last_seen)}</span></span>}
         </span>
@@ -133,7 +136,7 @@ function NodeRow({ node, isExpanded, onToggleExpand, onServiceCommand, lookupInF
             <NodeDetail node={node} onServiceCommand={onServiceCommand} lookupInFlight={lookupInFlight} />
           ) : (
             <div className="notice">
-              <Status state="offline" />
+              <Status state={restarting ? 'restarting' : 'offline'} />
               <p className="notice-text">Last seen <span className="mono">{absTime(node.last_seen)}</span></p>
             </div>
           )}
@@ -160,8 +163,65 @@ function NodeDetail({ node, onServiceCommand, lookupInFlight }: Omit<NodeRowProp
           </div>
         ))}
       </div>
+      <RepoLedger node={node} />
       <Services node={node} onServiceCommand={onServiceCommand} lookupInFlight={lookupInFlight} />
     </>
+  );
+}
+
+interface RepoLine {
+  repo: string;
+  serving: { commit: string; at: string } | null;
+  checked: string | null;
+}
+
+// One mini ledger for what the node serves (last successful deploy, from the
+// hub's history) and when it last looked at each repository (from the node).
+// A node too old to report its polling leaves those parts out.
+function RepoLedger({ node }: { node: OrchestratorNode }) {
+  const lines = new Map<string, RepoLine>();
+  const line = (repo: string) => {
+    const existing = lines.get(repo);
+    if (existing) return existing;
+    const created: RepoLine = { repo, serving: null, checked: null };
+    lines.set(repo, created);
+    return created;
+  };
+  for (const s of node.serving ?? []) {
+    line(s.repo).serving = { commit: servingCommit(s), at: servingTime(s.deployed_at) };
+  }
+  for (const f of node.repo_fetches ?? []) {
+    line(f.repo).checked = f.last_fetch;
+  }
+  const poll = node.poll_interval ?? null;
+  const noneServed = (node.serving ?? []).length === 0;
+  if (lines.size === 0 && poll === null && node.serving === undefined) return null;
+
+  return (
+    <div className="mini" role="group" aria-label="Repositories">
+      <p className="mini-note">
+        Last successful deploy per repository
+        {poll !== null && <> · Polls every <span className="mono">{pollText(poll)}</span></>}
+      </p>
+      {noneServed && lines.size === 0 && <p className="mini-empty">No successful deploy recorded</p>}
+      {lines.size > 0 && (
+        <ul className="mini-rows">
+          {Array.from(lines.values()).map(l => (
+            <li key={l.repo}>
+              <span className="r-name" title={l.repo}>{l.repo}</span>
+              <span className="mini-serving">
+                {l.serving
+                  ? <>serving <span className="mono">{l.serving.commit}</span> · <span className="mono">{l.serving.at}</span></>
+                  : 'No successful deploy recorded'}
+              </span>
+              <span className="mini-checked">
+                {l.checked ? <>checked {relTime(l.checked)}</> : null}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

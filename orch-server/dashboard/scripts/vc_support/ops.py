@@ -15,6 +15,7 @@ def dialog_ops(S, rep, scene, post):
     opener = p.get_by_role("button", name=name, exact=True).first
     # a selected checkbox and the scroll position stand in for "the outside screen is unchanged"
     p.locator(".row .check:not(:disabled)").first.check()
+    opener.scroll_into_view_if_needed()  # the press itself scrolls a button that starts below the fold; measure after that
     before = p.evaluate("() => [document.querySelectorAll('.check:checked').length, document.querySelector('.content').scrollTop]")
     opener.click()
     p.wait_for_selector("[role=dialog]")
@@ -59,6 +60,47 @@ def dialog_ops(S, rep, scene, post):
     posted = any(c[0] == "reject" for c in api.calls)
     if not posted or p.locator("[role=dialog]").count() != 0:
         rep.fail(scene, f"{name} dialog: Enter on the confirm button posted={posted}")
+    return row
+
+
+def batch_dialog_ops(S, rep, scene):
+    """Approve N selected asks first: focus starts on Cancel, Tab stays inside, Esc cancels, Approve sends the batch."""
+    p, api = S.page, S.api
+    p.get_by_text("Select all").click()
+    opener = p.locator(".page-tools .btn-primary")
+    opener.click()
+    p.wait_for_selector("[role=dialog]")
+    S.settle(300)
+    row = {"target": "Batch approve confirmation", "open": "Approve N selected button"}
+    first = S.active()
+    row["first"] = first
+    if "Cancel" not in first:
+        rep.fail(scene, f"batch dialog first focus is {first}, want the Cancel button")
+    targets = p.locator("[role=dialog] .targets").first.locator("li").count()
+    trapped = True
+    for key in ["Tab"] * 6 + ["Shift+Tab"] * 3:
+        p.keyboard.press(key)
+        p.wait_for_timeout(60)
+        trapped = trapped and _focused_in_dialog(p)
+    if not trapped:
+        rep.fail(scene, "batch dialog: focus left the dialog while tabbing")
+    before = p.evaluate("() => document.querySelectorAll('.check:checked').length")
+    p.keyboard.press("Escape")
+    S.settle(250)
+    after = p.evaluate("() => document.querySelectorAll('.check:checked').length")
+    if p.locator("[role=dialog]").count() != 0 or not opener.evaluate(IS_ACTIVE_JS) or after != before or api.calls:
+        rep.fail(scene, f"batch dialog Esc: open={p.locator('[role=dialog]').count()} focus={S.active()} selection {before}->{after} calls={api.calls}")
+    row["esc"] = "cancels: nothing is sent, selection kept"
+    row["after"] = "back on the Approve N selected button"
+    opener.click()
+    p.wait_for_selector("[role=dialog]")
+    S.settle(250)
+    p.locator("[role=dialog] .dialog-foot .btn-primary").click()
+    S.settle(400)
+    sent = [c for c in api.calls if c[0] == "approve"]
+    if len(sent) != targets or p.locator("[role=dialog]").count() != 0:
+        rep.fail(scene, f"batch dialog Approve sent {len(sent)} approvals for {targets} listed targets, open={p.locator('[role=dialog]').count()}")
+    row["enter"] = "Approve: sends one approval per listed target (requests that need a look stay out)"
     return row
 
 
