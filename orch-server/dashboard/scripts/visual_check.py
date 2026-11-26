@@ -156,6 +156,26 @@ def history_superseded(S):
     S.settle(150)
 
 
+def toasts(S):
+    S.api.approve_warning = "node eias-linegames-wsl is not connected"
+    S.open()
+    S.page.get_by_role("button", name="Approve", exact=True).first.click()
+    for ev in (
+        {"type": "node_disconnected", "node_id": "silent-manari-ts", "reason": "closed"},
+        {"type": "node_connected", "node_id": "eias-linegames", "hostname": "LINEGAMES-PC"},
+        {"type": "status_change", "deploy_id": "d1", "status": "success", "node_id": "eias-linegames"},
+        {"type": "status_change", "deploy_id": "n:d2", "status": "deploying", "node_id": "eias-linegames"},
+        {"type": "status_change", "deploy_id": "d3", "status": "failed", "node_id": "eias-linegames", "reject_reason": "boom"},
+        {"type": "status_change", "deploy_id": "d4", "status": "rejected", "node_id": "eias-linegames", "reject_reason": "superseded by a1b2c3d"},
+        {"type": "new_pending", "deploy_id": "d5", "node_id": "eias-linegames", "repo": "haniel", "branch": "main", "detected_at": ""},
+        {"type": "service_command_result", "command_id": "c1", "node_id": "eiaserinnys", "service_name": "soulstream-orch", "action": "restart", "success": True, "error": None},
+        {"type": "service_command_result", "command_id": "c2", "node_id": "eiaserinnys", "service_name": "soulstream-orch", "action": "restart", "success": False, "error": "timeout"},
+    ):
+        S.push(ev)
+    S.page.wait_for_selector(".toast >> nth=8")
+    S.settle(250)
+
+
 def theme_menu(S):
     S.open()
     S.page.locator("button[aria-label^='Theme']").click()
@@ -204,9 +224,21 @@ def conn_disconnected(S):
     S.settle(300)
 
 
+def pending_counts(S, rep, scene):
+    checks.nav_count_blank(S, rep, scene, "Pending Deploys")
+
+
+def nodes_counts(S, rep, scene):
+    checks.nav_count_blank(S, rep, scene, "Nodes")
+
+
+def history_counts(S, rep, scene):
+    checks.nav_count_blank(S, rep, scene, "Deploy History")
+
+
 # (name, setup, tall, checks, widths filter, themes filter, extra session kwargs)
 def scene_table():
-    c_pend = [checks.frame, checks.pending]
+    c_pend = [checks.frame, checks.pending, checks.pending_gap]
     return [
         ("pending-default", pending_default, True, c_pend + [checks.status_markers], None, None, {}),
         ("pending-expanded", pending_expanded, True, [], None, None, {}),
@@ -214,22 +246,23 @@ def scene_table():
         ("pending-reject", pending_reject, False, [], None, None, {}),
         ("pending-postpone", pending_postpone, False, [], None, None, {}),
         ("pending-empty", with_mode("pending", "empty", "pending"), False, [], None, None, {}),
-        ("pending-error", with_mode("pending", "error", "pending"), False, [], None, None, {}),
-        ("pending-loading", with_mode("pending", "hold", "pending", hold=True), False, [], None, None, {}),
+        ("pending-error", with_mode("pending", "error", "pending"), False, [pending_counts], None, None, {}),
+        ("pending-loading", with_mode("pending", "hold", "pending", hold=True), False, [pending_counts], None, None, {}),
         ("nodes-default", nodes_page, True, [], None, None, {}),
         ("nodes-expanded", nodes_expanded, True, [checks.nodes, checks.status_markers], None, None, {}),
         ("nodes-inflight", nodes_inflight, True, [], None, None, {}),
-        ("nodes-filter-none", nodes_filter_none, False, [], None, None, {}),
+        ("nodes-filter-none", nodes_filter_none, False, [checks.native_clear_button], None, None, {}),
         ("nodes-empty", with_mode("nodes", "empty", "nodes"), False, [], None, None, {}),
-        ("nodes-error", with_mode("nodes", "error", "nodes"), False, [], None, None, {}),
-        ("nodes-loading", with_mode("nodes", "hold", "nodes", hold=True), False, [], None, None, {}),
+        ("nodes-error", with_mode("nodes", "error", "nodes"), False, [nodes_counts], None, None, {}),
+        ("nodes-loading", with_mode("nodes", "hold", "nodes", hold=True), False, [nodes_counts], None, None, {}),
         ("history-default", history_page, True, [checks.history, checks.status_markers], None, None, {}),
         ("history-open", history_open, True, [], None, None, {}),
         ("history-failed", history_failed, True, [], None, None, {}),
         ("history-superseded", history_superseded, True, [], None, None, {}),
         ("history-empty", with_mode("history", "empty", "history"), False, [], None, None, {}),
-        ("history-error", with_mode("history", "error", "history"), False, [], None, None, {}),
-        ("history-loading", with_mode("history", "hold", "history", hold=True), False, [], None, None, {}),
+        ("history-error", with_mode("history", "error", "history"), False, [history_counts], None, None, {}),
+        ("history-loading", with_mode("history", "hold", "history", hold=True), False, [history_counts], None, None, {}),
+        ("toasts", toasts, False, [checks.toast_markers], None, None, {}),
         ("theme-menu", theme_menu, False, [], [1440], None, {}),
         ("drawer", drawer, False, [], [390], None, {}),
         ("conn-reconnecting", conn_reconnecting, False, [], None, None, {"ws_closed": True}),
@@ -273,6 +306,30 @@ def run_scenes(browser, server, api, out, rep):
                 rep.scenes += 1
 
 
+def run_narrow_pending(browser, server, api, out, rep):
+    """360 and 375 are the widths where the self-update row's metric once slid under its button."""
+    for theme in THEMES:
+        for width in (360, 375):
+            scene = f"pending-default-{theme}-{width}"
+            if ONLY not in scene:
+                continue
+            print("scene", scene, flush=True)
+            api.reset()
+            S = Session(browser, server.url, api, theme, width)
+            try:
+                S.open()
+                S.shot(out / f"{scene}.png", tall=True)
+                for c in (checks.frame, checks.pending, checks.pending_gap, checks.status_markers):
+                    c(S, rep, scene)
+                for v in S.audit():
+                    rep.fail(scene, v)
+            except Exception as e:
+                rep.fail(scene, f"scene error: {type(e).__name__}: {str(e)[:200]}")
+            finally:
+                S.close()
+            rep.scenes += 1
+
+
 def run_long(browser, server, api, out, rep):
     for theme in THEMES:
         for width in (360, 1440):
@@ -283,6 +340,8 @@ def run_long(browser, server, api, out, rep):
                 try:
                     setup(S)
                     S.shot(out / f"{scene}.png", tall=True)
+                    if name == "long-pending":
+                        checks.pending_gap(S, rep, scene)
                     for v in S.audit():
                         rep.fail(scene, v)
                     squeezed = S.page.evaluate(
@@ -329,6 +388,7 @@ def run_ops(browser, server, api, rep):
         S = fresh()
         try:
             rows.append((width, ops.theme_menu_ops(S, rep, scene)))
+            rows.append((width, ops.theme_menu_keyboard_ops(S, rep, scene)))
         except Exception as e:
             rep.fail(scene, f"scene error: {type(e).__name__}: {str(e)[:200]}")
         S.close()
@@ -494,6 +554,7 @@ def main():
                     print(f"before captures in {out / 'before'}")
                     return 0
                 run_scenes(browser, server, api, out, rep)
+                run_narrow_pending(browser, server, api, out, rep)
                 run_long(browser, server, api, out, rep)
                 rows = run_ops(browser, server, api, rep)
                 run_system_theme(browser, server, api, rep)

@@ -8,9 +8,9 @@ interface DrawerProps {
   onClose: () => void;
   page: Page;
   setPage: (p: Page) => void;
-  pendingCount: number;
-  nodesConnected: number;
-  historyCount: number;
+  pendingCount: number | null;
+  nodesConnected: number | null;
+  historyCount: number | null;
 }
 
 export function Drawer({ open, onClose, ...nav }: DrawerProps) {

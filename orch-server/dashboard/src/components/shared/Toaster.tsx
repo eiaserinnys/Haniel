@@ -13,6 +13,14 @@ function renderText(text: string) {
   );
 }
 
+const TONE: Record<Toast['kind'], string> = {
+  success: 'ok',
+  busy: 'busy',
+  warn: 'wait',
+  neutral: 'off',
+  error: 'fail',
+};
+
 export function Toaster({ toasts, onDismiss }: ToasterProps) {
   if (toasts.length === 0) return null;
 
@@ -22,7 +30,7 @@ export function Toaster({ toasts, onDismiss }: ToasterProps) {
         const fail = t.kind === 'error';
         return (
           <div key={t.id} className={fail ? 'toast is-fail' : 'toast'}>
-            <span className={`st st-${fail ? 'fail' : 'ok'}`}><span>{renderText(t.text)}</span></span>
+            <span className={`st st-${TONE[t.kind]}`}><span>{renderText(t.text)}</span></span>
             <button type="button" className="icon-btn" aria-label="Dismiss" onClick={() => onDismiss(t.id)}>
               <Icon name="x" small />
             </button>

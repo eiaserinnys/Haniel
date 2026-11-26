@@ -169,10 +169,6 @@ export function PendingView({
     );
   }
 
-  const blockedCount = regularDeploys.filter(
-    deploy => deploy.status === 'pending' && blockedNodeIds.has(deploy.node_id),
-  ).length;
-
   return (
     <>
       {header(true)}
@@ -196,7 +192,6 @@ export function PendingView({
       {regularDeploys.length > 0 && (
         <PendingSection
           title="Repository updates"
-          description={blockedCount > 0 ? `${blockedCount} waiting for Haniel on the same node.` : undefined}
           deploys={regularDeploys}
           blockedNodeIds={blockedNodeIds}
           activeSelected={activeSelected}
@@ -343,29 +338,31 @@ function PendingRow({
           )}
         </span>
       </RowToggle>
-      <div className="r-actions">
-        {isDeploying ? (
-          <Status state="deploying" />
-        ) : (
-          <>
-            <button type="button" className="btn btn-outline" onClick={onReject}>
-              {deploy.is_self_update ? 'Postpone' : 'Reject'}
-            </button>
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={onApprove}
-              disabled={isBlocked}
-              aria-describedby={isBlocked ? blockedId : undefined}
-            >
-              Approve
-            </button>
-          </>
-        )}
-      </div>
-      <div className="r-metric">
-        <span className="m-label">commits</span>
-        <span className="m-num">{commits.length}</span>
+      <div className="r-foot">
+        <div className="r-actions">
+          {isDeploying ? (
+            <Status state="deploying" />
+          ) : (
+            <>
+              <button type="button" className="btn btn-outline" onClick={onReject}>
+                {deploy.is_self_update ? 'Postpone' : 'Reject'}
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={onApprove}
+                disabled={isBlocked}
+                aria-describedby={isBlocked ? blockedId : undefined}
+              >
+                Approve
+              </button>
+            </>
+          )}
+        </div>
+        <div className="r-metric">
+          <span className="m-label">commits</span>
+          <span className="m-num">{commits.length}</span>
+        </div>
       </div>
       {isExpanded && (
         <div className="r-body">

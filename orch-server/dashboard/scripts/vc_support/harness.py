@@ -68,6 +68,8 @@ class FakeApi:
         self.long = False
         self.held = []
         self.calls = []
+        self.approve_warning = None
+        self.approve_warning = None
 
     def _body(self, ep, query):
         if ep == "pending":
@@ -92,6 +94,8 @@ class FakeApi:
                 route.fulfill(json={"command_id": "cmd-1", "status": "sent"})
             elif name == "approve-all":
                 route.fulfill(json={"approved": [], "failed": []})
+            elif name == "approve" and self.approve_warning:
+                route.fulfill(json={"deploy_id": "x", "status": "approved", "warning": self.approve_warning})
             else:
                 route.fulfill(json={"deploy_id": "x", "status": "ok"})
             return
@@ -114,6 +118,7 @@ class Session:
         self.height = height
         self.ready = ready
         self.external = []
+        self.ws = None
         key = (theme, width, ws_closed)
         if key not in Session.contexts:
             ctx = browser.new_context(
@@ -134,7 +139,13 @@ class Session:
         self.page.route(re.compile(r".*/api/orch/.*"), api.handle)
         if not ws_closed:
             # a refused socket (the static server answers the upgrade with 404) is the real failure path
-            self.page.route_web_socket(re.compile(r".*/ws/dashboard.*"), lambda ws: None)
+            self.page.route_web_socket(re.compile(r".*/ws/dashboard.*"), self._on_ws)
+
+    def _on_ws(self, ws):
+        self.ws = ws
+
+    def push(self, event):
+        self.ws.send(json.dumps(event))
 
     def _on_request(self, req):
         host = urlparse(req.url).hostname

@@ -1,5 +1,7 @@
 """Design measurements for the orchestrator dashboard (card #1884 spec)."""
 
+import re
+
 ACCENT = {"light": "rgb(11, 122, 75)", "dark": "rgb(79, 214, 156)"}
 BODY_BG = {"light": "rgb(255, 255, 255)", "dark": "rgb(12, 13, 12)"}
 
@@ -195,13 +197,123 @@ def history(S, rep, scene):
     m = S.page.evaluate(
         """() => ({ tabs: Array.from(document.querySelectorAll('[role=tab]')).map((t) => t.textContent.replace(/\\d+$/, '')),
                     fail: !!document.querySelector('.st-fail'), include: document.body.innerText.includes('Include superseded'),
-                    time: Array.from(document.querySelectorAll('.h-time')).every((t) => /^\\d\\d:\\d\\d$/.test(t.textContent)) })"""
+                    time: Array.from(document.querySelectorAll('.h-time')).every((t) => /^\\d\\d:\\d\\d$/.test(t.textContent)),
+                    dur: Array.from(document.querySelectorAll('.h-row .m-num')).map((t) => t.textContent) })"""
     )
     expect = [
         (m["tabs"] == ["All", "Pending", "Deploying", "Success", "Failed", "Rejected"], f"tabs {m['tabs']}"),
         (m["include"], "Include superseded missing"),
         (m["time"], "history time not HH:MM"),
+        (all(re.fullmatch(r"\d+ms|\d+\.\ds|\d+m \d\ds|\d+h \d\dm", d) for d in m["dur"]) and bool(m["dur"]), f"durations {m['dur']}"),
+        (not any(d in ("72.0s", "600.0s") for d in m["dur"]) and {"1m 12s", "10m 00s", "41.2s"} <= set(m["dur"]), f"durations {m['dur']}"),
     ]
     for ok, msg in expect:
         if not ok:
             rep.fail(scene, msg)
+
+
+def pending_gap(S, rep, scene):
+    """Phone widths: on a shared line the metric number ends 16px or more before the first button."""
+    if S.width > 760:
+        return
+    rows = S.page.evaluate(
+        """() => Array.from(document.querySelectorAll('.row')).filter((r) => r.querySelector('.r-metric .m-num') && r.getClientRects().length).map((r) => {
+          const num = r.querySelector('.m-num'), nr = num.getBoundingClientRect();
+          const btns = Array.from(r.querySelectorAll('.r-actions > *')).map((b) => b.getBoundingClientRect());
+          const first = btns[0] || null;
+          const same = first ? Math.min(nr.bottom, first.bottom) - Math.max(nr.top, first.top) > 0 : false;
+          return { name: r.querySelector('.r-name').textContent.slice(0, 24), gap: first ? first.left - nr.right : null, same,
+                   clipped: num.scrollWidth > num.clientWidth, btnH: Array.from(r.querySelectorAll('.r-actions .btn')).map((b) => b.getBoundingClientRect().height),
+                   lines: Array.from(r.querySelectorAll('.r-actions .btn')).map((b) => new Set(Array.from(b.getClientRects()).map((q) => Math.round(q.top))).size),
+                   right: Math.max(0, ...btns.map((b) => b.right)), width: document.documentElement.clientWidth };
+        })"""
+    )
+    if not rows:
+        rep.fail(scene, "no pending rows to measure")
+    for r in rows:
+        if r["same"] and r["gap"] < 16:
+            rep.fail(scene, f"{r['name']}: metric number ends {r['gap']:.0f}px before the first button (want 16 or more)")
+        if r["clipped"]:
+            rep.fail(scene, f"{r['name']}: metric number is clipped")
+        if any(h not in (44, 0) for h in r["btnH"]) or any(n > 1 for n in r["lines"]):
+            rep.fail(scene, f"{r['name']}: button height {r['btnH']} or wrapped label {r['lines']}")
+        if r["right"] > r["width"]:
+            rep.fail(scene, f"{r['name']}: buttons end at {r['right']:.0f}, past the {r['width']}px viewport")
+
+
+def nav_count_blank(S, rep, scene, label):
+    """Sidebar and drawer counts stay empty while their list is loading or failed."""
+    p = S.page
+    if S.width <= 760:
+        p.get_by_role("button", name="Open menu").click()
+        p.wait_for_selector(".drawer .nav-row")
+    rows = p.evaluate(
+        "() => Array.from(document.querySelectorAll('.nav-row')).map((r) => [r.querySelector('span').textContent, r.querySelector('.nav-count').textContent])"
+    )
+    got = dict(rows)
+    if label not in got:
+        rep.fail(scene, f"nav row {label!r} not found in {rows}")
+    elif got[label].strip() != "":
+        rep.fail(scene, f"nav count for {label!r} reads {got[label]!r} before its list is loaded")
+    if S.width <= 760:
+        p.keyboard.press("Escape")
+        p.wait_for_selector(".drawer", state="detached")
+    if label == "Pending Deploys" and S.width <= 760:
+        tab = p.evaluate("() => document.querySelector('.tabbar .tab-item .nav-count')?.textContent ?? ''")
+        if tab:
+            rep.fail(scene, f"tab bar shows a pending count {tab!r} before the list is loaded")
+
+
+def native_clear_button(S, rep, scene):
+    """The browser's blue search-clear cross never shows: no saturated blue pixel at the input's right end."""
+    from io import BytesIO
+    from PIL import Image
+
+    inp = S.page.locator(".search input")
+    inp.focus()
+    box = inp.bounding_box()
+    clip = {"x": box["x"] + box["width"] - 40, "y": box["y"], "width": 40, "height": box["height"]}
+    img = Image.open(BytesIO(S.page.screenshot(clip=clip, animations="disabled"))).convert("RGB")
+    blue = [p for p in img.getdata() if p[2] - p[0] > 50 and p[2] - p[1] > 30]
+    if blue:
+        rep.fail(scene, f"{len(blue)} saturated blue pixels at the filter's right end, e.g. {blue[0]}")
+
+
+TOAST_WANT = {
+    "Approved (deferred)": "wait", "Node disconnected": "wait", "Superseded": "wait", "New pending": "wait",
+    "Deploy succeeded": "ok", "Node connected": "ok", "restart soulstream-orch: success": "ok",
+    "Deploying": "busy", "Deploy failed": "fail", "restart soulstream-orch: timeout": "fail",
+}
+
+
+def toast_markers(S, rep, scene):
+    """Toast marker shape follows the state: filled green only for finished success."""
+    p = S.page
+    tok = p.evaluate(PROBE_JS, ["accent", "ink", "ink-2", "bg"])
+    toasts = p.evaluate(
+        """() => Array.from(document.querySelectorAll('.toast')).map((t) => {
+          const s = t.querySelector('.st'), b = getComputedStyle(s, '::before'), c = getComputedStyle(s);
+          return { text: s.textContent.trim(), bg: b.backgroundColor, border: b.borderTopColor, bw: b.borderTopWidth,
+                   chipBg: getComputedStyle(t).backgroundColor, color: c.color };
+        })"""
+    )
+    seen = set()
+    for t in toasts:
+        key = next((k for k in TOAST_WANT if t["text"].startswith(k)), None)
+        if key is None:
+            rep.fail(scene, f"unexpected toast {t['text']!r}")
+            continue
+        seen.add(key)
+        tone = TOAST_WANT[key]
+        hollow = lambda col: t["bw"] == "2px" and t["border"] == col and t["bg"] in ("rgba(0, 0, 0, 0)", "transparent")
+        ok = {
+            "ok": t["bg"] == tok["accent"],
+            "busy": hollow(tok["accent"]),
+            "wait": hollow(tok["ink-2"]),
+            "fail": t["chipBg"] == tok["ink"] and t["color"] == tok["bg"],
+        }[tone]
+        if not ok:
+            rep.fail(scene, f"toast {t['text']!r} should have the {tone} marker, got bg={t['bg']} border={t['border']} {t['bw']}")
+    for k in TOAST_WANT:
+        if k not in seen:
+            rep.fail(scene, f"toast {k!r} never appeared")

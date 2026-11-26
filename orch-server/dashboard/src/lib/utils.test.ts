@@ -73,6 +73,13 @@ describe('durMs', () => {
 
   it('returns seconds for >= 1000', () => {
     expect(durMs(3500)).toBe('3.5s');
+    expect(durMs(41200)).toBe('41.2s');
+  });
+
+  it('switches to minutes at 60 seconds and hours at 60 minutes', () => {
+    expect(durMs(72000)).toBe('1m 12s');
+    expect(durMs(600000)).toBe('10m 00s');
+    expect(durMs(3600000 + 5 * 60000)).toBe('1h 05m');
   });
 });
 

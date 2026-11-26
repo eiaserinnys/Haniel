@@ -46,7 +46,12 @@ export function uptimeStr(ms: number | null | undefined): string {
 export function durMs(ms: number | null | undefined): string {
   if (ms == null) return '—';
   if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const whole = Math.floor(seconds);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  if (whole < 3600) return `${Math.floor(whole / 60)}m ${pad(whole % 60)}s`;
+  return `${Math.floor(whole / 3600)}h ${pad(Math.floor((whole % 3600) / 60))}m`;
 }
 
 /**

@@ -81,7 +81,7 @@ function App() {
     setToasts(ts => ts.filter(x => x.id !== id));
   }, []);
 
-  const pushToast = useCallback((text: string, kind: Toast['kind'] = 'info') => {
+  const pushToast = useCallback((text: string, kind: Toast['kind']) => {
     const id = Math.random().toString(36).slice(2);
     setToasts(ts => [...ts, { id, text, kind }]);
     setTimeout(() => dismissToast(id), 4200);
@@ -159,7 +159,7 @@ function App() {
         }
         refreshDeploys();
         if (event.status === 'deploying') {
-          pushToast(`Deploying ${event.deploy_id.split(':')[1] || ''}`, 'warn');
+          pushToast(`Deploying ${event.deploy_id.split(':')[1] || ''}`, 'busy');
         } else if (event.status === 'success') {
           pushToast(`Deploy succeeded`, 'success');
         } else if (event.status === 'failed') {
@@ -182,7 +182,7 @@ function App() {
         break;
       case 'node_connected':
         refreshNodes();
-        pushToast(`Node connected: ${event.hostname}`, 'info');
+        pushToast(`Node connected: ${event.hostname}`, 'success');
         break;
       case 'node_disconnected':
         refreshNodes();
@@ -285,7 +285,7 @@ function App() {
     try {
       await api.rejectDeploy(deployId, reason);
       setPending(ps => ps.filter(p => p.deploy_id !== deployId));
-      pushToast(`Rejected deploy`, 'info');
+      pushToast(`Rejected deploy`, 'neutral');
     } catch (e) {
       pushToast(`Reject failed: ${e instanceof api.ApiError ? e.body : 'Unknown error'}`, 'error');
     } finally {
@@ -304,7 +304,7 @@ function App() {
         serviceName,
         action,
       });
-      pushToast(`${action} ${serviceName} sent`, 'info');
+      pushToast(`${action} ${serviceName} sent`, 'busy');
     } catch (e) {
       // 503 (node not connected), 400, etc. — no in-flight added, button stays idle.
       pushToast(`${action} failed: ${e instanceof api.ApiError ? e.body : 'Unknown error'}`, 'error');
@@ -350,7 +350,7 @@ function App() {
         const result = await api.approveAll();
         // Don't clear setPending — status_change events handle visibility.
         if (result.message === 'no pending deploys') {
-          pushToast('No pending deploys', 'info');
+          pushToast('No pending deploys', 'neutral');
         } else if (result.failed.length === 0) {
           pushToast(`Approved ${result.approved.length} deploys`, 'success');
         } else {
@@ -383,10 +383,11 @@ function App() {
   const nodesConnected = nodes.filter(n => n.connected === 1).length;
   const sidebarVisible = !isMobile && showSidebar;
   const menuLabel = isMobile ? 'Open menu' : showSidebar ? 'Hide sidebar' : 'Show sidebar';
+  const countWhenLoaded = (load: LoadState, count: number) => (load.status === 'ready' ? count : null);
   const navCounts = {
-    pendingCount: pending.length,
-    nodesConnected,
-    historyCount: history.length,
+    pendingCount: countWhenLoaded(pendingLoad, pending.length),
+    nodesConnected: countWhenLoaded(nodesLoad, nodesConnected),
+    historyCount: countWhenLoaded(historyLoad, history.length),
   };
 
   return (
@@ -435,7 +436,7 @@ function App() {
         </main>
       </div>
 
-      <MobileNav page={page} setPage={setPage} pendingCount={pending.length} />
+      <MobileNav page={page} setPage={setPage} pendingCount={navCounts.pendingCount ?? 0} />
       <Toaster toasts={toasts} onDismiss={dismissToast} />
       <Drawer
         open={isMobile && mobileMenuOpen}

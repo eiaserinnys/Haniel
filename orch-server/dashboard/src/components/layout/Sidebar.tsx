@@ -3,13 +3,13 @@ import type { Page } from '@/types';
 interface NavProps {
   page: Page;
   setPage: (p: Page) => void;
-  pendingCount: number;
-  nodesConnected: number;
-  historyCount: number;
+  pendingCount: number | null;
+  nodesConnected: number | null;
+  historyCount: number | null;
 }
 
 export function Nav({ page, setPage, pendingCount, nodesConnected, historyCount }: NavProps) {
-  const rows: [Page, string, number, boolean][] = [
+  const rows: [Page, string, number | null, boolean][] = [
     ['pending', 'Pending Deploys', pendingCount, true],
     ['nodes', 'Nodes', nodesConnected, false],
     ['history', 'Deploy History', historyCount, false],
@@ -25,7 +25,7 @@ export function Nav({ page, setPage, pendingCount, nodesConnected, historyCount 
           onClick={() => setPage(key)}
         >
           <span>{label}</span>
-          <span className={hot && count > 0 ? 'nav-count is-hot' : 'nav-count'}>{count}</span>
+          <span className={hot && count ? 'nav-count is-hot' : 'nav-count'}>{count}</span>
         </button>
       ))}
     </nav>

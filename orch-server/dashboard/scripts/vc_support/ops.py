@@ -126,6 +126,27 @@ def theme_menu_ops(S, rep, scene):
     return row
 
 
+def theme_menu_keyboard_ops(S, rep, scene):
+    """Opened from the keyboard, the first focus is the first item, Light; a mouse open focuses the menu box."""
+    p = S.page
+    trigger = p.locator("button[aria-label^='Theme']")
+    firsts = []
+    for key in ("Enter", "Space", "ArrowDown"):
+        trigger.focus()
+        p.keyboard.press(key)
+        p.wait_for_selector("[role=menu]")
+        S.settle(250)
+        got = p.evaluate("() => { const a = document.activeElement; return [a.getAttribute('role'), a.textContent.trim()]; }")
+        firsts.append(got[1] if got[0] == "menuitemradio" else f"{got[0]}")
+        if got != ["menuitemradio", "Light"]:
+            rep.fail(scene, f"theme menu opened with {key}: first focus {got}, want the Light item")
+        p.keyboard.press("Escape")
+        S.settle(250)
+    return {"target": "Theme menu, from the keyboard", "open": "Enter, Space, or Down arrow on the theme button",
+            "first": f"first item: {firsts[0]} (same for all three keys)", "enter": "item: applies the theme and closes",
+            "esc": "closes", "after": "back on the theme button"}
+
+
 def filter_ops(S, rep, scene):
     p = S.page
     box = p.get_by_placeholder("Filter nodes")

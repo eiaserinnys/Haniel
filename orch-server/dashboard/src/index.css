@@ -861,6 +861,10 @@ p {
   font-weight: 600;
 }
 
+.r-foot {
+  display: contents;
+}
+
 .r-actions {
   grid-area: actions;
   align-self: center;
@@ -1273,6 +1277,12 @@ p {
   padding-inline-start: var(--space-5);
 }
 
+.search .input::-webkit-search-cancel-button,
+.search .input::-webkit-search-decoration {
+  display: none;
+  appearance: none;
+}
+
 .check {
   position: relative;
   flex: none;
@@ -1632,6 +1642,7 @@ p {
 }
 
 .toast .st {
+  color: var(--ink);
   margin-inline-start: var(--zero);
   padding-inline-start: var(--zero);
   font-size: var(--ui-size);
@@ -1716,6 +1727,32 @@ p {
       "toggle toggle"
       "metric actions"
       "body body";
+  }
+
+  .row:has(> .r-foot) {
+    grid-template-columns: var(--lead-col) minmax(var(--zero), 1fr);
+    grid-template-areas:
+      "lead toggle"
+      ". foot"
+      "body body";
+  }
+
+  .r-foot {
+    grid-area: foot;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    column-gap: var(--space-2);
+  }
+
+  .r-foot > .r-metric {
+    order: 1;
+  }
+
+  .r-foot > .r-actions {
+    order: 2;
+    margin-inline-start: auto;
   }
 
   .row:hover {
