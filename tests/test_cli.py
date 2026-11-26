@@ -853,5 +853,5 @@ class TestValidateInputChecks:
         warnings = [
             r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
         ]
-        assert any("unknown key services.api.redy" in w for w in warnings)
-        assert any("services.api.ready" in w for w in warnings)
+        assert len([w for w in warnings if "unknown key services.api.redy" in w]) == 1
+        assert len([w for w in warnings if "services.api.ready" in w]) == 1

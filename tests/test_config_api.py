@@ -561,3 +561,16 @@ class TestInputErrorsRejected:
         resp = client.put("/api/config/repos/main", json={"url": "", "path": "./repo"})
         assert resp.status_code == 400
         assert "repos.main.url must not be empty" in resp.text
+
+    def test_register_service_with_unknown_key_returns_400(
+        self, dashboard_app, mock_runner, config_file
+    ):
+        before = config_file.read_text(encoding="utf-8")
+        client = TestClient(dashboard_app)
+        resp = client.post(
+            "/api/config/services/register",
+            json={"name": "api", "service_config": {"run": "x", "redy": "port:80"}},
+        )
+        assert resp.status_code == 400
+        assert "unknown key services.api.redy" in resp.text
+        assert config_file.read_text(encoding="utf-8") == before
