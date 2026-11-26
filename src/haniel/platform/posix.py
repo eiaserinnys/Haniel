@@ -162,7 +162,7 @@ class PosixHandler(PlatformHandler):
     def _get_listening_pids(self, port: int) -> set[int]:
         """Return PIDs listening on a TCP port using common POSIX tools."""
         proc_pids = self._get_listening_pids_from_proc(port)
-        if proc_pids:
+        if proc_pids is not None:
             return proc_pids
         ss_pids = self._get_listening_pids_from_ss(port)
         if ss_pids:
@@ -170,12 +170,14 @@ class PosixHandler(PlatformHandler):
         return self._get_listening_pids_from_lsof(port)
 
     @staticmethod
-    def _get_listening_pids_from_proc(port: int) -> set[int]:
+    def _get_listening_pids_from_proc(port: int) -> set[int] | None:
+        """Return listener PIDs, or None when /proc cannot answer."""
         proc = "/proc"
         if not os.path.isdir(proc):
-            return set()
+            return None
 
         inodes: set[str] = set()
+        table_read = False
         port_hex = f"{port:04X}"
         for table in ("/proc/net/tcp", "/proc/net/tcp6"):
             try:
@@ -183,6 +185,7 @@ class PosixHandler(PlatformHandler):
                     rows = f.readlines()[1:]
             except OSError:
                 continue
+            table_read = True
 
             for row in rows:
                 fields = row.split()
@@ -194,6 +197,8 @@ class PosixHandler(PlatformHandler):
                 if state == "0A" and local_addr.rsplit(":", 1)[-1] == port_hex:
                     inodes.add(inode)
 
+        if not table_read:
+            return None
         if not inodes:
             return set()
 
@@ -214,7 +219,7 @@ class PosixHandler(PlatformHandler):
                 if target.startswith("socket:[") and target[8:-1] in inodes:
                     pids.add(int(pid_name))
                     break
-        return pids
+        return pids or None
 
     @staticmethod
     def _get_listening_pids_from_ss(port: int) -> set[int]:

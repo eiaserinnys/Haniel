@@ -340,28 +340,3 @@ class HealthManager:
             except Exception:
                 # Don't let callback errors break health management
                 pass
-
-    def get_all_states(self) -> dict[str, ServiceState]:
-        """Get the current state of all services.
-
-        Returns:
-            Dict mapping service names to their states
-        """
-        return {name: health.state for name, health in self._services.items()}
-
-    def get_summary(self) -> dict:
-        """Get a summary of all service health.
-
-        Returns:
-            Dict with service health information
-        """
-        return {
-            name: {
-                "state": health.state.value,
-                "uptime": health.get_uptime(),
-                "restart_count": health.restart_count,
-                "consecutive_failures": health.consecutive_failures,
-                "last_exit_code": health.last_exit_code,
-            }
-            for name, health in self._services.items()
-        }

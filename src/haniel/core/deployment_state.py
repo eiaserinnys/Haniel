@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from collections.abc import Sequence
 from copy import deepcopy
@@ -16,7 +15,7 @@ from .deployment_errors import (
     KNOWN_DEPLOYMENT_ERROR_CODES,
     stable_deployment_error_code,
 )
-from .lifecycle_storage import retry_on_permission_error
+from .lifecycle_storage import atomic_json
 from .safety_redaction import bounded_redact_text, redact_value
 
 _JOURNAL_MESSAGE_MAX_CHARS = 16384
@@ -412,7 +411,7 @@ class DeploymentStateStore:
         """Persist the resident acknowledgement beside the deployment journal."""
         safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", repo_name)
         path = self.directory / f"{safe_name}.quiescence.json"
-        _atomic_json(path, redact_value(receipt))
+        atomic_json(path, redact_value(receipt))
         return path
 
     def is_success(self, repo_name: str, target_head: str, release_id: str) -> bool:
@@ -451,29 +450,4 @@ class DeploymentStateStore:
         return entry
 
     def _write(self, repo_name: str, value: dict[str, Any]) -> None:
-        _atomic_json(self._path(repo_name), redact_value(value))
-
-
-def _atomic_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
-    try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        retry_on_permission_error(lambda: os.replace(temporary, path))
-        _fsync_directory(path.parent)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _fsync_directory(directory: Path) -> None:
-    if os.name == "nt":
-        return
-    descriptor = os.open(directory, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+        atomic_json(self._path(repo_name), redact_value(value))

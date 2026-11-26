@@ -103,10 +103,8 @@ class OrchestratorClient:
         #                via deferred stop); DeployResult is sent on next
         #                startup via enqueue_deploy_result.
         #   Exception  — failure; we send DeployResult{failed, error=str(e)}.
-        self._deploy_approval_handler = deploy_approval_handler
         self._deploy_prepare_handler = deploy_prepare_handler
         self._deploy_plan_probe_handler = deploy_plan_probe_handler
-        self._repo_snapshot_handler = repo_snapshot_handler
         self._expected_budget_handler = expected_budget_handler
         self._ws = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -1046,19 +1044,6 @@ class OrchestratorClient:
             logger.warning(
                 "Dropping deploy plan proposal probe=%s: %s", msg["probe_id"], exc
             )
-
-    @staticmethod
-    def _parse_deploy_id(
-        deploy_id: str,
-    ) -> tuple[str, str, str, str] | None:
-        """Parse '{node_id}:{repo}:{branch}:{first_commit_hash}'.
-
-        Returns (node_id, repo, branch, first_commit_hash) or None on
-        format error. Uses split(':', 3) so the 4th element captures any
-        leftover ':' (commit hashes are pure hex so the 4th element is
-        always a single hash).
-        """
-        return parse_deploy_id(deploy_id)
 
     async def _handle_service_command(self, msg: dict) -> None:
         """Execute one service command off the loop and answer on the socket

@@ -1176,6 +1176,7 @@ class TestServiceRunnerPollCycle:
             path=runner_with_mock_repo.config_dir / "test-repo",
             branch="main",
             timeout=17,
+            compare=False,
         )
 
     @patch("haniel.core.runner.get_pending_changes", return_value=None)

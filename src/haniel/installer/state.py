@@ -14,7 +14,7 @@ import logging
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -212,20 +212,6 @@ class InstallState(BaseModel):
         """
         return step in self.completed_steps
 
-    def get_failed_step(self, step: str) -> StepStatus | None:
-        """Get failure info for a step.
-
-        Args:
-            step: Step name
-
-        Returns:
-            StepStatus if step failed, None otherwise
-        """
-        for s in self.failed_steps:
-            if s.step == step:
-                return s
-        return None
-
     def set_config_value(self, config_name: str, key: str, value: str) -> None:
         """Set a config value.
 
@@ -238,20 +224,6 @@ class InstallState(BaseModel):
             self.config_values[config_name] = {}
         self.config_values[config_name][key] = value
         logger.debug(f"Set config value: {config_name}.{key}")
-
-    def get_config_value(self, config_name: str, key: str) -> str | None:
-        """Get a config value.
-
-        Args:
-            config_name: Name of the config
-            key: Key name
-
-        Returns:
-            Value if set, None otherwise
-        """
-        if config_name in self.config_values:
-            return self.config_values[config_name].get(key)
-        return None
 
     def start_installation(self) -> None:
         """Mark installation as started."""
@@ -271,22 +243,3 @@ class InstallState(BaseModel):
     def is_complete(self) -> bool:
         """Check if installation is complete."""
         return self.phase == InstallPhase.COMPLETE
-
-    def is_incomplete(self) -> bool:
-        """Check if installation was started but not completed."""
-        return self.phase not in [InstallPhase.NOT_STARTED, InstallPhase.COMPLETE]
-
-    def to_summary(self) -> dict[str, Any]:
-        """Get a summary of the current state.
-
-        Returns:
-            Summary dict suitable for display or logging
-        """
-        return {
-            "phase": self.phase.value,
-            "completed_steps": len(self.completed_steps),
-            "failed_steps": len(self.failed_steps),
-            "configs_filled": sum(len(v) for v in self.config_values.values()),
-            "started_at": self.started_at,
-            "updated_at": self.updated_at,
-        }

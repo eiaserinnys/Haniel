@@ -261,10 +261,12 @@ def test_poll_git_barrier_does_not_block_reload_or_commit_stale_generation(
     fetch_entered = threading.Event()
     release_fetch = threading.Event()
 
-    def blocking_fetch(*, path: Path, branch: str, timeout: int = 300) -> bool:
+    def blocking_fetch(
+        *, path: Path, branch: str, timeout: int = 300, compare: bool = True
+    ) -> bool | None:
         fetch_entered.set()
         assert release_fetch.wait(timeout=5)
-        return fetch_repo(path=path, branch=branch, timeout=timeout)
+        return fetch_repo(path=path, branch=branch, timeout=timeout, compare=compare)
 
     monkeypatch.setattr("haniel.core.runner.fetch_repo", blocking_fetch)
     poll = threading.Thread(target=runner._poll_cycle)

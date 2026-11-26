@@ -216,17 +216,20 @@ def fetch_repo(
     branch: str,
     remote: str = "origin",
     timeout: int = DEFAULT_GIT_TIMEOUT,
-) -> bool:
-    """Fetch updates from remote and check if there are changes.
+    compare: bool = True,
+) -> bool | None:
+    """Fetch updates from remote and optionally check if there are changes.
 
     Args:
         path: Path to the git repository
         branch: Branch to fetch
         remote: Remote name (default: origin)
         timeout: Fetch timeout in seconds
+        compare: Compare local and remote HEAD after the fetch
 
     Returns:
-        True if there are new commits to pull, False otherwise
+        True if there are new commits to pull, False otherwise.
+        None when ``compare`` is False.
 
     Raises:
         GitFetchError: If fetch fails (network issue, no remote, etc.)
@@ -244,14 +247,15 @@ def fetch_repo(
             path=path,
         )
 
-    # Get local HEAD before fetch
-    try:
-        local_head = get_head(path)
-    except GitError as e:
-        raise GitFetchError(
-            f"Failed to get local HEAD: {e}",
-            path=path,
-        ) from e
+    local_head = None
+    if compare:
+        try:
+            local_head = get_head(path)
+        except GitError as e:
+            raise GitFetchError(
+                f"Failed to get local HEAD: {e}",
+                path=path,
+            ) from e
 
     # Fetch from remote
     try:
@@ -264,7 +268,9 @@ def fetch_repo(
             returncode=e.returncode,
         ) from e
 
-    # Get remote HEAD after fetch
+    if not compare:
+        return None
+
     try:
         remote_head = get_remote_head(path, branch, remote)
     except GitError as e:
@@ -522,25 +528,3 @@ def get_changed_paths_between(
     if result.returncode != 0:
         return None
     return [item for item in result.stdout.split("\0") if item]
-
-
-def has_changes(path: Path, branch: str, remote: str = "origin") -> bool:
-    """Check if there are changes between local and remote.
-
-    Compares local HEAD with remote HEAD. Requires a prior fetch
-    to have accurate remote refs.
-
-    Args:
-        path: Path to the git repository
-        branch: Branch to check
-        remote: Remote name (default: origin)
-
-    Returns:
-        True if local HEAD differs from remote HEAD
-
-    Raises:
-        GitError: If comparison fails
-    """
-    local_head = get_head(path)
-    remote_head = get_remote_head(path, branch, remote)
-    return local_head != remote_head
