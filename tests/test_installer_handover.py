@@ -2,6 +2,7 @@
 
 import logging
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -24,19 +25,24 @@ def install_root(tmp_path: Path) -> Path:
     (root / "haniel.yaml").write_text("x: 1\n")
     (root / "haniel-runner.conf").write_text("A=1\n")
     (root / "venv" / "bin" / "python").write_text("")
-    (root / "outside-link").symlink_to(tmp_path)
+    try:
+        (root / "outside-link").symlink_to(tmp_path, target_is_directory=True)
+    except OSError:
+        pass
     return root
 
 
 def hand_over(root: Path, *, euid=0, sudo_user="alice", chown=None, platform="linux"):
     env = {"SUDO_USER": sudo_user} if sudo_user else {}
     chown = chown or MagicMock()
+    getpwnam = MagicMock(return_value=SERVICE_USER)
+    fake_pwd = SimpleNamespace(getpwnam=getpwnam)
     with (
         patch.dict(os.environ, env, clear=False),
         patch("haniel.installer.utils.sys.platform", platform),
-        patch("haniel.installer.utils.os.geteuid", return_value=euid),
-        patch("pwd.getpwnam", return_value=SERVICE_USER) as getpwnam,
-        patch("haniel.installer.utils.os.chown", chown),
+        patch("haniel.installer.utils.os.geteuid", return_value=euid, create=True),
+        patch.dict(sys.modules, {"pwd": fake_pwd}),
+        patch("haniel.installer.utils.os.chown", chown, create=True),
     ):
         if not sudo_user:
             os.environ.pop("SUDO_USER", None)
@@ -63,8 +69,9 @@ def test_root_with_sudo_user_hands_over_everything_without_following_links(
     for call in chown.call_args_list:
         assert call.args[1:] == (1234, 5678)
         assert call.kwargs == {"follow_symlinks": False}
-    assert install_root / "outside-link" in changed
     link = install_root / "outside-link"
+    if link.is_symlink():
+        assert link in changed
     assert not any(link in p.parents for p in changed)
     assert f"Handed over {install_root} to alice" in caplog.text
 
