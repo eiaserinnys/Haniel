@@ -272,8 +272,8 @@ def test_secret_errors_logs_and_install_output_are_safe(secret_config, caplog):
     ("secrets_file", "expected"),
     [
         (None, "no secrets_file is set"),
-        ("missing.env", "cannot read {dir}/missing.env"),
-        ("secrets.env", "looked in {dir}/secrets.env"),
+        ("missing.env", "cannot read {path}"),
+        ("secrets.env", "looked in {path}"),
     ],
 )
 def test_unresolved_secret_names_the_file_it_looked_in(
@@ -290,8 +290,9 @@ def test_unresolved_secret_names_the_file_it_looked_in(
     secret_config.write_text(raw)
     with pytest.raises(ValueError) as error:
         load_config(secret_config)
+    path = secret_config.parent.resolve() / (secrets_file or "")
     assert "MISSING" in str(error.value)
-    assert expected.format(dir=secret_config.parent.resolve()) in str(error.value)
+    assert expected.format(path=path) in str(error.value)
 
 
 def test_unreadable_secrets_file_error_names_the_path(secret_config):
