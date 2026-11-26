@@ -1054,6 +1054,7 @@ p {
 
 .mini-rows {
   display: grid;
+  grid-template-columns: minmax(var(--zero), 1fr);
   margin: var(--zero);
   padding: var(--zero);
   border-top: var(--line) solid var(--rule);
@@ -1926,16 +1927,19 @@ p {
   }
 
   .mini-rows li {
-    grid-template-columns: minmax(var(--zero), 1fr) auto;
-    row-gap: var(--space-0);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-0) var(--space-2);
   }
 
   .mini-rows li .r-name {
-    grid-column: 1 / -1;
+    flex: 1 0 100%;
+    min-width: var(--zero);
   }
 
   .mini-checked {
-    text-align: start;
+    margin-inline-start: auto;
   }
 
   .r-actions:empty {

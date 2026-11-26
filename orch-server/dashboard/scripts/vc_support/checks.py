@@ -412,9 +412,12 @@ def nodes_ledger(S, rep, scene):
           const serving = li.querySelector('.mini-serving'), checked = li.querySelector('.mini-checked');
           const range = document.createRange(); range.selectNodeContents(checked);
           const t = range.getBoundingClientRect(), mono = checked.querySelector('.mono');
+          const sr = document.createRange(); sr.selectNodeContents(serving);
+          const st = sr.getBoundingClientRect();
           return { repo: li.querySelector('.r-name').textContent, checked: checked.textContent.length > 0,
                    row_right: li.getBoundingClientRect().right, text_right: t.right, text_left: t.left,
-                   prev_right: serving.getBoundingClientRect().right,
+                   serving_text_right: st.right, serving_text_top: st.top, checked_top: t.top, line_h: t.height,
+                   gap_token: parseFloat(getComputedStyle(li).columnGap),
                    checked_font: mono ? getComputedStyle(mono).fontFamily : getComputedStyle(checked).fontFamily }; })
           .filter((r) => r.checked)"""
     )
@@ -432,8 +435,10 @@ def nodes_ledger(S, rep, scene):
     for row in edges:
         if row["text_right"] > row["row_right"] + 0.5:
             rep.fail(scene, f"ledger row {row['repo']!r}: checked text ends at {row['text_right']:.1f}, past the row end {row['row_right']:.1f}")
-        if row["text_left"] < row["prev_right"] - 0.5:
-            rep.fail(scene, f"ledger row {row['repo']!r}: checked text starts at {row['text_left']:.1f}, inside the serving text ending {row['prev_right']:.1f}")
+        same_line = abs(row["checked_top"] - row["serving_text_top"]) < row["line_h"] / 2
+        gap = row["text_left"] - row["serving_text_right"]
+        if same_line and gap < row["gap_token"] - 0.5:
+            rep.fail(scene, f"ledger row {row['repo']!r}: serving and checked sit on one line with a {gap:.1f}px gap, want at least {row['gap_token']:.1f}px (the column gap token)")
         if row["checked"] and "IBM Plex Mono" not in row["checked_font"]:
             rep.fail(scene, f"ledger row {row['repo']!r}: the checked time is not Plex Mono ({row['checked_font']})")
     if not any("serving " in x["text"] and re.search(r"\d\d:\d\d", x["text"]) for x in m):
