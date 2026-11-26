@@ -46,7 +46,12 @@ export function uptimeStr(ms: number | null | undefined): string {
 export function durMs(ms: number | null | undefined): string {
   if (ms == null) return '—';
   if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const whole = Math.floor(seconds);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  if (whole < 3600) return `${Math.floor(whole / 60)}m ${pad(whole % 60)}s`;
+  return `${Math.floor(whole / 3600)}h ${pad(Math.floor((whole % 3600) / 60))}m`;
 }
 
 /**
@@ -82,4 +87,22 @@ export function parseCommit(raw: string): { hash: string; message: string } {
     hash: raw.slice(0, 7),
     message: raw.slice(8) || raw.slice(7),
   };
+}
+
+/**
+ * Absolute time for offline notices: "Nov 26, 12:41"
+ */
+export function absTime(ts: string): string {
+  const d = new Date(ts);
+  const date = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return `${date}, ${timeOfDay(ts).slice(0, 5)}`;
+}
+
+/**
+ * Summarize a git diff stat's last line: "2 files changed, 47 insertions(+), 13 deletions(-)"
+ */
+export function parseDiffSummary(line: string): { files: number; add: number; del: number } | null {
+  const m = /(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?/.exec(line);
+  if (!m) return null;
+  return { files: Number(m[1]), add: Number(m[2] ?? 0), del: Number(m[3] ?? 0) };
 }

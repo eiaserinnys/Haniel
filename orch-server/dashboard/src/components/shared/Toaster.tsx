@@ -3,21 +3,40 @@ import type { Toast } from '@/types';
 
 interface ToasterProps {
   toasts: Toast[];
+  onDismiss: (id: string) => void;
 }
 
-export function Toaster({ toasts }: ToasterProps) {
+// Keep hyphenated words (repo, node, and service names) on one line.
+function renderText(text: string) {
+  return text.split(/(\S*-\S*)/).map((part, i) =>
+    /-/.test(part) ? <span className="nw" key={i}>{part}</span> : part,
+  );
+}
+
+const TONE: Record<Toast['kind'], string> = {
+  success: 'ok',
+  busy: 'busy',
+  warn: 'wait',
+  neutral: 'off',
+  error: 'fail',
+};
+
+export function Toaster({ toasts, onDismiss }: ToasterProps) {
   if (toasts.length === 0) return null;
 
   return (
-    <div className="toasts">
-      {toasts.map(t => (
-        <div key={t.id} className={`toast toast-${t.kind}`}>
-          <span className="toast-icon">
-            <Icon name={t.kind === 'success' ? 'check' : t.kind === 'amber' ? 'bell' : 'dot'} size={12} />
-          </span>
-          <span>{t.text}</span>
-        </div>
-      ))}
+    <div className="toasts" role="status" aria-live="polite">
+      {toasts.map(t => {
+        const fail = t.kind === 'error';
+        return (
+          <div key={t.id} className={fail ? 'toast is-fail' : 'toast'}>
+            <span className={`st st-${TONE[t.kind]}`}><span>{renderText(t.text)}</span></span>
+            <button type="button" className="icon-btn" aria-label="Dismiss" onClick={() => onDismiss(t.id)}>
+              <Icon name="x" small />
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 }

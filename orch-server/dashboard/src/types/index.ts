@@ -148,10 +148,16 @@ export interface InFlightCommand {
 export type Page = 'pending' | 'nodes' | 'history';
 
 // Toast system
-export type ToastKind = 'info' | 'success' | 'amber' | 'error';
+export type ToastKind = 'success' | 'busy' | 'warn' | 'neutral' | 'error';
 
 export interface Toast {
   id: string;
   text: string;
   kind: ToastKind;
 }
+
+// Per-area load state for the three data lists.
+export type LoadState =
+  | { status: 'loading' }
+  | { status: 'ready' }
+  | { status: 'error'; detail: string };

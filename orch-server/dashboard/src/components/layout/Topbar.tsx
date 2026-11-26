@@ -1,44 +1,35 @@
+import { forwardRef } from 'react';
 import { Icon } from '@/components/shared/Icon';
-import type { Page } from '@/types';
+import { Status } from '@/components/shared/Status';
+import { ThemeMenu } from '@/components/layout/ThemeMenu';
+import type { ThemePreference } from '@/lib/theme';
+import type { WsStatus } from '@/types';
 
 interface TopbarProps {
-  page: Page;
-  pendingCount: number;
-  theme: 'dark' | 'light';
-  onToggleTheme: () => void;
+  wsStatus: WsStatus;
+  theme: ThemePreference;
+  onThemeChange: (theme: ThemePreference) => void;
+  menuLabel: string;
   onMenuToggle: () => void;
 }
 
-const PAGE_LABELS: Record<Page, string> = {
-  pending: 'Pending Deploys',
-  nodes: 'Nodes',
-  history: 'Deploy History',
-};
-
-export function Topbar({ page, pendingCount, theme, onToggleTheme, onMenuToggle }: TopbarProps) {
+export const Topbar = forwardRef<HTMLButtonElement, TopbarProps>(function Topbar(
+  { wsStatus, theme, onThemeChange, menuLabel, onMenuToggle },
+  menuRef,
+) {
   return (
     <header className="topbar">
-      <button className="top-action menu-btn" aria-label="Menu" onClick={onMenuToggle}>
-        <Icon name="menu" size={14} />
+      <button ref={menuRef} type="button" className="icon-btn" aria-label={menuLabel} onClick={onMenuToggle}>
+        <Icon name="menu" />
       </button>
-      <div className="crumbs">
-        <b style={{ color: 'var(--fg)' }}>Orchestrator Dashboard</b>
-        <span style={{ margin: '0 8px', color: 'var(--dim)' }}>/</span>
-        <span>{PAGE_LABELS[page]}</span>
+      <div className="brand">
+        <span className="brand-name">Haniel</span>
+        <span className="brand-sub">Orchestrator</span>
       </div>
-      <div className="spacer" />
-      <button
-        className="top-action"
-        aria-label="Toggle theme"
-        title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-        onClick={onToggleTheme}
-      >
-        <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={14} />
-      </button>
-      <button className="top-action" title={`${pendingCount} pending`}>
-        <Icon name="bell" size={14} />
-        {pendingCount > 0 && <span className="bell-badge" />}
-      </button>
+      <div className="topbar-end">
+        <span className="conn" role="status"><Status state={wsStatus} /></span>
+        <ThemeMenu theme={theme} onChange={onThemeChange} />
+      </div>
     </header>
   );
-}
+});

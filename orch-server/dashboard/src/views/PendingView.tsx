@@ -1,18 +1,27 @@
 import { useState, useCallback, useMemo } from 'react';
 import { Icon } from '@/components/shared/Icon';
 import { RejectModal } from '@/components/shared/RejectModal';
-import { relTime, parseCommit, cn } from '@/lib/utils';
-import type { Deploy } from '@/types';
+import { RowToggle } from '@/components/shared/RowToggle';
+import { Status } from '@/components/shared/Status';
+import { Empty, LoadError, Skeleton } from '@/components/shared/LoadStates';
+import { relTime, parseCommit, parseDiffSummary } from '@/lib/utils';
+import type { Deploy, LoadState } from '@/types';
 
 interface PendingViewProps {
   deploys: Deploy[];
+  load?: LoadState;
+  onRetry?: () => void;
   onApprove: (deployId: string) => Promise<boolean>;
   onReject: (deployId: string, reason: string) => void;
   onApproveAll: (ids: string[]) => Promise<readonly string[]>;
 }
 
+const READY: LoadState = { status: 'ready' };
+
 export function PendingView({
   deploys,
+  load = READY,
+  onRetry = () => undefined,
   onApprove,
   onReject,
   onApproveAll,
@@ -117,59 +126,57 @@ export function PendingView({
     });
   }, [onApprove, selectionTokens]);
 
+  const header = (tools: boolean) => (
+    <div className="page-head">
+      <h1 className="page-title">Pending Deploys</h1>
+      {tools && (
+        <div className="page-tools">
+          <label className="check-label">
+            <input
+              type="checkbox"
+              className="check"
+              checked={allSelected}
+              disabled={selectableDeploys.length === 0}
+              onChange={toggleSelectAll}
+            />
+            Select all
+          </label>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={activeSelected.size === 0}
+            onClick={handleApproveAll}
+          >
+            {activeSelected.size > 0 ? `Approve ${activeSelected.size} selected` : 'Approve selected'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+
+  if (load.status === 'loading') {
+    return <>{header(false)}<Skeleton rows={4} /></>;
+  }
+  if (load.status === 'error') {
+    return <>{header(false)}<LoadError what="pending deploys" detail={load.detail} onRetry={onRetry} /></>;
+  }
   if (deploys.length === 0) {
     return (
-      <div className="view-pending">
-        <h1>Pending Deploys</h1>
-        <div className="empty-state">
-          <div className="empty-icon">
-            <Icon name="check" size={28} />
-          </div>
-          <h2 className="empty-title">All clear</h2>
-          <p className="empty-desc">No pending deploys. Watching repos across connected nodes.</p>
-        </div>
-      </div>
+      <>
+        {header(false)}
+        <div className="ledger"><Empty title="All clear" text="New changes show up here." /></div>
+      </>
     );
   }
 
-  const pendingCount = deploys.filter(deploy => deploy.status === 'pending').length;
-  const deployingCount = deploys.length - pendingCount;
-  const blockedCount = regularDeploys.filter(
-    deploy => deploy.status === 'pending' && blockedNodeIds.has(deploy.node_id),
-  ).length;
-  const subtitle =
-    deployingCount > 0
-      ? `${pendingCount} pending · ${deployingCount} deploying${blockedCount ? ` · ${blockedCount} waiting for self-update` : ''}`
-      : `${pendingCount} change${pendingCount !== 1 ? 's' : ''} detected · awaiting approval`;
-
   return (
-    <div className="view-pending">
-      <h1>Pending Deploys</h1>
-      <p className="view-subtitle">{subtitle}</p>
-
-      <div className="pending-actions">
-        <label className="select-all-label">
-          <input
-            type="checkbox"
-            className="native-checkbox"
-            checked={allSelected}
-            disabled={selectableDeploys.length === 0}
-            onChange={toggleSelectAll}
-          />
-          <span className="select-all-text">Select all</span>
-        </label>
-        {activeSelected.size > 0 && (
-          <button className="btn-approve-all" onClick={handleApproveAll}>
-            <Icon name="check" size={12} />
-            Approve {activeSelected.size} selected
-          </button>
-        )}
-      </div>
+    <>
+      {header(true)}
 
       {selfUpdateDeploys.length > 0 && (
         <PendingSection
           title="Self-updates"
-          description="Update Haniel first so later deployments use the newest runner."
+          description="Same-node updates wait for these."
           priority
           deploys={selfUpdateDeploys}
           blockedNodeIds={blockedNodeIds}
@@ -185,7 +192,6 @@ export function PendingView({
       {regularDeploys.length > 0 && (
         <PendingSection
           title="Repository updates"
-          description={blockedCount > 0 ? `${blockedCount} update${blockedCount === 1 ? '' : 's'} waiting for Haniel on the same node.` : undefined}
           deploys={regularDeploys}
           blockedNodeIds={blockedNodeIds}
           activeSelected={activeSelected}
@@ -204,7 +210,7 @@ export function PendingView({
           onClose={() => setRejectTarget(null)}
         />
       )}
-    </div>
+    </>
   );
 }
 
@@ -242,45 +248,35 @@ function PendingSection({
   const headingId = `pending-section-${title.toLowerCase().replaceAll(' ', '-')}`;
 
   return (
-    <section className={cn('pending-section', priority && 'is-priority')} aria-labelledby={headingId}>
-      <div className="pending-section-header">
-        <div>
-          <h2 id={headingId}>{title}</h2>
-          {description && <p>{description}</p>}
-        </div>
-        <span className="pending-section-count">{deploys.length}</span>
+    <section className="sect" aria-labelledby={headingId}>
+      <div className="sect-head">
+        <h2 className="sect-title" id={headingId}>{title}</h2>
+        {description && <p className="sect-note">{description}</p>}
       </div>
-      <div className="pending-list">
-        {deploys.map(deploy => {
-          const approvalBlockedReason = !deploy.is_self_update && blockedNodeIds.has(deploy.node_id)
-            ? 'Self-update required first'
-            : undefined;
-          return (
-            <PendingCard
-              key={deploy.deploy_id}
-              deploy={deploy}
-              isDeploying={deploy.status === 'deploying'}
-              approvalBlockedReason={approvalBlockedReason}
-              isSelected={activeSelected.has(deploy.deploy_id)}
-              isExpanded={expanded.has(deploy.deploy_id)}
-              onToggleSelect={() => onToggleSelect(deploy)}
-              onToggleExpand={() => onToggleExpand(deploy.deploy_id)}
-              onApprove={() => onApprove(deploy)}
-              onReject={() => onReject(deploy)}
-            />
-          );
-        })}
+      <div className={priority ? 'ledger ledger-accent' : 'ledger'}>
+        {deploys.map(deploy => (
+          <PendingRow
+            key={deploy.deploy_id}
+            deploy={deploy}
+            isDeploying={deploy.status === 'deploying'}
+            isBlocked={!deploy.is_self_update && blockedNodeIds.has(deploy.node_id)}
+            isSelected={activeSelected.has(deploy.deploy_id)}
+            isExpanded={expanded.has(deploy.deploy_id)}
+            onToggleSelect={() => onToggleSelect(deploy)}
+            onToggleExpand={() => onToggleExpand(deploy.deploy_id)}
+            onApprove={() => onApprove(deploy)}
+            onReject={() => onReject(deploy)}
+          />
+        ))}
       </div>
     </section>
   );
 }
 
-/* ── PendingCard ─────────────────────────────────────── */
-
-interface PendingCardProps {
+interface PendingRowProps {
   deploy: Deploy;
   isDeploying: boolean;
-  approvalBlockedReason?: string;
+  isBlocked: boolean;
   isSelected: boolean;
   isExpanded: boolean;
   onToggleSelect: () => void;
@@ -289,137 +285,119 @@ interface PendingCardProps {
   onReject: () => void;
 }
 
-function PendingCard({
+function PendingRow({
   deploy,
   isDeploying,
-  approvalBlockedReason,
+  isBlocked,
   isSelected,
   isExpanded,
   onToggleSelect,
   onToggleExpand,
   onApprove,
   onReject,
-}: PendingCardProps) {
+}: PendingRowProps) {
   const [showAllCommits, setShowAllCommits] = useState(false);
   const commits = deploy.commits.map(parseCommit);
   const visibleCommits = showAllCommits ? commits : commits.slice(0, 3);
-  const hiddenCount = commits.length - 3;
+  const hiddenCount = commits.length - visibleCommits.length;
   const diffStatLines = (deploy.diff_stat ?? '')
     .split(/\r?\n/)
     .map(line => line.trimEnd())
     .filter(Boolean);
   const diffStatText = diffStatLines.join('\n');
-  const diffSummary = diffStatLines[diffStatLines.length - 1] ?? '';
+  const diffSummary = parseDiffSummary(diffStatLines[diffStatLines.length - 1] ?? '');
+  const blockedId = `blocked-${deploy.deploy_id}`;
 
   return (
-    <div
-      className={cn(
-        'pending-card',
-        isSelected && 'is-selected',
-        isDeploying && 'is-deploying',
-        approvalBlockedReason && 'is-approval-blocked',
-      )}
-    >
-      <div className="pending-card-header">
+    <div className="row" data-open={isExpanded ? '' : undefined}>
+      <div className="r-lead">
         <input
           type="checkbox"
-          className="native-checkbox"
+          className="check"
+          aria-label={`Select ${deploy.repo} on ${deploy.node_id}`}
           checked={isSelected}
-          disabled={isDeploying || Boolean(approvalBlockedReason)}
+          disabled={isDeploying || isBlocked}
           onChange={onToggleSelect}
         />
-        <button
-          className={cn('expand-btn', isExpanded && 'is-expanded')}
-          onClick={onToggleExpand}
-          aria-label={isExpanded ? 'Collapse' : 'Expand'}
-        >
-          <Icon name="chevron" size={12} />
-        </button>
-
-        <div className="pending-card-info" onClick={onToggleExpand}>
-          <div className="pending-card-title">
-            <span className="pending-repo">{deploy.repo}</span>
-            <span className="pending-sep">·</span>
-            <span className="pending-branch">{deploy.branch}</span>
-            <span className="pending-sep">·</span>
-            <span className="pending-node">{deploy.node_id}</span>
-          </div>
-          <div className="pending-card-meta">
-            <span>{commits.length} commit{commits.length !== 1 ? 's' : ''}</span>
-            {diffSummary && <><span className="pending-sep">·</span><span>{diffSummary}</span></>}
-            <span className="pending-sep">·</span>
-            <span>detected {relTime(deploy.detected_at)}</span>
-          </div>
-        </div>
-
-        <div className="pending-card-actions">
-          {isDeploying ? (
-            <span className="deploying-pill" aria-live="polite">
-              <Icon name="loader" size={12} />
-              Deploying
+      </div>
+      <RowToggle open={isExpanded} onToggle={onToggleExpand}>
+        <span className="r-title">
+          <span className="r-name sel">{deploy.repo}</span>
+          <span className="r-branch">{deploy.branch}</span>
+        </span>
+        <span className="r-meta">
+          <span className="r-node">{deploy.node_id}</span>
+          {diffSummary && (
+            <span>{diffSummary.files} files <span className="mono">+{diffSummary.add} −{diffSummary.del}</span></span>
+          )}
+          <span className="mono">{relTime(deploy.detected_at)}</span>
+          {isBlocked && !isDeploying && (
+            <span className="r-blocked" id={blockedId}>
+              <Icon name="lock" small />Waits for self-update
             </span>
+          )}
+        </span>
+      </RowToggle>
+      <div className="r-foot">
+        <div className="r-actions">
+          {isDeploying ? (
+            <Status state="deploying" />
           ) : (
             <>
-              <button className="btn-reject" onClick={onReject}>
+              <button type="button" className="btn btn-outline" onClick={onReject}>
                 {deploy.is_self_update ? 'Postpone' : 'Reject'}
               </button>
               <button
-                className="btn-approve"
+                type="button"
+                className="btn btn-primary"
                 onClick={onApprove}
-                disabled={Boolean(approvalBlockedReason)}
-                title={approvalBlockedReason}
+                disabled={isBlocked}
+                aria-describedby={isBlocked ? blockedId : undefined}
               >
-                <Icon name="check" size={12} />
                 Approve
               </button>
             </>
           )}
         </div>
-      </div>
-
-      {approvalBlockedReason && (
-        <div className="approval-blocked-reason" role="note">
-          {approvalBlockedReason}
+        <div className="r-metric">
+          <span className="m-label">commits</span>
+          <span className="m-num">{commits.length}</span>
         </div>
-      )}
-
+      </div>
       {isExpanded && (
-        <div className="pending-card-body">
-          {deploy.affected_services.length > 0 && (
-            <div className="affected-services">
-              <span className="affected-label">Affected services</span>
-              <div className="service-chips">
-                {deploy.affected_services.map(svc => (
-                  <span key={svc} className="service-chip">{svc}</span>
+        <div className="r-body">
+          <div className="dl">
+            {deploy.affected_services.length > 0 && (
+              <>
+                <span className="dl-k">Services</span>
+                <div className="dl-v chips">
+                  {deploy.affected_services.map(svc => <span key={svc} className="tag">{svc}</span>)}
+                </div>
+              </>
+            )}
+            <span className="dl-k">Commits</span>
+            <div className="dl-v">
+              <ul className="commits">
+                {visibleCommits.map((c, i) => (
+                  <li key={i}>
+                    <span className="commit-hash">{c.hash}</span>
+                    <span className="commit-msg">{c.message}</span>
+                  </li>
                 ))}
-              </div>
+              </ul>
+              {hiddenCount > 0 && (
+                <button type="button" className="link-btn" onClick={() => setShowAllCommits(true)}>
+                  {hiddenCount} more commit{hiddenCount !== 1 ? 's' : ''}
+                </button>
+              )}
             </div>
-          )}
-
-          {diffStatText && (
-            <div className="diff-stat-block">
-              <span className="diff-stat-label">Git changes</span>
-              <pre className="diff-stat" aria-label="Git changes">{diffStatText}</pre>
-            </div>
-          )}
-
-          <div className="commit-timeline">
-            {visibleCommits.map((c, i) => (
-              <div key={i} className="commit-row">
-                <div className="commit-rail">
-                  <Icon name="commit" size={12} />
-                  {i < visibleCommits.length - 1 && <div className="commit-rail-line" />}
+            {diffStatText && (
+              <>
+                <span className="dl-k">Files</span>
+                <div className="dl-v">
+                  <pre className="files scroll scroll-x" aria-label="Git changes">{diffStatText}</pre>
                 </div>
-                <div className="commit-detail">
-                  <code className="commit-hash">{c.hash}</code>
-                  <span className="commit-msg">{c.message}</span>
-                </div>
-              </div>
-            ))}
-            {!showAllCommits && hiddenCount > 0 && (
-              <button className="more-commits" onClick={() => setShowAllCommits(true)}>
-                + {hiddenCount} more commit{hiddenCount !== 1 ? 's' : ''}
-              </button>
+              </>
             )}
           </div>
         </div>

@@ -13,7 +13,7 @@ export function useWebSocket(onEvent: (event: WsEvent) => void): {
   status: WsStatus;
   reconnect: () => void;
 } {
-  const [status, setStatus] = useState<WsStatus>('disconnected');
+  const [status, setStatus] = useState<WsStatus>('reconnecting');
   const wsRef = useRef<WebSocket | null>(null);
   const retriesRef = useRef(0);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
