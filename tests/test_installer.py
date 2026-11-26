@@ -3118,3 +3118,422 @@ async def test_interactive_session_uses_streamable_mcp_url(tmp_path: Path):
         "type": "http",
         "url": "http://localhost:3201/mcp/",
     }
+
+
+def _self_update_config(config_dir: Path, **install_payload) -> HanielConfig:
+    """Config with a self-update repo whose wrapper script exists on disk."""
+    repo_dir = config_dir / ".projects" / "haniel"
+    (repo_dir / "scripts").mkdir(parents=True)
+    (repo_dir / "haniel-runner.sh").write_text("#!/usr/bin/env bash\n")
+    (repo_dir / "scripts" / "haniel_atomic_release.py").write_text("")
+    return HanielConfig.model_validate(
+        {
+            "repos": {
+                "haniel": {
+                    "url": "https://example.test/haniel.git",
+                    "branch": "main",
+                    "path": "./.projects/haniel",
+                }
+            },
+            "services": {},
+            "self": {"repo": "haniel"},
+            "install": {
+                "service": {"name": "haniel", "working_directory": "{root}"},
+                **install_payload,
+            },
+        }
+    )
+
+
+class TestSystemdUnitSelfUpdate:
+    """The Linux unit hands the process to the wrapper when self: is set."""
+
+    @pytest.fixture(autouse=True)
+    def _plain_user(self, monkeypatch):
+        monkeypatch.delenv("SUDO_USER", raising=False)
+        monkeypatch.setattr("haniel.installer.finalize.getpass.getuser", lambda: "dana")
+
+    def test_unit_runs_wrapper_with_runner_conf_when_self_is_set(self, tmp_path):
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+
+        config = _self_update_config(tmp_path)
+        unit = Finalizer(config, tmp_path, InstallState())._generate_systemd_unit(
+            config.install.service
+        )
+
+        runner = tmp_path / ".projects" / "haniel" / "haniel-runner.sh"
+        exec_start = [
+            line for line in unit.splitlines() if line.startswith("ExecStart=")
+        ]
+        assert exec_start == [
+            f"ExecStart=/bin/bash {runner} {tmp_path / 'haniel-runner.conf'}"
+        ]
+        assert "haniel run" not in unit
+
+    def test_unit_runs_haniel_directly_without_self(self, tmp_path):
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+
+        config = HanielConfig(
+            install=InstallConfig(
+                service=ServiceDefinitionConfig(
+                    name="haniel", working_directory="{root}"
+                )
+            )
+        )
+        with patch(
+            "haniel.installer.finalize.shutil.which", return_value="/opt/bin/haniel"
+        ):
+            unit = Finalizer(config, tmp_path, InstallState())._generate_systemd_unit(
+                config.install.service
+            )
+
+        assert "ExecStart=/opt/bin/haniel run haniel.yaml\n" in unit
+        assert "haniel-runner.sh" not in unit
+
+    def test_unit_names_the_user_who_ran_the_installer(self, tmp_path):
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+
+        config = _self_update_config(tmp_path)
+        unit = Finalizer(config, tmp_path, InstallState())._generate_systemd_unit(
+            config.install.service
+        )
+
+        assert "[Service]\nType=simple\nUser=dana\n" in unit
+
+    def test_unit_names_the_sudo_invoker_when_run_as_root(self, tmp_path, monkeypatch):
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+
+        monkeypatch.setenv("SUDO_USER", "erin")
+        monkeypatch.setattr("haniel.installer.finalize.os.geteuid", lambda: 0)
+        config = _self_update_config(tmp_path)
+        unit = Finalizer(config, tmp_path, InstallState())._generate_systemd_unit(
+            config.install.service
+        )
+
+        assert "User=erin\n" in unit
+
+    def test_linux_registration_writes_runner_conf_and_prints_systemctl_steps(
+        self, tmp_path, caplog
+    ):
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+
+        config = _self_update_config(tmp_path)
+        finalizer = Finalizer(config, tmp_path, InstallState(), "haniel.yaml")
+        written: dict[str, str] = {}
+
+        def fake_write(self, content, *args, **kwargs):
+            written[str(self)] = content
+
+        with (
+            caplog.at_level("INFO", logger="haniel.installer.finalize"),
+            patch("haniel.installer.finalize.platform.system", return_value="Linux"),
+            patch.object(Path, "write_text", autospec=True, side_effect=fake_write),
+            patch("haniel.installer.finalize.subprocess.run") as run,
+        ):
+            finalizer.register_service()
+
+        conf = (tmp_path / "haniel-runner.conf").read_text(encoding="utf-8")
+        assert "HANIEL_REPO=./.projects/haniel" in conf
+        assert "CONFIG=haniel.yaml" in conf
+        unit = written["/etc/systemd/system/haniel.service"]
+        assert "haniel-runner.sh" in unit and "User=dana" in unit
+        assert [call.args[0] for call in run.call_args_list] == [
+            ["systemctl", "daemon-reload"],
+            ["systemctl", "enable", "haniel"],
+        ]
+        assert "systemctl daemon-reload" in caplog.text
+        assert "systemctl enable" in caplog.text
+        assert "systemctl start haniel" in caplog.text
+
+    def test_linux_registration_without_self_writes_no_runner_conf(self, tmp_path):
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+
+        config = HanielConfig(
+            install=InstallConfig(
+                service=ServiceDefinitionConfig(
+                    name="haniel", working_directory="{root}"
+                )
+            )
+        )
+        finalizer = Finalizer(config, tmp_path, InstallState())
+
+        with (
+            patch("haniel.installer.finalize.platform.system", return_value="Linux"),
+            patch("haniel.installer.finalize.shutil.which", return_value="/bin/haniel"),
+            patch.object(Path, "write_text", autospec=True),
+            patch("haniel.installer.finalize.subprocess.run"),
+        ):
+            finalizer.register_service()
+
+        assert not (tmp_path / "haniel-runner.conf").exists()
+
+    def test_registration_refuses_when_wrapper_is_missing(self, tmp_path):
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+
+        config = _self_update_config(tmp_path)
+        (tmp_path / ".projects" / "haniel" / "haniel-runner.sh").unlink()
+        finalizer = Finalizer(config, tmp_path, InstallState())
+
+        with (
+            patch("haniel.installer.finalize.subprocess.run") as run,
+            patch.object(Path, "write_text", autospec=True) as write,
+            pytest.raises(FileNotFoundError, match="haniel-runner.sh"),
+        ):
+            finalizer._register_systemd_service(config.install.service)
+
+        run.assert_not_called()
+        write.assert_not_called()
+
+    def test_missing_haniel_cli_message_recommends_the_git_install(self, tmp_path):
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+
+        config = HanielConfig(
+            install=InstallConfig(
+                service=ServiceDefinitionConfig(
+                    name="haniel", working_directory="{root}"
+                )
+            )
+        )
+        finalizer = Finalizer(config, tmp_path, InstallState())
+
+        with (
+            patch("haniel.installer.finalize.shutil.which", return_value=None),
+            pytest.raises(RuntimeError) as error,
+        ):
+            finalizer._register_systemd_service(config.install.service)
+
+        assert "pip install git+https://github.com/eiaserinnys/haniel.git" in str(
+            error.value
+        )
+        assert "pip install haniel)" not in str(error.value)
+
+
+class TestBootstrapClaudeCode:
+    """Claude Code is checked only when the interactive phase will run."""
+
+    @patch("haniel.installer.orchestrator.find_tool", return_value=None)
+    def test_bootstrap_without_claude_check_proceeds_without_claude(
+        self, _find_tool, tmp_path
+    ):
+        from haniel.installer.orchestrator import InstallOrchestrator
+        from haniel.installer.state import InstallPhase, InstallState
+
+        state = InstallState()
+        orchestrator = InstallOrchestrator(HanielConfig(), tmp_path, state)
+
+        assert orchestrator.run_bootstrap_phase(require_claude_code=False) is True
+        assert state.phase == InstallPhase.MECHANICAL
+        assert not state.is_step_complete("claude-code-check")
+
+    @patch("haniel.installer.orchestrator.find_tool", return_value=None)
+    def test_bootstrap_still_requires_claude_by_default(self, _find_tool, tmp_path):
+        from haniel.installer.orchestrator import InstallOrchestrator
+        from haniel.installer.state import InstallState
+
+        orchestrator = InstallOrchestrator(HanielConfig(), tmp_path, InstallState())
+
+        assert orchestrator.run_bootstrap_phase() is False
+
+
+_POSIX_ONLY = pytest.mark.skipif(
+    sys.platform == "win32", reason="validate commands run through sh"
+)
+
+
+def _validated_key(command: str, **kwargs) -> ConfigKeyConfig:
+    return ConfigKeyConfig.model_validate(
+        {"key": "TOKEN", "validate": command, **kwargs}
+    )
+
+
+@_POSIX_ONLY
+class TestValidateCmd:
+    """The ``validate`` command of a config key runs against the chosen value."""
+
+    def test_value_replaces_placeholder_and_exit_zero_passes(self, tmp_path):
+        from haniel.installer.validation import run_validate_cmd
+
+        key = _validated_key('test "{value}" = "good-token"')
+
+        run_validate_cmd("app-env", key, "good-token", tmp_path)
+
+    def test_key_without_validate_command_is_not_run(self, tmp_path):
+        from haniel.installer.validation import run_validate_cmd
+
+        run_validate_cmd("app-env", ConfigKeyConfig(key="TOKEN"), "anything", tmp_path)
+
+    def test_nonzero_exit_names_key_command_and_last_output_lines(self, tmp_path):
+        from haniel.installer.validation import (
+            ConfigValueValidationError,
+            run_validate_cmd,
+        )
+
+        key = _validated_key(
+            "for i in 1 2 3 4 5 6 7 8; do echo line$i; done; echo oops >&2; exit 3"
+        )
+
+        with pytest.raises(ConfigValueValidationError) as error:
+            run_validate_cmd("app-env", key, "secret-value", tmp_path)
+
+        message = str(error.value)
+        assert "app-env.TOKEN" in message
+        assert "exit code 3" in message
+        assert "for i in 1 2 3" in message  # command template
+        assert "secret-value" not in message
+        assert "oops" in message and "line8" in message
+        assert "line1\n" not in message and "line3" not in message
+
+    def test_timeout_is_a_failure_and_leaves_no_child_running(
+        self, tmp_path, monkeypatch
+    ):
+        from haniel.installer import validation
+
+        monkeypatch.setattr(validation, "VALIDATE_TIMEOUT_SECONDS", 1)
+        pid_file = tmp_path / "child.pid"
+
+        with pytest.raises(validation.ConfigValueValidationError, match="timed out"):
+            validation.run_validate_cmd(
+                "app-env",
+                _validated_key(f"sleep 30 & echo $! > {pid_file}; wait"),
+                "v",
+                tmp_path,
+            )
+
+        child = int(pid_file.read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(child, 0)
+
+    def test_command_runs_in_config_dir(self, tmp_path):
+        from haniel.installer.validation import run_validate_cmd
+
+        (tmp_path / "marker").write_text("x")
+        run_validate_cmd("app-env", _validated_key("test -f marker"), "v", tmp_path)
+
+    def test_interactive_set_config_rejects_value_and_keeps_state_clean(self, tmp_path):
+        from haniel.installer.interactive import InteractiveInstaller
+        from haniel.installer.state import InstallState
+
+        config = HanielConfig(
+            install=InstallConfig(
+                configs={
+                    "app-env": ConfigFileConfig(
+                        path="./.env",
+                        keys=[_validated_key('test "{value}" = ok')],
+                    )
+                }
+            )
+        )
+        state = InstallState()
+        installer = InteractiveInstaller(config, tmp_path, state)
+
+        rejected = installer.set_config("app-env", "TOKEN", "bad")
+        accepted = installer.set_config("app-env", "TOKEN", "ok")
+
+        assert rejected["success"] is False
+        assert rejected["validation_failed"] is True
+        assert "app-env.TOKEN" in rejected["error"]
+        assert accepted == {"success": True, "config": "app-env", "key": "TOKEN"}
+        assert state.config_values == {"app-env": {"TOKEN": "ok"}}
+
+    def test_apply_to_set_reports_rejected_values_for_reasking(self, tmp_path):
+        from haniel.installer.interactive import InteractiveInstaller
+        from haniel.installer.state import InstallState
+
+        config = HanielConfig(
+            install=InstallConfig(
+                configs={
+                    "app-env": ConfigFileConfig(
+                        path="./.env",
+                        keys=[_validated_key("exit 1"), ConfigKeyConfig(key="PLAIN")],
+                    )
+                }
+            )
+        )
+        state = InstallState()
+        installer = InteractiveInstaller(config, tmp_path, state)
+
+        rejected = installer._apply_to_set(
+            [
+                {"config": "app-env", "key": "TOKEN", "value": "x"},
+                {"config": "app-env", "key": "PLAIN", "value": "y"},
+            ]
+        )
+
+        assert len(rejected) == 1 and "app-env.TOKEN" in rejected[0]
+        assert state.config_values == {"app-env": {"PLAIN": "y"}}
+
+    def _default_config(self, validate: str) -> HanielConfig:
+        return HanielConfig(
+            install=InstallConfig(
+                configs={
+                    "app-env": ConfigFileConfig(
+                        path="./out/.env",
+                        keys=[_validated_key(validate, default="from-default")],
+                    )
+                }
+            )
+        )
+
+    def test_finalize_validates_default_values_and_writes_nothing_on_failure(
+        self, tmp_path
+    ):
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+        from haniel.installer.validation import ConfigValueValidationError
+
+        finalizer = Finalizer(self._default_config("exit 1"), tmp_path, InstallState())
+
+        with pytest.raises(ConfigValueValidationError, match="app-env.TOKEN"):
+            finalizer.generate_config_files()
+
+        assert not (tmp_path / "out").exists()
+
+    def test_finalize_writes_default_that_passes_validation(self, tmp_path):
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+
+        config = self._default_config('test "{value}" = from-default')
+        Finalizer(config, tmp_path, InstallState()).generate_config_files()
+
+        assert (tmp_path / "out" / ".env").read_text() == "TOKEN=from-default\n"
+
+    def test_finalize_validates_values_that_are_already_in_state(self, tmp_path):
+        from haniel.installer.finalize import Finalizer
+        from haniel.installer.state import InstallState
+        from haniel.installer.validation import ConfigValueValidationError
+
+        state = InstallState()
+        state.set_config_value("app-env", "TOKEN", "chosen")
+        finalizer = Finalizer(
+            self._default_config('test "{value}" = chosen'), tmp_path, state
+        )
+        finalizer.generate_config_files()
+        assert (tmp_path / "out" / ".env").read_text() == "TOKEN=chosen\n"
+
+        state.set_config_value("app-env", "TOKEN", "other")
+        with pytest.raises(ConfigValueValidationError, match="app-env.TOKEN"):
+            finalizer.generate_config_files()
+
+    def test_orchestrator_stops_finalization_and_records_the_failure(self, tmp_path):
+        from haniel.installer.orchestrator import InstallOrchestrator
+        from haniel.installer.state import InstallPhase, InstallState
+        from haniel.installer.validation import ConfigValueValidationError
+
+        state = InstallState(phase=InstallPhase.FINALIZE)
+        orchestrator = InstallOrchestrator(
+            self._default_config("echo rejected; exit 1"), tmp_path, state
+        )
+
+        with pytest.raises(ConfigValueValidationError, match="rejected"):
+            orchestrator.run_finalize_phase()
+
+        assert state.phase == InstallPhase.FINALIZE
+        assert [step.step for step in state.failed_steps] == ["config-generation"]

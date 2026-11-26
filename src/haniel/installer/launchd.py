@@ -12,7 +12,7 @@ from pathlib import Path
 
 from ..config import HanielConfig
 from ..config.model import ServiceDefinitionConfig
-from .utils import get_tool_search_path
+from .utils import get_tool_search_path, require_self_update_runner
 
 logger = logging.getLogger(__name__)
 
@@ -41,27 +41,6 @@ def _require_executable(path: Path, description: str) -> None:
         raise RuntimeError(f"{description} is not executable: {path}")
 
 
-def _self_update_runner(config: HanielConfig, config_dir: Path) -> Path:
-    """Return the absolute wrapper script path for a self-updating install."""
-    self_update = config.self_update
-    assert self_update is not None
-    repo_config = config.repos.get(self_update.repo)
-    if repo_config is None:
-        raise RuntimeError(
-            f"Self-update repo is not configured in repos: {self_update.repo}"
-        )
-    repo_path = Path(repo_config.path)
-    if not repo_path.is_absolute():
-        repo_path = config_dir / repo_path
-    runner_path = _absolute(repo_path) / "haniel-runner.sh"
-    helper_path = runner_path.parent / "scripts" / "haniel_atomic_release.py"
-    if not runner_path.is_file():
-        raise FileNotFoundError(f"Self-update wrapper not found: {runner_path}")
-    if not helper_path.is_file():
-        raise FileNotFoundError(f"Atomic release helper not found: {helper_path}")
-    return runner_path
-
-
 def _launchd_environment(
     config_dir: Path, service_cfg: ServiceDefinitionConfig
 ) -> dict[str, str]:
@@ -80,6 +59,24 @@ def _launchd_label(service_cfg: ServiceDefinitionConfig) -> str:
     if not _SERVICE_NAME_PATTERN.fullmatch(name):
         raise ValueError(f"Invalid service name for a LaunchAgent label: {name}")
     return _LABEL_PREFIX + name
+
+
+def launchd_plist_path(service_cfg: ServiceDefinitionConfig) -> Path:
+    """Return where the LaunchAgent plist of a service is installed."""
+    return (
+        Path.home()
+        / "Library"
+        / "LaunchAgents"
+        / f"{_launchd_label(service_cfg)}.plist"
+    )
+
+
+def launchd_start_command(service_cfg: ServiceDefinitionConfig) -> str:
+    """Return the launchctl command that loads and starts the LaunchAgent."""
+    return (
+        f"launchctl bootstrap gui/{os.getuid()} "
+        f"{shlex.quote(str(launchd_plist_path(service_cfg)))}"
+    )
 
 
 def generate_launchd_plist(
@@ -117,7 +114,7 @@ def generate_launchd_plist(
         raise FileNotFoundError(f"Working directory not found: {working_directory}")
 
     if config.self_update is not None:
-        runner_path = _self_update_runner(config, config_dir)
+        runner_path = require_self_update_runner(config, config_dir)
         program_arguments = [
             "/bin/bash",
             str(runner_path),
@@ -162,20 +159,15 @@ def register_launchd_service(
         config, config_dir, config_filename, service_cfg
     )
     label = _launchd_label(service_cfg)
-    agents_dir = Path.home() / "Library" / "LaunchAgents"
-    agents_dir.mkdir(parents=True, exist_ok=True)
-    plist_path = agents_dir / f"{label}.plist"
+    plist_path = launchd_plist_path(service_cfg)
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
     plist_path.write_bytes(plist_bytes)
     plist_path.chmod(0o644)
 
     uid = os.getuid()
     logger.info("LaunchAgent file installed; not loaded in this session")
     logger.info("  File: %s", plist_path)
-    logger.info(
-        "  Start: launchctl bootstrap gui/%s %s",
-        uid,
-        shlex.quote(str(plist_path)),
-    )
+    logger.info("  Start: %s", launchd_start_command(service_cfg))
     logger.info("  Status: launchctl print gui/%s/%s", uid, label)
     logger.info("  Restart loaded job: launchctl kickstart -k gui/%s/%s", uid, label)
     logger.info("  Stop and unload: launchctl bootout gui/%s/%s", uid, label)

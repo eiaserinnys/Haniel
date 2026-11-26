@@ -175,3 +175,38 @@ def test_save_install_state_is_private(tmp_path: Path, existing: bool) -> None:
         state_file.chmod(0o644)
     InstallState().save(state_file)
     assert state_file.stat().st_mode & 0o777 == 0o600
+
+
+def test_policy_required_error_shows_the_selectable_options(tmp_path: Path) -> None:
+    state_file = tmp_path / "install.state"
+    InstallState(phase=InstallPhase.MECHANICAL).save(state_file)
+
+    with pytest.raises(InstallStatePolicyError) as exc_info:
+        select_install_state(
+            state_file=state_file,
+            config_path=tmp_path / "haniel.yaml",
+            state_policy=None,
+            resume_alias=False,
+            noninteractive=True,
+            prompt=lambda _message: False,
+        )
+
+    assert "--state-policy resume" in str(exc_info.value)
+    assert "--state-policy start-fresh" in str(exc_info.value)
+
+
+def test_invalid_state_error_shows_the_start_fresh_option(tmp_path: Path) -> None:
+    state_file = tmp_path / "install.state"
+    state_file.write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(InstallStatePolicyError) as exc_info:
+        select_install_state(
+            state_file=state_file,
+            config_path=tmp_path / "haniel.yaml",
+            state_policy="resume",
+            resume_alias=False,
+            noninteractive=True,
+            prompt=lambda _message: False,
+        )
+
+    assert "--state-policy start-fresh" in str(exc_info.value)

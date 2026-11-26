@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 from ..config import HanielConfig
 from .state import InstallState, InstallPhase
+from .validation import ConfigValueValidationError, run_validate_cmd
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,16 @@ class InteractiveInstaller:
 
         if key_cfg is None:
             return {"success": False, "error": f"Unknown key: {key}"}
+
+        try:
+            run_validate_cmd(
+                config_name,
+                key_cfg,
+                value.replace("{root}", str(self.config_dir)),
+                self.config_dir,
+            )
+        except ConfigValueValidationError as error:
+            return {"success": False, "error": str(error), "validation_failed": True}
 
         self.state.set_config_value(config_name, key, value)
 
@@ -364,7 +375,16 @@ JSON 외의 텍스트는 message 필드 안에 넣으세요.
                 message = response.get("message", "")
                 if message:
                     print(message)
-                self._apply_to_set(response.get("to_set", []))
+                rejected = self._apply_to_set(response.get("to_set", []))
+                if rejected:
+                    print("\n".join(rejected))
+                    await client.query(
+                        "These values failed validation and were not saved:\n"
+                        + "\n".join(rejected)
+                        + "\nTell the user what failed and ask for a corrected "
+                        "value. Do not set sufficient to true yet."
+                    )
+                    continue
                 if response.get("sufficient", False):
                     self.finalize_install()
                     break
@@ -419,12 +439,16 @@ JSON 외의 텍스트는 message 필드 안에 넣으세요.
             logger.warning(f"Failed to parse structured response: {full_text[:200]}")
             return {"message": full_text, "to_set": [], "sufficient": False}
 
-    def _apply_to_set(self, to_set: list[dict]) -> None:
+    def _apply_to_set(self, to_set: list[dict]) -> list[str]:
         """Apply confirmed config values from Claude's response.
 
         Args:
             to_set: List of {config, key, value} dicts
+
+        Returns:
+            Messages of the values rejected by their validate command.
         """
+        rejected: list[str] = []
         for item in to_set:
             config_name = item.get("config", "")
             key = item.get("key", "")
@@ -433,10 +457,13 @@ JSON 외의 텍스트는 message 필드 안에 넣으세요.
                 result = self.set_config(config_name, key, value)
                 if result.get("success"):
                     logger.info(f"Set {config_name}.{key}")
+                elif result.get("validation_failed"):
+                    rejected.append(result["error"])
                 else:
                     logger.warning(
                         f"Failed to set {config_name}.{key}: {result.get('error')}"
                     )
+        return rejected
 
     def _get_install_mcp_port(self) -> int:
         """Get the port for install-mode MCP server."""
