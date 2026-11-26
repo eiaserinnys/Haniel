@@ -4599,7 +4599,7 @@
     "node_attempts": [],
     "probes": []
    },
-   "step": "heads-differ-keeps-pending"
+   "step": "other-repo-observation-keeps-pending"
   },
   {
    "result": {
@@ -4962,6 +4962,165 @@
    "result": {
     "broadcasts": [
      {
+      "deploy_id": "n:r6:main:o6",
+      "node_id": "n",
+      "status": "rejected",
+      "type": "status_change"
+     }
+    ]
+   },
+   "rows": {
+    "attempts": [
+     {
+      "approved_by": "director",
+      "completed_at": true,
+      "deploy_id": "n:r2:main:o2",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa",
+      "outcome": "failed",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": "boom",
+      "terminal_kind": "failed",
+      "terminal_reason": "x",
+      "terminal_stage": "execution"
+     },
+     {
+      "approved_by": "director",
+      "completed_at": null,
+      "deploy_id": "n:r3:main:o3",
+      "duration_ms": null,
+      "execution_mode": "execute",
+      "orchestrator_attempt_id": "oa3",
+      "outcome": "active",
+      "result_error": null,
+      "result_status": null,
+      "settled_at": null,
+      "settled_local_head": null,
+      "settled_remote_head": null,
+      "terminal_error": null,
+      "terminal_kind": null,
+      "terminal_reason": null,
+      "terminal_stage": null
+     }
+    ],
+    "events": [
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r2:main:o2",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r2",
+      "status": "pending",
+      "target_head": "o2",
+      "updated_at": true
+     },
+     {
+      "approved_by": "director",
+      "branch": "main",
+      "deploy_id": "n:r3:main:o3",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r3",
+      "status": "deploying",
+      "target_head": "o3",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r4:main:o4",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r4",
+      "status": "pending",
+      "target_head": "o4",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r6:main:o6",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": "stale: node remote is now moved",
+      "repo": "r6",
+      "status": "rejected",
+      "target_head": "o6",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r:main:o1",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": null,
+      "repo": "r",
+      "status": "success",
+      "target_head": "o1",
+      "updated_at": true
+     }
+    ],
+    "lineage": [
+     {
+      "deploy_id": "n:r2:main:o2",
+      "lineage_orchestrator_attempt_id": "oa"
+     }
+    ],
+    "markers": [
+     {
+      "deploy_id": "n:r2:main:o2",
+      "last_failed_orchestrator_attempt_id": "oa",
+      "source_orchestrator_attempt_id": "oa"
+     },
+     {
+      "deploy_id": "n:r4:main:o4",
+      "last_failed_orchestrator_attempt_id": null,
+      "source_orchestrator_attempt_id": null
+     }
+    ],
+    "node_attempts": [
+     {
+      "deploy_id": "n:r4:main:o4",
+      "duration_ms": 25,
+      "error": "e",
+      "node_attempt_id": "nf",
+      "outcome": "failed",
+      "terminal_local_head": "o4"
+     }
+    ],
+    "probes": []
+   },
+   "step": "remote-moved-rejects-stale-pending"
+  },
+  {
+   "result": {
+    "broadcasts": [
+     {
       "deploy_id": "n:haniel:main:old-head",
       "node_id": "n",
       "status": "success",
@@ -5067,6 +5226,21 @@
       "repo": "r4",
       "status": "pending",
       "target_head": "o4",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r6:main:o6",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": "stale: node remote is now moved",
+      "repo": "r6",
+      "status": "rejected",
+      "target_head": "o6",
       "updated_at": true
      },
      {
@@ -5252,6 +5426,21 @@
       "repo": "r5",
       "status": "pending",
       "target_head": "t5",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r6:main:o6",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": "stale: node remote is now moved",
+      "repo": "r6",
+      "status": "rejected",
+      "target_head": "o6",
       "updated_at": true
      },
      {
@@ -5486,6 +5675,21 @@
       "repo": "r5",
       "status": "pending",
       "target_head": "t5",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r6:main:o6",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": "stale: node remote is now moved",
+      "repo": "r6",
+      "status": "rejected",
+      "target_head": "o6",
       "updated_at": true
      },
      {
@@ -5746,6 +5950,21 @@
       "repo": "r5",
       "status": "pending",
       "target_head": "t5",
+      "updated_at": true
+     },
+     {
+      "approved_by": null,
+      "branch": "main",
+      "deploy_id": "n:r6:main:o6",
+      "duration_ms": null,
+      "error": null,
+      "is_self_update": 0,
+      "node_id": "n",
+      "postponed_until": null,
+      "reject_reason": "stale: node remote is now moved",
+      "repo": "r6",
+      "status": "rejected",
+      "target_head": "o6",
       "updated_at": true
      },
      {

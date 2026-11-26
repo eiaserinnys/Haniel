@@ -133,3 +133,28 @@ def test_manifest_accepts_change_ignore_paths_and_defaults_to_empty() -> None:
         _manifest(change_ignore_paths=["soul-app/*"])
     )
     assert manifest.change_ignore_paths == ["soul-app/*"]
+
+
+def test_no_notify_while_deployment_owns_repo(remote_change) -> None:
+    runner, _, read_manifest, changed_paths, _ = remote_change
+    read_manifest.return_value = json.dumps(
+        _manifest(change_ignore_paths=["soul-app/*"])
+    ).encode()
+    changed_paths.return_value = ["scripts/test-affected.mjs"]
+    lock = runner._pull_locks["app"]
+
+    lock.acquire()
+    try:
+        assert runner._detect_changes() == ["app"]
+    finally:
+        lock.release()
+    runner._orch_client.notify_change.assert_not_called()
+
+    changed_paths.return_value = ["soul-app/src/app.ts"]
+    runner._repo_states["app"].last_head = "deployed-head"
+    with (
+        patch("haniel.core.runner.get_head", return_value="deployed-head"),
+        patch("haniel.core.repo_reconciliation.get_head", return_value="deployed-head"),
+    ):
+        runner._detect_changes()
+    runner._orch_client.notify_change.assert_not_called()

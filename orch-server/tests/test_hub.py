@@ -1490,6 +1490,75 @@ class TestRepoReconciliation:
         sent = [json.loads(call.args[0]) for call in ws_dash.send_text.call_args_list]
         assert {message["deploy_id"] for message in sent} == set(ids)
 
+    async def _seed_target(self, store, *, node="n1", repo="repo", target="oldtgt"):
+        deploy_id = f"{node}:{repo}:main:{target}"
+        await store.create_deploy_event(
+            deploy_id=deploy_id, node_id=node, repo=repo, branch="main",
+            commits=["change"], affected_services=[], diff_stat=None,
+            detected_at="2026-01-01T00:00:00Z", target_head=target,
+        )
+        return deploy_id
+
+    def _observed(self, remote_head: str) -> RepoReconciliation:
+        return RepoReconciliation(
+            phase="observed", deploy_id="n1:repo:main:obs", node_id="n1",
+            repo="repo", branch="main", local_head=remote_head,
+            remote_head=remote_head,
+        )
+
+    async def test_observed_rejects_open_wait_for_other_target_head(self, hub, store):
+        ws_dash = AsyncMock()
+        hub._dashboard_connections = {ws_dash}
+        stale = await self._seed_target(store, target="oldtgt")
+
+        await hub._repo_reconciler.handle(
+            RepoReconciliation(
+                phase="observed", deploy_id="n1:repo:main:obs", node_id="n1",
+                repo="repo", branch="main", local_head="localhd",
+                remote_head="abcdef0123456789",
+            )
+        )
+
+        event = await store.get_deploy_event(stale)
+        assert event["status"] == "rejected"
+        assert "abcdef01" in event["reject_reason"]
+        sent = [json.loads(call.args[0]) for call in ws_dash.send_text.call_args_list]
+        assert {"type": "status_change", "deploy_id": stale, "status": "rejected",
+                "node_id": "n1"} in sent
+
+    async def test_observed_keeps_wait_for_same_remote_head(self, hub, store):
+        same = await self._seed_target(store, target="samehd")
+
+        await hub._repo_reconciler.handle(
+            RepoReconciliation(
+                phase="observed", deploy_id="n1:repo:main:obs", node_id="n1",
+                repo="repo", branch="main", local_head="localhd",
+                remote_head="samehd",
+            )
+        )
+
+        assert (await store.get_deploy_event(same))["status"] == "pending"
+
+    async def test_observed_keeps_locked_wait(self, hub, store):
+        locked = await self._seed_target(store, target="lockedhd")
+        await store._db.execute(
+            "UPDATE deploy_events SET sm_lock = 'l_on' WHERE deploy_id = ?", (locked,)
+        )
+        await store._db.commit()
+
+        await hub._repo_reconciler.handle(self._observed("newhead00"))
+
+        assert (await store.get_deploy_event(locked))["status"] == "pending"
+
+    async def test_observed_keeps_waits_of_other_node_and_repo(self, hub, store):
+        other_node = await self._seed_target(store, node="n2", target="othernode")
+        other_repo = await self._seed_target(store, repo="other", target="otherrepo")
+
+        await hub._repo_reconciler.handle(self._observed("newhead00"))
+
+        for kept in (other_node, other_repo):
+            assert (await store.get_deploy_event(kept))["status"] == "pending"
+
     async def test_failed_equal_observation_stays_retryable_and_late_result_is_ignored(
         self, hub, store
     ):

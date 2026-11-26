@@ -5115,7 +5115,12 @@ class ServiceRunner:
             self._state.self_update_pending
             or (snapshot.in_sync and bool(state.pending_changes))
         )
-        if state.pending_changes and (not snapshot.in_sync or self_restart_required):
+        deployment_owns_repo = (
+            state.pull_lock.locked() or name in self._startup_repo_locks
+        )
+        if state.pending_changes and (
+            (not snapshot.in_sync and not deployment_owns_repo) or self_restart_required
+        ):
             commits = state.pending_changes.get("commits", [])
             if commits:
                 manifest_identity = state.config.release_manifest
@@ -5163,7 +5168,7 @@ class ServiceRunner:
         except StableDeploymentError:
             logger.info("Discarded stale reconciliation report for %s", name)
             return
-        if state.pull_lock.locked() or name in self._startup_repo_locks:
+        if deployment_owns_repo:
             logger.info(
                 "Skipping reconciliation observation for %s while a deployment owns it",
                 name,

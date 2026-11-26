@@ -45,3 +45,18 @@ class RepoReconciler:
                     "node_id": msg.node_id,
                 }
             )
+        stale = await self._store.reject_stale_pending(
+            node_id=msg.node_id,
+            repo=msg.repo,
+            branch=msg.branch,
+            remote_head=msg.remote_head,
+        )
+        for deploy_id in stale:
+            await self._broadcast(
+                {
+                    "type": "status_change",
+                    "deploy_id": deploy_id,
+                    "status": DeployStatus.REJECTED.value,
+                    "node_id": msg.node_id,
+                }
+            )

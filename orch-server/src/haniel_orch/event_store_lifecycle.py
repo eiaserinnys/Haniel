@@ -128,6 +128,30 @@ class EventStoreLifecycleMixin:
                 await self._db.rollback()
                 raise
 
+    async def reject_stale_pending(
+        self, *, node_id: str, repo: str, branch: str, remote_head: str
+    ) -> list[str]:
+        """Reject open unlocked waits whose target differs from the node's remote.
+
+        The node refuses to run a target that is not its remote head, so such a
+        wait can never be approved into a run. Returns the rejected deploy ids.
+        """
+        cursor = await self._db.execute(
+            """SELECT deploy_id FROM deploy_events
+               WHERE node_id = ? AND repo = ? AND branch = ?
+                 AND status = ? AND sm_status = 'pending' AND sm_lock = 'l_off'
+                 AND is_self_update = 0 AND deploy_id NOT LIKE 'attempt:%'
+                 AND target_head IS NOT NULL AND target_head != ?""",
+            (node_id, repo, branch, DeployStatus.PENDING.value, remote_head),
+        )
+        stale_ids = [row[0] for row in await cursor.fetchall()]
+        reason = f"stale: node remote is now {remote_head[:8]}"
+        return [
+            deploy_id
+            for deploy_id in stale_ids
+            if await self.reject_deploy(deploy_id, reason)
+        ]
+
     async def set_deploy_postponed_until(
         self, deploy_id: str, postponed_until: str
     ) -> None:
