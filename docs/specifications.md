@@ -759,7 +759,6 @@ The dashboard frontend (React 19 + Vite + TypeScript) is pre-built and served as
 Browser
   +-- REST API (fetch)     -> /api/*       -> dashboard/api.py, config_api.py
   +-- WebSocket            -> /ws          -> dashboard/ws.py (events)
-  +-- WebSocket            -> /ws/chat     -> dashboard/chat_ws.py (Claude Code)
   +-- Static files         -> /*           -> dashboard/static.py (React SPA)
 ```
 
@@ -813,22 +812,6 @@ Config mutations follow an atomic pattern: acquire write lock → read current Y
 | `self_update_pending` | repo, timestamp | Self-update waiting for approval |
 | `reload_complete` | timestamp | Config reload finished |
 
-**`/ws/chat`** — Claude Code chat session:
-
-Client → Server:
-- `{"type": "send_message", "session_id": "<uuid|null>", "text": "..."}` — Send message (null session_id = use last session)
-- `{"type": "new_session"}` — Create new session
-- `{"type": "list_sessions"}` — List all sessions
-
-Server → Client:
-- `{"type": "session_start", "session_id": "<uuid>", "is_new": true|false}` — Session opened
-- `{"type": "text_delta", "delta": "..."}` — Streaming text chunk
-- `{"type": "message_end", "session_id": "<uuid>"}` — Response complete
-- `{"type": "sessions_list", "sessions": [...]}` — Session list response
-- `{"type": "error", "error": "..."}` — Error
-
-The chat panel uses `claude-agent-sdk` to manage Claude Code sessions. Session metadata is persisted to `chat_sessions.json` for resume support. SDK clients are cached per session to avoid MCP reconnection overhead.
-
 ## Dry-run mode
 
 Preview the plan without executing:
@@ -873,13 +856,11 @@ haniel/
 |       |   +-- git.py             # git clone, fetch, pull, pending changes
 |       |   +-- health.py          # Service states, backoff, circuit breaker
 |       |   +-- logs.py            # stdout/stderr capture, rolling buffer, pattern matching
-|       |   +-- claude_session.py  # Claude Code sessions for dashboard chat panel
 |       +-- dashboard/
 |       |   +-- __init__.py        # Route setup, Bearer token auth middleware
 |       |   +-- api.py             # REST API endpoints (status, services, repos)
 |       |   +-- config_api.py      # Config CRUD API (runtime YAML modification)
 |       |   +-- ws.py              # WebSocket event stream
-|       |   +-- chat_ws.py         # Claude Code chat WebSocket
 |       |   +-- static.py          # React SPA static file serving
 |       +-- installer/
 |       |   +-- orchestrator.py    # Phase 0-1-2-3 flow control
@@ -898,9 +879,9 @@ haniel/
 |           +-- posix.py           # Unix signal handling
 +-- dashboard/                     # React frontend (separate build)
 |   +-- src/
-|   |   +-- App.tsx                # 2-panel layout (services | chat)
-|   |   +-- components/            # ServiceCard, RepoEditor, DependencyGraph, ChatPanel, etc.
-|   |   +-- hooks/                 # useServices, useWebSocket, useChatWebSocket
+|   |   +-- App.tsx                # Single-page layout with section navigation
+|   |   +-- components/            # ServiceRow, ServiceEditor, RepoEditor, DependencyGraph, LogViewer, etc.
+|   |   +-- hooks/                 # useServices, useCurrentSection, useNextPollCountdown, etc.
 |   |   +-- lib/api.ts             # REST API client
 |   +-- package.json               # React 19, Vite 8, TypeScript 5.9, Tailwind CSS 4
 +-- tests/                         # pytest suite (config, runner, process, git, health, etc.)

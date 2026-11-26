@@ -741,3 +741,72 @@ services: {}
     runner._self_update_prestager.freeze_target.assert_called_once()
     runner._self_update_prestager.prepare.assert_called_once()
     mock_stop.assert_not_called()
+
+
+# ── DM message events are dropped silently ───────────────────────────────────
+
+
+def _real_bolt_app(token):
+    """A real Bolt App that never calls Slack (authorize is stubbed)."""
+    from slack_bolt import App
+    from slack_bolt.authorization import AuthorizeResult
+
+    return App(
+        authorize=lambda **_: AuthorizeResult(
+            enterprise_id=None,
+            team_id="T1",
+            bot_token="xoxb-test",
+            bot_id="B1",
+            bot_user_id="UBOT",
+        ),
+        signing_secret="unused",
+        request_verification_enabled=False,
+        token_verification_enabled=False,
+    )
+
+
+_DM_EVENTS = {
+    "human top-level DM": {"user": "U12345", "text": "hello", "ts": "1.1"},
+    "human thread reply": {
+        "user": "U12345",
+        "text": "and again",
+        "ts": "1.2",
+        "thread_ts": "1.1",
+    },
+    "bot's own notification": {
+        "bot_id": "B1",
+        "user": "UBOT",
+        "text": "n",
+        "ts": "1.3",
+    },
+    "edited message": {
+        "subtype": "message_changed",
+        "message": {"text": "edited"},
+        "ts": "1.4",
+    },
+}
+
+
+@pytest.mark.parametrize("event", _DM_EVENTS.values(), ids=_DM_EVENTS.keys())
+def test_dm_message_events_are_dropped_silently(event, caplog):
+    """A DM message event gets no reply, no API call and no Bolt warning."""
+    from slack_bolt import BoltRequest
+
+    with (
+        patch("haniel.integrations.slack_bot.App", side_effect=_real_bolt_app),
+        patch("haniel.integrations.slack_bot.SocketModeHandler"),
+    ):
+        bot = SlackBot(_make_slack_config())
+    bot._client = MagicMock()
+    body = {
+        "type": "event_callback",
+        "team_id": "T1",
+        "event": {"type": "message", "channel_type": "im", "channel": "D1", **event},
+    }
+
+    with caplog.at_level("DEBUG"):
+        response = bot._app.dispatch(BoltRequest(body=body, mode="socket_mode"))
+
+    assert response.status == 200
+    assert bot._client.mock_calls == []
+    assert [r for r in caplog.records if r.levelno >= 30] == []

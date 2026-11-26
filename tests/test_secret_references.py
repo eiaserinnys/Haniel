@@ -223,10 +223,7 @@ async def test_dashboard_auth_and_mcp_config_edit_preserve_references(secret_con
     config = load_config(secret_config)
     runner = ServiceRunner(config, secret_config.parent, config_path=secret_config)
     server = HanielMcpServer(runner)
-    with (
-        patch("uvicorn.Server") as uvicorn_server,
-        patch("haniel.core.claude_session.ClaudeSessionManager"),
-    ):
+    with patch("uvicorn.Server") as uvicorn_server:
         from unittest.mock import AsyncMock
 
         uvicorn_server.return_value.serve = AsyncMock()

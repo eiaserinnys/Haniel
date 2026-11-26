@@ -94,7 +94,7 @@ The same warning applies to `haniel_restart(service="haniel")` and to pulling ha
 - **Migration-aware releases** — versioned manifests with backup gates, readiness verification, and automatic recovery
 - **Health monitoring** — crash detection, exponential backoff, circuit breaker
 - **MCP server** — full control surface via Streamable HTTP
-- **Web dashboard** — real-time UI with Claude Code chat panel
+- **Web dashboard** — real-time service and repository status UI
 - **Runtime config** — add/update/remove services without restart
 - **Self-update** — two-loop architecture for updating its own code
 - **Webhooks** — Slack, Discord, or JSON on deploys and failures
