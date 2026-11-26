@@ -141,9 +141,11 @@ def test_changed_dashboard_builds_in_persistent_dir_and_preserves_node_modules(
     (build_dir / "dist" / "index.html").write_text("stale", encoding="utf-8")
     monkeypatch.setattr(dashboard_build.shutil, "which", lambda _name: "/fake/pnpm")
     commands: list[tuple[str, list[str]]] = []
+    envs: dict[str, dict[str, str] | None] = {}
 
-    def run_step(result, name, command, **_kwargs):
+    def run_step(result, name, command, **kwargs):
         commands.append((name, command))
+        envs[name] = kwargs.get("env")
         if name == "pnpm_build":
             dist = build_dir / "dist"
             dist.mkdir()
@@ -173,10 +175,17 @@ def test_changed_dashboard_builds_in_persistent_dir_and_preserves_node_modules(
                 "install",
                 "--frozen-lockfile",
                 "--prefer-offline",
+                "--config.confirm-modules-purge=false",
             ],
         ),
         ("pnpm_build", ["/fake/pnpm", "--dir", str(build_dir), "build"]),
     ]
+    for name in ("pnpm_install", "pnpm_build"):
+        env = envs[name]
+        assert env is not None
+        assert env["CI"] == "true"
+        assert env["npm_config_confirm_modules_purge"] == "false"
+        assert env["PATH"] == os.environ["PATH"]
     assert sentinel.is_file()
     assert sentinel.stat().st_ino == sentinel_inode
     assert not (build_dir / "removed.ts").exists()
@@ -280,3 +289,19 @@ def test_release_prune_preserves_persistent_dashboard_dir(
     assert outcome.deleted == (stale.name,)
     assert not stale.exists()
     assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+def test_dashboard_tree_lookup_gets_no_stdin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dashboard_build = _import_script(monkeypatch, "haniel_dashboard_build")
+    stdins: list[object] = []
+
+    def run(command, **kwargs):
+        stdins.append(kwargs.get("stdin"))
+        return subprocess.CompletedProcess(command, 0, "tree\n", "")
+
+    monkeypatch.setattr(dashboard_build.subprocess, "run", run)
+
+    assert dashboard_build._dashboard_tree(tmp_path, "a" * 40) == "tree"
+    assert stdins == [subprocess.DEVNULL]

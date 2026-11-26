@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -32,6 +33,7 @@ def _remove_path(path: Path) -> None:
 def _dashboard_tree(source: Path, commit: str) -> str:
     completed = subprocess.run(
         ["git", "-C", str(source), "rev-parse", f"{commit}:dashboard"],
+        stdin=subprocess.DEVNULL,
         text=True,
         capture_output=True,
         check=False,
@@ -199,6 +201,11 @@ def prepare_dashboard(
             duration_sec=elapsed_since(pnpm_started_at),
         )
         raise ReleasePreparationError(result.error or "pnpm not found")
+    pnpm_env = {
+        **os.environ,
+        "CI": "true",
+        "npm_config_confirm_modules_purge": "false",
+    }
     run_step(
         result,
         "pnpm_install",
@@ -209,12 +216,15 @@ def prepare_dashboard(
             "install",
             "--frozen-lockfile",
             "--prefer-offline",
+            "--config.confirm-modules-purge=false",
         ],
+        env=pnpm_env,
     )
     run_step(
         result,
         "pnpm_build",
         [pnpm, "--dir", str(build_dir), "build"],
+        env=pnpm_env,
     )
     _copy_dashboard_dist(
         result,

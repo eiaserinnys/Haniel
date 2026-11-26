@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -102,11 +103,14 @@ def run_step(
     command: list[str],
     *,
     cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> None:
     started_at = monotonic_time()
     completed = subprocess.run(
         command,
         cwd=cwd,
+        env=env,
+        stdin=subprocess.DEVNULL,
         text=True,
         capture_output=True,
         check=False,
