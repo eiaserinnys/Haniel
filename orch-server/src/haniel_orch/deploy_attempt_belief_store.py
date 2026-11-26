@@ -21,6 +21,7 @@ from .deploy_attempt_intake import (
     intake_received,
     is_legacy,
 )
+from .event_store_rows import row_to_dict
 from .statechart import attempt_steps, steps
 from .statechart.restore import NoTransition
 
@@ -40,9 +41,6 @@ def _plus(now: datetime, seconds: float) -> str:
 
 class DeployAttemptBeliefStore:
     """Mixin: 믿음을 옮기는 글과 믿음별 마감을 저장 잠금 안에서 적는다."""
-
-    async def request_belief(self, deploy_id: str) -> str | None:
-        return await self._request_belief(deploy_id)
 
     async def record_received(
         self, *, deploy_id: str, orchestrator_attempt_id: str, node_id: str
@@ -89,7 +87,7 @@ class DeployAttemptBeliefStore:
         cursor = await self._db.execute(
             "SELECT * FROM deploy_attempts WHERE node_id = ? AND outcome = 'active'", (node_id,)
         )
-        return self._rows(cursor, await cursor.fetchall())
+        return [row_to_dict(cursor, row) for row in await cursor.fetchall()]
 
     async def mark_link_down(self, node_id: str, *, grace_sec: float) -> list[dict[str, Any]]:
         """오케스트레이터가 끊김을 안다. 판 1 시도마다 link_down을 넣고, 줄 서 있음이면 유예 마감을 건다(wire-v1 5절).

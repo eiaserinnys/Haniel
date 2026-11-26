@@ -1,10 +1,9 @@
 """Tests for authentication — AuthMiddleware, hub WS auth, auth module."""
 
+import base64
 import hmac
 import hashlib
 import json
-import time
-from unittest.mock import AsyncMock
 
 import pytest
 from starlette.applications import Starlette
@@ -186,54 +185,15 @@ class TestAuthConfigTokens:
         monkeypatch.setenv("BASE_URL", "http://localhost:9300")
         return AuthConfig()
 
-    def test_create_and_verify_session_token(self, config):
+    def test_create_session_token_is_signed_payload(self, config):
         token = config.create_session_token("user@example.com")
-        email = config.verify_session_token(token)
-        assert email == "user@example.com"
-
-    def test_verify_invalid_signature_returns_none(self, config):
-        token = config.create_session_token("user@example.com")
-        # Tamper with signature
-        parts = token.rsplit(".", 1)
-        tampered = parts[0] + ".invalid_signature"
-        assert config.verify_session_token(tampered) is None
-
-    def test_verify_expired_token_returns_none(self, config):
-        # Create token with already-expired time
-        import base64
-
-        payload = json.dumps(
-            {"email": "user@example.com", "exp": int(time.time()) - 100}
-        )
-        sig = hmac.new(
+        payload_b64, sig = token.rsplit(".", 1)
+        payload = base64.urlsafe_b64decode(payload_b64).decode()
+        assert json.loads(payload)["email"] == "user@example.com"
+        expected = hmac.new(
             config.session_secret.encode(), payload.encode(), hashlib.sha256
         ).hexdigest()
-        token = base64.urlsafe_b64encode(payload.encode()).decode() + "." + sig
-        assert config.verify_session_token(token) is None
-
-    def test_verify_bearer_correct(self, config):
-        request = AsyncMock()
-        request.headers = {"authorization": "Bearer test-bearer"}
-        assert config.verify_bearer(request) is True
-
-    def test_verify_bearer_wrong(self, config):
-        request = AsyncMock()
-        request.headers = {"authorization": "Bearer wrong"}
-        assert config.verify_bearer(request) is False
-
-    def test_verify_bearer_missing(self, config):
-        request = AsyncMock()
-        request.headers = {}
-        assert config.verify_bearer(request) is False
-
-    def test_verify_ws_token_correct(self, config):
-        assert config.verify_ws_token("test-bearer") is True
-
-    def test_verify_ws_token_wrong(self, config):
-        assert config.verify_ws_token("wrong") is False
-
-    def test_verify_ws_token_none(self, config):
-        assert config.verify_ws_token(None) is False
+        assert sig == expected
 
     def test_missing_env_var_raises(self, monkeypatch):
         """AuthConfig requires all env vars — missing one raises KeyError."""

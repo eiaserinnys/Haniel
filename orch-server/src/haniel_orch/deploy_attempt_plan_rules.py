@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
 from .deploy_attempt_intake import CLOSURE_NO
+from .event_store_rows import now_iso
 from .protocol import DeployPlanProposal
 from .statechart import steps
 from .statechart.restore import NoTransition
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 class DeployAttemptPlanRules:
@@ -35,7 +31,7 @@ class DeployAttemptPlanRules:
         linked_attempt = await self._attempt(linked)
         if linked_attempt is None or linked_attempt["closure"] not in CLOSURE_NO:
             return None
-        now = _now_iso()
+        now = now_iso()
         await self._terminalize_probe_unlocked(
             {**probe, "status": "proposed"},
             "preflight_fail_closed",

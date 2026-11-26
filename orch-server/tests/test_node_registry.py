@@ -313,8 +313,8 @@ class TestCheckStale:
         node = registry.get_node("n1")
         node.last_heartbeat = time.time() - 10
 
-        stale = await registry.check_stale()
-        assert stale == ["n1"]
+        stale = await registry.check_stale_connections()
+        assert [node.node_id for node in stale] == ["n1"]
         assert registry.get_node("n1") is not None
 
     async def test_keeps_fresh_nodes(self, store: EventStore):
@@ -322,7 +322,7 @@ class TestCheckStale:
         ws = MagicMock()
         await _register(registry, ws, _make_hello("n1"), "g1")
 
-        stale = await registry.check_stale()
+        stale = await registry.check_stale_connections()
         assert stale == []
         assert registry.get_node("n1") is not None
 
@@ -334,7 +334,7 @@ class TestCheckStale:
         # Make n1 stale, keep n2 fresh
         registry.get_node("n1").last_heartbeat = time.time() - 10
 
-        stale = await registry.check_stale()
-        assert stale == ["n1"]
+        stale = await registry.check_stale_connections()
+        assert [node.node_id for node in stale] == ["n1"]
         assert registry.get_node("n1") is not None
         assert registry.get_node("n2") is not None

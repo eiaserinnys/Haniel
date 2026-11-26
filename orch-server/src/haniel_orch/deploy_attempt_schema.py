@@ -76,6 +76,9 @@ CREATE TABLE IF NOT EXISTS deploy_attempts (
     completed_at TEXT
 );
 
+CREATE INDEX IF NOT EXISTS deploy_attempts_by_deploy_outcome
+ON deploy_attempts(deploy_id, outcome);
+
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_attempt_per_deploy
 ON deploy_attempts(deploy_id) WHERE outcome = 'active';
 

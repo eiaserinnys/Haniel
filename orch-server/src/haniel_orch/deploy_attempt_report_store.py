@@ -8,19 +8,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
 from .deploy_attempt_intake import (
     CLOSURE_NOT_EXECUTED, DEADLINE_LEASE, intake_terminal, is_legacy,
 )
+from .event_store_rows import now_iso
 from .protocol import DeployAttemptTerminal, ManifestRecoveryEvidence
 from .statechart import attempt_steps, steps
 from .statechart.restore import NoTransition
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 class DeployAttemptReportStore:
@@ -120,7 +116,7 @@ class DeployAttemptReportStore:
                     await self._db.commit()
                     return result
                 # 결과는 실제 실행의 증거다. 닫힌 시도에는 사실만 적고 시도를 되살리지 않는다.
-                lease_set = await self._mark_started_unlocked(attempt, _now_iso(), deadline_at)
+                lease_set = await self._mark_started_unlocked(attempt, now_iso(), deadline_at)
                 if status == "failed" and active:
                     result = await self._fail_attempt_unlocked(
                         attempt={**attempt, "duration_ms": duration_ms},
@@ -176,7 +172,7 @@ class DeployAttemptReportStore:
                 mismatch_extra = {
                     "settled_local_head": local_head,
                     "settled_remote_head": remote_head,
-                    "settled_at": _now_iso(),
+                    "settled_at": now_iso(),
                 }
                 if attempt["execution_mode"] != "execute":
                     # 증거 회수 방식 시도의 정착은 실행 시작으로 적지 않는다(design.md 68)
@@ -186,7 +182,7 @@ class DeployAttemptReportStore:
                     await self._db.commit()
                     return result
                 # 실행 방식의 정착은 실제 실행의 증거다. 닫힌 시도에도 사실만 적는다
-                lease_set = await self._mark_started_unlocked(attempt, _now_iso(), deadline_at)
+                lease_set = await self._mark_started_unlocked(attempt, now_iso(), deadline_at)
                 if local_head != attempt["target_head"] and attempt["outcome"] == "active":
                     result = await self._fail_attempt_unlocked(
                         attempt=attempt,

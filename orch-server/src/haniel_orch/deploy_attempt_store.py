@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
 from typing import Any
 
 import aiosqlite
@@ -23,13 +22,10 @@ from .deploy_attempt_progress_store import DeployAttemptProgressStore
 from .deploy_attempt_report_store import DeployAttemptReportStore
 from .deploy_attempt_store_support import DeployAttemptStoreSupport
 from .deploy_attempt_validation import DeployAttemptValidation
+from .event_store_rows import now_iso, row_to_dict
 from .protocol import DeployPlanProposal, DeployStatus
 from .statechart import steps
 from .statechart.restore import REASON_NO_TRANSITION, NoTransition
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 class DeployAttemptStore(
@@ -137,7 +133,7 @@ class DeployAttemptStore(
                         json.dumps(lineage),
                         event["expected_manifest_identity"],
                         event["expected_manifest_digest"],
-                        _now_iso(),
+                        now_iso(),
                         deadline_at,
                     ),
                 )
@@ -447,13 +443,13 @@ class DeployAttemptStore(
         cursor = await self._db.execute(
             "SELECT * FROM deploy_attempts WHERE outcome = 'active'"
         )
-        return self._rows(cursor, await cursor.fetchall())
+        return [row_to_dict(cursor, row) for row in await cursor.fetchall()]
 
     async def get_active_probes(self) -> list[dict[str, Any]]:
         cursor = await self._db.execute(
             "SELECT * FROM deploy_plan_probes WHERE status IN ('active','proposed')"
         )
-        return self._rows(cursor, await cursor.fetchall())
+        return [row_to_dict(cursor, row) for row in await cursor.fetchall()]
 
     async def get_probe(self, probe_id: str) -> dict[str, Any] | None:
         return await self._probe(probe_id)

@@ -55,12 +55,6 @@ class DeployAttemptCoordinatorSupport:
         for orchestrator_attempt_id in orchestrator_attempt_ids:
             self._cancel_timer(f"attempt:{orchestrator_attempt_id}")
 
-    async def _requested_id(self, probe_id: str) -> str | None:
-        for probe in await self.attempts.get_active_probes():
-            if probe["probe_id"] == probe_id:
-                return probe["requested_orchestrator_attempt_id"]
-        return None
-
     def _probe_message(self, probe: dict) -> DeployPlanProbe:
         return DeployPlanProbe(
             probe_id=probe["probe_id"],

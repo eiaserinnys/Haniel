@@ -7,16 +7,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
 from .deploy_attempt_intake import is_legacy
+from .event_store_rows import now_iso
 from .statechart import attempt_steps, steps
 from .statechart.restore import NoTransition
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 class DeployAttemptLateEvidence:
@@ -38,7 +34,7 @@ class DeployAttemptLateEvidence:
     ) -> dict[str, Any]:
         """닫힌 시도의 증거가 종결된 뒤 요청에 늦은 사건을 넣는다. 요청을 바꾸는 것은 정의의 전이뿐이다."""
         deploy_id = attempt["deploy_id"]
-        now = _now_iso()
+        now = now_iso()
         changed = False
         if leaf == "ev_both":
             no_later = await self._no_later_attempt(attempt)

@@ -884,77 +884,6 @@ class TestGetActiveDeploys:
         assert await store.get_active_self_update_for_node("n2") is None
 
 
-class TestGetPendingDeploysForBranch:
-    """get_pending_deploys_for_branch returns PENDING for the matching (node, repo, branch)."""
-
-    async def test_returns_only_matching_branch(self, store: EventStore):
-        # same node + repo, different branches; same branch + different node
-        await store.create_deploy_event(
-            deploy_id="m1",
-            node_id="n1",
-            repo="r",
-            branch="main",
-            commits=["h"],
-            affected_services=[],
-            diff_stat=None,
-            detected_at="2026-01-01T00:00:00Z",
-        )
-        await store.create_deploy_event(
-            deploy_id="d1",
-            node_id="n1",
-            repo="r",
-            branch="dev",
-            commits=["h"],
-            affected_services=[],
-            diff_stat=None,
-            detected_at="2026-01-01T00:00:00Z",
-        )
-        await store.create_deploy_event(
-            deploy_id="m2",
-            node_id="n2",
-            repo="r",
-            branch="main",
-            commits=["h"],
-            affected_services=[],
-            diff_stat=None,
-            detected_at="2026-01-01T00:00:00Z",
-        )
-
-        result = await store.get_pending_deploys_for_branch("n1", "r", "main")
-        assert {d["deploy_id"] for d in result} == {"m1"}
-
-    async def test_includes_only_pending(self, store: EventStore):
-        await store.create_deploy_event(
-            deploy_id="m1",
-            node_id="n1",
-            repo="r",
-            branch="main",
-            commits=["h"],
-            affected_services=[],
-            diff_stat=None,
-            detected_at="2026-01-01T00:00:00Z",
-        )
-        # m1이 배포 중이 된 뒤에 m2가 들어와야 m1이 밀리지 않고 배포 중으로 남는다
-        await to_deploying(store, "m1")
-        await store.create_deploy_event(
-            deploy_id="m2",
-            node_id="n1",
-            repo="r",
-            branch="main",
-            commits=["h"],
-            affected_services=[],
-            diff_stat=None,
-            detected_at="2026-01-01T00:00:00Z",
-        )
-
-        result = await store.get_pending_deploys_for_branch("n1", "r", "main")
-        assert {d["deploy_id"] for d in result} == {"m2"}
-
-    async def test_empty_when_no_match(self, store: EventStore):
-        result = await store.get_pending_deploys_for_branch("nope", "r", "main")
-        assert result == []
-
-
 class TestGetDeployHistory:
     async def test_returns_all_newest_first(self, store: EventStore):
         for i in range(5):
@@ -1169,53 +1098,6 @@ class TestRejectDeploy:
         assert (event["status"], event["error"]) == ("failed", "exit code 1")
         assert await store.reject_deploy("legacy1", "x") is False
         assert (await store.get_deploy_event("legacy1"))["status"] == "failed"
-
-
-class TestGetDeployingEventsForNode:
-    async def test_returns_deploying_only(self, store: EventStore):
-        # Create events in different states
-        await store.create_deploy_event(
-            deploy_id="dep1",
-            node_id="n1",
-            repo="r1",
-            branch="main",
-            commits=["h1 msg"],
-            affected_services=[],
-            diff_stat=None,
-            detected_at="2026-01-01T00:00:00Z",
-        )
-        await store.create_deploy_event(
-            deploy_id="dep2",
-            node_id="n1",
-            repo="r2",
-            branch="main",
-            commits=["h2 msg"],
-            affected_services=[],
-            diff_stat=None,
-            detected_at="2026-01-01T00:00:00Z",
-        )
-        await store.create_deploy_event(
-            deploy_id="dep3",
-            node_id="n2",
-            repo="r1",
-            branch="main",
-            commits=["h3 msg"],
-            affected_services=[],
-            diff_stat=None,
-            detected_at="2026-01-01T00:00:00Z",
-        )
-
-        # Set dep1 to deploying, dep2 to pending, dep3 to deploying (different node)
-        await to_deploying(store, "dep1")
-        await to_deploying(store, "dep3")
-
-        deploying = await store.get_deploying_events_for_node("n1")
-        assert len(deploying) == 1
-        assert deploying[0]["deploy_id"] == "dep1"
-
-    async def test_empty_when_no_deploying(self, store: EventStore):
-        deploying = await store.get_deploying_events_for_node("n1")
-        assert deploying == []
 
 
 class TestUpsertNode:

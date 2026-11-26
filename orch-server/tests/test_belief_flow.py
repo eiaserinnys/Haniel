@@ -24,9 +24,9 @@ try:
         DEADLINE_GRACE,
         DEADLINE_LEASE,
         DEADLINE_NONE,
+        Intake,
         intake_deadline,
         intake_hello,
-        intake_progress,
         intake_received,
         intake_send_failed,
         intake_terminal,
@@ -34,7 +34,7 @@ try:
 except ImportError:  # 2b-1 판(재현 시험을 돌릴 때): 값 이름만 둔다. 받기 함수를 쓰는 시험은 그 자리에서 실패한다
     CLOSURE_EXECUTION_UNKNOWN, CLOSURE_FAILED, CLOSURE_NOT_EXECUTED = "execution_unknown", "failed", "not_executed"
     DEADLINE_ACK, DEADLINE_GRACE, DEADLINE_LEASE, DEADLINE_NONE = "ack", "grace", "lease", "none"
-    intake_deadline = intake_hello = intake_progress = intake_received = intake_send_failed = intake_terminal = None
+    Intake = intake_deadline = intake_hello = intake_received = intake_send_failed = intake_terminal = None
 from haniel_orch.event_store import EventStore
 from haniel_orch import protocol as _protocol
 from haniel_orch.protocol import (
@@ -993,7 +993,7 @@ async def test_the_coordinator_lands_where_the_intake_and_one_definition_step_sa
             intake = intake_received(node_protocol=attempt["node_protocol"], active=True)
             await harness.coordinator.handle_received(DeployAttemptReceived(node_id="n", deploy_id=DEPLOY_ID, orchestrator_attempt_id="a1", connection_generation="g1"))
         elif kind == "progress":
-            intake = intake_progress(active=True)
+            intake = Intake("started")
             await harness.coordinator.handle_progress(DeployProgress(deploy_id=DEPLOY_ID, node_id="n", orchestrator_attempt_id="a1", connection_generation="g1", stage="build"))
         elif kind in ("terminal_declined", "terminal_running"):
             intake = intake_terminal(node_protocol=attempt["node_protocol"], belief=before["belief"], newer=False)
@@ -1013,9 +1013,7 @@ async def test_the_coordinator_lands_where_the_intake_and_one_definition_step_sa
             intake = intake_hello(node_protocol=attempt["node_protocol"], belief=before["belief"], held=held, attempt_id="a1", newer=False)
             await harness.coordinator.reconcile_hello("n", 1, [HeldAttempt(orchestrator_attempt_id=a, state="queued") for a in held])
         else:
-            from haniel_orch.deploy_attempt_intake import intake_link_down
-
-            intake = intake_link_down()
+            intake = Intake("link_down")
             await store.attempts.mark_link_down("n", grace_sec=300)
         assert intake is not None, kind
         expected = advance(OrchRequest, before, intake.event, intake.facts)

@@ -6,10 +6,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
-import aiosqlite
 
 from .deploy_attempt_intake import (
     CLOSURE_FAILED,
@@ -17,14 +15,11 @@ from .deploy_attempt_intake import (
     DEADLINE_LEASE,
     is_legacy,
 )
+from .event_store_rows import close_probes, now_iso, row_to_dict
 from .protocol import DeployPlanProposal
 from .statechart import attempt_steps, steps
-from .statechart.columns import LEAF_COLUMNS, LOCK_ON
+from .statechart.columns import LOCK_ON
 from .statechart.restore import REASON_NO_TRANSITION, NoTransition
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 class DeployAttemptStoreSupport:
@@ -49,7 +44,7 @@ class DeployAttemptStoreSupport:
         시도 줄에는 그 노드 연결의 판(node_protocol)과 마감 종류를 적는다: 판 1은 닿았는지 모름의 짧은 마감(ack),
         판 없음은 지금처럼 실행 임대(lease)다(wire-v1 4절, 5절). 마감 시각은 호출부가 판에 맞게 계산해 넘긴다.
         """
-        now = _now_iso()
+        now = now_iso()
         # 시도 순서 칸: 같은 요청의 최댓값 더하기 1(첫 시도는 1). 자동 길처럼 노드가 시도 번호를 정해도 순서는 여기서 적는다
         cursor = await self._db.execute(
             "SELECT COALESCE(MAX(attempt_seq), 0) + 1 FROM deploy_attempts WHERE deploy_id = ?",
@@ -155,7 +150,7 @@ class DeployAttemptStoreSupport:
         스스로 내는 닫힘이라 닫힘 칸만 쓰고 증거 잎은 두지 않는다(뒤에 오는 늦은 글이 증거로 적힌다).
         move_source가 거짓이면 실행하지 않았음이 확실한 닫힘이라 계보에는 더하되 source를 옮기지 않는다(design.md:232).
         """
-        now = _now_iso()
+        now = now_iso()
         todo: list[str] = []
         if node_glyph:
             try:
@@ -268,14 +263,12 @@ class DeployAttemptStoreSupport:
     async def _terminalize_sibling_probes_unlocked(
         self, deploy_id: str, error: str
     ) -> None:
-        await self._db.execute(
-            """UPDATE deploy_plan_probes
-               SET status = 'terminal', terminal_kind = 'preflight_stale',
-                   terminal_stage = 'attempt_terminal',
-                   terminal_reason = 'attempt_lineage_changed',
-                   terminal_error = ?, completed_at = ?
-               WHERE deploy_id = ? AND status IN ('active','proposed')""",
-            (error, _now_iso(), deploy_id),
+        await close_probes(
+            self._db,
+            [deploy_id],
+            stage="attempt_terminal",
+            reason="attempt_lineage_changed",
+            error=error,
         )
 
     async def _lock_on(self, deploy_id: str) -> bool:
@@ -311,7 +304,7 @@ class DeployAttemptStoreSupport:
             "UPDATE deploy_plan_probes SET status = 'terminal', terminal_kind = ?, "
             "terminal_stage = ?, terminal_reason = ?, terminal_error = ?, completed_at = ? "
             "WHERE probe_id = ? AND status IN ('active','proposed')",
-            (kind, stage, reason, error, _now_iso(), probe["probe_id"]),
+            (kind, stage, reason, error, now_iso(), probe["probe_id"]),
         )
         return changed.rowcount == 1
 
@@ -343,7 +336,7 @@ class DeployAttemptStoreSupport:
         row = await cursor.fetchone()
         if row is None:
             return None
-        result = self._rows(cursor, [row])[0]
+        result = row_to_dict(cursor, row)
         lineage_cursor = await self._db.execute(
             "SELECT lineage_orchestrator_attempt_id FROM deploy_retry_source_attempts "
             "WHERE deploy_id = ? ORDER BY added_at",
@@ -357,14 +350,14 @@ class DeployAttemptStoreSupport:
             "SELECT * FROM deploy_events WHERE deploy_id = ?", (deploy_id,)
         )
         row = await cursor.fetchone()
-        return None if row is None else self._rows(cursor, [row])[0]
+        return None if row is None else row_to_dict(cursor, row)
 
     async def _probe(self, probe_id: str) -> dict[str, Any] | None:
         cursor = await self._db.execute(
             "SELECT * FROM deploy_plan_probes WHERE probe_id = ?", (probe_id,)
         )
         row = await cursor.fetchone()
-        return None if row is None else self._rows(cursor, [row])[0]
+        return None if row is None else row_to_dict(cursor, row)
 
     async def _attempt(self, orchestrator_attempt_id: str) -> dict[str, Any] | None:
         cursor = await self._db.execute(
@@ -372,7 +365,7 @@ class DeployAttemptStoreSupport:
             (orchestrator_attempt_id,),
         )
         row = await cursor.fetchone()
-        return None if row is None else self._rows(cursor, [row])[0]
+        return None if row is None else row_to_dict(cursor, row)
 
     async def _owned_attempt(
         self, deploy_id: str, orchestrator_attempt_id: str, generation: str
@@ -414,14 +407,3 @@ class DeployAttemptStoreSupport:
             (event["node_id"], event["repo"], event["branch"]),
         )
         return await cursor.fetchone() is not None
-
-    @staticmethod
-    def _rows(cursor: aiosqlite.Cursor, rows: list[tuple]) -> list[dict[str, Any]]:
-        return [
-            {
-                column[0]: value
-                for column, value in zip(cursor.description, row)
-                if column[0] not in LEAF_COLUMNS
-            }
-            for row in rows
-        ]

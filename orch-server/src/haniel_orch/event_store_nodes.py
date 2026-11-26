@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 import aiosqlite
 
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from .event_store_rows import now_iso
 
 
 async def initialize_node_schema(db: aiosqlite.Connection) -> None:
@@ -36,7 +32,7 @@ async def upsert_node(
     connection_token: str | None,
     deploy_protocol: int | None = None,
 ) -> None:
-    now = _now_iso()
+    now = now_iso()
     await db.execute(
         """INSERT INTO nodes
            (node_id, hostname, os, arch, haniel_version, connected,
@@ -77,13 +73,13 @@ async def update_node_heartbeat(
     if expected_generation is None or expected_connection_token is None:
         cursor = await db.execute(
             "UPDATE nodes SET last_seen = ?, connected = 1 WHERE node_id = ?",
-            (_now_iso(), node_id),
+            (now_iso(), node_id),
         )
     else:
         cursor = await db.execute(
             "UPDATE nodes SET last_seen = ?, connected = 1 "
             "WHERE node_id = ? AND connection_generation = ? AND connection_token = ?",
-            (_now_iso(), node_id, expected_generation, expected_connection_token),
+            (now_iso(), node_id, expected_generation, expected_connection_token),
         )
     return cursor.rowcount == 1
 
@@ -98,6 +94,6 @@ async def mark_node_disconnected(
         "UPDATE nodes SET connected = 0, last_seen = ? "
         "WHERE node_id = ? AND connection_generation = ? AND connection_token = ? "
         "AND connected = 1",
-        (_now_iso(), node_id, expected_generation, expected_connection_token),
+        (now_iso(), node_id, expected_generation, expected_connection_token),
     )
     return cursor.rowcount == 1

@@ -13,11 +13,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime, timezone
 from typing import Any, NamedTuple
 
 import aiosqlite
 
+from ..event_store_rows import now_iso
 from .columns import ATTEMPT_REGION, LATE_EVIDENCE_OF_LEAF, attempt_leaf_is_consistent
 from .definitions import ATTEMPT_TERMINAL, AttemptEvidence
 from .restore import (
@@ -28,10 +28,6 @@ from .restore import (
     advance_with_todo,
     initial_row,
 )
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 class AttemptStep(NamedTuple):
@@ -224,10 +220,6 @@ async def step_attempt(
             orchestrator_attempt_id,
         )
     return AttemptStep(previous=leaf, leaf=new_leaf, todo=tuple(todo))
-
-
-def attempt_is_terminal(leaf: str) -> bool:
-    return leaf in ATTEMPT_TERMINAL
 
 
 async def close_attempt(
