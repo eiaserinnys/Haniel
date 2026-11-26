@@ -914,3 +914,57 @@ class TestMcpServerLifecycle:
         mcp_server.stop_sync()
 
         assert mcp_server._stop_requested.is_set()
+
+
+class TestConfigSaveRejections:
+    """Saving an entry with unknown keys or bad values is a tool error."""
+
+    @pytest.fixture
+    def real_server(self, tmp_path: Path):
+        from haniel.core.runner import ServiceRunner
+        from haniel.integrations.mcp_server import HanielMcpServer
+        from haniel.config import load_config
+
+        path = tmp_path / "haniel.yaml"
+        path.write_text("services:\n  web:\n    run: python app.py\n", encoding="utf-8")
+        runner = ServiceRunner(load_config(path), config_dir=tmp_path, config_path=path)
+        return HanielMcpServer(runner), path
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tool", "arguments"),
+        [
+            (
+                "haniel_update_service_config",
+                {"service": "web", "config": {"run": "x", "redy": "port:80"}},
+            ),
+            (
+                "haniel_create_service_config",
+                {"name": "api", "config": {"run": "x", "redy": "port:80"}},
+            ),
+            (
+                "haniel_register_service",
+                {"name": "api", "service_config": {"run": "x", "redy": "port:80"}},
+            ),
+        ],
+    )
+    async def test_unknown_key_is_a_tool_error_and_writes_nothing(
+        self, real_server, tool, arguments
+    ):
+        server, path = real_server
+        before = path.read_text(encoding="utf-8")
+
+        with pytest.raises(McpToolError, match=r"unknown key services\.\w+\.redy"):
+            await server.call_tool(tool, arguments)
+
+        assert path.read_text(encoding="utf-8") == before
+
+    @pytest.mark.asyncio
+    async def test_repo_with_empty_url_is_a_tool_error(self, real_server):
+        server, _ = real_server
+
+        with pytest.raises(McpToolError, match=r"repos\.r\.url must not be empty"):
+            await server.call_tool(
+                "haniel_create_repo_config",
+                {"name": "r", "config": {"url": "", "path": "./r"}},
+            )

@@ -266,3 +266,39 @@ def test_secret_errors_logs_and_install_output_are_safe(secret_config, caplog):
     assert result.exit_code == 0
     assert "example-secret-value" not in caplog.text + result.output
     assert "other-secret-value" not in caplog.text + result.output
+
+
+@pytest.mark.parametrize(
+    ("secrets_file", "expected"),
+    [
+        (None, "no secrets_file is set"),
+        ("missing.env", "cannot read {path}"),
+        ("secrets.env", "looked in {path}"),
+    ],
+)
+def test_unresolved_secret_names_the_file_it_looked_in(
+    secret_config, secrets_file, expected
+):
+    raw = (
+        secret_config.read_text()
+        .replace(
+            "secrets_file: secrets.env",
+            "" if secrets_file is None else f"secrets_file: {secrets_file}",
+        )
+        .replace("${secret:TOKEN}", "${secret:MISSING}")
+    )
+    secret_config.write_text(raw)
+    with pytest.raises(ValueError) as error:
+        load_config(secret_config)
+    path = secret_config.parent.resolve() / (secrets_file or "")
+    assert "MISSING" in str(error.value)
+    assert expected.format(path=path) in str(error.value)
+
+
+def test_unreadable_secrets_file_error_names_the_path(secret_config):
+    secret_config.write_text(
+        "secrets_file: missing.env\nservices:\n  a: {run: x}\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError) as error:
+        load_config(secret_config)
+    assert str(secret_config.parent.resolve() / "missing.env") in str(error.value)

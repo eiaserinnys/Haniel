@@ -386,11 +386,14 @@ class HanielConfig(BaseModel):
 
     secrets_file: str | None = Field(default=None, description="Private dotenv file")
     _secret_values: dict[str, str] = PrivateAttr(default_factory=dict)
+    _secret_source: str = PrivateAttr(default="no secrets_file is set")
 
     def resolve_secret(self, value: str | None, field_path: str) -> str | None:
         from .secrets import resolve_secret
 
-        return resolve_secret(value, field_path, self._secret_values)
+        return resolve_secret(
+            value, field_path, self._secret_values, self._secret_source
+        )
 
     def redact_secrets(self, message: str) -> str:
         for value in self._secret_values.values():

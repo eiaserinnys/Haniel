@@ -415,3 +415,151 @@ def test_delete_service_config_stops_and_purges_unshared_repo_path(tmp_path: Pat
     raw = _read_raw(runner.config_path)
     assert "web" not in raw["services"]
     assert "main" in raw["repos"]
+
+
+def _write_raw_config(path: Path, text: str) -> ServiceRunner:
+    path.write_text(text, encoding="utf-8")
+    from haniel.config import load_config
+
+    return ServiceRunner(load_config(path), config_dir=path.parent, config_path=path)
+
+
+class TestSaveRejectsInputErrors:
+    """Saving an entry refuses unknown keys and bad values in that entry only."""
+
+    def test_create_service_rejects_unknown_key_and_writes_nothing(
+        self, tmp_path: Path
+    ):
+        from haniel.core.service_lifecycle import create_service_config
+
+        runner = _runner(HanielConfig(poll_interval=60), tmp_path)
+        before = runner.config_path.read_text(encoding="utf-8")
+
+        with pytest.raises(ValueError, match=r"unknown key services\.api\.redy"):
+            create_service_config(
+                runner, "api", {"run": "python app.py", "redy": "port:80"}
+            )
+
+        assert runner.config_path.read_text(encoding="utf-8") == before
+        assert not runner.config_path.with_suffix(".yaml.bak").exists()
+
+    def test_update_service_rejects_bad_ready_and_keeps_old_entry(self, tmp_path: Path):
+        from haniel.core.service_lifecycle import update_service_config
+
+        runner = _runner(
+            HanielConfig(
+                poll_interval=60, services={"api": ServiceConfig(run="python app.py")}
+            ),
+            tmp_path,
+        )
+
+        with pytest.raises(ValueError, match=r"services\.api\.ready"):
+            update_service_config(
+                runner, "api", {"run": "python app.py", "ready": "prt:80"}
+            )
+
+        assert (
+            _read_raw(runner.config_path)["services"]["api"]["run"] == "python app.py"
+        )
+        assert "ready" not in _read_raw(runner.config_path)["services"]["api"]
+
+    def test_reports_every_problem_in_the_entry(self, tmp_path: Path):
+        from haniel.core.service_lifecycle import create_service_config
+
+        runner = _runner(HanielConfig(poll_interval=60), tmp_path)
+
+        with pytest.raises(ValueError) as error:
+            create_service_config(
+                runner,
+                "api",
+                {"run": "x", "redy": "port:80", "restart_delay": -5},
+            )
+
+        assert "unknown key services.api.redy" in str(error.value)
+        assert "services.api.restart_delay" in str(error.value)
+
+    def test_repo_save_rejects_unknown_key_and_empty_url(self, tmp_path: Path):
+        from haniel.core.service_lifecycle import create_repo_config, register_repo
+
+        runner = _runner(HanielConfig(poll_interval=60), tmp_path)
+
+        with pytest.raises(ValueError, match=r"unknown key repos\.r\.brnch"):
+            create_repo_config(runner, "r", {"url": "u", "path": "./r", "brnch": "x"})
+        with pytest.raises(ValueError, match=r"repos\.r\.url must not be empty"):
+            register_repo(runner, name="r", repo_config={"url": "", "path": "./r"})
+
+    def test_register_service_rejects_unknown_key_before_cloning(self, tmp_path: Path):
+        from haniel.core.service_lifecycle import register_service
+
+        runner = _runner(HanielConfig(poll_interval=60), tmp_path)
+
+        with patch("haniel.core.service_lifecycle.clone_repo") as clone_repo:
+            with pytest.raises(ValueError, match=r"unknown key repos\.main\.brnch"):
+                register_service(
+                    runner,
+                    name="web",
+                    service_config={"run": "python app.py"},
+                    repo="main",
+                    repo_config={"url": "u", "path": "", "brnch": "main"},
+                )
+            with pytest.raises(ValueError, match=r"unknown key services\.web\.redy"):
+                register_service(
+                    runner,
+                    name="web",
+                    service_config={"run": "python app.py", "redy": "port:80"},
+                )
+
+        clone_repo.assert_not_called()
+
+    def test_empty_path_is_still_filled_before_the_repo_is_checked(
+        self, tmp_path: Path
+    ):
+        from haniel.core.service_lifecycle import register_service
+
+        runner = _runner(HanielConfig(poll_interval=60), tmp_path)
+        runner.execute_hook = MagicMock(return_value=True)
+        runner._start_service = MagicMock(return_value=True)
+
+        with patch("haniel.core.service_lifecycle.clone_repo"):
+            result = register_service(
+                runner,
+                name="web",
+                service_config={"run": "python app.py"},
+                repo="main",
+                repo_config={"url": "u", "path": ""},
+            )
+
+        assert result["repo_path"] == "./main"
+
+    def test_old_problem_in_another_entry_does_not_block_the_save(self, tmp_path: Path):
+        from haniel.core.service_lifecycle import update_service_config
+
+        runner = _write_raw_config(
+            tmp_path / "haniel.yaml",
+            "services:\n"
+            "  old:\n    run: x\n    redy: 'port:80'\n    ready: 'prt:80'\n"
+            "  api:\n    run: y\n",
+        )
+
+        update_service_config(runner, "api", {"run": "python app.py"})
+
+        assert (
+            _read_raw(runner.config_path)["services"]["api"]["run"] == "python app.py"
+        )
+
+
+def test_reload_config_warns_about_input_errors_and_still_reloads(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    runner = _write_raw_config(
+        tmp_path / "haniel.yaml",
+        "services:\n  api:\n    run: x\n    redy: 'port:80'\n    ready: 'prt:80'\n",
+    )
+
+    with caplog.at_level("WARNING", logger="haniel.config.input_checks"):
+        runner.reload_config()
+
+    messages = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("unknown key services.api.redy" in m for m in messages)
+    assert any("services.api.ready" in m for m in messages)
+    assert "api" in runner._enabled_services

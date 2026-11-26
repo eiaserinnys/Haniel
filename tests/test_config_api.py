@@ -539,3 +539,38 @@ class TestPutRepo:
             json=payload,
         )
         assert resp.status_code == 404
+
+
+class TestInputErrorsRejected:
+    def test_put_service_with_unknown_key_returns_400_and_names_it(
+        self, dashboard_app, mock_runner, config_file
+    ):
+        before = config_file.read_text(encoding="utf-8")
+        client = TestClient(dashboard_app)
+        resp = client.put(
+            "/api/config/services/web",
+            json={"run": "python -m http.server", "redy": "port:80"},
+        )
+        assert resp.status_code == 400
+        assert "unknown key services.web.redy (did you mean ready?)" in resp.text
+        assert config_file.read_text(encoding="utf-8") == before
+        mock_runner.reload_config.assert_not_called()
+
+    def test_put_repo_with_empty_url_returns_400(self, dashboard_app, mock_runner):
+        client = TestClient(dashboard_app)
+        resp = client.put("/api/config/repos/main", json={"url": "", "path": "./repo"})
+        assert resp.status_code == 400
+        assert "repos.main.url must not be empty" in resp.text
+
+    def test_register_service_with_unknown_key_returns_400(
+        self, dashboard_app, mock_runner, config_file
+    ):
+        before = config_file.read_text(encoding="utf-8")
+        client = TestClient(dashboard_app)
+        resp = client.post(
+            "/api/config/services/register",
+            json={"name": "api", "service_config": {"run": "x", "redy": "port:80"}},
+        )
+        assert resp.status_code == 400
+        assert "unknown key services.api.redy" in resp.text
+        assert config_file.read_text(encoding="utf-8") == before

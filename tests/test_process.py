@@ -1272,3 +1272,44 @@ services:
         # Should have config but with semantic errors
         assert config is not None
         assert len(errors) > 0
+
+
+class TestUnreadableReadyWarning:
+    """A ready value that cannot be used is logged, not silently accepted."""
+
+    def test_unknown_format_warns_and_records_running(
+        self, process_manager: ProcessManager, caplog: pytest.LogCaptureFixture
+    ):
+        config = ServiceConfig(
+            run=f'{sys.executable} -c "import time; time.sleep(60)"',
+            ready="prt:80",
+        )
+
+        with caplog.at_level("WARNING", logger="haniel.core.process"):
+            process_manager.start_service("test", config)
+        try:
+            assert any(
+                r.levelname == "WARNING"
+                and "test" in r.getMessage()
+                and "unknown ready format 'prt:80'" in r.getMessage()
+                for r in caplog.records
+            )
+            assert process_manager.is_running("test")
+        finally:
+            process_manager.stop_service("test", force=True)
+
+    def test_usable_ready_does_not_warn(
+        self, process_manager: ProcessManager, caplog: pytest.LogCaptureFixture
+    ):
+        config = ServiceConfig(
+            run=f'{sys.executable} -c "import time; time.sleep(60)"',
+            ready="delay:0.1",
+        )
+
+        with caplog.at_level("WARNING", logger="haniel.core.process"):
+            process_manager.start_service("test", config)
+        try:
+            assert process_manager.wait_for_ready("test", timeout=2)
+            assert not [r for r in caplog.records if "ready" in r.getMessage()]
+        finally:
+            process_manager.stop_service("test", force=True)
