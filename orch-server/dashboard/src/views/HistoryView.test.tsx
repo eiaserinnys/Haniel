@@ -18,7 +18,7 @@ function renderRows(deploys: Deploy[]) {
 }
 
 describe('HistoryView failure rows', () => {
-  it('names the stage the deploy failed in and whether a rollback ran, in one line', () => {
+  it('names the stage the deploy failed in and whether recovery was attempted, in one line', () => {
     renderRows([
       row({
         deploy_id: 'f1', repo: 'rolled-repo', terminal_reason: 'deploy_result_failed',
@@ -33,7 +33,7 @@ describe('HistoryView failure rows', () => {
       row({ deploy_id: 's1', repo: 'ok-repo', status: 'success', failed_stage: 'starting' }),
     ]);
     const lineOf = (repo: string) => (screen.getByText(repo).closest('.row') as HTMLElement).querySelector('.h-outcome');
-    expect(lineOf('rolled-repo')?.textContent).toBe('Failed while starting services · rollback ran');
+    expect(lineOf('rolled-repo')?.textContent).toBe('Failed while starting services · recovery attempted');
     expect(lineOf('plain-stage-repo')?.textContent).toBe('Failed while verifying');
     expect(lineOf('silent-repo')?.textContent).toBe('Failed while building');
     expect(lineOf('timeout-repo')?.textContent).toBe('No response from node');

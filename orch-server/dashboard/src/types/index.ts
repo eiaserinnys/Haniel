@@ -48,7 +48,7 @@ export interface Deploy {
   // Deploying rows only; null until the node reports a stage.
   progress_stage?: ProgressStage | null;
   // History failure rows. failed_stage is a node stage (the PR #114 v2 field);
-  // recovery_attempted says whether a rollback ran; null when the node did not say.
+  // recovery_attempted says the node entered recovery (not that it recovered); null when the node did not say.
   terminal_reason?: string | null;
   failed_stage?: string | null;
   recovery_attempted?: boolean | null;

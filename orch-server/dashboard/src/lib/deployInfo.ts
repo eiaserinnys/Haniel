@@ -46,8 +46,9 @@ export function hasFailed(deploy: Deploy): boolean {
 
 // What the History failure row says, from the failure columns of
 // GET /api/orch/history (hub PR #114 v2). failed_stage is the node stage the
-// deploy stopped in; recovery_attempted says a rollback ran. Neither is
-// guessed from terminal_kind or terminal_stage, which are hub-side values.
+// deploy stopped in; recovery_attempted says the node entered recovery, not that
+// it recovered (that stays in the node's error sentence). Neither is guessed
+// from terminal_kind or terminal_stage, which are hub-side values.
 const FAILED_WHILE: Record<string, string> = {
   preparing: 'preparing',
   build: 'building',
@@ -74,14 +75,14 @@ function reasonLine(reason: string | null | undefined): string | null {
   return REASON_LINES[reason] ?? null;
 }
 
-// "Failed while starting services · rollback ran". null when the row has
+// "Failed while starting services · recovery attempted". null when the row has
 // nothing to say, so it keeps showing only its error.
 export function failureOutcome(deploy: Deploy): string | null {
   if (deploy.status !== 'failed') return null;
   const phrase = deploy.failed_stage ? FAILED_WHILE[deploy.failed_stage] : undefined;
   const head = phrase ? `Failed while ${phrase}` : reasonLine(deploy.terminal_reason);
   if (!head) return null;
-  return deploy.recovery_attempted === true ? `${head} · rollback ran` : head;
+  return deploy.recovery_attempted === true ? `${head} · recovery attempted` : head;
 }
 
 export function servingTime(servedAt: string): string {

@@ -51,7 +51,7 @@ describe('failureOutcome', () => {
     created_at: '', updated_at: '', ...extra,
   });
 
-  it('writes the stage phrase and appends the rollback only when the hub says one ran', () => {
+  it('writes the stage phrase and appends the recovery only when the hub says it was attempted', () => {
     const phrases: Record<string, string> = {
       preparing: 'preparing', build: 'building', preflight: 'checking', backing_up: 'backing up',
       migrating: 'migrating', starting: 'starting services', verifying: 'verifying',
@@ -59,7 +59,7 @@ describe('failureOutcome', () => {
     for (const [stage, phrase] of Object.entries(phrases)) {
       expect(failureOutcome(failed({ failed_stage: stage }))).toBe(`Failed while ${phrase}`);
       expect(failureOutcome(failed({ failed_stage: stage, recovery_attempted: false }))).toBe(`Failed while ${phrase}`);
-      expect(failureOutcome(failed({ failed_stage: stage, recovery_attempted: true }))).toBe(`Failed while ${phrase} · rollback ran`);
+      expect(failureOutcome(failed({ failed_stage: stage, recovery_attempted: true }))).toBe(`Failed while ${phrase} · recovery attempted`);
     }
   });
 
@@ -82,7 +82,7 @@ describe('failureOutcome', () => {
     expect(failureOutcome(failed({ failed_stage: 'starting', status: 'success' }))).toBeNull();
   });
 
-  it('never guesses a rollback from the hub-side columns or the error text', () => {
+  it('never guesses a recovery from the hub-side columns or the error text', () => {
     const row = failed({ terminal_reason: 'deploy_result_failed', error: 'Rolled back to abc' }) as Deploy & Record<string, unknown>;
     row.terminal_kind = 'deploy_result_failed';
     row.terminal_stage = 'starting';

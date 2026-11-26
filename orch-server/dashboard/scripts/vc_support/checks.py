@@ -390,7 +390,8 @@ def pending_failed(S, rep, scene):
 
 def history_outcome(S, rep, scene):
     got = S.page.evaluate("() => Array.from(document.querySelectorAll('.h-outcome')).map((e) => e.textContent)")
-    want = {"Failed while starting services · rollback ran", "Failed while verifying", "No response from node"}
+    want = {"Failed while starting services · recovery attempted", "Failed while migrating · recovery attempted",
+            "Failed while verifying", "No response from node"}
     if not want <= set(got):
         rep.fail(scene, f"history failure lines {got}, want {sorted(want)}")
 
