@@ -293,6 +293,23 @@ class OrchestratorServer:
         return self._app
 
 
+def _push_config_from_env() -> PushConfig | None:
+    """Relay push is on only when both ORCH_PUSH_* values are set; the key is never logged."""
+    names = ("ORCH_PUSH_RELAY_URL", "ORCH_PUSH_INSTANCE_KEY")
+    relay_url, instance_key = (os.environ.get(name, "").strip() for name in names)
+    missing = [name for name, value in zip(names, (relay_url, instance_key)) if not value]
+
+    if not missing:
+        relay_url = relay_url.rstrip("/")
+        logger.info("Push relay enabled: %s", relay_url)
+        return PushConfig(mode="relay", relay_url=relay_url, instance_key=instance_key)
+    if len(missing) == 1:
+        logger.warning("Push disabled: %s is not set", missing[0])
+    else:
+        logger.info("Push relay disabled")
+    return None
+
+
 def create_app() -> Starlette:
     """Uvicorn factory entry point.
 
@@ -311,6 +328,8 @@ def create_app() -> Starlette:
         ORCH_SOULSTREAM_URL       — 점검 필요 알림을 보낼 소울스트림 주소 (없으면 보내지 않음)
         ORCH_SOULSTREAM_TOKEN     — 소울스트림 인증 토큰 (없으면 보내지 않음)
         ORCH_INSPECTION_SESSION_ID — 알림을 받을 소울스트림 세션 id (없으면 보내지 않음)
+        ORCH_PUSH_RELAY_URL       — iOS 푸시 중계 서버 주소 (둘 다 있어야 켜짐)
+        ORCH_PUSH_INSTANCE_KEY    — 중계 서버 인증 키 (둘 다 있어야 켜짐, 값은 로그에 남기지 않음)
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -335,6 +354,7 @@ def create_app() -> Starlette:
         soulstream_url=os.environ.get("ORCH_SOULSTREAM_URL"),
         soulstream_token=os.environ.get("ORCH_SOULSTREAM_TOKEN"),
         inspection_session_id=os.environ.get("ORCH_INSPECTION_SESSION_ID"),
+        push=_push_config_from_env(),
     )
     # ORCH_COMMAND_TIMEOUT_SEC: optional override.
     # 기본값(30.0)은 OrchestratorConfig.command_timeout_sec 필드가 정본으로 보유
