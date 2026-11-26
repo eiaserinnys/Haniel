@@ -478,9 +478,6 @@ LEAVES_NOT_IN_DESIGN: dict[type, frozenset[str]] = {
 REQUEST_CLOSED = frozenset({"success", "rejected", "superseded"})
 ATTEMPT_TERMINAL = frozenset({"ev_both", "ev_failed", "ev_superseded"})
 
-# 믿음 가운데 노드가 시도를 쥐고 있을 수 있는 셋(hello 대조와 마감의 대상)
-BELIEF_HELD = frozenset({"b_unknown", "b_queued", "b_running"})
-
 # 바깥 칸(status)으로 쓰이는 값. 대기 셋은 pending, 밀림은 rejected다.
 REQUEST_OUTER_STATUS = {
     "pending": "pending",

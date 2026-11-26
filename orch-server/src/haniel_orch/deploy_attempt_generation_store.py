@@ -6,11 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from .event_store_rows import now_iso
 
 
 class DeployAttemptGenerationStore:
@@ -25,7 +21,7 @@ class DeployAttemptGenerationStore:
                     (generation,),
                 )
                 changed: list[str] = []
-                now = _now_iso()
+                now = now_iso()
                 for (probe_id,) in await cursor.fetchall():
                     probe = await self._probe(probe_id)
                     if probe and await self._terminalize_probe_unlocked(
@@ -55,7 +51,7 @@ class DeployAttemptGenerationStore:
                     (node_id, current_generation),
                 )
                 changed: list[str] = []
-                now = _now_iso()
+                now = now_iso()
                 for (probe_id,) in await cursor.fetchall():
                     probe = await self._probe(probe_id)
                     if probe and await self._terminalize_probe_unlocked(

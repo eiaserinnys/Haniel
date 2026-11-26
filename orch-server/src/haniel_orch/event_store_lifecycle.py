@@ -5,7 +5,14 @@ from __future__ import annotations
 from typing import Any
 
 from . import event_store_mutations, event_store_nodes, node_deploy_store
-from .event_store_rows import decode_deploy_row, now_iso, row_to_dict
+from .event_store_rows import (
+    batches,
+    close_probes,
+    decode_deploy_row,
+    history_order,
+    now_iso,
+    row_to_dict,
+)
 from .protocol import DeployStatus
 from .statechart import steps
 from .statechart.restore import NoTransition
@@ -20,30 +27,48 @@ class EventStoreLifecycleMixin:
         *,
         include_superseded: bool = False,
     ) -> list[dict[str, Any]]:
-        """Get deploy events newest first."""
+        """Get deploy events newest first.
+
+        Each source is sorted and cut to ``limit`` rows in SQL, then the merged
+        rows are sorted and cut again here.
+        """
         if include_superseded:
-            sql = "SELECT * FROM deploy_events"
-            params: tuple[Any, ...] = ()
+            where = ""
+            params: tuple[Any, ...] = (limit,)
         else:
-            sql = (
-                "SELECT * FROM deploy_events "
-                "WHERE NOT (status = ? AND reject_reason LIKE 'superseded by %') "
-            )
-            params = (DeployStatus.REJECTED.value,)
-        cursor = await self._db.execute(sql, params)
-        rows = await cursor.fetchall()
+            where = "WHERE NOT (status = ? AND reject_reason LIKE 'superseded by %') "
+            params = (DeployStatus.REJECTED.value, limit)
+        # 큰 칸(commits_json, diff_stat)을 정렬 칸에 싣지 않으려고 번호만 정렬해 자른 뒤 그 줄만 읽는다
+        key_cursor = await self._db.execute(
+            "SELECT deploy_id FROM deploy_events "
+            + where
+            + history_order("updated_at", "created_at", "deploy_id"),
+            params,
+        )
+        deploy_ids = [row[0] for row in await key_cursor.fetchall()]
         results = []
-        for row in rows:
-            item = decode_deploy_row(cursor, row)
-            item.update(
-                terminal_kind=None,
-                terminal_stage=None,
-                terminal_reason=None,
-                terminal_error=None,
+        for batch in batches(deploy_ids):
+            placeholders = ", ".join("?" for _ in batch)
+            cursor = await self._db.execute(
+                f"SELECT * FROM deploy_events WHERE deploy_id IN ({placeholders})",
+                tuple(batch),
             )
-            results.append(item)
+            for row in await cursor.fetchall():
+                item = decode_deploy_row(cursor, row)
+                item.update(
+                    terminal_kind=None,
+                    terminal_stage=None,
+                    terminal_reason=None,
+                    terminal_error=None,
+                )
+                results.append(item)
+        success_ids = [
+            item["deploy_id"]
+            for item in results
+            if item["status"] == DeployStatus.SUCCESS.value
+        ]
         if self.attempts is not None:
-            success_metadata = await self.attempts.success_metadata()
+            success_metadata = await self.attempts.success_metadata(success_ids)
             for item in results:
                 metadata = success_metadata.get(item["deploy_id"])
                 if (
@@ -51,16 +76,19 @@ class EventStoreLifecycleMixin:
                     and item["status"] == DeployStatus.SUCCESS.value
                 ):
                     item.update(metadata)
-            results.extend(await self.attempts.history_rows(include_superseded))
-        node_success_metadata = await node_deploy_store.success_metadata(self._db)
+        node_success_metadata = await node_deploy_store.success_metadata(
+            self._db, success_ids
+        )
         for item in results:
-            metadata = node_success_metadata.get(item.get("deploy_id"))
+            metadata = node_success_metadata.get(item["deploy_id"])
             if (
                 metadata is not None
-                and item.get("status") == DeployStatus.SUCCESS.value
+                and item["status"] == DeployStatus.SUCCESS.value
             ):
                 item.update(metadata)
-        results.extend(await node_deploy_store.history_rows(self._db))
+        if self.attempts is not None:
+            results.extend(await self.attempts.history_rows(limit))
+        results.extend(await node_deploy_store.history_rows(self._db, limit))
         results.sort(
             key=lambda item: (
                 item.get("updated_at") or item.get("created_at") or "",
@@ -87,18 +115,12 @@ class EventStoreLifecycleMixin:
                     exc.warn("reject")
                     await self._db.commit()
                     return False
-                await self._db.execute(
-                    """UPDATE deploy_plan_probes
-                       SET status = 'terminal', terminal_kind = 'preflight_stale',
-                           terminal_stage = 'canonical_status_update',
-                           terminal_reason = 'canonical_terminal',
-                           terminal_error = ?, completed_at = ?
-                       WHERE deploy_id = ? AND status IN ('active','proposed')""",
-                    (
-                        f"canonical became {DeployStatus.REJECTED.value} during preflight",
-                        now_iso(),
-                        deploy_id,
-                    ),
+                await close_probes(
+                    self._db,
+                    [deploy_id],
+                    stage="canonical_status_update",
+                    reason="canonical_terminal",
+                    error=f"canonical became {DeployStatus.REJECTED.value} during preflight",
                 )
                 await self._db.commit()
                 return True
@@ -119,15 +141,6 @@ class EventStoreLifecycleMixin:
             except Exception:
                 await self._db.rollback()
                 raise
-
-    async def get_deploying_events_for_node(self, node_id: str) -> list[dict[str, Any]]:
-        """Get events in DEPLOYING state for diagnostics."""
-        cursor = await self._db.execute(
-            "SELECT * FROM deploy_events WHERE node_id = ? AND status = ?",
-            (node_id, DeployStatus.DEPLOYING.value),
-        )
-        rows = await cursor.fetchall()
-        return [decode_deploy_row(cursor, row) for row in rows]
 
     async def reject_pending_deploys_for_nodes(
         self, node_ids: list[str], reject_reason: str

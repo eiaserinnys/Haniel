@@ -94,9 +94,6 @@ def request_step(system, c, event, *, later=False, human=False):
     elif event == "acked":
         result = intake.intake_received(node_protocol=protocol, active=True)
         event, facts = result.event, result.facts
-    elif event == "started":
-        result = intake.intake_progress(active=True)
-        event, facts = result.event, result.facts
     elif event == "declined":
         result = intake.intake_terminal(node_protocol=protocol, belief=c.bl, newer=c.newer)
         event, facts = result.event, result.facts
@@ -117,9 +114,6 @@ def request_step(system, c, event, *, later=False, human=False):
                                      attempt_id=str(c.cur), newer=c.newer)
         if result is None:
             return None
-        event, facts = result.event, result.facts
-    elif event == "link_down":
-        result = intake.intake_link_down()
         event, facts = result.event, result.facts
 
     if event in {"late_failed", "node_failed"} and "p81" in system.without:

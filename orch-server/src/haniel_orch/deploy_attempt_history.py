@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
+
+from .event_store_rows import batches, history_order, row_to_dict
 
 
 class DeployAttemptHistory:
     """Read-only history rows built from attempt and probe tables."""
 
-    async def history_rows(self, include_superseded: bool) -> list[dict[str, Any]]:
+    async def history_rows(self, limit: int) -> list[dict[str, Any]]:
         attempt_cursor = await self._db.execute(
-            "SELECT * FROM deploy_attempts WHERE outcome = 'failed'"
+            "SELECT * FROM deploy_attempts WHERE outcome = 'failed' "
+            + history_order(
+                "completed_at", "started_at", "'attempt:' || orchestrator_attempt_id"
+            ),
+            (limit,),
         )
-        attempts = self._rows(attempt_cursor, await attempt_cursor.fetchall())
+        attempts = [row_to_dict(attempt_cursor, row) for row in await attempt_cursor.fetchall()]
         rows: list[dict[str, Any]] = []
         for attempt in attempts:
             rows.append(
@@ -47,9 +54,11 @@ class DeployAttemptHistory:
                 }
             )
         probe_cursor = await self._db.execute(
-            "SELECT * FROM deploy_plan_probes WHERE status = 'terminal'"
+            "SELECT * FROM deploy_plan_probes WHERE status = 'terminal' "
+            + history_order("completed_at", "created_at", "'preflight:' || probe_id"),
+            (limit,),
         )
-        for probe in self._rows(probe_cursor, await probe_cursor.fetchall()):
+        for probe in [row_to_dict(probe_cursor, row) for row in await probe_cursor.fetchall()]:
             rows.append(
                 {
                     "deploy_id": f"preflight:{probe['probe_id']}",
@@ -75,22 +84,28 @@ class DeployAttemptHistory:
             )
         return rows
 
-    async def success_metadata(self) -> dict[str, dict[str, Any]]:
-        """Join the successful attempt onto its canonical History row once."""
-        cursor = await self._db.execute(
-            """SELECT * FROM deploy_attempts
-               WHERE outcome IN ('success','evidence_recovered_success')
-               ORDER BY completed_at DESC"""
-        )
+    async def success_metadata(
+        self, deploy_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Join the successful attempt onto the given canonical History rows once."""
         metadata: dict[str, dict[str, Any]] = {}
-        for attempt in self._rows(cursor, await cursor.fetchall()):
-            metadata.setdefault(
-                attempt["deploy_id"],
-                {
-                    "orchestrator_attempt_id": attempt["orchestrator_attempt_id"],
-                    "execution_mode": attempt["execution_mode"],
-                    "attempt_outcome": attempt["outcome"],
-                    "journal_attempt_id": attempt["journal_attempt_id"],
-                },
+        for batch in batches(deploy_ids):
+            placeholders = ", ".join("?" for _ in batch)
+            cursor = await self._db.execute(
+                f"""SELECT * FROM deploy_attempts
+                    WHERE outcome IN ('success','evidence_recovered_success')
+                      AND deploy_id IN ({placeholders})
+                    ORDER BY completed_at DESC""",
+                tuple(batch),
             )
+            for attempt in [row_to_dict(cursor, row) for row in await cursor.fetchall()]:
+                metadata.setdefault(
+                    attempt["deploy_id"],
+                    {
+                        "orchestrator_attempt_id": attempt["orchestrator_attempt_id"],
+                        "execution_mode": attempt["execution_mode"],
+                        "attempt_outcome": attempt["outcome"],
+                        "journal_attempt_id": attempt["journal_attempt_id"],
+                    },
+                )
         return metadata

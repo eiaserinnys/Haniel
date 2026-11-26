@@ -29,10 +29,7 @@ PROTECTED_WRITERS = {
 OTHER_WRITES = {
     ("deploy_attempt_store.py", "deploy_plan_probes"): "계획 묻기 줄은 정의 밖 저장(PR 2의 믿음 영역이 가져간다)",
     ("deploy_attempt_store_support.py", "deploy_plan_probes"): "계획 묻기 줄 닫기. 정의 밖 저장",
-    ("event_store.py", "deploy_plan_probes"): "새 커밋이 옛 대기를 밀 때 열린 계획 묻기를 닫는다. 정의 밖 저장",
-    ("event_store_lifecycle.py", "deploy_plan_probes"): "거절할 때 열린 계획 묻기를 닫는다. 정의 밖 저장",
-    ("event_store_mutations.py", "deploy_plan_probes"): "닫힌 요청의 열린 계획 묻기를 닫는다. 정의 밖 저장",
-    ("node_deploy_store.py", "deploy_plan_probes"): "노드의 배포 성공 보고가 열린 계획 묻기를 닫는다. 정의 밖 저장",
+    ("event_store_rows.py", "deploy_plan_probes"): "닫힌 요청의 열린 계획 묻기를 닫는다(close_probes 하나: 새 커밋, 거절, 정리, 노드 배포 성공 보고, 시도 계보 변경). 정의 밖 저장",
     ("node_deploy_store.py", "node_deploy_attempts"): "노드 시도 줄은 정의 밖 저장(설계의 실행 정의는 노드 쪽)",
     ("statechart/inspection_notice.py", "inspection_notices"): "점검 필요 알림 원장(카드 #1260). 정의 밖 부수 기록이며 요청 상태와 잠금을 바꾸지 않는다",
     ("event_store_nodes.py", "nodes"): "노드 접속 표. 배포 상태가 아니다",

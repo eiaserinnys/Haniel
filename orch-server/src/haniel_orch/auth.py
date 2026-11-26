@@ -47,36 +47,6 @@ class AuthConfig:
         ).hexdigest()
         return base64.urlsafe_b64encode(payload.encode()).decode() + "." + sig
 
-    def verify_session_token(self, token: str) -> str | None:
-        """Verify token and return email, or None if invalid/expired."""
-        try:
-            payload_b64, sig = token.rsplit(".", 1)
-            payload = base64.urlsafe_b64decode(payload_b64).decode()
-            expected_sig = hmac.new(
-                self.session_secret.encode(), payload.encode(), hashlib.sha256
-            ).hexdigest()
-            if not hmac.compare_digest(sig, expected_sig):
-                return None
-            data = json.loads(payload)
-            if data.get("exp", 0) < time.time():
-                return None
-            return data.get("email")
-        except Exception:
-            return None
-
-    def verify_bearer(self, request: Request) -> bool:
-        """Verify Authorization: Bearer header matches AUTH_BEARER_TOKEN."""
-        auth = request.headers.get("authorization", "")
-        if auth.startswith("Bearer "):
-            return hmac.compare_digest(auth[7:], self.bearer_token)
-        return False
-
-    def verify_ws_token(self, token: str | None) -> bool:
-        """Verify WebSocket query param token matches AUTH_BEARER_TOKEN."""
-        if not token:
-            return False
-        return hmac.compare_digest(token, self.bearer_token)
-
 
 def create_auth_routes(config: AuthConfig) -> list[Route]:
     """Create authentication routes for Google OAuth flow."""

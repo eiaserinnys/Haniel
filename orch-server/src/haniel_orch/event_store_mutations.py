@@ -7,26 +7,13 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from typing import Any
 import aiosqlite
 
+from .event_store_rows import close_probes, now_iso, row_to_dict
 from .protocol import DeployStatus
 from .statechart import steps
-from .statechart.columns import LEAF_COLUMNS
 from .statechart.restore import NoTransition
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _row_to_dict(cursor: aiosqlite.Cursor, row: tuple) -> dict[str, Any]:
-    return {
-        column[0]: value
-        for column, value in zip(cursor.description, row)
-        if column[0] not in LEAF_COLUMNS
-    }
 
 
 async def supersede_stale_pending_deploys(
@@ -40,7 +27,7 @@ async def supersede_stale_pending_deploys(
     )
     kept_by_group: dict[tuple[str, str, str], str] = {}
     superseded: list[str] = []
-    now = _now_iso()
+    now = now_iso()
     for deploy_id, node_id, repo, branch in await cursor.fetchall():
         key = (node_id, repo, branch)
         kept = kept_by_group.get(key)
@@ -83,9 +70,9 @@ async def supersede_pending_for_branch(
     )
     rows = await cursor.fetchall()
     rejected: list[dict[str, Any]] = []
-    now = _now_iso()
+    now = now_iso()
     for row in rows:
-        item = _row_to_dict(cursor, row)
+        item = row_to_dict(cursor, row)
         item["commits"] = json.loads(item.pop("commits_json"))
         item["affected_services"] = json.loads(item.pop("affected_services_json"))
         item["reject_reason"] = f"superseded by {latest_id}"
@@ -113,12 +100,12 @@ async def reject_pending_deploys_for_nodes(
     )
     rejected = []
     for row in await cursor.fetchall():
-        item = _row_to_dict(cursor, row)
+        item = row_to_dict(cursor, row)
         item["commits"] = json.loads(item.pop("commits_json"))
         item["affected_services"] = json.loads(item.pop("affected_services_json"))
         rejected.append(item)
     if rejected:
-        now = _now_iso()
+        now = now_iso()
         for item in rejected:
             await steps.step_request(
                 db,
@@ -171,19 +158,10 @@ async def close_absent_node_requests(
 
 
 async def _close_probes(db: aiosqlite.Connection, deploy_ids: list[str]) -> None:
-    """닫힌 요청의 열린 계획 묻기를 닫는다(계획 묻기 줄은 정의 밖 저장)."""
-    if not deploy_ids:
-        return
-    placeholders = ", ".join("?" for _ in deploy_ids)
-    now = _now_iso()
-    await db.execute(
-        f"""UPDATE deploy_plan_probes
-            SET status = 'terminal', terminal_kind = 'preflight_stale',
-                terminal_stage = 'canonical_cleanup',
-                terminal_reason = 'canonical_terminal',
-                terminal_error = 'canonical became terminal during preflight',
-                completed_at = ?
-            WHERE deploy_id IN ({placeholders})
-              AND status IN ('active','proposed')""",
-        (now, *deploy_ids),
+    await close_probes(
+        db,
+        deploy_ids,
+        stage="canonical_cleanup",
+        reason="canonical_terminal",
+        error="canonical became terminal during preflight",
     )

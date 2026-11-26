@@ -17,11 +17,11 @@ deploy_retry_source_attempts)에 쓰는 SQL이 있는 유일한 곳(스키마 �
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime, timezone
 from typing import Any, NamedTuple
 
 import aiosqlite
 
+from ..event_store_rows import now_iso
 from . import inspection_notice
 from .columns import BELIEF_REGION, LOCK_ON, LOCK_REGION, REQUEST_REGION, TAG_REGION
 from .definitions import REQUEST_CLOSED, REQUEST_OUTER_STATUS, OrchRequest
@@ -33,10 +33,6 @@ from .restore import (
     advance_with_todo,
     initial_row,
 )
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 class RequestStep(NamedTuple):

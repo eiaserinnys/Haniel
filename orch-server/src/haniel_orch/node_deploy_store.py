@@ -3,24 +3,15 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
 import aiosqlite
 
-from .event_store_rows import now_iso
+from .event_store_rows import batches, close_probes, history_order, now_iso, row_to_dict
 from .protocol import DeployStatus, NodeDeployReport
 from .statechart import attempt_steps, steps
-from .statechart.columns import LEAF_COLUMNS
 from .statechart.restore import NoTransition
-
-
-def _rows(
-    cursor: aiosqlite.Cursor, rows: list[tuple[Any, ...]]
-) -> list[dict[str, Any]]:
-    columns = [column[0] for column in cursor.description or ()]
-    return [
-        {k: v for k, v in zip(columns, row) if k not in LEAF_COLUMNS} for row in rows
-    ]
 
 
 async def _attempt(
@@ -33,7 +24,7 @@ async def _attempt(
     row = await cursor.fetchone()
     if row is None:
         return None
-    return _rows(cursor, [row])[0]
+    return row_to_dict(cursor, row)
 
 
 async def _canonical(
@@ -54,7 +45,7 @@ async def _canonical(
     row = await cursor.fetchone()
     if row is None:
         return None
-    return _rows(cursor, [row])[0]
+    return row_to_dict(cursor, row)
 
 
 def _validate_identity(existing: dict[str, Any], report: NodeDeployReport) -> None:
@@ -231,15 +222,13 @@ async def record(db: aiosqlite.Connection, report: NodeDeployReport) -> dict[str
             data={"duration_ms": report.duration_ms},
             now=now,
         )
-        await db.execute(
-            """UPDATE deploy_plan_probes
-               SET status = 'terminal', terminal_kind = 'preflight_stale',
-                   terminal_stage = 'node_deploy_report',
-                   terminal_reason = 'canonical_terminal',
-                   terminal_error = 'canonical succeeded out of band',
-                   completed_at = ?
-               WHERE deploy_id = ? AND status IN ('active','proposed')""",
-            (now, report.deploy_id),
+        await close_probes(
+            db,
+            [report.deploy_id],
+            stage="node_deploy_report",
+            reason="canonical_terminal",
+            error="canonical succeeded out of band",
+            now=now,
         )
         canonical_status = DeployStatus.SUCCESS.value
     else:
@@ -272,11 +261,15 @@ async def record(db: aiosqlite.Connection, report: NodeDeployReport) -> dict[str
     }
 
 
-async def history_rows(db: aiosqlite.Connection) -> list[dict[str, Any]]:
+async def history_rows(db: aiosqlite.Connection, limit: int) -> list[dict[str, Any]]:
     cursor = await db.execute(
-        "SELECT * FROM node_deploy_attempts WHERE outcome = 'failed'"
+        "SELECT * FROM node_deploy_attempts WHERE outcome = 'failed' "
+        + history_order(
+            "completed_at", "started_at", "'node-attempt:' || node_attempt_id"
+        ),
+        (limit,),
     )
-    attempts = _rows(cursor, await cursor.fetchall())
+    attempts = [row_to_dict(cursor, row) for row in await cursor.fetchall()]
     rows: list[dict[str, Any]] = []
     for attempt in attempts:
         canonical_cursor = await db.execute(
@@ -316,20 +309,26 @@ async def history_rows(db: aiosqlite.Connection) -> list[dict[str, Any]]:
     return rows
 
 
-async def success_metadata(db: aiosqlite.Connection) -> dict[str, dict[str, Any]]:
-    cursor = await db.execute(
-        """SELECT * FROM node_deploy_attempts WHERE outcome = 'success'
-           ORDER BY completed_at DESC"""
-    )
+async def success_metadata(
+    db: aiosqlite.Connection, deploy_ids: Sequence[str]
+) -> dict[str, dict[str, Any]]:
     metadata: dict[str, dict[str, Any]] = {}
-    for attempt in _rows(cursor, await cursor.fetchall()):
-        metadata.setdefault(
-            attempt["deploy_id"],
-            {
-                "node_attempt_id": attempt["node_attempt_id"],
-                "node_deploy_trigger": attempt["trigger"],
-                "attempt_outcome": "success",
-                "journal_attempt_id": attempt["journal_attempt_id"],
-            },
+    for batch in batches(deploy_ids):
+        placeholders = ", ".join("?" for _ in batch)
+        cursor = await db.execute(
+            f"""SELECT * FROM node_deploy_attempts
+                WHERE outcome = 'success' AND deploy_id IN ({placeholders})
+                ORDER BY completed_at DESC""",
+            tuple(batch),
         )
+        for attempt in [row_to_dict(cursor, row) for row in await cursor.fetchall()]:
+            metadata.setdefault(
+                attempt["deploy_id"],
+                {
+                    "node_attempt_id": attempt["node_attempt_id"],
+                    "node_deploy_trigger": attempt["trigger"],
+                    "attempt_outcome": "success",
+                    "journal_attempt_id": attempt["journal_attempt_id"],
+                },
+            )
     return metadata

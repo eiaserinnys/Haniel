@@ -13,7 +13,7 @@ from .deploy_attempt_schema import initialize_attempt_schema
 from .deploy_attempt_store import DeployAttemptStore
 from .deploy_last_failure import last_failure
 from .event_store_lifecycle import EventStoreLifecycleMixin
-from .event_store_rows import decode_deploy_row, now_iso
+from .event_store_rows import close_probes, decode_deploy_row, now_iso
 from .inspection_notice_store import InspectionNoticeStoreMixin
 from .protocol import DeployStatus, NodeDeployReport
 from .statechart import steps
@@ -40,6 +40,12 @@ CREATE TABLE IF NOT EXISTS deploy_events (
     is_self_update INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE INDEX IF NOT EXISTS deploy_events_by_branch_status
+ON deploy_events(node_id, repo, branch, status);
+
+CREATE INDEX IF NOT EXISTS deploy_events_by_status
+ON deploy_events(status);
+
 CREATE TABLE IF NOT EXISTS nodes (
     node_id TEXT PRIMARY KEY,
     hostname TEXT NOT NULL,
@@ -51,15 +57,6 @@ CREATE TABLE IF NOT EXISTS nodes (
     connection_token TEXT,
     last_seen TEXT NOT NULL,
     created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS device_tokens (
-    token_id TEXT PRIMARY KEY,
-    node_id TEXT NOT NULL,
-    platform TEXT NOT NULL,
-    token TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY (node_id) REFERENCES nodes(node_id)
 );
 """
 
@@ -160,18 +157,13 @@ class EventStore(EventStoreLifecycleMixin, InspectionNoticeStoreMixin):
                             data={"reason": f"superseded by {latest_id}"},
                             now=now,
                         )
-                        await self._db.execute(
-                            """UPDATE deploy_plan_probes
-                               SET status = 'terminal', terminal_kind = 'preflight_stale',
-                                   terminal_stage = 'canonical_create',
-                                   terminal_reason = 'newer_canonical',
-                                   terminal_error = ?, completed_at = ?
-                               WHERE deploy_id = ? AND status IN ('active','proposed')""",
-                            (
-                                f"canonical superseded by {latest_id}",
-                                now,
-                                old_id,
-                            ),
+                        await close_probes(
+                            self._db,
+                            [old_id],
+                            stage="canonical_create",
+                            reason="newer_canonical",
+                            error=f"canonical superseded by {latest_id}",
+                            now=now,
                         )
                 await self._db.commit()
                 return inserted
@@ -451,24 +443,6 @@ class EventStore(EventStoreLifecycleMixin, InspectionNoticeStoreMixin):
             except Exception:
                 await self._db.rollback()
                 raise
-
-    async def get_pending_deploys_for_branch(
-        self, node_id: str, repo: str, branch: str
-    ) -> list[dict[str, Any]]:
-        """Get PENDING deploys for the same (node, repo, branch).
-
-        Used by hub.supersede_pending to mark older PENDING deploys as
-        REJECTED (with reject_reason='superseded by ${kept}') when a newer
-        deploy is approved.
-        """
-        cursor = await self._db.execute(
-            "SELECT * FROM deploy_events "
-            "WHERE node_id = ? AND repo = ? AND branch = ? AND status = ? "
-            "ORDER BY created_at DESC",
-            (node_id, repo, branch, DeployStatus.PENDING.value),
-        )
-        rows = await cursor.fetchall()
-        return [decode_deploy_row(cursor, row) for row in rows]
 
     async def supersede_pending_for_branch(
         self, node_id: str, repo: str, branch: str

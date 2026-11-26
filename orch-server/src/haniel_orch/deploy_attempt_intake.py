@@ -49,11 +49,6 @@ def intake_received(*, node_protocol: int | None, active: bool) -> Intake | None
     return Intake("acked")
 
 
-def intake_progress(*, active: bool) -> Intake | None:
-    """진행 알림은 「시작했다」다(wire-v1 2절). 닫힌 시도의 것은 믿음을 옮기지 않는다."""
-    return Intake("started") if active else None
-
-
 def intake_terminal(*, node_protocol: int | None, belief: str, newer: bool) -> Intake:
     """노드의 deploy_attempt_terminal. 판 1 시도가 시작하기 전(닿았는지 모름, 줄 서 있음)이면 「실행하지 않음」 닫힘이고,
     시작했다 뒤에 오면 실제 실행으로 보아 실패 닫힘이다(4e). 판 없는 시도는 지금처럼 실패 닫힘이다."""
@@ -85,11 +80,6 @@ def intake_deadline(
     if deadline_kind == DEADLINE_LEASE and belief == BELIEF_RUNNING:
         return Intake("lease_deadline", {"newer": newer})
     return None
-
-
-def intake_link_down() -> Intake:
-    """오케스트레이터가 끊김을 안다. 계획 묻기를 닫고, 줄 서 있음은 호출부가 유예 마감을 건다."""
-    return Intake("link_down")
 
 
 def intake_hello(

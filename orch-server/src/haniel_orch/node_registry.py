@@ -183,15 +183,6 @@ class NodeRegistry:
         """Get all currently connected nodes."""
         return list(self._nodes.values())
 
-    async def check_stale(self) -> list[str]:
-        """Identify nodes that exceeded heartbeat timeout.
-
-        The hub owns disconnect side effects so WebSocket close, heartbeat
-        timeout, and outbound send failure share one cleanup path.
-        """
-        stale_nodes = await self.check_stale_connections()
-        return [node.node_id for node in stale_nodes]
-
     async def check_stale_connections(self) -> list[ConnectedNode]:
         """Return stale node records with their exact WebSocket connection."""
         now = time.time()

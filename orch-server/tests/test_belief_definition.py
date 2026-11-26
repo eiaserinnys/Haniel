@@ -16,7 +16,6 @@ from haniel_orch.deploy_attempt_intake import (
     closure_of,
     intake_deadline,
     intake_hello,
-    intake_progress,
     intake_received,
     intake_send_failed,
     intake_terminal,
@@ -364,12 +363,10 @@ def test_intake_hello_compares_only_protocol_one_held_beliefs_against_a_present_
     assert intake_hello(node_protocol=1, belief="b_none", held=set(), attempt_id="a1", newer=False) is None
 
 
-def test_intake_received_progress_and_send_failed():
+def test_intake_received_and_send_failed():
     assert intake_received(node_protocol=1, active=True) == Intake("acked", {})
     assert intake_received(node_protocol=1, active=False) is None
     assert intake_received(node_protocol=None, active=True) is None
-    assert intake_progress(active=True) == Intake("started", {})
-    assert intake_progress(active=False) is None
     assert intake_send_failed(node_protocol=1, newer=False) == Intake("send_failed", {"newer": False, "legacy": False})
     assert intake_send_failed(node_protocol=None, newer=True) == Intake("send_failed", {"newer": True, "legacy": True})
 
