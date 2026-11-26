@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import threading
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -43,16 +44,29 @@ def _require_config_path(runner: "ServiceRunner") -> Path:
     return Path(config_path)
 
 
+WriteErrorWrapper = Callable[[Exception], Exception]
+
+
+class RepoInUseError(ValueError):
+    def __init__(self, repo: str, services: list[str]):
+        super().__init__(f"Cannot delete repo '{repo}': used by services {services}")
+        self.services = services
+
+
 def _commit_config(
     config_path: Path,
     config: HanielConfig,
     runner: "ServiceRunner",
+    *,
+    wrap_write_error: WriteErrorWrapper | None = None,
 ) -> None:
     backup_config(config_path)
     try:
         write_config(config_path, config)
-    except Exception:
+    except Exception as write_error:
         restore_config(config_path)
+        if wrap_write_error is not None:
+            raise wrap_write_error(write_error) from write_error
         raise
     runner.reload_config()
 
@@ -319,6 +333,135 @@ def register_repo(
         _commit_config(config_path, config, runner)
 
     return {"ok": True, "repo": name}
+
+
+def _apply_config_change(
+    runner: "ServiceRunner",
+    change: Callable[[HanielConfig], None],
+    wrap_write_error: WriteErrorWrapper | None,
+) -> None:
+    config_path = runner.config_path
+    with config_write_transaction(runner):
+        config = read_config(config_path)
+        change(config)
+        _validate_or_raise(config)
+        _commit_config(config_path, config, runner, wrap_write_error=wrap_write_error)
+
+
+def _put_config_entry(
+    runner: "ServiceRunner",
+    entries: Callable[[HanielConfig], dict[str, Any]],
+    label: str,
+    name: str,
+    value: ServiceConfig | RepoConfig,
+    *,
+    must_exist: bool,
+    wrap_write_error: WriteErrorWrapper | None,
+) -> None:
+    def change(config: HanielConfig) -> None:
+        section = entries(config)
+        if must_exist and name not in section:
+            raise KeyError(f"{label} not found: {name}")
+        if not must_exist and name in section:
+            raise ValueError(f"{label} already exists: {name}")
+        section[name] = value
+
+    _apply_config_change(runner, change, wrap_write_error)
+
+
+def update_service_config(
+    runner: "ServiceRunner",
+    name: str,
+    service_config: Any,
+    *,
+    wrap_write_error: WriteErrorWrapper | None = None,
+) -> None:
+    """Replace an existing service definition and reload runner state."""
+    _put_config_entry(
+        runner,
+        lambda config: config.services,
+        "Service",
+        name,
+        ServiceConfig.model_validate(service_config),
+        must_exist=True,
+        wrap_write_error=wrap_write_error,
+    )
+
+
+def create_service_config(
+    runner: "ServiceRunner",
+    name: str,
+    service_config: Any,
+    *,
+    wrap_write_error: WriteErrorWrapper | None = None,
+) -> None:
+    """Add a service definition without cloning or starting anything."""
+    _put_config_entry(
+        runner,
+        lambda config: config.services,
+        "Service",
+        name,
+        ServiceConfig.model_validate(service_config),
+        must_exist=False,
+        wrap_write_error=wrap_write_error,
+    )
+
+
+def update_repo_config(
+    runner: "ServiceRunner",
+    name: str,
+    repo_config: Any,
+    *,
+    wrap_write_error: WriteErrorWrapper | None = None,
+) -> None:
+    """Replace an existing repo definition and reload runner state."""
+    _put_config_entry(
+        runner,
+        lambda config: config.repos,
+        "Repo",
+        name,
+        RepoConfig.model_validate(repo_config),
+        must_exist=True,
+        wrap_write_error=wrap_write_error,
+    )
+
+
+def create_repo_config(
+    runner: "ServiceRunner",
+    name: str,
+    repo_config: Any,
+    *,
+    wrap_write_error: WriteErrorWrapper | None = None,
+) -> None:
+    """Add a repo definition, validating its shape before the name check."""
+    _put_config_entry(
+        runner,
+        lambda config: config.repos,
+        "Repo",
+        name,
+        RepoConfig.model_validate(repo_config),
+        must_exist=False,
+        wrap_write_error=wrap_write_error,
+    )
+
+
+def delete_repo_config(
+    runner: "ServiceRunner",
+    name: str,
+    *,
+    wrap_write_error: WriteErrorWrapper | None = None,
+) -> None:
+    """Delete a repo definition that no service references."""
+
+    def change(config: HanielConfig) -> None:
+        if name not in config.repos:
+            raise KeyError(f"Repo not found: {name}")
+        using = [svc for svc, cfg in config.services.items() if cfg.repo == name]
+        if using:
+            raise RepoInUseError(name, using)
+        del config.repos[name]
+
+    _apply_config_change(runner, change, wrap_write_error)
 
 
 def reload_service_definition(runner: "ServiceRunner", service: str) -> dict[str, Any]:

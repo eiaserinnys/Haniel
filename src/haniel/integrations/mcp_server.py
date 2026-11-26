@@ -20,11 +20,16 @@ from typing import Any, TYPE_CHECKING, Optional
 from urllib.parse import parse_qs, urlparse
 
 from ..core.service_lifecycle import (
-    config_write_transaction,
+    RepoInUseError,
+    create_repo_config,
+    create_service_config,
+    delete_repo_config,
     delete_service_config,
     disable_service,
     register_service,
     reload_service_definition,
+    update_repo_config,
+    update_service_config,
 )
 from ..core.thread_shutdown import join_thread_with_timeout
 
@@ -837,86 +842,30 @@ class HanielMcpServer:
 
     # --- Config CRUD tool handlers ---
 
-    def _get_config_lock(self):
-        return config_write_transaction(self.runner)
+    async def _apply_config_change(
+        self, change, caught: tuple[type[Exception], ...] = (KeyError, ValueError)
+    ) -> str:
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, change)
+            return json.dumps({"ok": True})
+        except caught as e:
+            return json.dumps({"error": str(e)})
 
     async def _update_service_config(self, arguments: dict[str, Any]) -> str:
-        from ..config.io import (
-            read_config,
-            write_config,
-            backup_config,
-            restore_config,
-        )
-        from ..config.model import ServiceConfig
-        from ..config.validators import validate_config
-
         service = arguments["service"]
         config_data = arguments["config"]
-        config_path = self.runner.config_path
-        loop = asyncio.get_running_loop()
-
-        def _do():
-            new_svc = ServiceConfig.model_validate(config_data)
-            with self._get_config_lock():
-                config = read_config(config_path)
-                if service not in config.services:
-                    raise KeyError(f"Service not found: {service}")
-                config.services[service] = new_svc
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
-                backup_config(config_path)
-                try:
-                    write_config(config_path, config)
-                except Exception:
-                    restore_config(config_path)
-                    raise
-                self.runner.reload_config()
-
-        try:
-            await loop.run_in_executor(None, _do)
-            return json.dumps({"ok": True})
-        except (KeyError, ValueError) as e:
-            return json.dumps({"error": str(e)})
+        return await self._apply_config_change(
+            lambda: update_service_config(self.runner, service, config_data)
+        )
 
     async def _create_service_config(self, arguments: dict[str, Any]) -> str:
-        from ..config.io import (
-            read_config,
-            write_config,
-            backup_config,
-            restore_config,
-        )
-        from ..config.model import ServiceConfig
-        from ..config.validators import validate_config
-
         name = arguments["name"]
         config_data = arguments["config"]
-        config_path = self.runner.config_path
-        loop = asyncio.get_running_loop()
-
-        def _do():
-            new_svc = ServiceConfig.model_validate(config_data)
-            with self._get_config_lock():
-                config = read_config(config_path)
-                if name in config.services:
-                    raise ValueError(f"Service already exists: {name}")
-                config.services[name] = new_svc
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
-                backup_config(config_path)
-                try:
-                    write_config(config_path, config)
-                except Exception:
-                    restore_config(config_path)
-                    raise
-                self.runner.reload_config()
-
-        try:
-            await loop.run_in_executor(None, _do)
-            return json.dumps({"ok": True})
-        except ValueError as e:
-            return json.dumps({"error": str(e)})
+        return await self._apply_config_change(
+            lambda: create_service_config(self.runner, name, config_data),
+            caught=(ValueError,),
+        )
 
     async def _delete_service_config(self, arguments: dict[str, Any]) -> str:
         service = arguments["service"]
@@ -933,121 +882,30 @@ class HanielMcpServer:
             return json.dumps({"error": str(e)})
 
     async def _update_repo_config(self, arguments: dict[str, Any]) -> str:
-        from ..config.io import (
-            read_config,
-            write_config,
-            backup_config,
-            restore_config,
-        )
-        from ..config.model import RepoConfig
-        from ..config.validators import validate_config
-
         repo = arguments["repo"]
         config_data = arguments["config"]
-        config_path = self.runner.config_path
-        loop = asyncio.get_running_loop()
-
-        def _do():
-            new_repo = RepoConfig.model_validate(config_data)
-            with self._get_config_lock():
-                config = read_config(config_path)
-                if repo not in config.repos:
-                    raise KeyError(f"Repo not found: {repo}")
-                config.repos[repo] = new_repo
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
-                backup_config(config_path)
-                try:
-                    write_config(config_path, config)
-                except Exception:
-                    restore_config(config_path)
-                    raise
-                self.runner.reload_config()
-
-        try:
-            await loop.run_in_executor(None, _do)
-            return json.dumps({"ok": True})
-        except (KeyError, ValueError) as e:
-            return json.dumps({"error": str(e)})
+        return await self._apply_config_change(
+            lambda: update_repo_config(self.runner, repo, config_data)
+        )
 
     async def _create_repo_config(self, arguments: dict[str, Any]) -> str:
-        from ..config.io import (
-            read_config,
-            write_config,
-            backup_config,
-            restore_config,
-        )
-        from ..config.model import RepoConfig
-        from ..config.validators import validate_config
-
         name = arguments["name"]
         config_data = arguments["config"]
-        config_path = self.runner.config_path
-        loop = asyncio.get_running_loop()
-
-        def _do():
-            new_repo = RepoConfig.model_validate(config_data)
-            with self._get_config_lock():
-                config = read_config(config_path)
-                if name in config.repos:
-                    raise ValueError(f"Repo already exists: {name}")
-                config.repos[name] = new_repo
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
-                backup_config(config_path)
-                try:
-                    write_config(config_path, config)
-                except Exception:
-                    restore_config(config_path)
-                    raise
-                self.runner.reload_config()
-
-        try:
-            await loop.run_in_executor(None, _do)
-            return json.dumps({"ok": True})
-        except ValueError as e:
-            return json.dumps({"error": str(e)})
+        return await self._apply_config_change(
+            lambda: create_repo_config(self.runner, name, config_data),
+            caught=(ValueError,),
+        )
 
     async def _delete_repo_config(self, arguments: dict[str, Any]) -> str:
-        from ..config.io import (
-            read_config,
-            write_config,
-            backup_config,
-            restore_config,
-        )
-        from ..config.validators import validate_config
-
         repo = arguments["repo"]
-        config_path = self.runner.config_path
-        loop = asyncio.get_running_loop()
 
-        def _do():
-            with self._get_config_lock():
-                config = read_config(config_path)
-                if repo not in config.repos:
-                    raise KeyError(f"Repo not found: {repo}")
-                using = [n for n, s in config.services.items() if s.repo == repo]
-                if using:
-                    raise ValueError(f"Cannot delete: used by services {using}")
-                del config.repos[repo]
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
-                backup_config(config_path)
-                try:
-                    write_config(config_path, config)
-                except Exception:
-                    restore_config(config_path)
-                    raise
-                self.runner.reload_config()
+        def _do_delete():
+            try:
+                delete_repo_config(self.runner, repo)
+            except RepoInUseError as e:
+                raise ValueError(f"Cannot delete: used by services {e.services}") from e
 
-        try:
-            await loop.run_in_executor(None, _do)
-            return json.dumps({"ok": True})
-        except (KeyError, ValueError) as e:
-            return json.dumps({"error": str(e)})
+        return await self._apply_config_change(_do_delete)
 
     async def _self_restart(self) -> str:
         """Restart haniel without performing a git update.
