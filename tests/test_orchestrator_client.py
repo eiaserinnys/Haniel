@@ -282,26 +282,6 @@ class TestStartStop:
             client.stop()
 
 
-class TestParseDeployId:
-    def test_parses_valid(self):
-        result = OrchestratorClient._parse_deploy_id("node-1:my-repo:main:abc1234")
-        assert result == ("node-1", "my-repo", "main", "abc1234")
-
-    def test_too_few_parts(self):
-        assert OrchestratorClient._parse_deploy_id("a:b:c") is None
-
-    def test_empty(self):
-        assert OrchestratorClient._parse_deploy_id("") is None
-
-    def test_non_string(self):
-        assert OrchestratorClient._parse_deploy_id(None) is None  # type: ignore[arg-type]
-
-    def test_extra_colons_in_4th(self):
-        # split(':', 3) keeps any extra ':' inside the 4th element
-        result = OrchestratorClient._parse_deploy_id("n:r:b:h:extra")
-        assert result == ("n", "r", "b", "h:extra")
-
-
 class TestHandleDeployApproval:
     @staticmethod
     def _approval(config, deploy_id: str | None = None) -> dict:

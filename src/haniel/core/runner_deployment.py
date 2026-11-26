@@ -258,15 +258,6 @@ class RunnerDeploymentAdapter:
         assert resolved is not None
         return resolved
 
-    def derive_service_cwd(self) -> Path | None:
-        return resolve_manifest_service_cwd(
-            self.runner,
-            self.repo_name,
-            self.affected,
-            None,
-            enabled_services=self.config_snapshot.enabled_services,
-        )
-
     def service_environment(
         self,
         service_name: str | None,

@@ -33,7 +33,7 @@ class LifecycleRequestServer:
         control: LifecycleControl,
         runner: "ServiceRunner",
         instance_id: str,
-        poll_interval: float = 0.1,
+        poll_interval: float = 0.5,
     ) -> None:
         self.control = control
         self.runner = runner

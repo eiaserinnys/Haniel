@@ -11,32 +11,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 
 from ..config import WebhookConfig
 
 logger = logging.getLogger(__name__)
-
-
-def _mask_url(url: str) -> str:
-    """Mask sensitive parts of webhook URL for logging.
-
-    Args:
-        url: The webhook URL to mask
-
-    Returns:
-        Masked URL safe for logging
-    """
-    try:
-        parsed = urlparse(url)
-        path = parsed.path
-        if len(path) > 15:
-            path = f"{path[:5]}...{path[-5:]}"
-        return f"{parsed.scheme}://{parsed.netloc}{path}"
-    except Exception:
-        return "<invalid-url>"
 
 
 class WebhookFormat(str, Enum):
@@ -322,118 +302,3 @@ class WebhookNotifier:
 
 
 # Helper functions to create common messages
-
-
-def create_service_started_message(service_name: str) -> WebhookMessage:
-    """Create a service started message.
-
-    Args:
-        service_name: Name of the service
-
-    Returns:
-        WebhookMessage for service started event
-    """
-    return WebhookMessage(
-        event_type=EventType.SERVICE_STARTED,
-        service_name=service_name,
-        message="Service has been started successfully.",
-    )
-
-
-def create_change_detected_message(
-    service_name: str,
-    repo: str,
-    commits: list[str],
-) -> WebhookMessage:
-    """Create a change detected message.
-
-    Args:
-        service_name: Name of the service
-        repo: Repository name
-        commits: List of commit messages
-
-    Returns:
-        WebhookMessage for change detected event
-    """
-    return WebhookMessage(
-        event_type=EventType.CHANGE_DETECTED,
-        service_name=service_name,
-        message=f"Changes detected in repository `{repo}`.",
-        details={"repo": repo, "commits": commits},
-    )
-
-
-def create_deploying_message(service_name: str) -> WebhookMessage:
-    """Create a deploying message.
-
-    Args:
-        service_name: Name of the service
-
-    Returns:
-        WebhookMessage for deploying event
-    """
-    return WebhookMessage(
-        event_type=EventType.DEPLOYING,
-        service_name=service_name,
-        message="Pulling changes and restarting service...",
-    )
-
-
-def create_deploy_complete_message(service_name: str) -> WebhookMessage:
-    """Create a deploy complete message.
-
-    Args:
-        service_name: Name of the service
-
-    Returns:
-        WebhookMessage for deploy complete event
-    """
-    return WebhookMessage(
-        event_type=EventType.DEPLOY_COMPLETE,
-        service_name=service_name,
-        message="Deployment complete. Service is running.",
-    )
-
-
-def create_graceful_failed_message(
-    service_name: str,
-    timeout: int,
-) -> WebhookMessage:
-    """Create a graceful shutdown failed message.
-
-    Args:
-        service_name: Name of the service
-        timeout: Timeout that was exceeded
-
-    Returns:
-        WebhookMessage for graceful failed event
-    """
-    return WebhookMessage(
-        event_type=EventType.GRACEFUL_FAILED,
-        service_name=service_name,
-        message=f"Graceful shutdown timed out after {timeout}s. Force killing process.",
-        details={"timeout": timeout},
-    )
-
-
-def create_circuit_breaker_message(
-    service_name: str,
-    failure_count: int,
-    window: int,
-) -> WebhookMessage:
-    """Create a circuit breaker message.
-
-    Args:
-        service_name: Name of the service
-        failure_count: Number of failures that triggered the circuit breaker
-        window: Time window in seconds
-
-    Returns:
-        WebhookMessage for circuit breaker event
-    """
-    return WebhookMessage(
-        event_type=EventType.CIRCUIT_BREAKER,
-        service_name=service_name,
-        message=f"Circuit breaker tripped: {failure_count} failures in {window}s. Service disabled.",
-        details={"failure_count": failure_count, "window": window},
-    )

@@ -8,10 +8,7 @@ import time
 import pytest
 
 from haniel.core.repo_reconciliation import RepoReconciliationSnapshot
-from haniel.integrations.deploy_reporting import (
-    DeployReporter,
-    classify_deploy_result,
-)
+from haniel.integrations.deploy_reporting import DeployReporter
 
 
 def snapshot(*, in_sync: bool) -> RepoReconciliationSnapshot:
@@ -23,34 +20,6 @@ def snapshot(*, in_sync: bool) -> RepoReconciliationSnapshot:
         remote_head="remote-head",
         deploy_id="node-a:repo-a:main:remote-head",
     )
-
-
-@pytest.mark.parametrize("trigger", ["auto_apply", "manual_single", "manual_batch"])
-@pytest.mark.parametrize(
-    ("operation_error", "in_sync", "expected_status", "pending_visible"),
-    [
-        (None, True, "success", False),
-        (None, False, "failed", True),
-        ("hook failed", True, "failed", False),
-        ("hook failed", False, "failed", True),
-    ],
-)
-def test_trigger_head_result_matrix_has_one_head_contract(
-    trigger: str,
-    operation_error: str | None,
-    in_sync: bool,
-    expected_status: str,
-    pending_visible: bool,
-) -> None:
-    status, error = classify_deploy_result(snapshot(in_sync=in_sync), operation_error)
-    assert status == expected_status, trigger
-    assert (not in_sync) is pending_visible, trigger
-    if not in_sync:
-        assert "node=node-a" in error
-        assert "repo=repo-a" in error
-        assert "branch=main" in error
-        assert "local_head=local-head" in error
-        assert "remote_head=remote-head" in error
 
 
 async def test_manual_success_return_with_mismatch_sends_failed_then_settled() -> None:

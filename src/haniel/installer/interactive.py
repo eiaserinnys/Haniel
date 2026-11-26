@@ -16,7 +16,6 @@ import asyncio
 import json
 import logging
 import re
-import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -30,17 +29,6 @@ logger = logging.getLogger(__name__)
 
 # Timeout for waiting for Claude Code to finish (in seconds)
 CLAUDE_CODE_TIMEOUT = 3600  # 1 hour max
-# Poll interval for checking finalize status (in seconds)
-FINALIZE_POLL_INTERVAL = 1.0
-
-# SDK availability flag
-try:
-    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
-    from claude_agent_sdk.types import AssistantMessage, ResultMessage, TextBlock
-
-    SDK_AVAILABLE = True
-except ImportError:
-    SDK_AVAILABLE = False
 
 
 class InteractiveInstaller:
@@ -222,9 +210,6 @@ class InteractiveInstaller:
 
         return {"success": True, "message": "Finalization requested"}
 
-    def is_finalize_requested(self) -> bool:
-        return self._finalize_requested
-
     def get_claude_prompt(self) -> str:
         """Generate the system prompt for the Claude Code SDK session.
 
@@ -308,7 +293,9 @@ JSON 외의 텍스트는 message 필드 안에 넣으세요.
         Returns:
             True if session completed successfully
         """
-        if not SDK_AVAILABLE:
+        try:
+            import claude_agent_sdk  # noqa: F401
+        except ImportError:
             logger.error(
                 "claude-agent-sdk is not installed. "
                 "Install it with: pip install claude-agent-sdk"
@@ -350,6 +337,8 @@ JSON 외의 텍스트는 message 필드 안에 넣으세요.
         to_set values, displays message, reads user input, and sends
         it back to Claude. Loop ends when sufficient: true.
         """
+        from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+
         mcp_port = self._get_install_mcp_port()
         options = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
@@ -404,6 +393,8 @@ JSON 외의 텍스트는 message 필드 안에 넣으세요.
         Returns:
             Parsed JSON dict with message, to_set, sufficient fields
         """
+        from claude_agent_sdk.types import AssistantMessage, ResultMessage, TextBlock
+
         full_text = ""
         async for msg in client.receive_response():
             if isinstance(msg, AssistantMessage):
@@ -446,40 +437,6 @@ JSON 외의 텍스트는 message 필드 안에 넣으세요.
                     logger.warning(
                         f"Failed to set {config_name}.{key}: {result.get('error')}"
                     )
-
-    def run_headless_session(self, timeout: float = 300.0) -> bool:
-        """Run an interactive session in headless mode (for testing).
-
-        This starts the MCP server but doesn't launch Claude Code,
-        allowing tests to interact with the MCP tools directly.
-        """
-        from .install_mcp_server import InstallMcpServer
-
-        mcp_port = self._get_install_mcp_port()
-
-        try:
-            logger.info(f"Starting headless install MCP server on port {mcp_port}...")
-            self._mcp_server = InstallMcpServer(self, port=mcp_port)
-            self._mcp_server.start_background()
-
-            start_time = time.time()
-            while not self._finalize_requested:
-                if time.time() - start_time > timeout:
-                    logger.error("Headless session timed out waiting for finalize")
-                    return False
-                time.sleep(FINALIZE_POLL_INTERVAL)
-
-            logger.info("Headless session finalized successfully")
-            return True
-
-        except Exception as e:
-            logger.error(f"Headless session error: {e}")
-            return False
-
-        finally:
-            if self._mcp_server:
-                self._mcp_server.stop_background()
-                self._mcp_server = None
 
     def _get_install_mcp_port(self) -> int:
         """Get the port for install-mode MCP server."""

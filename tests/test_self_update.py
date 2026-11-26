@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from haniel import EXIT_CLEAN, EXIT_SELF_UPDATE, SelfUpdateExit
+from haniel import EXIT_SELF_UPDATE, SelfUpdateExit
 from haniel.config import (
     HanielConfig,
     RepoConfig,
@@ -33,9 +33,6 @@ from haniel.integrations.webhook import EVENT_METADATA, EventType
 
 class TestExitCodes:
     """Tests for exit code constants and SelfUpdateExit."""
-
-    def test_exit_clean_is_zero(self):
-        assert EXIT_CLEAN == 0
 
     def test_exit_self_update_is_ten(self):
         assert EXIT_SELF_UPDATE == 10

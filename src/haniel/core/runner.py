@@ -666,6 +666,28 @@ class ServiceRunner:
             self._clear_pending_log_heads(observation.repo_name)
         return True
 
+    def _commit_pulled_head(
+        self,
+        runtime: RepoRuntimeSnapshot,
+        repo_name: str,
+        head: str,
+        last_fetch: datetime | None,
+    ) -> bool:
+        """Commit a freshly pulled head with its pending changes cleared."""
+
+        return self._commit_repo_observation(
+            RepoObservation(
+                generation=runtime.generation,
+                repo_name=repo_name,
+                repo_config=runtime.config,
+                last_fetch=last_fetch,
+                fetch_error=None,
+                last_head=head,
+                pending_changes=None,
+                changed=True,
+            )
+        )
+
     def _replace_config_snapshot(
         self,
         candidate: HanielConfig,
@@ -3377,17 +3399,8 @@ class ServiceRunner:
                                 "PULL_FAILED",
                                 "activated checkout differs from staged target",
                             )
-                        if not self._commit_repo_observation(
-                            RepoObservation(
-                                generation=runtime.generation,
-                                repo_name=repo_name,
-                                repo_config=runtime.config,
-                                last_fetch=runtime.last_fetch,
-                                fetch_error=None,
-                                last_head=actual_head,
-                                pending_changes=None,
-                                changed=True,
-                            )
+                        if not self._commit_pulled_head(
+                            runtime, repo_name, actual_head, runtime.last_fetch
                         ):
                             raise StableDeploymentError(
                                 "CONFIG_GENERATION_CHANGED",
@@ -3424,17 +3437,8 @@ class ServiceRunner:
                                 f"git pull failed for {repo_name}",
                             ) from error
                         head = get_head(repo_path)
-                        if not self._commit_repo_observation(
-                            RepoObservation(
-                                generation=runtime.generation,
-                                repo_name=repo_name,
-                                repo_config=runtime.config,
-                                last_fetch=runtime.last_fetch,
-                                fetch_error=None,
-                                last_head=head,
-                                pending_changes=None,
-                                changed=True,
-                            )
+                        if not self._commit_pulled_head(
+                            runtime, repo_name, head, runtime.last_fetch
                         ):
                             self._restore_failed_activation(repo_path, previous_head)
                             raise StableDeploymentError(
@@ -3977,17 +3981,8 @@ class ServiceRunner:
                                     "PULL_FAILED",
                                     "activated checkout differs from staged target",
                                 )
-                            if not self._commit_repo_observation(
-                                RepoObservation(
-                                    generation=runtime.generation,
-                                    repo_name=name,
-                                    repo_config=runtime.config,
-                                    last_fetch=observed_at,
-                                    fetch_error=None,
-                                    last_head=actual_head,
-                                    pending_changes=None,
-                                    changed=True,
-                                )
+                            if not self._commit_pulled_head(
+                                runtime, name, actual_head, observed_at
                             ):
                                 raise StableDeploymentError(
                                     "CONFIG_GENERATION_CHANGED",
@@ -4007,17 +4002,8 @@ class ServiceRunner:
                                 strategy=runtime.config.pull_strategy or "merge",
                             )
                             actual_head = get_head(repo_path)
-                            if not self._commit_repo_observation(
-                                RepoObservation(
-                                    generation=runtime.generation,
-                                    repo_name=name,
-                                    repo_config=runtime.config,
-                                    last_fetch=observed_at,
-                                    fetch_error=None,
-                                    last_head=actual_head,
-                                    pending_changes=None,
-                                    changed=True,
-                                )
+                            if not self._commit_pulled_head(
+                                runtime, name, actual_head, observed_at
                             ):
                                 raise StableDeploymentError(
                                     "CONFIG_GENERATION_CHANGED",
@@ -4320,32 +4306,6 @@ class ServiceRunner:
                 inflight.add(path.stem)
         return inflight
 
-    def _record_manifest_deployment_intent(
-        self,
-        repo_name: str,
-        previous_head: str,
-        release_id: str,
-        *,
-        target_head: str | None = None,
-        orchestrator_attempt_id: str | None = None,
-        node_id: str | None = None,
-        branch: str | None = None,
-        manifest_identity: str | None = None,
-        manifest_digest: str | None = None,
-    ) -> str:
-        """Persist the rollback head before a pull can make startup resumable."""
-        return self._deployment_state_store().begin(
-            repo_name,
-            previous_head,
-            target_head or previous_head,
-            release_id,
-            orchestrator_attempt_id=orchestrator_attempt_id,
-            node_id=node_id,
-            branch=branch,
-            manifest_identity=manifest_identity,
-            manifest_digest=manifest_digest,
-        )
-
     def _queue_interrupted_manifest_deployment(
         self,
         repo_name: str,
@@ -4541,11 +4501,11 @@ class ServiceRunner:
                 continue
 
             try:
-                # Fetch from remote (don't rely on return value)
                 fetch_repo(
                     path=repo_path,
                     branch=runtime.config.branch,
                     timeout=config_snapshot.config.git_fetch_timeout,
+                    compare=False,
                 )
                 if self._stop_event.is_set():
                     break
@@ -5439,18 +5399,7 @@ class ServiceRunner:
                 strategy=strategy,
             )
             head = get_head(repo_path)
-            if not self._commit_repo_observation(
-                RepoObservation(
-                    generation=state.generation,
-                    repo_name=repo_name,
-                    repo_config=state.config,
-                    last_fetch=state.last_fetch,
-                    fetch_error=None,
-                    last_head=head,
-                    pending_changes=None,
-                    changed=True,
-                )
-            ):
+            if not self._commit_pulled_head(state, repo_name, head, state.last_fetch):
                 self._restore_failed_activation(repo_path, previous_head)
                 raise StableDeploymentError(
                     "CONFIG_GENERATION_CHANGED",

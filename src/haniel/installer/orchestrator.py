@@ -298,51 +298,6 @@ class InstallOrchestrator:
         logger.info("=== Installation Complete ===")
         return True
 
-    def run_full_install(
-        self,
-        resume: bool = False,
-        on_status: Callable[[dict], None] | None = None,
-    ) -> bool:
-        """Run the full installation process.
-
-        Args:
-            resume: If True and state exists, resume from last phase
-            on_status: Optional callback for status updates
-
-        Returns:
-            True if installation completed successfully
-        """
-        # Load existing state if resuming
-        if resume and self._state_file.exists():
-            self.state = InstallState.load(self._state_file)
-            logger.info(f"Resuming from phase: {self.state.phase}")
-        else:
-            self.state = InstallState()
-            logger.info("Starting fresh installation")
-
-        # Run phases based on current state
-        if self.state.phase == InstallPhase.NOT_STARTED:
-            if not self.run_bootstrap_phase():
-                return False
-
-        if self.state.phase == InstallPhase.BOOTSTRAP:
-            if not self.run_bootstrap_phase():
-                return False
-
-        if self.state.phase == InstallPhase.MECHANICAL:
-            if not self.run_mechanical_phase():
-                return False
-
-        if self.state.phase == InstallPhase.INTERACTIVE:
-            if not self.run_interactive_phase(on_status):
-                return False
-
-        if self.state.phase == InstallPhase.FINALIZE:
-            if not self.run_finalize_phase():
-                return False
-
-        return self.state.is_complete()
-
     def retry_step(self, step_name: str) -> dict:
         """Retry a failed step.
 

@@ -77,10 +77,6 @@ class RetrySpec(BaseModel):
         return self
 
 
-# Preserve the PR #38 import surface while the policy becomes phase-generic.
-VerifyRetrySpec = RetrySpec
-
-
 class ServiceRestartFilter(BaseModel):
     """Paths whose changes never require restarting one declared service.
 

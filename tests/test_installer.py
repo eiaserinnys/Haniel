@@ -826,7 +826,6 @@ class TestInstallMcpServer:
             assert result["success"] is True
 
             # Check state transitioned
-            assert installer.is_finalize_requested()
             assert state.phase == InstallPhase.FINALIZE
 
 
@@ -895,7 +894,6 @@ class TestInteractiveInstallerClaudeSession:
         """Test launching session when claude-agent-sdk is not installed."""
         from haniel.installer.interactive import InteractiveInstaller
         from haniel.installer.state import InstallState, InstallPhase
-        import haniel.installer.interactive as mod
 
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir)
@@ -903,13 +901,9 @@ class TestInteractiveInstallerClaudeSession:
             installer = InteractiveInstaller(session_config, config_dir, state)
 
             # Simulate SDK not available
-            original = mod.SDK_AVAILABLE
-            mod.SDK_AVAILABLE = False
-            try:
+            with patch.dict(sys.modules, {"claude_agent_sdk": None}):
                 result = installer.launch_claude_code_session()
-                assert result is False
-            finally:
-                mod.SDK_AVAILABLE = original
+            assert result is False
 
 
 class TestInstallMcpServerBackground:
@@ -2472,111 +2466,6 @@ class TestOrchestratorRetryRequirements:
             assert result["success"] is False
 
 
-class TestOrchestratorFullInstall:
-    """Tests for orchestrator full install flow."""
-
-    @pytest.fixture
-    def simple_config(self):
-        """Create a simple config for testing."""
-        return HanielConfig(
-            install=InstallConfig(
-                directories=["./runtime"],
-            ),
-        )
-
-    @patch("shutil.which")
-    @patch("haniel.installer.orchestrator.InstallOrchestrator.run_bootstrap_phase")
-    @patch("haniel.installer.orchestrator.InstallOrchestrator.run_mechanical_phase")
-    @patch("haniel.installer.orchestrator.InstallOrchestrator.run_interactive_phase")
-    @patch("haniel.installer.orchestrator.InstallOrchestrator.run_finalize_phase")
-    def test_run_full_install_fresh(
-        self,
-        mock_finalize,
-        mock_interactive,
-        mock_mechanical,
-        mock_bootstrap,
-        mock_which,
-        simple_config,
-    ):
-        """Test running full install from scratch."""
-        from haniel.installer.orchestrator import InstallOrchestrator
-        from haniel.installer.state import InstallState, InstallPhase
-
-        mock_which.return_value = "/usr/bin/claude"
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config_dir = Path(tmpdir)
-            state = InstallState()
-            orchestrator = InstallOrchestrator(simple_config, config_dir, state)
-
-            # Each phase transitions to the next
-            def bootstrap_effect():
-                orchestrator.state.transition_to(InstallPhase.MECHANICAL)
-                return True
-
-            def mechanical_effect():
-                orchestrator.state.transition_to(InstallPhase.INTERACTIVE)
-                return True
-
-            def interactive_effect(on_status=None):
-                orchestrator.state.transition_to(InstallPhase.FINALIZE)
-                return True
-
-            def finalize_effect():
-                orchestrator.state.transition_to(InstallPhase.COMPLETE)
-                return True
-
-            mock_bootstrap.side_effect = bootstrap_effect
-            mock_mechanical.side_effect = mechanical_effect
-            mock_interactive.side_effect = interactive_effect
-            mock_finalize.side_effect = finalize_effect
-
-            result = orchestrator.run_full_install()
-
-            assert result is True
-
-    @patch("shutil.which")
-    def test_run_full_install_resume(self, mock_which, simple_config):
-        """Test resuming install from saved state."""
-        from haniel.installer.orchestrator import InstallOrchestrator
-        from haniel.installer.state import InstallState, InstallPhase
-
-        mock_which.return_value = "/usr/bin/claude"
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config_dir = Path(tmpdir)
-
-            # Save state at COMPLETE phase
-            state = InstallState(phase=InstallPhase.COMPLETE)
-            state.save(config_dir / "install.state")
-
-            # Start fresh but resume
-            new_state = InstallState()
-            orchestrator = InstallOrchestrator(simple_config, config_dir, new_state)
-
-            result = orchestrator.run_full_install(resume=True)
-
-            # State should have been loaded and is already complete
-            assert result is True
-
-    @patch("shutil.which")
-    def test_run_full_install_bootstrap_fails(self, mock_which, simple_config):
-        """Test full install when bootstrap fails."""
-        from haniel.installer.orchestrator import InstallOrchestrator
-        from haniel.installer.state import InstallState
-
-        mock_which.return_value = None  # Claude not found
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config_dir = Path(tmpdir)
-            state = InstallState()
-            orchestrator = InstallOrchestrator(simple_config, config_dir, state)
-
-            result = orchestrator.run_full_install()
-
-            assert result is False
-
-
 class TestInteractiveInstallerSession:
     """Tests for InteractiveInstaller session handling."""
 
@@ -3223,9 +3112,7 @@ async def test_interactive_session_uses_streamable_mcp_url(tmp_path: Path):
         return_value={"sufficient": True}
     )
     installer.finalize_install = MagicMock()
-    with patch(
-        "haniel.installer.interactive.ClaudeSDKClient", return_value=client
-    ) as factory:
+    with patch("claude_agent_sdk.ClaudeSDKClient", return_value=client) as factory:
         await installer._run_sdk_session()
     assert factory.call_args.kwargs["options"].mcp_servers["haniel"] == {
         "type": "http",

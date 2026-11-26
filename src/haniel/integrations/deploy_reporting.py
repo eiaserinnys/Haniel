@@ -42,21 +42,6 @@ def parse_deploy_id(deploy_id: str) -> tuple[str, str, str, str] | None:
     return tuple(parts)  # type: ignore[return-value]
 
 
-def classify_deploy_result(
-    snapshot: RepoReconciliationSnapshot,
-    operation_error: str | None,
-) -> tuple[str, str | None]:
-    """Classify an attempt without conflating command return with Git truth."""
-    mismatch = None if snapshot.in_sync else snapshot.mismatch_error()
-    if operation_error and mismatch:
-        return "failed", f"{operation_error}; {mismatch}"
-    if operation_error:
-        return "failed", operation_error
-    if mismatch:
-        return "failed", mismatch
-    return "success", None
-
-
 def deploy_result_message(
     node_id: str,
     deploy_id: str,

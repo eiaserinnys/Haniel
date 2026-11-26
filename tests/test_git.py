@@ -22,7 +22,6 @@ from haniel.core.git import (
     fetch_repo,
     pull_repo,
     reset_repo_to,
-    has_changes,
     _run_git,
     _validate_git_url,
 )
@@ -398,60 +397,6 @@ class TestPullRepo:
         assert not (git_repo / "new.txt").exists()
 
 
-class TestHasChanges:
-    """Tests for has_changes function."""
-
-    def test_detects_changes(self, git_repo: Path, bare_remote: Path, tmp_path: Path):
-        """Should return True when remote has new commits."""
-        # Clone the repo
-        clone_path = tmp_path / "clone"
-        clone_repo(str(bare_remote), "master", clone_path)
-
-        # Make a new commit in the original repo and push
-        (git_repo / "change.txt").write_text("change")
-        subprocess.run(
-            ["git", "add", "."], cwd=git_repo, check=True, capture_output=True
-        )
-        subprocess.run(
-            ["git", "commit", "-m", "Add change"],
-            cwd=git_repo,
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "push", "origin", "master"],
-            cwd=git_repo,
-            check=True,
-            capture_output=True,
-        )
-
-        # Fetch first to get remote refs
-        fetch_repo(clone_path, "master")
-
-        # Check for changes
-        result = has_changes(clone_path, "master")
-
-        assert result is True
-
-    def test_no_changes_when_up_to_date(
-        self, git_repo: Path, bare_remote: Path, tmp_path: Path
-    ):
-        """Should return False when local matches remote."""
-        # Clone the repo
-        clone_path = tmp_path / "clone"
-        clone_repo(str(bare_remote), "master", clone_path)
-
-        # Check for changes (none expected)
-        # Need to fetch first to have remote refs
-        subprocess.run(
-            ["git", "fetch", "origin"], cwd=clone_path, check=True, capture_output=True
-        )
-
-        result = has_changes(clone_path, "master")
-
-        assert result is False
-
-
 class TestGitErrorClasses:
     """Tests for Git error classes."""
 
@@ -539,6 +484,26 @@ def test_fetch_repo_passes_configured_timeout_to_fetch(
 
     assert fetch_repo(repo, "main", timeout=17) is True
     assert (["fetch", "origin", "main"], 17) in calls
+
+
+def test_fetch_repo_without_compare_only_fetches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from haniel.core import git as git_module
+
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def run_git(args, cwd=None, check=True, timeout=300):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(git_module, "_run_git", run_git)
+
+    assert fetch_repo(repo, "main", compare=False) is None
+    assert calls == [["fetch", "origin", "main"]]
 
 
 class TestValidateGitUrl:

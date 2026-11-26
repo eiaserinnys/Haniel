@@ -840,7 +840,6 @@ haniel/
 |       |   +-- __init__.py        # Route setup, Bearer token auth middleware
 |       |   +-- api.py             # REST API endpoints (status, services, repos)
 |       |   +-- config_api.py      # Config CRUD API (runtime YAML modification)
-|       |   +-- config_io.py       # YAML read/write/backup utilities
 |       |   +-- ws.py              # WebSocket event stream
 |       |   +-- chat_ws.py         # Claude Code chat WebSocket
 |       |   +-- static.py          # React SPA static file serving

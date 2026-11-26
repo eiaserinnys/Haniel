@@ -1153,18 +1153,6 @@ class ProcessManager:
                     changed = True
         return tuple(sorted(affected & running))
 
-    def get_state(self, name: str) -> ServiceState:
-        """Get the current state of a service.
-
-        Args:
-            name: Service name
-
-        Returns:
-            Current ServiceState
-        """
-        health = self.health_manager.get_health(name)
-        return health.state
-
     def wait_for_ready(
         self,
         name: str,
