@@ -57,7 +57,7 @@ export function LogViewer({ serviceName, initialLines = 100, fetchFn = getServic
   return (
     <div className="logs">
       <div className="log-bar">
-        <span>Last</span>
+        <span className="log-label">Last</span>
         <span className="seg" role="group" aria-label="Lines">
           {LINE_COUNTS.map((n) => (
             <button key={n} type="button" aria-pressed={lineCount === n} onClick={() => setLineCount(n)}>

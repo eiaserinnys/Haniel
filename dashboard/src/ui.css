@@ -947,6 +947,11 @@
   font-weight: 600;
 }
 
+.log-label {
+  flex: none;
+  white-space: nowrap;
+}
+
 .log-bar .icon-btn {
   margin-inline-start: auto;
   margin-inline-end: calc(var(--space-1) * -1);
@@ -1376,6 +1381,15 @@
 
 /* ---------- phone-sized window: drawer replaces the sidebar, dialogs become sheets ---------- */
 @media (max-width: 760px) {
+  /* Log bar: the line-count buttons shrink so the label and the refresh button stay inside the gutter. */
+  .seg button {
+    min-width: var(--space-5);
+  }
+
+  .log-bar .icon-btn {
+    margin-inline-end: var(--zero);
+  }
+
   .shell {
     grid-template-columns: minmax(var(--zero), 1fr);
   }
