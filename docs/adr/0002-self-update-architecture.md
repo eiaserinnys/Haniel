@@ -58,18 +58,27 @@ Exit code 10 was chosen because it is outside common error ranges (1-2 generic,
 When haniel detects changes in its own repo:
 
 - **`auto_update: true`**: Immediately shuts down services and exits with code 10.
-- **`auto_update: false`** (default): Sends webhook notification, enters "pending
-  approval" state, and exposes `haniel_approve_update()` MCP tool. Update happens
-  only when approval is received.
+- **`auto_update: false`** (default): Sends webhook notification and enters "pending
+  approval" state. Update happens only when approval is received. (This ADR first
+  described a dedicated approval MCP tool. That tool no longer exists; see the
+  current approval paths below.)
 
-Approval is decoupled from the approval source. haniel only knows "approval arrived
-via MCP tool." The caller could be:
+Approval is decoupled from the approval source. haniel only knows "approval arrived."
+The caller could be:
 - A human using Claude Code interactively
 - A Slack bot forwarding a user's button click
 - An automated policy (e.g., "approve if tests pass")
 
 This keeps haniel indifferent to the approval mechanism, consistent with its
 "intentionally indifferent" design philosophy.
+
+**Current behavior (2026-11).** A self-update waits for approval by default, even when
+the global `auto_apply` is `true`. It is approved from the orchestrator's Pending screen
+(web hub or iOS app) when the node is connected to one, with `haniel_update(service="haniel")`
+or `haniel_pull(repo=<self repo>)` over MCP, or with "Approve update" in the local
+dashboard (`POST /api/self-update/approve`). Approving restarts the Haniel process, so
+every service on that node stops for a moment; only services that a release manifest
+declares `overlap` or `adopt` stay up.
 
 ### Wrapper Script Design
 

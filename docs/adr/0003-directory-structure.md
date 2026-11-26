@@ -59,6 +59,9 @@ repo is isolated in `.self/`, and managed services are cloned into `.services/`:
         +-- logs/                # stdout/stderr logs for service B
 ```
 
+Current behavior: the per-service `logs/` folders in this tree are not used. All service
+logs are in `{root}/logs/`, one `{service}.log` per service, plus `haniel.log`.
+
 ### Key conventions
 
 **One config to rule them all**: A single `haniel.yaml` at root defines all repos and
@@ -77,6 +80,11 @@ predecessor, and the configured number of additional ready releases.
 **`.services/{name}/` per managed repo**: Each repo from the `repos` section (except
 the `self` repo) is cloned here. Service logs go into `{repo}/logs/` to avoid cross-service
 naming conflicts.
+
+> **Current behavior (2026-11).** Service logs are not written into the repository.
+> haniel writes every service's stdout and stderr to `{root}/logs/{service}.log`, next
+> to `haniel.yaml`, and its own messages to `{root}/logs/haniel.log`. Read them with
+> the MCP tool `haniel_read_logs`.
 
 **WinSW files at root**: The service executable, XML config, and `haniel-runner.conf`
 live at root alongside `haniel.yaml`. This is WinSW's requirement — the `.exe` and `.xml`
@@ -112,7 +120,7 @@ repos:
 
 - Root directory is clean — only config and WinSW files visible
 - Single haniel.yaml manages everything; adding services is a YAML edit
-- Per-repo log directories eliminate naming conflicts
+- Per-repo log directories eliminate naming conflicts (the original intent; today every log is `{root}/logs/{service}.log` and service names are unique within one config)
 - haniel source code is hidden in `.self/`, reducing confusion
 
 ### Negative

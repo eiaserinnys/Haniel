@@ -41,16 +41,21 @@ Installation flow:
 
 After installation, services can be started with `haniel run`.
 
-**Resume support**: If installation is interrupted, re-running `haniel install` offers "start fresh / resume" choice.
+**Resume support**: If installation is interrupted, re-running `haniel install` asks "start fresh / resume" in a terminal. When it cannot ask (`--skip-interactive`, or no terminal) it stops until you pass `--state-policy resume` or `--state-policy start-fresh`. `--resume` is the deprecated name of `--state-policy resume`.
+
+**Options**: `--dry-run` prints the plan. `--skip-interactive` skips the Claude Code step, so Claude Code does not have to be installed; a config key without a `default` then stops finalization with "Not all required configs are filled".
 
 ### `haniel run` — Runtime mode
 
 The main operational mode. Starts all services, enters the poll loop, and runs until shutdown.
 
+`haniel run [CONFIG]` uses `./haniel.yaml` when `CONFIG` is omitted and exits with code 2 if that file does not exist. A second `haniel run` for the same config prints one line (config path and the running pid) and exits with code 1. Exit code 10 means an approved self-update and 11 a restart request; the service wrapper reads both. `--dry-run` prints the startup order without starting anything.
+
 At startup:
-- Loads `haniel.yaml` (all sections: `repos`, `services`, `mcp`, `dashboard`, etc.)
-- Starts the MCP server (Streamable HTTP on port 3200 by default)
-- Mounts the web dashboard if `dashboard.enabled` is true (shares the MCP port)
+- Loads `haniel.yaml` (all sections: `repos`, `services`, `mcp`, `dashboard`, etc.) and logs a WARNING for each unknown key or bad value it finds; it does not refuse to start
+- Starts the MCP server (Streamable HTTP on port 3200 by default) only when an `mcp:` block with `enabled: true` is present. If the port is in use an ERROR goes to `haniel.log` and the services keep running
+- Mounts the web dashboard if a `dashboard:` block with `enabled: true` is present (shares the MCP port)
+- Clones every repo whose `path` does not exist (not the `self` repo); a failed clone logs an ERROR with the repo name and URL
 - Fetches every managed repository in parallel regardless of `auto_apply`
 - Starts services of unchanged repositories first, then builds each updated
   repository on its own lane and starts only that lane's services
@@ -66,19 +71,27 @@ Does not touch .env, .mcp.json, venv, etc.
 
 ### `haniel status` — Status query
 
-Displays current service state, repo state, last poll time, etc.
-Also queryable via Claude Code when the MCP server is running.
+`haniel status [CONFIG]` first reads the owner record that `haniel run` keeps for this config and prints `Running (pid N)` or `Not running`. For a running instance it then asks `GET http://<mcp.host>:<mcp.port>/api/status` and prints the real service state, repo state, last poll time, and poll count. That needs `mcp.enabled` and `dashboard.enabled` to be true in the config, and `dashboard.token` is sent as a Bearer token when set. When it cannot ask (a block is missing, the connection fails, the token is rejected), it prints the reason and lists the services and repos from the config only, marked "not runtime state". `--json` prints the same as JSON with `source: runtime` or `source: config`.
+The same information is available to Claude Code through MCP when the server is running.
 
 ### `haniel validate` — Configuration validation
 
 Validates haniel.yaml:
 - YAML syntax
 - Required field presence
+- Unknown keys at any depth, with the closest known name as a hint
+- Unusable values: `ready` format, `shutdown.signal`, negative `restart_delay` and `backoff` delays, empty repo `url`, empty `orchestrator_client.url` or `token`
 - Circular dependency detection (`after` field)
 - Port conflict detection (`ready: port:*` duplicates)
 - Duplicate repo path detection
 
+Errors give exit code 1. A config with no services only gets a warning. `--no-plain-secrets` additionally rejects plain-text secrets. MCP and REST config saves apply the same unknown-key and value checks to the entry being written and reject it; `haniel run` logs them as warnings only.
+
 Used for pre-run validation.
+
+### What the CLI does not do
+
+`haniel` has no command to start, stop, restart, or pull a service. Those are MCP tools (`haniel_restart`, `haniel_stop`, `haniel_start`, `haniel_pull`, ...), dashboard buttons, and REST calls. The `handover` and `lifecycle` commands are internal tools used by the self-update wrapper and the running instance, not part of the user-facing CLI, and are hidden from `haniel --help`.
 
 ## Configuration file (`haniel.yaml`)
 
@@ -111,12 +124,12 @@ webhooks:
 
 mcp:
   enabled: true
-  transport: streamable_http   # Streamable HTTP transport
+  transport: streamable_http   # currently ignored; always Streamable HTTP
   port: 3200
 
 dashboard:
   enabled: true
-  port: null                   # null = share MCP port
+  port: null                   # currently ignored; shares the MCP port
   token: "your-secret-token"   # Bearer token for API/WebSocket auth
 
 repos:
@@ -139,7 +152,6 @@ services:
     ready: port:3104
     ready_timeout: 120
     restart_delay: 3
-    reflect: true              # Expose /reflect endpoint for introspection
     hooks:
       post_pull: ./runtime/venv/Scripts/pip.exe install -r requirements.txt
       pre_start: echo "checking prerequisites..."
@@ -247,9 +259,11 @@ haniel install haniel.yaml
   |     +- Missing or complete -> start fresh
   |
   +- Phase 0: Bootstrap
-  |     Is Claude Code installed?
-  |     +- No: print installation instructions and abort
-  |     +- Yes: continue
+  |     Will Phase 2 run? (no --skip-interactive and a key without value/default)
+  |     +- No: Claude Code is not needed, continue
+  |     +- Yes: is Claude Code installed?
+  |           +- No: print installation instructions and abort
+  |           +- Yes: continue
   |
   +- Phase 1: Mechanical installation (haniel alone)
   |     Load haniel.yaml
@@ -280,13 +294,17 @@ haniel install haniel.yaml
   |     When Claude Code session ends, haniel proceeds to finalize
   |
   +- Phase 3: Finalization (haniel alone)
+  |     Run every key's validate command on its final value; any failure
+  |       stops here (exit code 1) before a file is written
   |     Generate config files from collected values
-  |     Register WinSW service
+  |     Register the service (WinSW / systemd / LaunchAgent)
   |     Stop MCP server (exit install mode)
   |     Mark install.state as complete
   |
   +- Done
-      "Installation complete. Start the service with 'sc start haniel'."
+      "Installation complete." followed by the start command for this OS:
+        Windows `sc start <name>`, Linux `sudo systemctl start <name>`,
+        macOS `launchctl bootstrap gui/<uid> <plist>`
 ```
 
 ### Install-only MCP tools
@@ -327,7 +345,7 @@ install:
     claude-code: true     # Verified in Phase 0 (required prerequisite)
 ```
 
-claude-code is verified separately in Phase 0 (installation cannot proceed without it).
+claude-code is verified separately in Phase 0, and only when the interactive phase will run (otherwise it is not needed).
 Others are verified in Phase 1, but failures don't abort — they're recorded.
 Claude Code guides the user through resolution in Phase 2.
 
@@ -389,13 +407,13 @@ configs:
 
 - `prompt`: Description for Claude Code when asking the user
 - `guide`: URL or instructions for obtaining/verifying the value. Claude Code presents this to the user
-- `validate`: Validation command. `{value}` is substituted with the input. Claude Code runs this and reports results
+- `validate`: Validation command, run by haniel (not by Claude Code) with `{value}` replaced by the value as written, no quoting or escaping, so a value containing `'`, `"`, `$`, or a backtick can break the command. It runs through the platform shell in the folder of `haniel.yaml` with a 60-second limit; a non-zero exit means invalid. It runs when the value is set in the interactive phase (a rejected value is sent back to Claude Code to ask again) and again, for every final value including defaults and values read from an existing file, just before the files are written. A failure there stops the install with exit code 1, writes no file, and records a `config-generation` failure; `--state-policy resume` continues after the value is fixed. The error shows the key, the command template, the exit code, and the last 5 output lines.
 - `default`: Default value. `{root}` is substituted with the absolute path of haniel.yaml's location
 - `description`: Human-readable description for AI-assisted setup
 
 If the file already exists, existing values are preserved; only new keys appear as missing_keys.
 
-### `service` — WinSW service registration
+### `service` — Service registration
 
 ```yaml
 install:
@@ -412,7 +430,7 @@ install:
 ```
 
 - `service_account`: Run the Windows service under a specific user instead of LocalSystem. `allow_service_logon` grants the "Log on as a service" right automatically.
-- Registered as a Windows service via WinSW in Phase 3 (finalize).
+- Registered in Phase 3 (finalize): a Windows service via WinSW, a systemd unit on Linux (`/etc/systemd/system/<name>.service`, `User=` set to the user who ran `sudo` or the installing user; with a `self:` block `ExecStart` runs `haniel-runner.sh` with a generated `haniel-runner.conf`, otherwise `haniel run haniel.yaml`), or a user LaunchAgent on macOS. The installer enables the Linux unit but does not start it.
 
 ## `repos` section
 
@@ -438,7 +456,7 @@ Haniel leaves it untouched and blocks that repository's services.
 
 Repositories with a release manifest use the migration-aware deployment state machine during both approved pulls and startup updates. Build and migration preflight complete while old processes remain available during a live handover. Haniel then stops affected local processes, runs any declared backup gate, performs migration and process handover, waits for every affected service readiness condition, executes the manifest's post-start verification commands, and only then reports success. Stopping local services does not prove that a shared database is quiescent; a destructive restore fallback requires repository-owned cluster-wide write-fence evidence. Failures enter the manifest's declared automatic recovery path and remain a failed deployment even when availability is restored.
 
-**Auto-clone flow (install):**
+**Auto-clone flow (install and run):** `haniel run` clones a missing repo on startup too (except the `self` repo).
 1. Check if `path` exists
 2. If missing: `git clone --branch {branch} {url} {path}`
 3. If present: verify `.git` is valid and remote URL matches
@@ -460,7 +478,7 @@ services:
     cwd: {directory}               # Optional. Working directory (default: haniel.yaml location)
     repo: {repo name}              # Optional. Restart when this repo changes
     restart_delay: {seconds}       # Optional. Delay before crash restart (default: backoff)
-    after: {service name}          # Optional. Wait for this service to be ready
+    after: {service name}          # Optional. Start only once this service is running and ready
     ready: {condition}             # Optional. "Ready" judgment condition
     ready_timeout: {seconds}       # Optional. Ready deadline (default: 60)
     shutdown:                      # Optional. Shutdown method
@@ -469,7 +487,6 @@ services:
       method: http                 #   Optional. If http, send HTTP shutdown request
       endpoint: /shutdown          #   Used when method: http
     enabled: true                  # Optional. If false, skip (default: true)
-    reflect: false                 # Optional. Service introspection /reflect endpoint (default: false)
     hooks:                         # Optional. Lifecycle hooks
       post_pull: {command}         #   Run after git pull
       pre_start: {command}         #   Run before service start
@@ -489,7 +506,7 @@ ready: log:{pattern}              # Ready when pattern appears in stdout/stderr
 ready: http:{url}                 # Ready when GET request returns 2xx
 ```
 
-If `ready` is absent and the service is referenced by `after`, `delay:3` is used as default.
+If `ready` is absent, the service counts as ready once its process is running; there is no default delay.
 
 ### `after` startup ordering syntax
 
@@ -502,6 +519,8 @@ after:
   - mcp-server
   - database
 ```
+
+A service with `after` starts only when each dependency is running and, if it has `ready`, that condition holds; haniel waits up to the dependency's `ready_timeout` (default 60 seconds). If a dependency does not get ready, the service is skipped (`<name> skipped: dependency <dep> failed`). It is retried only when the dependency is itself waiting for a restart, so with an open circuit it stays down until started by hand. Services that do not depend on each other do not wait for each other.
 
 Services without `after` start immediately in YAML order.
 
@@ -539,14 +558,14 @@ CIRCUIT_OPEN <──threshold── CRASHED <──process dies──---+
 | `STOPPED` | Initial state. Also set after clean shutdown or circuit breaker reset |
 | `STARTING` | Process has been spawned, waiting for ready condition |
 | `READY` | Ready condition met. Resets failure count and backoff |
-| `RUNNING` | Running without a ready condition. Resets failure count and backoff |
+| `RUNNING` | Running without a ready condition. Resets failure count and backoff only after the process has stayed up for more than 10 seconds, so a service that dies right after starting accumulates failures and opens the circuit |
 | `STOPPING` | Graceful shutdown in progress |
 | `CRASHED` | Process exited unexpectedly. Increments failure count, calculates backoff |
 | `CIRCUIT_OPEN` | Too many failures within the circuit window. Service will not auto-restart |
 
 **Backoff formula**: `base_delay * 2^(failures - 1)`, capped at `max_delay`.
 
-**Circuit breaker**: Trips when `>=circuit_breaker` failures occur within `circuit_window` seconds. Reset via `haniel_enable()` MCP tool or dashboard.
+**Circuit breaker**: Trips when `>=circuit_breaker` failures occur within `circuit_window` seconds. `haniel_reset_circuit(service)` resets only the breaker. `haniel_enable(service)` is the pair of `haniel_disable`: it sets `enabled: true`, resets the breaker, and starts the service (the dashboard and REST `enable` do the same).
 
 ## Self-update
 
@@ -561,20 +580,27 @@ self:
 
 When changes are detected in the self-repo:
 - `auto_update: true` — Immediately shuts down services and exits with code 10
-- `auto_update: false` — Sends webhook, enters pending state, waits for `haniel_approve_update()` MCP tool call or dashboard approval
+- `auto_update: false` — Sends webhook, enters pending state, and waits for approval. The global `auto_apply` does not change this: a self-update waits for approval by default
 
-The wrapper script (`haniel-runner.ps1`) interprets exit code 10 as a signal to update and restart.
+Approve a pending self-update from the orchestrator's Pending screen (web hub or iOS app) when the node is connected to one, with `haniel_update(service="haniel")` or `haniel_pull(repo=<self repo>)` over MCP, or with "Approve update" in the local dashboard (`POST /api/self-update/approve`).
+
+**Approving restarts the Haniel process, so every service on this node stops for a moment.** Services that the active release manifest declares `overlap` or `adopt` are kept running and handed over to the next Haniel. `haniel_restart(service="haniel")` restarts Haniel without an update (exit code 11) with the same effect on services.
+
+The wrapper script (`haniel-runner.ps1` on Windows, `haniel-runner.sh` on Linux and macOS) interprets exit code 10 as a signal to update and restart. On Linux the systemd unit runs the wrapper only when the config has a `self:` block.
 
 ## Log handling
 
 haniel captures each service's stdout/stderr and writes them to per-service log files.
 
 ```
-{service cwd or haniel.yaml location}/logs/
+{folder of haniel.yaml}/logs/
++-- haniel.log          # haniel's own messages
 +-- mcp-server.log
 +-- bot.log
 +-- ...
 ```
+
+The logs always go to the `logs/` folder next to `haniel.yaml`, not to the service's `cwd` or repository.
 
 - Services may create their own log files separately
 - haniel only captures stdout/stderr
@@ -594,7 +620,7 @@ haniel run
   +- Check repos:
   |    Path exists? -> OK
   |    Path missing? -> git clone (recover from missed install)
-  |    Clone failed? -> webhook alert, skip dependent services
+  |    Clone failed? -> ERROR log with repo name and URL; the repo's services then fail to start (missing working directory)
   +- Fetch every managed repo in parallel (regardless of auto_apply)
   |    Pull changed repos, activate manifests, and stage config serially per repo
   +- Start services:
@@ -610,7 +636,9 @@ haniel run
 ### Poll loop
 
 ```
-Every poll_interval:
+A poll starts poll_interval seconds after the previous poll started (a poll that
+runs longer than the interval is followed by the next at once). A crashed service's
+restart runs when its delay is up, between polls, without a fetch.
 
   [Phase 1: Change detection]
   For each repo:
@@ -693,10 +721,18 @@ haniel_restart(service)            -> Restart a specific service
 haniel_stop(service)               -> Stop a specific service
 haniel_start(service)              -> Start a specific service
 haniel_pull(repo)                  -> Immediately pull a repo + restart dependent services
-haniel_enable(service)             -> Re-enable a service stopped by circuit breaker
+haniel_update(service)             -> Pull the service's repo; service="haniel" approves a self-update
+haniel_enable(service)             -> Undo haniel_disable: enabled: true, reset circuit, start
+haniel_reset_circuit(service)      -> Reset only the circuit breaker
+haniel_disable(service)            -> Set enabled: false and stop the service
 haniel_reload()                    -> Reload haniel.yaml (keep processes, update config only)
-haniel_approve_update()            -> Approve a pending self-update
 ```
+
+The tools that change a config (`haniel_create_service_config`, `haniel_update_service_config`, the repo equivalents, `haniel_register_service`) take different argument names (`name` and `config`, or `service`/`repo` and `config`; see each tool's `inputSchema`) and reject an entry with unknown keys or bad values.
+
+**Results.** A call that names an unknown service or repo, or whose config change is rejected, returns an MCP error result (`isError: true`) with the reason. A call that did nothing says so: `haniel_pull` and `haniel_update` answer `<name>: pulled; affected services restarted`, `<name>: no changes to pull`, `<name>: already pulling; this request was ignored`, or `<name>: self-update requested`. `haniel_read_logs` on a service that is not in the config is an error.
+
+**Restarting Haniel itself.** `haniel_restart(service="haniel")`, `haniel_update(service="haniel")`, and `haniel_pull` on haniel's own repo restart the Haniel process, and every service on this node stops for a moment (services declared `overlap` or `adopt` excluded). `haniel_stop(service="haniel")` is refused.
 
 ### Claude Code connection
 
@@ -740,11 +776,13 @@ All `/api/*` and `/ws` requests require Bearer token authentication when `dashbo
 | POST | `/api/services/{name}/start` | Start a service |
 | POST | `/api/services/{name}/stop` | Stop a service |
 | POST | `/api/services/{name}/restart` | Restart a service |
-| POST | `/api/services/{name}/enable` | Reset circuit breaker |
+| POST | `/api/services/{name}/enable` | Undo disable: `enabled: true`, reset circuit breaker, start |
+| POST | `/api/services/{name}/disable` | Set `enabled: false` and stop |
 | GET | `/api/services/{name}/logs` | Service log output (?lines=N, max 1000) |
 | GET | `/api/repos` | Repository statuses |
-| POST | `/api/repos/{name}/pull` | Pull + restart dependent services |
-| POST | `/api/self-update/approve` | Approve pending self-update |
+| POST | `/api/repos/{name}/pull` | Pull + restart dependent services; the response says what happened (pulled, no changes, already pulling, self-update requested) |
+| POST | `/api/self-update/approve` | Approve pending self-update; the Haniel process restarts and the node's services stop for a moment |
+| POST | `/api/self/restart` | Restart the Haniel process (exit code 11); the node's services stop for a moment |
 | POST | `/api/reload` | Reload haniel.yaml |
 
 **Config CRUD** (runtime YAML modification):
@@ -761,7 +799,7 @@ All `/api/*` and `/ws` requests require Bearer token authentication when `dashbo
 | POST | `/api/config/repos` | Add new repo (`{name, config}`) |
 | DELETE | `/api/config/repos/{name}` | Remove repo (reference check) |
 
-Config mutations follow an atomic pattern: acquire write lock → read current YAML → modify → validate → backup → write → reload config.
+Config mutations follow an atomic pattern: acquire write lock → read current YAML → modify → validate → backup → write → reload config. The write serializes the whole loaded configuration: comments and keys the loader does not know are lost and defaults are written out; the previous file is kept as `haniel.yaml.bak`. The service or repo being saved is rejected if it has unknown keys or bad values.
 
 ### WebSocket events
 
