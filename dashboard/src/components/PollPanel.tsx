@@ -39,7 +39,7 @@ export function PollPanel({ status, onFetch }: { status: RunnerStatus; onFetch: 
       </div>
       {status.pending_restarts.length > 0 && (
         <div className="side-restart">
-          <Mark kind="wait" label="Restart pending" />
+          <Mark kind="wait" label="Crash restarts queued" />
           <span className="mono">{status.pending_restarts.join(', ')}</span>
         </div>
       )}

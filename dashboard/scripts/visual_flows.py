@@ -112,6 +112,10 @@ def _dialogs(env: Env):
         env, "Haniel 재시작 확인", "self 행의 재시작 단추", lambda page: label(page, "Restart Haniel"),
         _enter_confirm(("POST", "/api/self/restart")), root=".dialog.is-confirm",
     )
+    dialog_flow(
+        env, "자기 갱신 승인 확인", "self 행의 Approve 단추", lambda page: page.get_by_role("button", name="Approve", exact=True),
+        _enter_confirm(("POST", "/api/self-update/approve")), root=".dialog.is-confirm",
+    )
     dialog_flow(env, "서랍 (휴대폰 폭)", "머리줄 메뉴 단추", lambda page: page.get_by_label("Open menu"), _enter_none, width=390, root=".drawer")
     dialog_flow(env, "편집 대화상자 (휴대폰 폭, 아래 시트)", "행의 연필 단추", lambda page: label(page, f"Edit {DISPATCHER}"), _enter_editor("Run command", [("PUT", f"/api/config/services/{DISPATCHER}")]), width=390)
 
@@ -136,8 +140,9 @@ def _theme_menu_and_overlay(env: Env):
     ctx.close()
 
     ctx, page, mock = env.open(1440, 900, clock=True)
-    approve = page.get_by_role("button", name="Approve update")
+    approve = page.get_by_role("button", name="Approve", exact=True)
     approve.click()
+    page.locator(".dialog.is-confirm").get_by_role("button", name="Approve", exact=True).click()
     page.wait_for_selector(".status-panel")
     page.keyboard.press("Escape")
     r.check("15", "업데이트 덮개: 진행 중에는 Esc로 닫히지 않는다(화면을 막는 상태)", page.locator(".status-panel").count() == 1)
@@ -148,8 +153,8 @@ def _theme_menu_and_overlay(env: Env):
     page.keyboard.press("Escape")
     page.wait_for_timeout(150)
     r.check("15", "업데이트 덮개(무응답): Esc로 닫힌다", page.locator(".status-panel").count() == 0)
-    r.check("14", "업데이트 덮개: 닫으면 Approve update 단추로 초점", _is_focused(approve), active(page))
-    env.report.dialogs.append({"target": "업데이트 덮개(무응답)", "open": "Approve update", "first": first, "enter": "Refresh는 페이지 새로고침", "esc": "닫힘", "after": active(page)})
+    r.check("14", "업데이트 덮개: 닫으면 Approve 단추로 초점", _is_focused(approve), active(page))
+    env.report.dialogs.append({"target": "업데이트 덮개(무응답)", "open": "Approve, 확인창의 Approve", "first": first, "enter": "Refresh는 페이지 새로고침", "esc": "닫힘", "after": active(page)})
     ctx.close()
 
 
