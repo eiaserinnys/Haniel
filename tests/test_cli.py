@@ -855,3 +855,22 @@ class TestValidateInputChecks:
         ]
         assert len([w for w in warnings if "unknown key services.api.redy" in w]) == 1
         assert len([w for w in warnings if "services.api.ready" in w]) == 1
+
+
+def test_run_logs_config_issues_to_haniel_log(cli_runner, tmp_path):
+    config = tmp_path / "haniel.yaml"
+    config.write_text("poll_interval: 60\nrepos: {}\nservices: {}\nmystery_key: 1\n")
+    root = logging.getLogger()
+    handlers = set(root.handlers)
+    try:
+        with patch(
+            "haniel.core.runner.ServiceRunner", side_effect=RuntimeError("stop")
+        ):
+            cli_runner.invoke(main, ["run", str(config)])
+        log_text = (tmp_path / "logs" / "haniel.log").read_text(encoding="utf-8")
+        assert "Config issue in" in log_text
+        assert "mystery_key" in log_text
+    finally:
+        for handler in set(root.handlers) - handlers:
+            root.removeHandler(handler)
+            handler.close()

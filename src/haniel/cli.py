@@ -227,7 +227,6 @@ def run(
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logger = logging.getLogger("haniel")
-    log_config_issues(config, haniel_config)
 
     click.echo(f"Starting haniel with config: {config}")
     click.echo(f"Poll interval: {haniel_config.poll_interval}s")
@@ -247,6 +246,8 @@ def run(
         )
     )
     logging.getLogger().addHandler(file_handler)
+
+    log_config_issues(config, haniel_config)
 
     # Create runner
     try:
