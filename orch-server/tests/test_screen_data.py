@@ -247,6 +247,26 @@ class TestSelfUpdateDisconnect:
         assert event["self_update_deploying"] is False
         assert event["self_update_deploy_id"] is None
 
+    async def test_lookup_failure_still_broadcasts_and_cleans_up(
+        self, hub, store, monkeypatch
+    ):
+        async def broken_lookup(node_id=None):
+            raise RuntimeError("db unavailable")
+
+        monkeypatch.setattr(store, "get_deploying_self_updates", broken_lookup)
+        cleanup = AsyncMock()
+        monkeypatch.setattr(hub, "_cleanup_orphan_commands", cleanup)
+        dashboard = AsyncMock()
+        hub._dashboard_connections.add(dashboard)
+
+        await hub._on_current_node_disconnect("n1", "ws_closed", "node disconnected")
+
+        event = json.loads(dashboard.send_text.call_args_list[0].args[0])
+        assert event["type"] == "node_disconnected"
+        assert event["self_update_deploying"] is False
+        assert event["self_update_deploy_id"] is None
+        cleanup.assert_awaited_once_with("n1", error="node disconnected")
+
     async def test_nodes_list_marks_only_the_node_with_a_deploying_self_update(
         self, hub, store, client
     ):

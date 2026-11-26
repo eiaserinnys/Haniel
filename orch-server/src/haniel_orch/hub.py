@@ -405,9 +405,15 @@ class WebSocketHub(HubCanonicalFlows, HubServiceCommands):
         self, node_id: str, reason: str, error: str
     ) -> None:
         # 자기 갱신이 배포 중이면 곧 다시 붙는다. 화면이 장애 끊김과 가르게 그 deploy_id를 싣는다
-        self_update_deploy_id = (
-            await self._store.get_deploying_self_updates(node_id)
-        ).get(node_id)
+        try:
+            self_update_deploy_id = (
+                await self._store.get_deploying_self_updates(node_id)
+            ).get(node_id)
+        except Exception as exc:
+            logger.warning(
+                "Self-update lookup failed on disconnect of node %s: %s", node_id, exc
+            )
+            self_update_deploy_id = None
         await self.broadcast_to_dashboards(
             {
                 "type": "node_disconnected",
