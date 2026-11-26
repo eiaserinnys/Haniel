@@ -180,6 +180,8 @@ class ProcessManager:
     IMMEDIATE_EXIT_WINDOW = 1.0  # seconds
     POLL_INTERVAL = 0.1  # seconds
     READY_RECHECK_INTERVAL = 10  # seconds between checks past the ready limit
+    STABLE_RUNNING_SECONDS = 10  # a service with no ready condition counts as
+    # working once its process has stayed up this long
 
     def __init__(
         self,
@@ -208,6 +210,7 @@ class ProcessManager:
         self.stale_instance_grace_timeout = self.STALE_INSTANCE_GRACE_TIMEOUT
         self.immediate_exit_window = self.IMMEDIATE_EXIT_WINDOW
         self.ready_recheck_interval = self.READY_RECHECK_INTERVAL
+        self.stable_running_seconds = self.STABLE_RUNNING_SECONDS
 
         self._processes: dict[str, ManagedProcess] = {}
         self._pending_processes: dict[str, ManagedProcess] = {}
@@ -1233,7 +1236,8 @@ class ProcessManager:
             # reports ready=true for a running service with no ready condition.
             if managed.ready_event:
                 managed.ready_event.set()
-            self.health_manager.record_running(managed.name)
+            self.health_manager.record_running(managed.name, confirmed=False)
+            self._start_stable_running_monitor(managed)
             if on_ready:
                 on_ready()
             return
@@ -1245,7 +1249,8 @@ class ProcessManager:
             # because the service does have a ready condition.
             if managed.ready_event:
                 managed.ready_event.set()
-            self.health_manager.record_running(managed.name)
+            self.health_manager.record_running(managed.name, confirmed=False)
+            self._start_stable_running_monitor(managed)
             return
 
         # Start ready monitor thread
@@ -1255,6 +1260,27 @@ class ProcessManager:
             daemon=True,
         )
         thread.start()
+
+    def _start_stable_running_monitor(self, managed: ManagedProcess) -> None:
+        """Count a service with no usable ready condition as working once it stays up."""
+        threading.Thread(
+            target=self._stable_running_loop,
+            args=(managed,),
+            daemon=True,
+        ).start()
+
+    def _stable_running_loop(self, managed: ManagedProcess) -> None:
+        deadline = time.monotonic() + self.stable_running_seconds
+        while True:
+            if managed.intentional_stop or (
+                managed.process is not None and managed.process.poll() is not None
+            ):
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(self.POLL_INTERVAL, remaining))
+        self.health_manager.record_stable(managed.name)
 
     def _ready_monitor_loop(
         self,

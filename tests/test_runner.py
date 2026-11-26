@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -2296,11 +2297,21 @@ class TestServiceRunnerServices:
             },
         )
         runner = ServiceRunner(config, config_dir=tmp_path)
+        started: list[str] = []
+
+        def fake_start(name, **_kwargs):
+            started.append(name)
+            process = MagicMock()
+            process.poll.return_value = None
+            runner.process_manager._processes[name] = MagicMock(
+                process=process, ready_event=None
+            )
+
+        mock_start.side_effect = fake_start
 
         runner.start_services()
 
-        # Should be called for both services
-        assert mock_start.call_count == 2
+        assert started == ["db", "api"]
 
     @patch("haniel.core.process.ProcessManager.start_service")
     def test_start_services_runs_startup_hook_only_for_updated_repos(
@@ -3613,3 +3624,271 @@ def test_start_restricts_existing_install_state(tmp_path: Path):
         with pytest.raises(RuntimeError, match="stop"):
             runner.start()
     assert state_file.stat().st_mode & 0o777 == 0o600
+
+
+def _python_service(
+    code: str = "import time; time.sleep(60)", **kwargs
+) -> ServiceConfig:
+    return ServiceConfig(run=f'{sys.executable} -c "{code}"', **kwargs)
+
+
+class TestStartupDependencyWait:
+    """`after` means the earlier service is ready, not merely launched."""
+
+    @staticmethod
+    def _record_starts(runner: ServiceRunner) -> dict[str, float]:
+        started: dict[str, float] = {}
+        real_start = runner._start_service
+
+        def recording_start(name, **kwargs):
+            started[name] = time.monotonic()
+            return real_start(name, **kwargs)
+
+        runner._start_service = recording_start  # type: ignore[method-assign]
+        return started
+
+    def test_dependent_waits_for_ready_and_independent_service_does_not(
+        self, tmp_path: Path
+    ):
+        config = HanielConfig(
+            repos={},
+            services={
+                "db": _python_service(ready="delay:1.5"),
+                "api": _python_service(after=["db"]),
+                "cache": _python_service(),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        started = self._record_starts(runner)
+        try:
+            runner.start_services()
+            assert started["api"] - started["db"] >= 1.3
+            assert started["api"] - started["cache"] >= 1.0
+            assert runner.process_manager.is_running("api")
+        finally:
+            runner.process_manager.stop_all(timeout=5)
+
+    def test_service_without_ready_counts_as_ready_while_running(self, tmp_path: Path):
+        config = HanielConfig(
+            repos={},
+            services={
+                "db": _python_service(),
+                "api": _python_service(after=["db"]),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        started = self._record_starts(runner)
+        try:
+            runner.start_services()
+            assert started["api"] - started["db"] < 1.0
+            assert runner.process_manager.is_running("api")
+        finally:
+            runner.process_manager.stop_all(timeout=5)
+
+    def test_failed_dependency_skips_dependent(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        config = HanielConfig(
+            repos={},
+            services={
+                "db": _python_service("import sys; sys.exit(1)", ready="delay:30"),
+                "api": _python_service(after=["db"]),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        started = self._record_starts(runner)
+        try:
+            runner.start_services()
+        finally:
+            runner.process_manager.stop_all(timeout=5)
+
+        assert "api" not in started
+        assert "api skipped: dependency db failed" in caplog.text
+
+    def test_dependency_not_ready_in_time_skips_dependent(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        config = HanielConfig(
+            repos={},
+            services={
+                "db": _python_service(ready="log:never-printed", ready_timeout=1),
+                "api": _python_service(after=["db"]),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        started = self._record_starts(runner)
+        try:
+            runner.start_services()
+        finally:
+            runner.process_manager.stop_all(timeout=5)
+
+        assert "api" not in started
+        assert "api skipped: dependency db failed" in caplog.text
+
+    def test_restart_after_pull_waits_for_dependency_and_skips_on_failure(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        config = HanielConfig(
+            repos={},
+            services={
+                "db": _python_service(ready="log:never-printed", ready_timeout=1),
+                "api": _python_service(after=["db"]),
+            },
+        )
+        runner = ServiceRunner(config, config_dir=tmp_path)
+        runner.process_manager.start_service("db", config.services["db"])
+        try:
+            with (
+                patch.object(runner, "execute_repo_hook", return_value=True),
+                patch.object(runner, "execute_hook", return_value=True),
+                patch.object(runner, "_start_service", return_value=True) as start,
+                pytest.raises(StableDeploymentError, match="skipped"),
+            ):
+                runner._restart_after_pull_legacy("app", ["api"])
+        finally:
+            runner.process_manager.stop_all(timeout=5)
+
+        start.assert_not_called()
+        assert "api skipped: dependency db failed" in caplog.text
+
+
+class TestPollingSchedule:
+    """Polls keep their period and restarts do not wait for them."""
+
+    @staticmethod
+    def _runner(tmp_path: Path, poll_interval: int = 60) -> ServiceRunner:
+        return ServiceRunner(
+            HanielConfig(
+                poll_interval=poll_interval,
+                repos={},
+                services={"svc": _python_service()},
+            ),
+            config_dir=tmp_path,
+        )
+
+    def test_scheduled_restart_does_not_wait_for_next_poll(self, tmp_path: Path):
+        runner = self._runner(tmp_path)
+        poll_starts: list[float] = []
+        restarted = threading.Event()
+        runner._poll_cycle = lambda: poll_starts.append(time.monotonic())  # type: ignore[method-assign]
+        runner._start_service = lambda name, **_kw: restarted.set() or True  # type: ignore[method-assign]
+        runner._detect_changes = MagicMock(return_value=[])  # type: ignore[method-assign]
+        thread = threading.Thread(target=runner._poll_loop, daemon=True)
+        thread.start()
+        try:
+            deadline = time.monotonic() + 5
+            while not poll_starts:
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+
+            runner._schedule_restart("svc", 0.2)
+
+            assert restarted.wait(timeout=5), "restart waited for the poll interval"
+            assert len(poll_starts) == 1
+            runner._detect_changes.assert_not_called()
+        finally:
+            runner._stop_event.set()
+            runner._poll_wakeup.set()
+            thread.join(timeout=5)
+
+    def test_poll_period_is_measured_from_poll_start(self, tmp_path: Path):
+        runner = self._runner(tmp_path, poll_interval=1)
+        poll_starts: list[float] = []
+
+        def slow_cycle() -> None:
+            poll_starts.append(time.monotonic())
+            time.sleep(0.5)
+            if len(poll_starts) == 3:
+                runner._stop_event.set()
+
+        runner._poll_cycle = slow_cycle  # type: ignore[method-assign]
+        thread = threading.Thread(target=runner._poll_loop, daemon=True)
+        thread.start()
+        thread.join(timeout=10)
+
+        assert len(poll_starts) == 3
+        for earlier, later in zip(poll_starts, poll_starts[1:]):
+            assert 0.9 <= later - earlier < 1.35
+
+    def test_overlong_poll_is_followed_by_the_next_one_at_once(self, tmp_path: Path):
+        runner = self._runner(tmp_path)
+
+        started = time.monotonic()
+        runner._wait_for_next_poll(started - 5)
+
+        assert time.monotonic() - started < 0.5
+
+
+def _git(*args: str, cwd: Path | None = None) -> None:
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+    )
+
+
+class TestStartupClone:
+    """A repository whose path is missing is cloned when haniel runs."""
+
+    @staticmethod
+    def _origin(tmp_path: Path) -> Path:
+        origin = tmp_path / "origin"
+        origin.mkdir()
+        _git("init", "-b", "develop", cwd=origin)
+        (origin / "README.md").write_text("hello")
+        _git("add", ".", cwd=origin)
+        _git("commit", "-m", "init", cwd=origin)
+        return origin
+
+    @staticmethod
+    def _runner(tmp_path: Path, url: str) -> ServiceRunner:
+        return ServiceRunner(
+            HanielConfig(
+                repos={"app": RepoConfig(url=url, path="app", branch="develop")},
+                services={"web": ServiceConfig(run="true", repo="app")},
+            ),
+            config_dir=tmp_path / "root",
+        )
+
+    def test_missing_repo_is_cloned_on_the_configured_branch(self, tmp_path: Path):
+        origin = self._origin(tmp_path)
+        (tmp_path / "root").mkdir()
+        runner = self._runner(tmp_path, str(origin))
+
+        runner._apply_startup_updates()
+
+        clone = tmp_path / "root" / "app"
+        assert (clone / "README.md").read_text() == "hello"
+        assert get_head(clone) == get_head(origin)
+        assert "app" in runner._startup_updated_repos
+
+    def test_existing_repo_is_left_alone(self, tmp_path: Path):
+        origin = self._origin(tmp_path)
+        (tmp_path / "root").mkdir()
+        clone = tmp_path / "root" / "app"
+        _git("clone", "--branch", "develop", str(origin), str(clone))
+        (clone / "local.txt").write_text("keep")
+        runner = self._runner(tmp_path, str(origin))
+
+        runner._apply_startup_updates()
+
+        assert (clone / "local.txt").read_text() == "keep"
+        assert "app" not in runner._startup_updated_repos
+
+    def test_failed_clone_logs_error_with_repo_name_and_url(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        (tmp_path / "root").mkdir()
+        url = str(tmp_path / "no-such-origin")
+        runner = self._runner(tmp_path, url)
+
+        runner._apply_startup_updates()
+
+        assert not (tmp_path / "root" / "app").exists()
+        errors = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelname == "ERROR"
+        ]
+        assert any("app" in message and url in message for message in errors)

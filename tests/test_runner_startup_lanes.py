@@ -198,6 +198,12 @@ def test_service_depending_on_updated_repo_service_waits_for_that_service(
         patch.object(runner, "execute_hook", side_effect=execute_hook),
         patch.object(runner, "_start_service", side_effect=start_service),
         patch("haniel.core.runner.sync_disk"),
+        patch.object(
+            runner.process_manager,
+            "is_running",
+            side_effect=lambda name: name in started,
+        ),
+        patch.object(runner.process_manager, "wait_for_ready", return_value=True),
     ):
         thread = threading.Thread(target=runner.start_services)
         thread.start()
@@ -270,6 +276,12 @@ def test_unchanged_prerequisite_starts_without_waiting_for_dependent_lanes(
         patch.object(runner, "execute_hook", side_effect=execute_hook),
         patch.object(runner, "_start_service", side_effect=start_service),
         patch("haniel.core.runner.sync_disk"),
+        patch.object(
+            runner.process_manager,
+            "is_running",
+            side_effect=lambda name: name in started,
+        ),
+        patch.object(runner.process_manager, "wait_for_ready", return_value=True),
     ):
         thread = threading.Thread(target=runner.start_services)
         thread.start()

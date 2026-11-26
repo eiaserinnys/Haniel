@@ -658,6 +658,49 @@ while True:
         assert len(crashed) == 1
         assert crashed[0] == 1
 
+    def test_service_without_ready_that_dies_at_once_opens_circuit(
+        self, tmp_path: Path, log_dir: Path
+    ):
+        """A service with no ready condition that keeps dying is not a success."""
+        health = HealthManager(circuit_breaker_threshold=3, circuit_breaker_window=300)
+        manager = ProcessManager(
+            config_dir=tmp_path, log_dir=log_dir, health_manager=health
+        )
+        config = ServiceConfig(run=f'{sys.executable} -c "import sys; sys.exit(1)"')
+
+        for attempt in range(1, 4):
+            manager.start_service("flaky", config)
+            deadline = time.monotonic() + 10
+            while health.get_health("flaky").restart_count < attempt:
+                assert time.monotonic() < deadline, "crash was not recorded"
+                time.sleep(0.05)
+
+        service_health = health.get_health("flaky")
+        assert service_health.state == ServiceState.CIRCUIT_OPEN
+        assert service_health.consecutive_failures == 3
+
+    def test_service_without_ready_resets_failures_after_staying_up(
+        self, tmp_path: Path, log_dir: Path
+    ):
+        """A ready-less service counts as working once its process stays up."""
+        health = HealthManager()
+        manager = ProcessManager(
+            config_dir=tmp_path, log_dir=log_dir, health_manager=health
+        )
+        manager.stable_running_seconds = 0.3
+        health.get_health("steady").consecutive_failures = 2
+        config = ServiceConfig(run=f'{sys.executable} -c "import time; time.sleep(60)"')
+
+        manager.start_service("steady", config)
+        try:
+            assert health.get_health("steady").consecutive_failures == 2
+            deadline = time.monotonic() + 10
+            while health.get_health("steady").consecutive_failures != 0:
+                assert time.monotonic() < deadline, "failures were never reset"
+                time.sleep(0.05)
+        finally:
+            manager.stop_service("steady", force=True)
+
     def test_ready_callback(self, process_manager: ProcessManager):
         """Should call ready callback when service is ready."""
         ready_called = []

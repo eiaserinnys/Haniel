@@ -74,12 +74,23 @@ class ServiceHealth:
         self.consecutive_failures = 0
         self.current_backoff = 0
 
-    def record_running(self) -> None:
-        """Record that the service is running (no ready condition, or the condition could not be parsed)."""
+    def record_running(self, *, confirmed: bool = True) -> None:
+        """Record that the service is running (no ready condition, or the condition could not be parsed).
+
+        A freshly started service with no ready condition passes
+        ``confirmed=False``: nothing shows it works yet, so its failures stay
+        counted until record_stable().
+        """
         self.state = ServiceState.RUNNING
-        # Reset consecutive failures on successful start
-        self.consecutive_failures = 0
-        self.current_backoff = 0
+        if confirmed:
+            self.consecutive_failures = 0
+            self.current_backoff = 0
+
+    def record_stable(self) -> None:
+        """Record that a running service stayed up long enough to count as working."""
+        if self.state == ServiceState.RUNNING:
+            self.consecutive_failures = 0
+            self.current_backoff = 0
 
     def record_stop(self) -> None:
         """Record that the service stopped gracefully."""
@@ -241,12 +252,16 @@ class HealthManager:
         health.record_ready()
         self._notify_state_change(service_name, old_state, health.state)
 
-    def record_running(self, service_name: str) -> None:
+    def record_running(self, service_name: str, *, confirmed: bool = True) -> None:
         """Record that a service is running."""
         health = self.get_health(service_name)
         old_state = health.state
-        health.record_running()
+        health.record_running(confirmed=confirmed)
         self._notify_state_change(service_name, old_state, health.state)
+
+    def record_stable(self, service_name: str) -> None:
+        """Record that a running service stayed up long enough to count as working."""
+        self.get_health(service_name).record_stable()
 
     def record_stop(self, service_name: str) -> None:
         """Record that a service stopped gracefully."""
