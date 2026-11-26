@@ -879,9 +879,9 @@ haniel/
 |           +-- posix.py           # Unix signal handling
 +-- dashboard/                     # React frontend (separate build)
 |   +-- src/
-|   |   +-- App.tsx                # 2-panel layout (services | chat)
-|   |   +-- components/            # ServiceCard, RepoEditor, DependencyGraph, ChatPanel, etc.
-|   |   +-- hooks/                 # useServices, useWebSocket, useChatWebSocket
+|   |   +-- App.tsx                # Single-page layout with section navigation
+|   |   +-- components/            # ServiceRow, ServiceEditor, RepoEditor, DependencyGraph, LogViewer, etc.
+|   |   +-- hooks/                 # useServices, useCurrentSection, useNextPollCountdown, etc.
 |   |   +-- lib/api.ts             # REST API client
 |   +-- package.json               # React 19, Vite 8, TypeScript 5.9, Tailwind CSS 4
 +-- tests/                         # pytest suite (config, runner, process, git, health, etc.)
