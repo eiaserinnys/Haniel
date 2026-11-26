@@ -2713,7 +2713,9 @@ class ServiceRunner:
             repos.append(
                 {
                     "repo": name,
-                    "last_fetch": runtime.last_fetch.isoformat()
+                    "last_fetch": runtime.last_fetch.astimezone(
+                        timezone.utc
+                    ).isoformat()
                     if runtime.last_fetch
                     else None,
                 }
