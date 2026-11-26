@@ -10,7 +10,7 @@ import click
 from haniel.core.one_shot_handover import stop
 
 
-@click.group("lifecycle")
+@click.group("lifecycle", hidden=True)
 def lifecycle_group() -> None:
     """Control a resident Haniel instance by config identity."""
 

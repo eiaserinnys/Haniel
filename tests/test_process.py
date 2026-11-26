@@ -8,6 +8,7 @@ Tests cover:
 - Circuit breaker and backoff
 """
 
+import os
 import sys
 import threading
 import time
@@ -308,6 +309,49 @@ class TestProcessManager:
             assert process_manager.is_running("test")
         finally:
             process_manager.stop_service("test", force=True)
+
+    def test_start_failure_names_service_cwd_and_executable(
+        self, process_manager: ProcessManager, tmp_path: Path
+    ):
+        """A missing executable says which service, folder, and file failed."""
+        config = ServiceConfig(run="definitely-not-a-real-binary --flag")
+
+        with pytest.raises(RuntimeError) as error:
+            process_manager.start_service("api", config)
+
+        message = str(error.value)
+        assert "Failed to start service api" in message
+        assert f"cwd: {tmp_path}" in message
+        assert "executable: definitely-not-a-real-binary" in message
+        assert "FileNotFoundError" in message
+
+    def test_start_failure_with_missing_cwd_points_at_config_key(
+        self, process_manager: ProcessManager, tmp_path: Path
+    ):
+        config = ServiceConfig(run=f"{sys.executable} -c pass", cwd="./not-cloned")
+
+        with pytest.raises(RuntimeError) as error:
+            process_manager.start_service("api", config)
+
+        message = str(error.value)
+        assert "services.api.cwd path does not exist" in message
+        assert "does the repository need to be cloned?" in message
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX execute bits")
+    def test_start_failure_without_execute_permission_says_so(
+        self, process_manager: ProcessManager, tmp_path: Path
+    ):
+        script = tmp_path / "run.sh"
+        script.write_text("#!/bin/sh\nexit 0\n")
+        script.chmod(0o644)
+        config = ServiceConfig(run=str(script))
+
+        with pytest.raises(RuntimeError) as error:
+            process_manager.start_service("api", config)
+
+        message = str(error.value)
+        assert "PermissionError" in message
+        assert f"Check that {script} has execute permission" in message
 
     def test_stop_process(self, process_manager: ProcessManager, tmp_path: Path):
         """Should stop a running process."""

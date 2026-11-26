@@ -948,3 +948,44 @@ class TestHeartbeatDoesNotBlockEventLoop:
         assert client._build_node_hello(services)["services"] == [
             {"name": "svc", "ready": True}
         ]
+
+
+class TestConnectionFailureLog:
+    @staticmethod
+    async def _run_once(client, error):
+        async def fail_then_stop():
+            client._stop_event.set()
+            raise error
+
+        with patch.object(client, "_connect_and_listen", side_effect=error):
+            original = client._next_backoff
+
+            def stop_after_backoff():
+                client._stop_event.set()
+                return original()
+
+            with patch.object(client, "_next_backoff", side_effect=stop_after_backoff):
+                await client._run()
+
+    @pytest.mark.asyncio
+    async def test_log_names_the_exception(self, config, caplog):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+
+        with caplog.at_level("WARNING"):
+            await self._run_once(client, ConnectionRefusedError("refused by peer"))
+
+        assert "Orchestrator connection failed: ConnectionRefusedError" in caplog.text
+        assert "refused by peer" in caplog.text
+        assert "token rejected" not in caplog.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [401, 403])
+    async def test_log_says_token_was_rejected(self, config, caplog, status):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+        error = RuntimeError("server rejected WebSocket connection")
+        error.response = MagicMock(status_code=status)
+
+        with caplog.at_level("WARNING"):
+            await self._run_once(client, error)
+
+        assert f"token rejected by the orchestrator (HTTP {status})" in caplog.text

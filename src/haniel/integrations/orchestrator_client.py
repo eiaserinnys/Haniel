@@ -34,6 +34,7 @@ from .deploy_reporting import (
     settled_result_messages,
 )
 from .deploy_attempt_gate import DeployAttemptGate
+from ..core.safety_redaction import bounded_redact_text
 from ..core.thread_shutdown import join_thread_with_timeout
 from ..core.node_run_registry import NodeRunRegistry
 
@@ -63,6 +64,15 @@ DEPLOY_PLAN_REASON_INVENTORY = frozenset(
         "planner_error",
     }
 )
+
+
+def _connection_failure_reason(error: Exception) -> str:
+    """Name the exception; say so when the orchestrator rejected the token."""
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    reason = bounded_redact_text(f"{type(error).__name__}: {error}")
+    if status in (401, 403):
+        return f"token rejected by the orchestrator (HTTP {status}); {reason}"
+    return reason
 
 
 class OrchestratorClient:
@@ -607,11 +617,12 @@ class OrchestratorClient:
             while not self._stop_event.is_set():
                 try:
                     await self._connect_and_listen()
-                except Exception:
+                except Exception as error:
                     if self._stop_event.is_set():
                         break
                     logger.warning(
-                        "Orchestrator connection failed. "
+                        "Orchestrator connection failed: "
+                        f"{_connection_failure_reason(error)}. "
                         f"Reconnecting in {self._reconnect_delay:.1f}s"
                     )
                 finally:

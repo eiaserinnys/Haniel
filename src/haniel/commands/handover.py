@@ -12,7 +12,7 @@ from haniel.core.handover_result import handover_error_code
 from haniel.core.safety_redaction import bounded_redact_text
 
 
-@click.command("handover")
+@click.command("handover", hidden=True)
 @click.argument("config", type=click.Path(path_type=Path, exists=True))
 @click.argument("repo")
 @click.option("--target-ref", required=True)

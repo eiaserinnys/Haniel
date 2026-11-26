@@ -96,8 +96,14 @@ class TestCLIBasics:
         assert "run" in result.output
         assert "status" in result.output
         assert "validate" in result.output
-        assert "handover" in result.output
-        assert "lifecycle" in result.output
+
+    def test_internal_commands_are_hidden_but_still_work(self, cli_runner: CliRunner):
+        """handover and lifecycle are for haniel itself, not for users."""
+        help_text = cli_runner.invoke(main, ["--help"]).output
+        assert "handover" not in help_text
+        assert "lifecycle" not in help_text
+        assert cli_runner.invoke(main, ["lifecycle", "--help"]).exit_code == 0
+        assert cli_runner.invoke(main, ["handover", "--help"]).exit_code == 0
 
     def test_version_flag(self, cli_runner: CliRunner):
         """--version should display version information."""
@@ -202,10 +208,50 @@ class TestRunCommand:
         assert result.exit_code == 0
         assert "run" in result.output.lower()
 
-    def test_run_requires_config(self, cli_runner: CliRunner):
-        """run without config should show error or help."""
+    def test_run_without_config_and_without_default_file_exits_2(
+        self, cli_runner: CliRunner, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
         result = cli_runner.invoke(main, ["run"])
-        assert result.exit_code in [0, 2]
+        assert result.exit_code == 2
+        assert "./haniel.yaml was not found" in result.output
+        assert "Traceback" not in result.output
+
+    def test_run_without_config_uses_default_file(
+        self, cli_runner: CliRunner, tmp_config, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_config.parent)
+        result = cli_runner.invoke(main, ["run", "--dry-run"])
+        assert result.exit_code == 0
+        assert "[dry-run] Configuration: haniel.yaml" in result.output
+
+    def test_foreground_flag_is_accepted_but_hidden(
+        self, cli_runner: CliRunner, tmp_config
+    ):
+        """one_shot_handover still passes --foreground to the new version."""
+        assert "--foreground" not in cli_runner.invoke(main, ["run", "--help"]).output
+        result = cli_runner.invoke(
+            main, ["run", "-f", "--foreground", "--dry-run", str(tmp_config)]
+        )
+        assert result.exit_code == 0
+
+    def test_second_run_for_same_config_says_already_running(
+        self, cli_runner: CliRunner, tmp_config
+    ):
+        from haniel.core.lifecycle_control import LifecycleControl
+
+        owner = LifecycleControl(tmp_config.resolve()).acquire_owner("first")
+        try:
+            result = cli_runner.invoke(main, ["run", str(tmp_config)])
+        finally:
+            owner.__exit__(None, None, None)
+
+        assert result.exit_code == 1
+        assert "haniel is already running with this config" in result.output
+        assert str(tmp_config.resolve()) in result.output
+        assert f"pid {os.getpid()}" in result.output
+        assert "Traceback" not in result.output
+        assert len(result.output.strip().splitlines()) == 1
 
     def test_run_with_nonexistent_config(self, cli_runner: CliRunner):
         """run with nonexistent config should show error."""
@@ -618,3 +664,125 @@ class TestInstallerExpectations:
         assert "exit code 4" in result.output
         assert "token-rejected" in result.output
         assert not (tmp_path / "app.env").exists()
+
+
+class TestStatusReportsRuntime:
+    """status must not call a running haniel Stopped."""
+
+    @pytest.fixture
+    def web_config(self, tmp_path: Path) -> Path:
+        config_file = tmp_path / "haniel.yaml"
+        config_file.write_text(
+            "poll_interval: 60\n"
+            "mcp: {enabled: true, port: 3299}\n"
+            "dashboard: {enabled: true, token: secret-token}\n"
+            "repos: {}\n"
+            "services:\n"
+            "  api: {run: python api.py}\n"
+            "  old: {run: python old.py, enabled: false}\n",
+            encoding="utf-8",
+        )
+        return config_file
+
+    @pytest.fixture
+    def running_owner(self, web_config: Path):
+        from haniel.core.lifecycle_control import LifecycleControl
+
+        owner = LifecycleControl(web_config.resolve()).acquire_owner("resident")
+        yield owner
+        owner.__exit__(None, None, None)
+
+    def test_not_running_says_so_and_lists_config_services(
+        self, cli_runner: CliRunner, web_config: Path
+    ):
+        result = cli_runner.invoke(main, ["status", str(web_config)])
+
+        assert result.exit_code == 0
+        assert "Not running" in result.output
+        assert "no running haniel owns this config" in result.output
+        assert "Services (from config; not runtime state):" in result.output
+        assert "api: enabled" in result.output
+        assert "old: disabled" in result.output
+        assert "stopped" not in result.output.lower()
+
+    def test_running_shows_pid_and_asks_the_dashboard_with_the_token(
+        self, cli_runner: CliRunner, web_config: Path, running_owner
+    ):
+        runtime = {
+            "running": True,
+            "poll_interval": 60,
+            "services": {"api": {"state": "ready", "uptime": 12, "restart_count": 0}},
+            "repos": {},
+        }
+        response = MagicMock(status_code=200)
+        response.json.return_value = runtime
+        with patch("haniel.commands.status.httpx.get", return_value=response) as get:
+            result = cli_runner.invoke(main, ["status", str(web_config)])
+
+        assert result.exit_code == 0
+        assert f"Running (pid {os.getpid()})" in result.output
+        assert "api: ready (uptime: 12s)" in result.output
+        assert "from config" not in result.output
+        assert get.call_args.args == ("http://127.0.0.1:3299/api/status",)
+        assert get.call_args.kwargs["headers"] == {
+            "Authorization": "Bearer secret-token"
+        }
+
+    def test_running_but_unreachable_gives_the_reason_not_stopped(
+        self, cli_runner: CliRunner, web_config: Path, running_owner
+    ):
+        import httpx
+
+        with patch(
+            "haniel.commands.status.httpx.get", side_effect=httpx.ConnectError("no")
+        ):
+            result = cli_runner.invoke(main, ["status", str(web_config)])
+
+        assert result.exit_code == 0
+        assert f"Running (pid {os.getpid()})" in result.output
+        assert "could not reach running haniel at 127.0.0.1:3299" in result.output
+        assert "Services (from config; not runtime state):" in result.output
+        assert "stopped" not in result.output.lower()
+
+    def test_rejected_token_is_reported(
+        self, cli_runner: CliRunner, web_config: Path, running_owner
+    ):
+        with patch(
+            "haniel.commands.status.httpx.get",
+            return_value=MagicMock(status_code=401),
+        ):
+            result = cli_runner.invoke(main, ["status", str(web_config)])
+
+        assert "rejected the dashboard token (HTTP 401)" in result.output
+
+    def test_dashboard_disabled_says_runtime_status_is_unavailable(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ):
+        from haniel.core.lifecycle_control import LifecycleControl
+
+        config = tmp_path / "haniel.yaml"
+        config.write_text(
+            "mcp: {enabled: true}\nrepos: {}\nservices:\n  api: {run: python api.py}\n",
+            encoding="utf-8",
+        )
+        owner = LifecycleControl(config.resolve()).acquire_owner("resident")
+        try:
+            with patch("haniel.commands.status.httpx.get") as get:
+                result = cli_runner.invoke(main, ["status", str(config)])
+        finally:
+            owner.__exit__(None, None, None)
+
+        get.assert_not_called()
+        assert "dashboard disabled so runtime status is unavailable" in result.output
+        assert "stopped" not in result.output.lower()
+
+    def test_json_marks_config_only_answers(
+        self, cli_runner: CliRunner, web_config: Path
+    ):
+        result = cli_runner.invoke(main, ["status", "--json", str(web_config)])
+
+        data = json.loads(result.output)
+        assert data["running"] is False
+        assert data["source"] == "config"
+        assert data["runtime_status"] == "unavailable"
+        assert data["services"]["old"] == {"enabled": False, "run": "python old.py"}

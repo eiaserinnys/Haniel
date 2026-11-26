@@ -174,14 +174,44 @@ class TestDashboardApi:
         data = resp.json()
         assert "error" in data
 
-    def test_service_enable_resets_circuit(self, dashboard_app, mock_runner):
-        """POST /api/services/{name}/enable calls health_manager.reset_circuit."""
+    def test_service_enable_uses_shared_enable(self, dashboard_app, mock_runner):
+        """POST /api/services/{name}/enable is the pair of disable."""
         client = TestClient(dashboard_app)
-        resp = client.post("/api/services/web/enable")
+        with patch("haniel.dashboard.api.enable_service") as enable:
+            enable.return_value = {"ok": True, "service": "web", "enabled": True}
+            resp = client.post("/api/services/web/enable")
+
         assert resp.status_code == 200
         data = resp.json()
         assert data["ok"] is True
-        mock_runner.health_manager.reset_circuit.assert_called_once_with("web")
+        assert data["action"] == "enable"
+        enable.assert_called_once_with(mock_runner, "web")
+        mock_runner.health_manager.reset_circuit.assert_not_called()
+
+    def test_service_enable_unknown_service_returns_404(
+        self, dashboard_app, mock_runner
+    ):
+        client = TestClient(dashboard_app)
+        with patch("haniel.dashboard.api.enable_service") as enable:
+            enable.side_effect = KeyError("Service not found: nope")
+            resp = client.post("/api/services/nope/enable")
+
+        assert resp.status_code == 404
+        assert resp.json() == {"error": "Service not found: nope"}
+
+    def test_repo_pull_reports_outcome(self, dashboard_app, mock_runner):
+        """POST /api/repos/{name}/pull says what the pull actually did."""
+        from haniel.core.service_lifecycle import PullOutcome
+
+        mock_runner.trigger_pull.return_value = PullOutcome.NO_CHANGES
+        mock_runner._repo_states = {}
+        client = TestClient(dashboard_app)
+        resp = client.post("/api/repos/main/pull")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["outcome"] == "no changes"
+        assert data["message"] == "main: no changes to pull"
 
     def test_service_disable_calls_lifecycle_core(self, dashboard_app, mock_runner):
         """POST /api/services/{name}/disable disables and stops via common core."""

@@ -25,7 +25,10 @@ from haniel.commands.handover import handover_command
 from haniel.commands.install import install_command
 from haniel.commands.install import print_dry_run_install as print_dry_run_install
 from haniel.commands.lifecycle import lifecycle_group
+from haniel.commands.status import collect_status
 from haniel.config import HanielConfig
+from haniel.core.lifecycle_control import LifecycleControl
+from haniel.core.lifecycle_locks import LifecycleConflict
 
 
 ACTIVE_SELF_HEAD_ENV = "HANIEL_ACTIVE_SELF_HEAD"
@@ -145,9 +148,7 @@ main.add_command(lifecycle_group)
 
 @main.command()
 @click.argument("config", required=False, callback=validate_config_file)
-@click.option(
-    "--foreground", "-f", is_flag=True, help="Run in foreground (don't daemonize)."
-)
+@click.option("--foreground", "-f", is_flag=True, hidden=True, expose_value=False)
 @click.option(
     "--dry-run", is_flag=True, help="Show what would be done without executing."
 )
@@ -162,13 +163,14 @@ main.add_command(lifecycle_group)
 @click.option("--initial-request-id", hidden=True)
 def run(
     config: Path | None,
-    foreground: bool,
     dry_run: bool,
     log_level: str,
     active_self_head: str | None,
     initial_request_id: str | None,
 ) -> None:
     """Start services and begin the poll loop.
+
+    Without CONFIG, ./haniel.yaml is used.
 
     This command:
     1. Loads the configuration
@@ -178,8 +180,14 @@ def run(
     from haniel.core.runner import ServiceRunner
 
     if config is None:
-        click.echo(click.get_current_context().get_help())
-        return
+        config = Path("haniel.yaml")
+        if not config.exists():
+            click.echo(
+                "No CONFIG given and ./haniel.yaml was not found. "
+                "Usage: haniel run [CONFIG]",
+                err=True,
+            )
+            sys.exit(2)
 
     # Load and validate
     haniel_config, errors = load_and_validate(config)
@@ -194,6 +202,21 @@ def run(
         click.echo()
         print_dry_run_run(haniel_config)
         return
+
+    lifecycle = LifecycleControl(config.resolve())
+    instance_id = str(uuid4())
+    try:
+        owner = lifecycle.acquire_owner(instance_id)
+    except LifecycleConflict as conflict:
+        if conflict.code != "LIFECYCLE_OWNER_CONFLICT":
+            raise
+        pid = lifecycle.read_owner(optional=True).get("pid", "unknown")
+        click.echo(
+            f"haniel is already running with this config ({config.resolve()}, "
+            f"pid {pid})",
+            err=True,
+        )
+        sys.exit(1)
 
     # Configure logging
     logging.basicConfig(
@@ -224,18 +247,18 @@ def run(
     logging.getLogger().addHandler(file_handler)
 
     # Create runner
-    runner = ServiceRunner(
-        config=haniel_config,
-        config_dir=config_dir,
-        config_path=config.resolve(),
-        active_self_head=_resolve_active_self_head(active_self_head),
-    )
-    from haniel.core.lifecycle_control import LifecycleControl
+    try:
+        runner = ServiceRunner(
+            config=haniel_config,
+            config_dir=config_dir,
+            config_path=config.resolve(),
+            active_self_head=_resolve_active_self_head(active_self_head),
+        )
+    except BaseException:
+        owner.__exit__(None, None, None)
+        raise
     from haniel.core.lifecycle_request_server import LifecycleRequestServer
 
-    lifecycle = LifecycleControl(config.resolve())
-    instance_id = str(uuid4())
-    owner = lifecycle.acquire_owner(instance_id)
     runner.lifecycle_instance_id = instance_id
     runner.lifecycle_control = lifecycle
     lifecycle_server = LifecycleRequestServer(
@@ -324,25 +347,20 @@ def run(
 @click.argument("config", required=False, callback=validate_config_file)
 @click.option("--json", "as_json", is_flag=True, help="Output status as JSON.")
 def status(config: Path | None, as_json: bool) -> None:
-    """Show current service and repository status.
+    """Show whether haniel is running and what its services are doing.
 
-    Displays:
-    - Service status (running/stopped/crashed)
-    - Repository status (HEAD, last fetch time)
-    - MCP server status (if enabled)
+    Reads the running instance's owner record, then asks its dashboard API
+    (needs mcp and dashboard enabled in CONFIG) for the real service status.
+    When that is not possible it says why and lists services from the config.
     """
-    from haniel.core.runner import ServiceRunner
-
-    # If no config provided, show basic status
     if config is None:
         if as_json:
-            click.echo(json.dumps({"running": False, "services": {}, "repos": {}}))
+            click.echo(json.dumps({"running": None, "services": {}, "repos": {}}))
         else:
             click.echo("haniel status")
-            click.echo("Status: Not running (no config specified)")
+            click.echo("Status: unknown (no config specified; pass haniel.yaml)")
         return
 
-    # Load config to show configured services
     haniel_config, errors = load_and_validate(config)
     if errors:
         if as_json:
@@ -355,44 +373,42 @@ def status(config: Path | None, as_json: bool) -> None:
                 click.echo(f"  - {error}", err=True)
         sys.exit(1)
 
-    # Create a runner to get status info (not starting it)
-    config_dir = config.parent.resolve()
-    runner = ServiceRunner(
-        config=haniel_config,
-        config_dir=config_dir,
-        config_path=config.resolve(),
-    )
-
-    status_data = runner.get_status()
+    report = collect_status(config, haniel_config)
 
     if as_json:
-        click.echo(json.dumps(status_data, indent=2))
+        click.echo(json.dumps(report.to_json(haniel_config), indent=2))
         return
 
-    # Human-readable output
     click.echo(click.style("haniel status", bold=True))
     click.echo()
 
-    running = status_data.get("running", False)
-    status_str = (
-        click.style("Running", fg="green")
-        if running
-        else click.style("Stopped", fg="yellow")
-    )
-    click.echo(f"Status: {status_str}")
+    if report.running:
+        pid_str = f" (pid {report.pid})" if report.pid is not None else ""
+        click.echo(f"Status: {click.style('Running', fg='green')}{pid_str}")
+        if report.owner_note:
+            click.echo(f"Note: {report.owner_note}")
+    else:
+        click.echo(f"Status: {click.style('Not running', fg='yellow')}")
 
-    if status_data.get("start_time"):
-        click.echo(f"Started: {status_data['start_time']}")
-    if status_data.get("last_poll"):
-        click.echo(f"Last poll: {status_data['last_poll']}")
-    if status_data.get("poll_count"):
-        click.echo(f"Poll count: {status_data['poll_count']}")
+    runtime = report.runtime
+    if runtime is None:
+        click.echo(f"Runtime status unavailable: {report.unavailable_reason}")
+        click.echo()
+        _echo_configured_status(haniel_config)
+        return
 
-    click.echo(f"Poll interval: {status_data.get('poll_interval', 'N/A')}s")
+    if runtime.get("start_time"):
+        click.echo(f"Started: {runtime['start_time']}")
+    if runtime.get("last_poll"):
+        click.echo(f"Last poll: {runtime['last_poll']}")
+    if runtime.get("poll_count"):
+        click.echo(f"Poll count: {runtime['poll_count']}")
+
+    click.echo(f"Poll interval: {runtime.get('poll_interval', 'N/A')}s")
     click.echo()
 
     # Services
-    services = status_data.get("services", {})
+    services = runtime.get("services", {})
     if services:
         click.echo(click.style("Services:", bold=True))
         for name, svc_status in services.items():
@@ -418,7 +434,7 @@ def status(config: Path | None, as_json: bool) -> None:
         click.echo()
 
     # Repos
-    repos = status_data.get("repos", {})
+    repos = runtime.get("repos", {})
     if repos:
         click.echo(click.style("Repositories:", bold=True))
         for name, repo_status in repos.items():
@@ -435,6 +451,19 @@ def status(config: Path | None, as_json: bool) -> None:
                 status_str = f"HEAD: {head or 'N/A'}"
 
             click.echo(f"  {name} ({branch}): {status_str}")
+
+
+def _echo_configured_status(haniel_config: HanielConfig) -> None:
+    """List what the config declares; this is not runtime state."""
+    if haniel_config.services:
+        click.echo(click.style("Services (from config; not runtime state):", bold=True))
+        for name, service in haniel_config.services.items():
+            click.echo(f"  {name}: {'enabled' if service.enabled else 'disabled'}")
+        click.echo()
+    if haniel_config.repos:
+        click.echo(click.style("Repositories (from config):", bold=True))
+        for name, repo in haniel_config.repos.items():
+            click.echo(f"  {name} ({repo.branch}): {repo.path}")
 
 
 @main.command()
