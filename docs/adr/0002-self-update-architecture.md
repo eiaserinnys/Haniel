@@ -75,7 +75,7 @@ This keeps haniel indifferent to the approval mechanism, consistent with its
 **Current behavior (2026-11).** A self-update waits for approval by default, even when
 the global `auto_apply` is `true`. It is approved from the orchestrator's Pending screen
 (web hub or iOS app) when the node is connected to one, with `haniel_update(service="haniel")`
-or `haniel_pull(repo=<self repo>)` over MCP, or with "Approve update" in the local
+or `haniel_pull(repo=<self repo>)` over MCP, or with "Approve" in the local
 dashboard (`POST /api/self-update/approve`). Approving restarts the Haniel process, so
 every service on that node stops for a moment; only services that a release manifest
 declares `overlap` or `adopt` stay up.

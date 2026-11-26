@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Callable
 
 from ..config import HanielConfig
 from .state import InstallState, InstallPhase
-from .utils import find_tool
+from .utils import find_tool, hand_over_install_root
 from .validation import ConfigValueValidationError
 
 if TYPE_CHECKING:
@@ -306,6 +306,10 @@ class InstallOrchestrator:
 
         self.state.transition_to(InstallPhase.COMPLETE)
         self.save_state()
+
+        # Last step: everything above ran as root under sudo, so the service
+        # user (SUDO_USER) gets the whole install root, install.state included.
+        hand_over_install_root(self.config_dir)
 
         logger.info("=== Installation Complete ===")
         return True

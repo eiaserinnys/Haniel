@@ -172,9 +172,9 @@ sudo systemctl start haniel                   # the name is install.service.name
 Writing `/etc/systemd/system/<name>.service` needs root; without permission the installer prints
 the unit text and the commands to run by hand. Registration runs `systemctl daemon-reload` and
 `systemctl enable`, but never `start`. The unit runs as the user who invoked `sudo` (or the
-installing user when not using `sudo`), so files that the installer created as root, such as the
-clones and venvs, must be handed to that user (`sudo chown -R "$USER": ~/haniel-root`) before the
-first start.
+installing user when not using `sudo`). When the installer runs as root under `sudo`, it hands the
+install root to the user who called `sudo` as its last step, so the clones, venvs and config files
+belong to the service user before the first start.
 
 - **With a `self:` block** the unit's `ExecStart` is `/bin/bash <self repo>/haniel-runner.sh <root>/haniel-runner.conf`.
   The installer writes `haniel-runner.conf`, and stops before writing the unit if the wrapper

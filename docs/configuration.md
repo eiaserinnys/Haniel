@@ -56,7 +56,7 @@ Where the same file is read elsewhere the reaction differs on purpose:
 |-------|--------------------------|
 | `haniel validate` | Error, exit code 1 |
 | MCP and REST saves (`haniel_create_service_config`, `haniel_update_service_config`, the repo equivalents, `haniel_register_service`, `/api/config/...`) | The service or repo being written is rejected with the reasons. Old problems in other entries do not block the save |
-| `haniel run` and config reload | Logged as a WARNING (at startup on the console or in the service journal, before `haniel.log` is opened), and haniel starts anyway. A `ready` that cannot be used also logs a WARNING when the service starts, and the service is treated as running |
+| `haniel run` and config reload | Logged as a WARNING (at startup, on the console or in the service journal and in `haniel.log`), and haniel starts anyway. A `ready` that cannot be used also logs a WARNING when the service starts, and the service is treated as running |
 
 ## Saving configuration through tools
 
@@ -488,7 +488,7 @@ A self-update does not follow the global `auto_apply`: it waits for approval by 
 
 When changes are detected:
 - `auto_update: true` — Shuts down all services and exits with code 10
-- `auto_update: false` — Sends webhook notification and waits for approval. Approve it from the orchestrator's Pending screen (web hub or iOS app) when the node is connected to one, with `haniel_update(service="haniel")` or `haniel_pull(repo=<the self repo>)` over MCP, or with "Approve update" in the local dashboard (`POST /api/self-update/approve`).
+- `auto_update: false` — Sends webhook notification and waits for approval. Approve it from the orchestrator's Pending screen (web hub or iOS app) when the node is connected to one, with `haniel_update(service="haniel")` or `haniel_pull(repo=<the self repo>)` over MCP, or with "Approve" in the local dashboard (`POST /api/self-update/approve`).
 
 **Approving a self-update restarts the Haniel process, so every service on this node stops for a moment.** Only services that an active release manifest declares `overlap` or `adopt` stay up (see below). The same is true of `haniel_restart(service="haniel")`, which restarts Haniel without updating it (exit code 11). Changes pending in other repos are not applied by the self-update; approve them after Haniel is back.
 

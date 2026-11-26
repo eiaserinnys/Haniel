@@ -28,6 +28,40 @@ def write_private_text(path: Path, text: str) -> None:
         stream.write(text)
 
 
+def hand_over_install_root(config_dir: Path) -> None:
+    """Give the install root to the user who ran the installer through sudo.
+
+    The unit runs as SUDO_USER, so everything the root-run installer created
+    must belong to that user or the service cannot read its config or update
+    itself. Does nothing unless this is Linux, root, and SUDO_USER is set.
+    A path that cannot be handed over is warned about and skipped.
+    """
+    if not sys.platform.startswith("linux") or os.geteuid() != 0:
+        return
+    sudo_user = os.environ.get("SUDO_USER")
+    if not sudo_user:
+        return
+    import pwd
+
+    try:
+        entry = pwd.getpwnam(sudo_user)
+    except KeyError:
+        logger.warning(f"Cannot hand over {config_dir}: unknown user {sudo_user}")
+        return
+
+    def chown_path(path: Path) -> None:
+        try:
+            os.chown(path, entry.pw_uid, entry.pw_gid, follow_symlinks=False)
+        except OSError as e:
+            logger.warning(f"Could not hand over {path} to {sudo_user}: {e}")
+
+    chown_path(config_dir)
+    for dirpath, dirnames, filenames in os.walk(config_dir, followlinks=False):
+        for name in dirnames + filenames:
+            chown_path(Path(dirpath) / name)
+    logger.info(f"Handed over {config_dir} to {sudo_user}")
+
+
 def resolve_self_update_runner(config: "HanielConfig", config_dir: Path) -> Path:
     """Return the absolute haniel-runner.sh path of the self-update repo."""
     self_update = config.self_update
