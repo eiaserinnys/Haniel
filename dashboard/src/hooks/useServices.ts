@@ -223,18 +223,24 @@ export function useServices() {
     }
   }, [])
 
+  // Throws on failure so the restart confirmation can show the error and offer a retry.
   const selfRestart = useCallback(async () => {
-    try {
-      await api.selfRestart()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    }
+    await api.selfRestart()
+  }, [])
+
+  const dismissError = useCallback(() => setError(null), [])
+
+  const dismissUpdate = useCallback(() => {
+    updateStartedAtRef.current = null
+    setUpdating(false)
   }, [])
 
   const refreshStatus = useCallback(async () => {
     try {
       const s = await api.getStatus()
       setStatus(s)
+      setLoading(false)
+      setError(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     }
@@ -251,6 +257,8 @@ export function useServices() {
     approveSelfUpdate,
     selfRestart,
     refreshStatus,
+    dismissError,
+    dismissUpdate,
     updating,
     updateResult,
   }

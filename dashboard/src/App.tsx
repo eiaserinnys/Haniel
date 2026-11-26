@@ -1,58 +1,28 @@
-// Haniel Dashboard App
-// Uses Phase 1 API types: RunnerStatus, WsEvent
+// Haniel local dashboard (Index style): header bar, section sidebar, one ledger page.
 
-import { Wifi, WifiOff, RefreshCw, Plus, Pencil, Trash2 } from 'lucide-react'
-import { useServices } from '@/hooks/useServices'
-import { ServiceCard } from '@/components/ServiceCard'
-import { HanielSelfCard } from '@/components/HanielSelfCard'
-import { RepoServiceGroup } from '@/components/RepoServiceGroup'
-import { ServiceEditor } from '@/components/ServiceEditor'
-import { RepoEditor } from '@/components/RepoEditor'
+import { Fragment, useMemo, useState } from 'react'
+import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { DependencyGraph } from '@/components/DependencyGraph'
-import { ChatPanel } from '@/components/ChatPanel'
-import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable'
+import { Drawer } from '@/components/Drawer'
+import { Icon } from '@/components/Icon'
+import { RepoEditor } from '@/components/RepoEditor'
+import { RepoGroupRow, RepoRow, SelfRow } from '@/components/RepoRows'
+import { SidePanel, type SectionId } from '@/components/SectionNav'
+import { ServiceEditor } from '@/components/ServiceEditor'
+import { ServiceRow } from '@/components/ServiceRow'
+import { LoadError, Notice, SkeletonRows } from '@/components/states'
+import { Topbar } from '@/components/Topbar'
+import { UpdateOverlay } from '@/components/UpdateOverlay'
+import { useMediaQuery } from '@/hooks/useMediaQuery'
+import { useServices } from '@/hooks/useServices'
 import { api } from '@/lib/api'
 import { groupServicesAndRepos } from '@/lib/groups'
-import type { ServiceConfig, ServiceConfigInput, RepoConfigInput, SelfUpdateResult } from '@/lib/types'
-import { useEffect, useMemo, useState } from 'react'
-import './index.css'
+import type { RepoConfigInput, ServiceConfig, ServiceConfigInput } from '@/lib/types'
+import { errorMessage } from '@/lib/utils'
 
-/** Returns seconds until the next poll based on last_poll + poll_interval. */
-function useNextPollCountdown(
-  lastPoll: string | null,
-  pollInterval: number,
-): number {
-  const [secs, setSecs] = useState(0)
+type EditorState<T> = { open: false } | { open: true; editName?: string; editConfig?: T }
 
-  useEffect(() => {
-    if (!lastPoll || pollInterval <= 0) return
-
-    const tick = () => {
-      const elapsed = (Date.now() - new Date(lastPoll).getTime()) / 1000
-      setSecs(Math.max(0, Math.ceil(pollInterval - elapsed)))
-    }
-
-    tick()
-    const id = setInterval(tick, 1000)
-    return () => clearInterval(id)
-  }, [lastPoll, pollInterval])
-
-  return secs
-}
-
-// ── Editor dialog state types ─────────────────────────────────────────────────
-
-interface ServiceEditorState {
-  open: boolean
-  editName?: string
-  editConfig?: ServiceConfig
-}
-
-interface RepoEditorState {
-  open: boolean
-  editName?: string
-  editConfig?: RepoConfigInput
-}
+type ConfirmState = { kind: 'service' | 'repo' | 'restart'; name: string } | null
 
 export default function App() {
   const {
@@ -66,346 +36,256 @@ export default function App() {
     approveSelfUpdate,
     selfRestart,
     refreshStatus,
+    dismissError,
+    dismissUpdate,
     updating,
     updateResult,
   } = useServices()
 
-  const countdown = useNextPollCountdown(
-    status?.last_poll ?? null,
-    status?.poll_interval ?? 0,
-  )
-
-  const [svcEditor, setSvcEditor] = useState<ServiceEditorState>({ open: false })
-  const [repoEditor, setRepoEditor] = useState<RepoEditorState>({ open: false })
+  const [svcEditor, setSvcEditor] = useState<EditorState<ServiceConfig>>({ open: false })
+  const [repoEditor, setRepoEditor] = useState<EditorState<RepoConfigInput>>({ open: false })
+  const [confirm, setConfirm] = useState<ConfirmState>(null)
   const [crudError, setCrudError] = useState<string | null>(null)
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const [section, setSection] = useState<SectionId>('services')
+  const phone = useMediaQuery('(max-width: 760px)', (matches) => {
+    if (!matches) setDrawerOpen(false)
+  })
 
-  // ── Group services by repo ────────────────────────────────────────────────
+  const groups = useMemo(() => (status ? groupServicesAndRepos(status, status.self_update?.repo) : null), [status])
 
-  const groups = useMemo(
-    () => (status ? groupServicesAndRepos(status, status.self_update?.repo) : null),
-    [status],
-  )
-
-  // ── Service CRUD handlers ──────────────────────────────────────────────────
-
-  const handleAddService = () => {
-    setSvcEditor({ open: true })
+  const failure = error ?? crudError
+  const dismissFailure = () => {
+    dismissError()
+    setCrudError(null)
   }
+  const reportError = (message: string) => setCrudError(message)
 
-  const handleEditService = (name: string) => {
-    const cfg = status?.services[name]?.config
-    setSvcEditor({ open: true, editName: name, editConfig: cfg })
-  }
+  // ── Service and repo CRUD ──────────────────────────────────────────────────
 
-  const handleDeleteService = async (name: string) => {
-    if (!window.confirm(`Are you sure you want to delete service "${name}"?`)) return
-    try {
-      await api.deleteService(name)
-      setCrudError(null)
-      refreshStatus()
-    } catch (e) {
-      setCrudError(e instanceof Error ? e.message : String(e))
-    }
-  }
+  const handleEditService = (name: string) =>
+    setSvcEditor({ open: true, editName: name, editConfig: status?.services[name]?.config })
 
   const handleSaveService = async (name: string, config: ServiceConfigInput) => {
-    if (svcEditor.editName) {
-      await api.updateService(name, config)
-    } else {
-      await api.createService(name, config)
-    }
+    if (svcEditor.open && svcEditor.editName) await api.updateService(name, config)
+    else await api.createService(name, config)
     setCrudError(null)
     setSvcEditor({ open: false })
-    refreshStatus()
-  }
-
-  // ── Repo CRUD handlers ────────────────────────────────────────────────────
-
-  const handleAddRepo = () => {
-    setRepoEditor({ open: true })
+    void refreshStatus()
   }
 
   const handleEditRepo = async (name: string) => {
     try {
       const repos = await api.getConfigRepos()
-      const cfg = repos[name]
-      setRepoEditor({ open: true, editName: name, editConfig: cfg })
+      setRepoEditor({ open: true, editName: name, editConfig: repos[name] })
     } catch (e) {
-      setCrudError(e instanceof Error ? e.message : String(e))
-    }
-  }
-
-  const handleDeleteRepo = async (name: string) => {
-    if (!window.confirm(`Are you sure you want to delete repo "${name}"?`)) return
-    try {
-      await api.deleteRepo(name)
-      setCrudError(null)
-      refreshStatus()
-    } catch (e) {
-      setCrudError(e instanceof Error ? e.message : String(e))
+      setCrudError(errorMessage(e))
     }
   }
 
   const handleSaveRepo = async (name: string, config: RepoConfigInput) => {
-    if (repoEditor.editName) {
-      await api.updateRepo(name, config)
-    } else {
-      await api.createRepo(name, config)
-    }
+    if (repoEditor.open && repoEditor.editName) await api.updateRepo(name, config)
+    else await api.createRepo(name, config)
     setCrudError(null)
     setRepoEditor({ open: false })
-    refreshStatus()
+    void refreshStatus()
+  }
+
+  const runConfirmed = async () => {
+    if (!confirm) return
+    if (confirm.kind === 'service') await api.deleteService(confirm.name)
+    else if (confirm.kind === 'repo') await api.deleteRepo(confirm.name)
+    else await selfRestart()
+    setCrudError(null)
+    if (confirm.kind !== 'restart') void refreshStatus()
+  }
+
+  // A deleted row takes the opener with it; hand focus to its section instead of dropping it on the page.
+  const closeConfirm = () => {
+    const kind = confirm?.kind
+    setConfirm(null)
+    if (kind === 'restart' || !kind) return
+    requestAnimationFrame(() => {
+      if (document.activeElement === document.body) {
+        document.getElementById(kind === 'service' ? 'sec-services' : 'sec-repos')?.focus()
+      }
+    })
+  }
+
+  const jump = (id: SectionId) => {
+    setSection(id)
+    setDrawerOpen(false)
+    document.getElementById(`sec-${id}`)?.scrollIntoView({ block: 'start' })
   }
 
   // ── Derived values ─────────────────────────────────────────────────────────
 
   const availableRepos = status ? Object.keys(status.repos) : []
+  const counts = {
+    services: groups && status ? Object.keys(status.services).length : null,
+    repos: groups ? groups.standaloneRepos.length : null,
+  }
+  const loadFailed = loading && (wsStatus === 'reconnecting' || wsStatus === 'disconnected')
+  const side = (
+    <SidePanel status={status} onFetch={refreshStatus} counts={counts} current={section} onJump={jump} />
+  )
+
   return (
-    <div className="h-screen flex flex-col bg-zinc-900 text-zinc-100">
-      {/* Header */}
-      <header className="border-b border-zinc-800 px-4 py-3 flex items-center gap-3 shrink-0">
-        <h1 className="font-semibold text-zinc-100 flex-1">Haniel Dashboard</h1>
-        <WsIndicator status={wsStatus} />
-        <button
-          onClick={() => {
-            // Surface reload failures to the user — silent swallow hid the
-            // /api/config/reload 404 reported in the E2E review (P1). The
-            // endpoint is now /api/reload; the catch is kept defensive so
-            // future regressions are immediately visible.
-            api.reload().catch((e) => {
-              setCrudError(e instanceof Error ? e.message : String(e))
-            })
-          }}
-          title="Reload config"
-          className="p-1.5 text-zinc-400 hover:text-zinc-200 transition-colors"
-        >
-          <RefreshCw size={15} />
-        </button>
-      </header>
+    <div className="app">
+      <Topbar connection={loading && wsStatus === 'connected' ? 'connecting' : wsStatus} onOpenMenu={() => setDrawerOpen(true)} onError={reportError} />
 
-      {/* Main body: 2-panel split */}
-      <ResizablePanelGroup orientation="horizontal" className="flex-1 overflow-hidden">
-        <ResizablePanel defaultSize={60} minSize={20}>
-          <div className="h-full overflow-y-auto select-none">
-            <main className="max-w-4xl mx-auto px-4 py-6 space-y-6">
-        {/* Error banner */}
-        {(error || crudError) && (
-          <div className="bg-red-900/30 border border-red-700/50 rounded-lg px-4 py-2 text-sm text-red-300">
-            {error || crudError}
-          </div>
-        )}
+      <div className="shell">
+        <aside className="sidebar">{side}</aside>
 
-        {/* Loading state */}
-        {loading && (
-          <div className="text-center text-zinc-500 py-12">Connecting…</div>
-        )}
+        <div className="content scroll">
+          <main className="content-inner">
+            <h1 className="sr-only">Haniel local dashboard</h1>
 
-        {/* Services + Repos */}
-        {status && groups && !loading && (
-          <>
-            {/* SERVICES section */}
-            <section>
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">
+            {failure && !loadFailed && <Notice detail={failure} onDismiss={dismissFailure} />}
+
+            <section className="sect" id="sec-services" tabIndex={-1} aria-labelledby="h-services" aria-busy={loading}>
+              <div className="sect-head">
+                <h2 className="sect-title" id="h-services">
                   Services
                 </h2>
-                <button
-                  onClick={handleAddService}
-                  className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-200 transition-colors px-2 py-1 rounded hover:bg-zinc-800"
-                >
-                  <Plus size={12} />
-                  Add Service
+                <button type="button" className="btn btn-ghost edge" onClick={() => setSvcEditor({ open: true })}>
+                  <Icon name="plus" small />
+                  Add service
                 </button>
               </div>
-
-              <div className="flex flex-col gap-3">
-                {/* Haniel self card */}
-                {groups.selfRepo && status.self_update && (
-                  <HanielSelfCard
-                    repo={groups.selfRepo}
-                    selfUpdate={status.self_update}
-                    onApprove={approveSelfUpdate}
-                    onRestart={selfRestart}
-                  />
-                )}
-
-                {/* Repo+service groups */}
-                {groups.repoGroups.map((group) => (
-                  <RepoServiceGroup
-                    key={group.repoName}
-                    group={group}
-                    onControl={controlService}
-                    onPull={pullRepo}
-                    isPulling={pullingRepos.has(group.repoName)}
-                    onEdit={handleEditService}
-                    onDelete={handleDeleteService}
-                  />
-                ))}
-
-                {/* Standalone services (no repo) */}
-                {groups.standaloneServices.map(({ name, service }) => (
-                  <ServiceCard
-                    key={name}
-                    name={name}
-                    service={service}
-                    onControl={controlService}
-                    onEdit={handleEditService}
-                    onDelete={handleDeleteService}
-                  />
-                ))}
-
-                {/* Empty state */}
-                {groups.repoGroups.length === 0 &&
-                  groups.standaloneServices.length === 0 &&
-                  !groups.selfRepo && (
-                  <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center text-zinc-500 text-sm">
-                    No services configured.
-                  </div>
-                )}
-              </div>
-            </section>
-
-            {/* REPOSITORIES section (standalone repos + add button) */}
-            <section>
-                <div className="flex items-center justify-between mb-3">
-                  <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">
-                    Repositories
-                  </h2>
-                  <button
-                    onClick={handleAddRepo}
-                    className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-200 transition-colors px-2 py-1 rounded hover:bg-zinc-800"
-                  >
-                    <Plus size={12} />
-                    Add Repo
-                  </button>
+              {loadFailed ? (
+                <div className="ledger">
+                  <LoadError what="services" detail={error ?? 'WebSocket /ws is closed. Retrying.'} onRetry={() => void refreshStatus()} />
                 </div>
-                {groups.standaloneRepos.length > 0 ? (
-                  <div className="space-y-2">
-                    {groups.standaloneRepos.map(({ repoName, repo }) => (
-                      <div
-                        key={repoName}
-                        className="rounded-lg border border-zinc-700 bg-zinc-800/50 px-4 py-3"
-                      >
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <span className="font-medium text-zinc-200">{repoName}</span>
-                            <span className="ml-2 text-xs text-zinc-500">
-                              {repo.branch} · {repo.last_head ?? '—'}
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            {pullingRepos.has(repoName) ? (
-                              <span className="text-xs text-blue-400/60 px-2 py-1 animate-pulse">
-                                Pulling…
-                              </span>
-                            ) : repo.pending_changes && (
-                              <button
-                                onClick={() => pullRepo(repoName)}
-                                className="text-xs bg-blue-600/20 text-blue-400 hover:bg-blue-600/40 px-2 py-1 rounded transition-colors"
-                              >
-                                Pull ({repo.pending_changes.commits.length} commits)
-                              </button>
-                            )}
-                            <button
-                              onClick={() => handleEditRepo(repoName)}
-                              title="Edit"
-                              className="p-1.5 rounded text-zinc-500 hover:text-zinc-300 transition-colors hover:bg-zinc-700/50"
-                            >
-                              <Pencil size={14} />
-                            </button>
-                            <button
-                              onClick={() => handleDeleteRepo(repoName)}
-                              title="Delete"
-                              className="p-1.5 rounded text-zinc-500 hover:text-red-400 transition-colors hover:bg-zinc-700/50"
-                            >
-                              <Trash2 size={14} />
-                            </button>
-                          </div>
-                        </div>
-                        {repo.fetch_error && (
-                          <div className="mt-1 text-xs text-red-400">
-                            Fetch error: {repo.fetch_error}
-                          </div>
-                        )}
-                        {repo.pending_changes && (
-                          <details className="mt-2 text-xs text-zinc-400">
-                            <summary className="cursor-pointer hover:text-zinc-300">
-                              {repo.pending_changes.commits.length} pending commits
-                            </summary>
-                            <pre className="mt-1 bg-zinc-900 rounded p-2 overflow-x-auto">
-                              {repo.pending_changes.commits.join('\n')}
-                            </pre>
-                            {repo.pending_changes.stat && (
-                              <pre className="mt-1 bg-zinc-900 rounded p-2 overflow-x-auto">
-                                {repo.pending_changes.stat}
-                              </pre>
-                            )}
-                          </details>
-                        )}
-                      </div>
+              ) : !status || !groups ? (
+                <>
+                  <div className="ledger ledger-accent">
+                    <SkeletonRows count={1} />
+                  </div>
+                  <div className="ledger">
+                    <SkeletonRows count={4} />
+                  </div>
+                </>
+              ) : (
+                <>
+                  {groups.selfRepo && status.self_update && (
+                    <div className="ledger ledger-accent">
+                      <SelfRow
+                        repo={groups.selfRepo}
+                        selfUpdate={status.self_update}
+                        onApprove={approveSelfUpdate}
+                        onRestart={() => setConfirm({ kind: 'restart', name: 'haniel' })}
+                      />
+                    </div>
+                  )}
+                  <div className="ledger">
+                    {groups.repoGroups.map((group) => (
+                      <Fragment key={group.repoName}>
+                        <RepoGroupRow group={group} isPulling={pullingRepos.has(group.repoName)} onPull={pullRepo} />
+                        {group.services.map(({ name, service }) => (
+                          <ServiceRow
+                            key={name}
+                            name={name}
+                            service={service}
+                            onControl={controlService}
+                            onEdit={handleEditService}
+                            onDelete={(n) => setConfirm({ kind: 'service', name: n })}
+                            hideRepo
+                          />
+                        ))}
+                      </Fragment>
                     ))}
+                    {groups.standaloneServices.map(({ name, service }) => (
+                      <ServiceRow
+                        key={name}
+                        name={name}
+                        service={service}
+                        onControl={controlService}
+                        onEdit={handleEditService}
+                        onDelete={(n) => setConfirm({ kind: 'service', name: n })}
+                      />
+                    ))}
+                    {groups.repoGroups.length === 0 && groups.standaloneServices.length === 0 && (
+                      <div className="empty">
+                        <p className="empty-title">No services</p>
+                        <button type="button" className="btn btn-outline" onClick={() => setSvcEditor({ open: true })}>
+                          <Icon name="plus" small />
+                          Add service
+                        </button>
+                      </div>
+                    )}
                   </div>
-                ) : (
-                  <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center text-zinc-500 text-sm">
-                    No standalone repositories.
-                  </div>
-                )}
-              </section>
-
-            {/* Dependency Graph */}
-            {status.dependency_graph && Object.keys(status.dependency_graph).length > 0 && (
-              <section>
-                <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-3">
-                  Dependency Graph
-                </h2>
-                <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
-                  <DependencyGraph graph={status.dependency_graph} />
-                </div>
-              </section>
-            )}
-
-            {/* Runner info footer */}
-            <section className="text-xs text-zinc-600 border-t border-zinc-800 pt-4">
-              <div className="flex gap-6 flex-wrap items-center">
-                <span>Poll count: {status.poll_count}</span>
-                <span>Interval: {status.poll_interval}s</span>
-                {status.last_poll && (
-                  <>
-                    <span>Last poll: {new Date(status.last_poll).toLocaleTimeString()}</span>
-                    <span className={countdown <= 5 ? 'text-zinc-400' : ''}>
-                      Next in: {countdown}s
-                    </span>
-                  </>
-                )}
-                <button
-                  onClick={refreshStatus}
-                  title="Fetch status now"
-                  className="flex items-center gap-1 text-zinc-500 hover:text-zinc-300 transition-colors"
-                >
-                  <RefreshCw size={11} />
-                  Fetch now
-                </button>
-                {status.pending_restarts.length > 0 && (
-                  <span className="text-yellow-500">
-                    Pending restarts: {status.pending_restarts.join(', ')}
-                  </span>
-                )}
-              </div>
+                </>
+              )}
             </section>
-          </>
-        )}
-            </main>
-          </div>
-        </ResizablePanel>
 
-        <ResizableHandle />
+            <section className="sect" id="sec-repos" tabIndex={-1} aria-labelledby="h-repos" aria-busy={loading}>
+              <div className="sect-head">
+                <h2 className="sect-title" id="h-repos">
+                  Repositories
+                </h2>
+                <button type="button" className="btn btn-ghost edge" onClick={() => setRepoEditor({ open: true })}>
+                  <Icon name="plus" small />
+                  Add repo
+                </button>
+              </div>
+              {!groups ? (
+                loadFailed ? null : (
+                  <div className="ledger">
+                    <SkeletonRows count={2} />
+                  </div>
+                )
+              ) : (
+                <div className="ledger">
+                  {groups.standaloneRepos.map((repo) => (
+                    <RepoRow
+                      key={repo.repoName}
+                      repo={repo}
+                      isPulling={pullingRepos.has(repo.repoName)}
+                      onPull={pullRepo}
+                      onEdit={handleEditRepo}
+                      onDelete={(n) => setConfirm({ kind: 'repo', name: n })}
+                    />
+                  ))}
+                  {groups.standaloneRepos.length === 0 && (
+                    <div className="empty is-inline">
+                      <p className="empty-text">No standalone repositories.</p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </section>
 
-        <ResizablePanel defaultSize={40} minSize={15}>
-          <ChatPanel />
-        </ResizablePanel>
-      </ResizablePanelGroup>
+            <section className="sect" id="sec-deps" aria-labelledby="h-deps" aria-busy={loading}>
+              <div className="sect-head">
+                <h2 className="sect-title" id="h-deps">
+                  Dependencies
+                </h2>
+              </div>
+              {!status ? (
+                loadFailed ? null : (
+                  <div className="figure">
+                    <div className="sk-lines">
+                      <span className="sk w2" />
+                      <span className="sk w1" />
+                      <span className="sk w3" />
+                    </div>
+                  </div>
+                )
+              ) : status.dependency_graph && Object.keys(status.dependency_graph).length > 0 ? (
+                <DependencyGraph graph={status.dependency_graph} />
+              ) : (
+                <div className="figure">
+                  <p className="empty-text">No dependencies.</p>
+                </div>
+              )}
+            </section>
+          </main>
+        </div>
+      </div>
 
-      {/* ServiceEditor dialog */}
+      {drawerOpen && phone && <Drawer onClose={() => setDrawerOpen(false)}>{side}</Drawer>}
+
       {svcEditor.open && (
         <ServiceEditor
           editName={svcEditor.editName}
@@ -416,7 +296,6 @@ export default function App() {
         />
       )}
 
-      {/* RepoEditor dialog */}
       {repoEditor.open && (
         <RepoEditor
           editName={repoEditor.editName}
@@ -426,69 +305,23 @@ export default function App() {
         />
       )}
 
-      {/* Self-update overlay */}
-      {updating && <UpdateOverlay result={updateResult} />}
+      {confirm && (
+        <ConfirmDialog
+          title={confirm.kind === 'restart' ? 'Restart Haniel?' : `Delete ${confirm.kind}?`}
+          sub={
+            confirm.kind === 'restart' ? (
+              <span>Every service stops until Haniel is back.</span>
+            ) : (
+              <span className="mono">{confirm.name}</span>
+            )
+          }
+          action={confirm.kind === 'restart' ? 'Restart' : 'Delete'}
+          onConfirm={runConfirmed}
+          onClose={closeConfirm}
+        />
+      )}
+
+      {updating && <UpdateOverlay result={updateResult} onDismiss={dismissUpdate} />}
     </div>
-  )
-}
-
-const UPDATE_TIMEOUT_MS = 120_000
-
-interface UpdateOverlayProps {
-  result: SelfUpdateResult | null
-}
-
-function UpdateOverlay({ result }: UpdateOverlayProps) {
-  const [timedOut, setTimedOut] = useState(false)
-
-  useEffect(() => {
-    // Only count down while still waiting. Once a result arrives, useServices
-    // either reloads (ok) or surfaces an error (not ok), and the overlay
-    // closes — no need for the timeout to fire then.
-    if (result !== null) return
-    const t = window.setTimeout(() => setTimedOut(true), UPDATE_TIMEOUT_MS)
-    return () => window.clearTimeout(t)
-  }, [result])
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
-      <div className="relative bg-zinc-800 border border-zinc-700 rounded-xl px-8 py-6 flex flex-col items-center gap-4 shadow-2xl">
-        {timedOut ? (
-          <>
-            <WifiOff className="text-yellow-400" size={32} />
-            <div className="text-zinc-100 font-medium">Server not responding</div>
-            <div className="text-zinc-400 text-sm">Please refresh manually.</div>
-            <button
-              onClick={() => window.location.reload()}
-              className="text-sm bg-zinc-700 hover:bg-zinc-600 text-zinc-200 px-4 py-1.5 rounded transition-colors"
-            >
-              Refresh
-            </button>
-          </>
-        ) : (
-          <>
-            <RefreshCw className="animate-spin text-blue-400" size={32} />
-            <div className="text-zinc-100 font-medium">Updating…</div>
-            <div className="text-zinc-400 text-sm">Will auto-refresh when the update completes.</div>
-          </>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function WsIndicator({ status }: { status: string }) {
-  const connected = status === 'connected'
-  return (
-    <span
-      title={`WebSocket: ${status}`}
-      className={`flex items-center gap-1 text-xs ${
-        connected ? 'text-green-400' : 'text-yellow-400'
-      }`}
-    >
-      {connected ? <Wifi size={13} /> : <WifiOff size={13} />}
-      {status}
-    </span>
   )
 }

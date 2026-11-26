@@ -1,73 +1,359 @@
-@import "tailwindcss";
-@plugin "@tailwindcss/typography";
+@import "pretendard/dist/web/variable/pretendardvariable-dynamic-subset.css";
+@import "@fontsource/ibm-plex-mono/latin-400.css";
+@import "@fontsource/ibm-plex-mono/latin-500.css";
 
-/* ── Chat panel CSS variables ───────────────────────────────────────────── */
-
-/* @theme inline: activate text-accent-blue etc. utility classes (Tailwind v4) */
-@theme inline {
-  --color-accent-blue: var(--node-user);
-  --color-accent-green: var(--node-response);
-  --color-accent-orange: var(--node-tool);
-  --color-accent-red: var(--node-error);
-  --color-muted-foreground: oklch(0.55 0 0);
-  --color-foreground: oklch(0.95 0 0);
-  --color-border: oklch(0.25 0 0);
-  --color-input: oklch(0.15 0 0);
-  --color-background: oklch(0.11 0 0);
-  --color-muted: oklch(0.2 0 0);
-}
-
+/* Index design tokens (copied by name and value from the approved mockup; card #1884). */
 :root {
-  /* node colours (light mode) */
-  --node-user: #3b82f6;
-  --node-response: #10b981;
-  --node-tool: #f97316;
-  --node-intervention: #a855f7;
-  --node-error: #ef4444;
-  --node-system: #6b7280;
+  color-scheme: light;
+  --bg: #FFFFFF;
+  --bg-2: #F5F5F3;
+  --ink: #0F0F0F;
+  --ink-2: #5C5C5C;
+  --ink-3: #9A9A9A;
+  --rule: #E4E4E1;
+  --rule-strong: #0F0F0F;
+  --accent: #0B7A4B;
+  --accent-hover: #096841;
+  --accent-soft: rgb(11 122 75 / 8%);
+  --accent-press: rgb(11 122 75 / 14%);
+  --focus: #0B7A4B;
+  --control-rule: #8A8A8A;
+  --scrim: rgb(15 15 15 / 40%);
+  --skeleton: #ECECE9;
+  --scrollbar-thumb: #8A8A8A;
+  --scrollbar-thumb-hover: var(--ink-2);
+  --scrollbar-thumb-active: var(--accent);
+
+  --on-accent: var(--bg);
+  --state-ok: var(--accent);
+  --state-busy: var(--accent);
+  --state-wait: var(--ink-2);
+  --state-off: var(--ink-3);
+  --state-fail-bg: var(--ink);
+  --state-fail-ink: var(--bg);
+  --danger-bg: var(--ink);
+  --danger-ink: var(--bg);
+  --danger-hover: var(--ink-2);
+
+  --font-body: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, "Apple SD Gothic Neo", "Segoe UI", "Malgun Gothic", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  --zero: 0px;
+  --line: 1px;
+  --line-strong: 2px;
+  --space-0: 4px;
+  --space-1: 8px;
+  --space-h: 12px;
+  --space-2: 16px;
+  --space-3: 24px;
+  --space-4: 32px;
+  --space-5: 48px;
+  --space-6: 64px;
+  --gutter: 32px;
+  --gutter-m: 20px;
+  --icon-inset: 12px;
+
+  --meta-size: 13px;
+  --ui-size: 15px;
+  --row-title-size: 16px;
+  --section-size: 18px;
+  --metric-size: 20px;
+  --overlay-title-size: 22px;
+  --page-title-size: 32px;
+  --page-title-m-size: 28px;
+  --brand-size: 18px;
+  --brand-m-size: 16px;
+  --title-tracking: -0.03em;
+  --claim-tracking: -0.015em;
+  --eyebrow-tracking: 0.04em;
+
+  --topbar-h: 64px;
+  --tabbar-h: 64px;
+  --sidebar-w: 240px;
+  --drawer-w: 280px;
+  --nav-row-h: 40px;
+  --tap: 44px;
+  --icon-btn: 40px;
+  --icon: 20px;
+  --icon-sm: 16px;
+  --btn-h: 36px;
+  --input-h: 40px;
+  --chip-h: 24px;
+  --marker: 8px;
+  --marker-big: 24px;
+  --check: 16px;
+  --check-mark-w: 5px;
+  --check-mark-h: 9px;
+  --lead-col: 24px;
+  --chev-col: 24px;
+  --metric-col: 176px;
+  --time-col: 64px;
+  --state-col: 136px;
+  --label-col: 96px;
+  --kv-min: 160px;
+  --container-max: 1280px;
+  --dialog-w: 480px;
+  --confirm-w: 400px;
+  --login-w: 360px;
+  --menu-w: 200px;
+  --filter-w: 280px;
+  --toast-w: 380px;
+  --log-max: 320px;
+  --files-max: 240px;
+  --table-fade: 32px;
+  --sk-title: 16px;
+  --sk-meta: 13px;
+  --sk-w-1: 40%;
+  --sk-w-2: 64%;
+  --sk-w-3: 28%;
+  --sk-metric: 72px;
+  --graph-node-w: 216px;
+  --graph-node-h: 40px;
+
+  --frame-wide: 1440px;
+  --frame-mid: 900px;
+  --frame-narrow: 390px;
+  --frame-h-wide: 900px;
+  --frame-h-mid: 1000px;
+  --frame-h-narrow: 844px;
+
+  --disabled-opacity: 0.4;
+  --focus-offset: 2px;
+  --scrollbar-size: 12px;
+  --scrollbar-thin: 8px;
+  --scrollbar-thumb-min: 48px;
+  --motion-fast: 150ms;
+  --motion-mid: 220ms;
+  --motion-busy: 1200ms;
+
+  --z-sticky: 2;
+  --z-menu: 20;
+  --z-drawer: 30;
+  --z-dialog: 40;
+  --z-toast: 50;
+  --z-chrome: 60;
 }
 
-.dark {
-  --node-user: hsl(213, 70%, 50%);
-  --node-response: hsl(160, 60%, 40%);
-  --node-tool: hsl(25, 80%, 50%);
-  --node-intervention: hsl(270, 60%, 50%);
-  --node-error: hsl(0, 70%, 50%);
-  --node-system: hsl(220, 10%, 45%);
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0C0D0C;
+  --bg-2: #141614;
+  --ink: #ECEDEA;
+  --ink-2: #A0A39E;
+  --ink-3: #666A64;
+  --rule: #242724;
+  --rule-strong: #ECEDEA;
+  --accent: #4FD69C;
+  --accent-hover: #74E0B2;
+  --accent-soft: rgb(79 214 156 / 10%);
+  --accent-press: rgb(79 214 156 / 18%);
+  --focus: #4FD69C;
+  --control-rule: #666A64;
+  --scrim: rgb(0 0 0 / 60%);
+  --skeleton: #1C1F1C;
+  --scrollbar-thumb: #666A64;
 }
 
-/* custom scrollbar */
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: oklch(0.3 0 0); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: oklch(0.4 0 0); }
-
-/* streaming cursor animation */
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --bg: #0C0D0C;
+    --bg-2: #141614;
+    --ink: #ECEDEA;
+    --ink-2: #A0A39E;
+    --ink-3: #666A64;
+    --rule: #242724;
+    --rule-strong: #ECEDEA;
+    --accent: #4FD69C;
+    --accent-hover: #74E0B2;
+    --accent-soft: rgb(79 214 156 / 10%);
+    --accent-press: rgb(79 214 156 / 18%);
+    --focus: #4FD69C;
+    --control-rule: #666A64;
+    --scrim: rgb(0 0 0 / 60%);
+    --skeleton: #1C1F1C;
+    --scrollbar-thumb: #666A64;
+  }
 }
 
-/* ── Haniel base variables ────────────────────────────────────────────────── */
+@media (prefers-contrast: more) {
+  :root {
+    --ink-2: var(--ink);
+    --rule: var(--rule-strong);
+    --control-rule: var(--ink);
+    --accent-soft: transparent;
+    --scrollbar-thumb: var(--ink);
+  }
+}
 
-:root {
-  --background: 222 47% 11%;
-  --foreground: 210 40% 98%;
-  --card: 222 47% 14%;
-  --border: 217 33% 25%;
-  --muted: 217 33% 18%;
-  --muted-foreground: 215 20% 65%;
-  --primary: 210 100% 56%;
-  --primary-foreground: 222 47% 11%;
-  --destructive: 0 63% 31%;
-  --destructive-foreground: 210 40% 98%;
-  --ring: 210 100% 56%;
+@media (forced-colors: active) {
+  :root {
+    --bg: Canvas;
+    --bg-2: Canvas;
+    --ink: CanvasText;
+    --ink-2: CanvasText;
+    --ink-3: GrayText;
+    --rule: CanvasText;
+    --rule-strong: CanvasText;
+    --accent: Highlight;
+    --accent-soft: Canvas;
+    --accent-press: Highlight;
+    --focus: Highlight;
+    --control-rule: CanvasText;
+    --skeleton: GrayText;
+    --state-fail-bg: CanvasText;
+    --state-fail-ink: Canvas;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-mid: 0ms;
+  }
+}
+
+/* ---------- base ---------- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-body);
 }
 
 body {
-  background-color: hsl(var(--background));
-  color: hsl(var(--foreground));
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
-  margin: 0;
-  min-height: 100vh;
+  height: 100%;
+  margin: var(--zero);
+  background: var(--bg);
+  color: var(--ink);
+  font-size: var(--ui-size);
+  line-height: 1.5;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+
+#root {
+  height: 100%;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: var(--zero);
+}
+
+:focus-visible {
+  outline: var(--line-strong) solid var(--focus);
+  outline-offset: var(--focus-offset);
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.sr-only {
+  position: absolute;
+  width: var(--line);
+  height: var(--line);
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Text selection: the frame is not selectable; content people read and copy is. */
+.app,
+.dialog,
+.drawer,
+.status-panel {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.sel,
+.r-meta,
+.kv-v,
+.commit-msg,
+.commit-hash,
+.files,
+.log-pane,
+.notice-text,
+.dialog-sub,
+.empty-text {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Scrollbars: the Index page scrollbar shape on every scroll area. */
+@media (hover: hover) and (pointer: fine) {
+  @supports not selector(::-webkit-scrollbar) {
+    html,
+    .scroll {
+      scrollbar-width: thin;
+      scrollbar-color: var(--scrollbar-thumb) transparent;
+    }
+  }
+
+  html::-webkit-scrollbar,
+  .scroll::-webkit-scrollbar {
+    width: var(--scrollbar-size);
+    height: var(--scrollbar-size);
+    background: transparent;
+  }
+
+  html::-webkit-scrollbar-track,
+  .scroll::-webkit-scrollbar-track {
+    background: transparent;
+    box-shadow: inset var(--line) var(--zero) var(--zero) var(--rule);
+  }
+
+  .scroll.scroll-x::-webkit-scrollbar-track {
+    box-shadow: inset var(--zero) var(--line) var(--zero) var(--rule);
+  }
+
+  html::-webkit-scrollbar-thumb,
+  .scroll::-webkit-scrollbar-thumb {
+    min-height: var(--scrollbar-thumb-min);
+    border: solid transparent;
+    border-width: 3px 2px 3px 4px;
+    background-color: var(--scrollbar-thumb);
+    background-clip: padding-box;
+  }
+
+  .scroll.scroll-x::-webkit-scrollbar-thumb {
+    border-width: 4px 3px 2px 3px;
+  }
+
+  html::-webkit-scrollbar-thumb:hover,
+  .scroll::-webkit-scrollbar-thumb:hover {
+    background-color: var(--scrollbar-thumb-hover);
+  }
+
+  html::-webkit-scrollbar-thumb:active,
+  .scroll::-webkit-scrollbar-thumb:active {
+    background-color: var(--scrollbar-thumb-active);
+  }
+
+  .scroll::-webkit-scrollbar-corner {
+    background: transparent;
+  }
 }
