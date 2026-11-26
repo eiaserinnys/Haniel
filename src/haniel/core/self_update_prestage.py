@@ -145,6 +145,7 @@ class SelfUpdatePrestager:
         env = sanitized_child_env()
         fetch = subprocess.run(
             ["git", "-C", str(source), "fetch", "origin"],
+            stdin=subprocess.DEVNULL,
             text=True,
             capture_output=True,
             check=False,
@@ -163,6 +164,7 @@ class SelfUpdatePrestager:
                 "rev-parse",
                 f"origin/{repo.branch}^{{commit}}",
             ],
+            stdin=subprocess.DEVNULL,
             text=True,
             capture_output=True,
             check=False,
@@ -219,6 +221,7 @@ class SelfUpdatePrestager:
             process = self._popen_factory(
                 command,
                 env=sanitized_child_env(),
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,

@@ -90,6 +90,7 @@ def test_prepare_uses_exact_target_sanitized_env_and_logs_steps(
     def popen(command, **kwargs):
         captured["command"] = command
         captured["env"] = kwargs["env"]
+        captured["stdin"] = kwargs.get("stdin")
         _ready_result(config_dir, release_root)
         return _FinishedProcess()
 
@@ -107,6 +108,7 @@ def test_prepare_uses_exact_target_sanitized_env_and_logs_steps(
     assert command[command.index("--target-commit") + 1] == TARGET
     assert result.target_commit == TARGET
     assert result.prepared_release == release_root / "releases" / TARGET[:12]
+    assert captured["stdin"] is subprocess.DEVNULL
     env = captured["env"]
     assert env["PATH"] == "/nodejs:/pnpm"
     assert env["PYTHONUTF8"] == "1"
@@ -122,9 +124,11 @@ def test_freeze_target_fetches_without_advancing_source_checkout(
     source = tmp_path / "repo"
     source.mkdir()
     calls: list[list[str]] = []
+    stdins: list[object] = []
 
     def run(command, **kwargs):
         calls.append(command)
+        stdins.append(kwargs.get("stdin"))
         if command[-2:] == ["fetch", "origin"]:
             return subprocess.CompletedProcess(command, 0, "", "")
         return subprocess.CompletedProcess(command, 0, TARGET + "\n", "")
@@ -140,6 +144,7 @@ def test_freeze_target_fetches_without_advancing_source_checkout(
         ["git", "-C", str(source), "rev-parse", "origin/main^{commit}"],
     ]
     assert all("checkout" not in command and "pull" not in command for command in calls)
+    assert stdins == [subprocess.DEVNULL, subprocess.DEVNULL]
 
 
 def test_duplicate_prepare_cancels_the_single_active_process(tmp_path: Path) -> None:

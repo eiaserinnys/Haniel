@@ -56,6 +56,7 @@ from haniel_release_steps import (
 def _git_output(source: Path, *arguments: str) -> str:
     completed = subprocess.run(
         ["git", "-C", str(source), *arguments],
+        stdin=subprocess.DEVNULL,
         text=True,
         capture_output=True,
         check=False,
@@ -75,6 +76,7 @@ def _resolve_commit(source: Path, ref: str) -> str:
 def _detect_branch(source: Path) -> str:
     completed = subprocess.run(
         ["git", "-C", str(source), "symbolic-ref", "--short", "HEAD"],
+        stdin=subprocess.DEVNULL,
         text=True,
         capture_output=True,
         check=False,
@@ -287,6 +289,7 @@ def _fetch_target(
     for attempt in range(1, max_failures + 1):
         completed = subprocess.run(
             ["git", "-C", str(source), "fetch", "origin"],
+            stdin=subprocess.DEVNULL,
             text=True,
             capture_output=True,
             check=False,

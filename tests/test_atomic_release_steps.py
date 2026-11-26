@@ -177,3 +177,46 @@ def test_prune_invalidates_ready_marker_before_recursive_delete(
     assert (
         inventory.ready_release_for_commit(release_root / "releases", "3" * 40) is None
     )
+
+
+def test_run_step_gives_children_no_stdin_and_passes_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.syspath_prepend(str(REPO_ROOT / "scripts"))
+    steps = importlib.import_module("haniel_release_steps")
+    calls: list[dict[str, object]] = []
+
+    def run(command, **kwargs):
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(steps.subprocess, "run", run)
+    result = steps.PreparationResult()
+
+    steps.run_step(result, "plain", ["tool"])
+    steps.run_step(result, "with_env", ["tool"], env={"CI": "true"})
+
+    assert [call["stdin"] for call in calls] == [subprocess.DEVNULL] * 2
+    assert calls[0]["env"] is None
+    assert calls[1]["env"] == {"CI": "true"}
+
+
+def test_atomic_release_git_calls_get_no_stdin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    atomic_release = _atomic_release(monkeypatch)
+    stdins: list[object] = []
+
+    def run(command, **kwargs):
+        stdins.append(kwargs.get("stdin"))
+        return subprocess.CompletedProcess(command, 0, "a" * 40 + "\n", "")
+
+    monkeypatch.setattr(atomic_release.subprocess, "run", run)
+
+    atomic_release._git_output(tmp_path, "status")
+    atomic_release._detect_branch(tmp_path)
+    atomic_release._fetch_target(
+        atomic_release.PreparationResult(), tmp_path, "main", 1
+    )
+
+    assert stdins[:3] == [subprocess.DEVNULL] * 3
