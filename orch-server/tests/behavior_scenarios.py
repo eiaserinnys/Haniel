@@ -855,7 +855,7 @@ async def s11_observation(store: EventStore) -> list:
 
     plain = "n:r:main:o1"
     await _create(store, plain)
-    await observe("heads-differ-keeps-pending", _observed(plain, "o1", "other"))
+    await observe("other-repo-observation-keeps-pending", _observed(plain, "o1", "other", repo="rx"))
     await observe("closes-plain-pending", _observed(plain, "o1", "o1"))
 
     marked = "n:r2:main:o2"
@@ -882,6 +882,10 @@ async def s11_observation(store: EventStore) -> list:
     await observe("failed-node-attempt-blocks-close", _observed(nodefail, "o4", "o4", repo="r4"))
 
     # 자기 갱신: 시간 초과로 머리가 옛것인 줄을 더 새 관측이 닫는다
+    stale = "n:r6:main:o6"
+    await _create(store, stale, repo="r6")
+    await observe("remote-moved-rejects-stale-pending", _observed(stale, "o6", "moved", repo="r6"))
+
     selfupd = "n:haniel:main:old-head"
     await _create(store, selfupd, repo="haniel", target="newer-head", self_update=True)
     await observe(
