@@ -315,6 +315,10 @@ def _wide_360(env: Env):
     label(page, f"Edit {DISPATCHER}").click()
     page.wait_for_selector(".dialog")
     r.check("16", "360px 편집 시트: 넘침 없음", not (bad := page.evaluate(OVERFLOW_AUDIT)), str(bad))
+    # The sheet fades in; capture it once the motion is over.
+    page.wait_for_function("getComputedStyle(document.querySelector('.dialog')).opacity === '1'")
+    page.wait_for_timeout(200)
+    r.check("g", "360px 편집 시트는 등장 움직임이 끝난 불투명도 1에서 캡처한다", page.evaluate("getComputedStyle(document.querySelector('.dialog')).opacity") == "1")
     env.png(page, "narrow-360-editor", "extra")
     ctx.close()
 

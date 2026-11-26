@@ -1,6 +1,6 @@
 // Haniel local dashboard (Index style): header bar, section sidebar, one ledger page.
 
-import { Fragment, useMemo, useState } from 'react'
+import { Fragment, useMemo, useRef, useState } from 'react'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { DependencyGraph } from '@/components/DependencyGraph'
 import { Drawer } from '@/components/Drawer'
@@ -13,12 +13,15 @@ import { ServiceRow } from '@/components/ServiceRow'
 import { LoadError, Notice, SkeletonRows } from '@/components/states'
 import { Topbar } from '@/components/Topbar'
 import { UpdateOverlay } from '@/components/UpdateOverlay'
+import { useCurrentSection } from '@/hooks/useCurrentSection'
 import { useMediaQuery } from '@/hooks/useMediaQuery'
 import { useServices } from '@/hooks/useServices'
 import { api } from '@/lib/api'
 import { groupServicesAndRepos } from '@/lib/groups'
 import type { RepoConfigInput, ServiceConfig, ServiceConfigInput } from '@/lib/types'
 import { errorMessage } from '@/lib/utils'
+
+const SECTION_IDS = ['services', 'repos', 'deps'] as const
 
 type EditorState<T> = { open: false } | { open: true; editName?: string; editConfig?: T }
 
@@ -47,7 +50,8 @@ export default function App() {
   const [confirm, setConfirm] = useState<ConfirmState>(null)
   const [crudError, setCrudError] = useState<string | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
-  const [section, setSection] = useState<SectionId>('services')
+  const contentRef = useRef<HTMLDivElement>(null)
+  const [section, jumpTo] = useCurrentSection<SectionId>(contentRef, SECTION_IDS)
   const phone = useMediaQuery('(max-width: 760px)', (matches) => {
     if (!matches) setDrawerOpen(false)
   })
@@ -113,9 +117,8 @@ export default function App() {
   }
 
   const jump = (id: SectionId) => {
-    setSection(id)
     setDrawerOpen(false)
-    document.getElementById(`sec-${id}`)?.scrollIntoView({ block: 'start' })
+    jumpTo(id)
   }
 
   // ── Derived values ─────────────────────────────────────────────────────────
@@ -137,7 +140,7 @@ export default function App() {
       <div className="shell">
         <aside className="sidebar">{side}</aside>
 
-        <div className="content scroll">
+        <div className="content scroll" ref={contentRef}>
           <main className="content-inner">
             <h1 className="sr-only">Haniel local dashboard</h1>
 

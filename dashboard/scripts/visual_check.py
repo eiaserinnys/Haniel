@@ -20,6 +20,7 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
+import visual_fixes
 import visual_flows
 import visual_general
 import visual_mock as vm
@@ -144,7 +145,7 @@ def main() -> int:
     parser.add_argument("--out", required=True, type=Path, help="folder for captures and operations.md")
     parser.add_argument("--dist", type=Path, default=DASH / "dist", help="built dashboard (default: dashboard/dist)")
     parser.add_argument("--merge", action="store_true", help="keep the measurements of earlier --stages runs in the same --out folder")
-    parser.add_argument("--stages", default="captures,flows,general", help="comma list of captures, general and the flow groups dialogs, layers, focus, errors, resize, narrow360 (default: all)")
+    parser.add_argument("--stages", default="captures,flows,fixes,general", help="comma list of captures, general and fixes (screen-review fixes) and the flow groups dialogs, layers, focus, errors, resize, narrow360 (default: all)")
     args = parser.parse_args()
 
     if not (args.dist / "index.html").is_file():
@@ -165,6 +166,8 @@ def main() -> int:
             flows = [x for x in stages if x in visual_flows.STAGES]
             if flows or "flows" in stages:
                 visual_flows.run(env, flows)
+            if "fixes" in stages:
+                visual_fixes.run(env)
             if "general" in stages:
                 visual_general.run(env)
             browser.close()

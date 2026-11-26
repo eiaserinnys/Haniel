@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useRef, type MouseEvent, type ReactNode } from 'react'
 import { Icon } from './Icon'
 import { Mark } from './Status'
 import { cx } from '@/lib/utils'
@@ -32,10 +32,25 @@ export function Row({ open, onToggle, group, title, meta, actions, metric, body 
       {meta && <span className="r-meta">{meta}</span>}
     </span>
   )
+  const toggleRef = useRef<HTMLButtonElement>(null)
+  // Pointer text selection and expanding share the head: a second click only selects (so it is not
+  // allowed to toggle or pick a word), and a drag that selected text inside the head does not toggle.
+  // A selection left from an earlier press is dropped first, so it cannot swallow a plain click.
+  const press = (event: MouseEvent) => {
+    if (event.detail > 1) event.preventDefault()
+    else if (toggleRef.current?.contains(window.getSelection()?.anchorNode ?? null)) window.getSelection()?.removeAllRanges()
+  }
+  const click = (event: MouseEvent) => {
+    if (event.detail > 1) return
+    const selection = window.getSelection()
+    const picked = selection && !selection.isCollapsed && toggleRef.current?.contains(selection.anchorNode)
+    if (event.detail > 0 && picked) return
+    onToggle?.()
+  }
   return (
     <div className={cx('row', group && 'is-group')} data-open={open ? '' : undefined}>
       {onToggle ? (
-        <button type="button" className="r-toggle" aria-expanded={open} onClick={onToggle}>
+        <button ref={toggleRef} type="button" className="r-toggle" aria-expanded={open} onMouseDown={press} onClick={click}>
           <Icon name="chev" small className="r-chev" />
           {text}
         </button>

@@ -3,12 +3,20 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <meta name="haniel-ui" content="index">
   <meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#0C0D0C" media="(prefers-color-scheme: dark)">
   <title>Haniel Local — Sign in</title>
+  <script>
+    // Apply the saved theme before the first paint (same script as the dashboard) so sign-in does not flash the other theme.
+    try {
+      var theme = localStorage.getItem('haniel-theme')
+      if (theme === 'light' || theme === 'dark') document.documentElement.setAttribute('data-theme', theme)
+    } catch (e) {}
+  </script>
   <style>
-  /* Same tokens as dashboard/src/index.css. The page is static, so it uses the system fonts when Pretendard is not installed and follows the system theme. */
+  /* Same tokens as dashboard/src/index.css. The page is static, so it uses the system fonts when Pretendard is not installed and follows the saved theme, then the system theme. */
   :root {
     color-scheme: light;
     --bg: #FFFFFF;
@@ -140,8 +148,28 @@
     --z-chrome: 60;
   }
 
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0C0D0C;
+    --bg-2: #141614;
+    --ink: #ECEDEA;
+    --ink-2: #A0A39E;
+    --ink-3: #666A64;
+    --rule: #242724;
+    --rule-strong: #ECEDEA;
+    --accent: #4FD69C;
+    --accent-hover: #74E0B2;
+    --accent-soft: rgb(79 214 156 / 10%);
+    --accent-press: rgb(79 214 156 / 18%);
+    --focus: #4FD69C;
+    --control-rule: #666A64;
+    --scrim: rgb(0 0 0 / 60%);
+    --skeleton: #1C1F1C;
+    --scrollbar-thumb: #666A64;
+  }
+
   @media (prefers-color-scheme: dark) {
-    :root {
+    :root:not([data-theme]) {
       color-scheme: dark;
       --bg: #0C0D0C;
       --bg-2: #141614;

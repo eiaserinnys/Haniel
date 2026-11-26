@@ -18,7 +18,7 @@ pnpm run lint
 ```
 pnpm run build
 python3 scripts/visual_check.py --out <folder>                       # captures + measurements + <folder>/operations.md
-python3 scripts/visual_check.py --out <folder> --merge --stages errors,resize   # re-run some groups into the same folder
+python3 scripts/visual_check.py --out <folder> --merge --stages fixes,resize   # re-run some groups into the same folder
 ```
 
 Stages: `captures`, `general`, and the flow groups `dialogs`, `layers`, `focus`, `errors`, `resize`, `narrow360`.

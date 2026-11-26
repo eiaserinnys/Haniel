@@ -28,12 +28,16 @@ class Report:
         path.write_text(json.dumps({"rows": self.rows, "dialogs": self.dialogs}, ensure_ascii=False, indent=1), encoding="utf-8")
 
     def merge(self, path: Path) -> None:
-        """Take over rows from an earlier staged run; rows of the same measurement are replaced by the new ones."""
+        """Take over rows from an earlier staged run; rows of the same measurement are replaced by the new ones.
+
+        A failed old row is also dropped when this run measured the same item and name again (its detail text changed).
+        """
         if not path.is_file():
             return
         old = json.loads(path.read_text(encoding="utf-8"))
         have = {(r[0], r[1], r[3]) for r in self.rows}
-        self.rows = [tuple(r) for r in old["rows"] if (r[0], r[1], r[3]) not in have] + self.rows
+        redone = {(r[0], r[1]) for r in self.rows}
+        self.rows = [tuple(r) for r in old["rows"] if (r[0], r[1], r[3]) not in have and (r[2] or (r[0], r[1]) not in redone)] + self.rows
         seen = {d["target"] for d in self.dialogs}
         self.dialogs = [d for d in old["dialogs"] if d["target"] not in seen] + self.dialogs
 
