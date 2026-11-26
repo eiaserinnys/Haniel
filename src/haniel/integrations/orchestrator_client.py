@@ -102,10 +102,12 @@ class OrchestratorClient:
         expected_budget_handler: "Callable[[str], int | None] | None" = None,
         config_dir: Path | None = None,
         deploy_prepare_handler: "Callable[[dict[str, Any]], Any] | None" = None,
+        get_repo_fetch_info: "Callable[[], dict[str, Any]] | None" = None,
     ) -> None:
         self._config = config
         self._haniel_version = haniel_version
         self._get_services_info = get_services_info
+        self._get_repo_fetch_info = get_repo_fetch_info
         self._service_command_handler = service_command_handler
         # handler convention: immutable approval dict -> result.
         #   None       — synchronous success; we send DeployResult{success}.
@@ -187,6 +189,7 @@ class OrchestratorClient:
         expected_manifest_identity: str | None = None,
         expected_manifest_digest: str | None = None,
         is_self_update: bool = False,
+        apply_policy: str | None = None,
         wait: bool = False,
     ) -> None:
         """Notify the orchestrator of detected changes. Thread-safe.
@@ -219,6 +222,7 @@ class OrchestratorClient:
             "expected_manifest_identity": expected_manifest_identity,
             "expected_manifest_digest": expected_manifest_digest,
             "is_self_update": is_self_update,
+            "apply_policy": apply_policy,
         }
 
         try:
@@ -380,9 +384,20 @@ class OrchestratorClient:
             return None
         return await asyncio.to_thread(self._get_services_info)
 
-    def _build_node_hello(self, services: "list[dict] | None" = None) -> dict:
+    async def _repo_fetch_snapshot(self) -> "dict[str, Any] | None":
+        """Per-repo last fetch times and poll interval, read off the loop like the services."""
+        if self._get_repo_fetch_info is None:
+            return None
+        return await asyncio.to_thread(self._get_repo_fetch_info)
+
+    def _build_node_hello(
+        self,
+        services: "list[dict] | None" = None,
+        repo_fetch_info: "dict[str, Any] | None" = None,
+    ) -> dict:
         """Build the NodeHello payload sent after connecting."""
         return {
+            **(repo_fetch_info or {}),
             "type": "node_hello",
             "node_id": self._config.node_id,
             "token": self._config.token,
@@ -687,7 +702,9 @@ class OrchestratorClient:
 
             # Send NodeHello
             await self._send_json(
-                self._build_node_hello(await self._services_snapshot())
+                self._build_node_hello(
+                    await self._services_snapshot(), await self._repo_fetch_snapshot()
+                )
             )
 
             self._connected = True
@@ -1126,6 +1143,7 @@ class OrchestratorClient:
             "type": "node_status",
             "node_id": self._config.node_id,
             "services": services,
+            **(await self._repo_fetch_snapshot() or {}),
         }
         await self._send_json(msg)
 

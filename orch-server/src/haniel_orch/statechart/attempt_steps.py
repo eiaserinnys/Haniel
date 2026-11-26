@@ -277,12 +277,27 @@ async def renew_deadline(
     orchestrator_attempt_id: str,
     deadline_at: str,
     expected_budget_sec: int | None,
+    progress_stage: str,
 ) -> None:
-    """실행 임대 늘림은 상태 칸이 아니라 데이터 칸이다. 마감 종류는 실행 임대가 된다(시작했다의 마감)."""
+    """실행 임대 늘림은 상태 칸이 아니라 데이터 칸이다. 마감 종류는 실행 임대가 되고, 알림의 단계는 시도별 최신 값으로 덮는다.
+
+    recovering이 처음 들어올 때(recovery_seen이 비었을 때)만 덮기 전의 단계(없으면 NULL)를 failed_stage에 남기고
+    recovery_seen을 1로 적는다. 이후 알림은 두 칸을 건드리지 않는다(SQLite는 SET의 오른쪽을 갱신 전 값으로 읽는다).
+    """
+    first_recovering = "? = 'recovering' AND recovery_seen IS NULL"
     await db.execute(
-        "UPDATE deploy_attempts SET deadline_at = ?, expected_budget_sec = ?, deadline_kind = 'lease' "
-        "WHERE orchestrator_attempt_id = ? AND outcome = 'active'",
-        (deadline_at, expected_budget_sec, orchestrator_attempt_id),
+        "UPDATE deploy_attempts SET deadline_at = ?, expected_budget_sec = ?, deadline_kind = 'lease', "
+        f"failed_stage = CASE WHEN {first_recovering} THEN progress_stage ELSE failed_stage END, "
+        f"recovery_seen = CASE WHEN {first_recovering} THEN 1 ELSE recovery_seen END, "
+        "progress_stage = ? WHERE orchestrator_attempt_id = ? AND outcome = 'active'",
+        (
+            deadline_at,
+            expected_budget_sec,
+            progress_stage,
+            progress_stage,
+            progress_stage,
+            orchestrator_attempt_id,
+        ),
     )
 
 

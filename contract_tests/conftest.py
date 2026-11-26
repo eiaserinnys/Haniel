@@ -171,6 +171,7 @@ class NodeFactory:
         approval_handler,
         service_command_handler=None,
         reconnect_base: float = 0.05,
+        get_repo_fetch_info=None,
     ) -> OrchestratorClient:
         config = OrchestratorClientConfig(
             url=self.orchestrator.node_ws_url,
@@ -189,6 +190,7 @@ class NodeFactory:
             deploy_approval_handler=approval_handler,
             repo_snapshot_handler=settled_snapshot,
             config_dir=self.config_dir,
+            get_repo_fetch_info=get_repo_fetch_info,
         )
         self.clients.append(client)
         client.start()

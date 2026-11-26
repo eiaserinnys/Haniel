@@ -142,6 +142,16 @@ class EventStoreLifecycleMixin:
                 await self._db.rollback()
                 raise
 
+    async def set_apply_policy(self, deploy_id: str, apply_policy: str) -> None:
+        """이미 있는 대기 줄에 노드가 다시 알린 적용 방식을 반영한다(옛 노드가 만든 줄은 NULL로 시작한다)."""
+        async with self._mutation_lock:
+            try:
+                if await steps.set_apply_policy(self._db, deploy_id, apply_policy):
+                    await self._db.commit()
+            except Exception:
+                await self._db.rollback()
+                raise
+
     async def reject_pending_deploys_for_nodes(
         self, node_ids: list[str], reject_reason: str
     ) -> list[dict[str, Any]]:
@@ -278,6 +288,56 @@ class EventStoreLifecycleMixin:
         )
         rows = await cursor.fetchall()
         return [row_to_dict(cursor, row) for row in rows]
+
+    async def get_served_commits(self) -> dict[str, list[dict[str, Any]]]:
+        """노드별, 저장소별로 마지막 성공 배포의 target head와 그 시각. 이 허브가 아는 배포 기준이다.
+
+        SQLite는 MAX가 든 집계에서 같은 줄의 나머지 칸을 돌려준다.
+        """
+        cursor = await self._db.execute(
+            "SELECT node_id, repo, branch, target_head, deploy_id, "
+            "MAX(COALESCE(NULLIF(updated_at, ''), created_at)) AS deployed_at "
+            "FROM deploy_events WHERE status = ? GROUP BY node_id, repo "
+            "ORDER BY node_id, repo",
+            (DeployStatus.SUCCESS.value,),
+        )
+        served: dict[str, list[dict[str, Any]]] = {}
+        for (
+            node_id,
+            repo,
+            branch,
+            target_head,
+            deploy_id,
+            deployed_at,
+        ) in await cursor.fetchall():
+            served.setdefault(node_id, []).append(
+                {
+                    "repo": repo,
+                    "branch": branch,
+                    "target_head": target_head or deploy_id.rsplit(":", 1)[-1],
+                    "deployed_at": deployed_at,
+                    "deploy_id": deploy_id,
+                }
+            )
+        return served
+
+    async def get_deploying_self_updates(
+        self, node_id: str | None = None
+    ) -> dict[str, str]:
+        """지금 배포 중(deploying)인 자기 갱신의 deploy_id를 노드별로 돌려준다. 노드마다 가장 최근 줄 하나."""
+        query = (
+            "SELECT node_id, deploy_id FROM deploy_events "
+            "WHERE is_self_update = 1 AND status = ?"
+        )
+        params: list[Any] = [DeployStatus.DEPLOYING.value]
+        if node_id is not None:
+            query += " AND node_id = ?"
+            params.append(node_id)
+        cursor = await self._db.execute(
+            query + " ORDER BY detected_at ASC, created_at ASC, deploy_id ASC", params
+        )
+        # 오래된 줄부터 읽어 덮으므로 노드마다 가장 최근 줄이 남는다
+        return {row[0]: row[1] for row in await cursor.fetchall()}
 
     async def get_node_ids_by_hostname(self, hostname: str) -> list[str]:
         """Return node IDs that have reported the given hostname."""

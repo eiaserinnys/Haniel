@@ -285,6 +285,80 @@ class TestDashboardApi:
         assert resp.status_code == 501
 
 
+class TestReloadComplete:
+    """다시 읽기와 설정 저장이 끝나면 로컬 화면이 기다리는 reload_complete를 방송한다."""
+
+    @pytest.fixture
+    def app_and_ws(self, mock_runner):
+        from haniel.dashboard import setup_dashboard
+
+        routes, middleware, ws_handler = setup_dashboard(mock_runner)
+        ws_handler.broadcast_reload_complete = MagicMock()
+        return Starlette(routes=routes, middleware=middleware), ws_handler
+
+    def test_rest_reload_announces_after_reloading(self, app_and_ws, mock_runner):
+        app, ws_handler = app_and_ws
+        order: list[str] = []
+        mock_runner.reload_config.side_effect = lambda: order.append("reload")
+        ws_handler.broadcast_reload_complete.side_effect = lambda: order.append(
+            "announce"
+        )
+
+        assert TestClient(app).post("/api/reload").status_code == 200
+
+        assert order == ["reload", "announce"]
+
+    def test_failed_reload_does_not_announce(self, app_and_ws, mock_runner):
+        app, ws_handler = app_and_ws
+        mock_runner.reload_config.side_effect = RuntimeError("bad yaml")
+
+        assert TestClient(app).post("/api/reload").status_code == 400
+
+        ws_handler.broadcast_reload_complete.assert_not_called()
+
+    def test_service_reload_announces(self, app_and_ws):
+        app, ws_handler = app_and_ws
+        with patch(
+            "haniel.dashboard.api.reload_service_definition", return_value={"ok": True}
+        ):
+            assert TestClient(app).post("/api/services/web/reload").status_code == 200
+
+        ws_handler.broadcast_reload_complete.assert_called_once_with()
+
+    def test_config_save_announces(self, app_and_ws):
+        app, ws_handler = app_and_ws
+        with patch("haniel.dashboard.config_api.update_service_config"):
+            response = TestClient(app).put(
+                "/api/config/services/web", json={"run": "python -m http.server"}
+            )
+
+        assert response.status_code == 200
+        ws_handler.broadcast_reload_complete.assert_called_once_with()
+
+    def test_rejected_config_save_does_not_announce(self, app_and_ws):
+        app, ws_handler = app_and_ws
+        with patch(
+            "haniel.dashboard.config_api.update_service_config",
+            side_effect=ValueError("invalid"),
+        ):
+            response = TestClient(app).put("/api/config/services/web", json={})
+
+        assert response.status_code == 400
+        ws_handler.broadcast_reload_complete.assert_not_called()
+
+    def test_message_shape_is_what_the_local_screen_waits_for(self, mock_runner):
+        from haniel.dashboard.ws import DashboardWebSocket
+
+        ws_handler = DashboardWebSocket(mock_runner)
+        ws_handler._schedule_broadcast = MagicMock()
+
+        ws_handler.broadcast_reload_complete()
+
+        (event,) = ws_handler._schedule_broadcast.call_args.args
+        assert set(event) == {"type", "timestamp"}
+        assert event["type"] == "reload_complete"
+
+
 # ── WebSocket Tests ───────────────────────────────────────────────────────────
 
 

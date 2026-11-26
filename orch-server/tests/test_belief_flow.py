@@ -141,6 +141,7 @@ async def progress(store: EventStore, attempt_id: str = "a1") -> dict:
         orchestrator_attempt_id=attempt_id,
         node_id="n",
         expected_budget_sec=None,
+        progress_stage="build",
         deadline_at=(now + timedelta(seconds=60)).isoformat(),
         now=now.isoformat(),
     )

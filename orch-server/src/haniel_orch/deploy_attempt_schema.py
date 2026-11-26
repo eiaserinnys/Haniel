@@ -141,6 +141,8 @@ CANONICAL_COLUMNS = {
     "applied_after_close_attempt_id": "TEXT",
     # 지금 시도에 대한 믿음의 잎(같은 정의의 belief 영역, 2b-2). 옛 줄은 기동 때 도는 시도와 실행 시작 시각에서 채운다
     "sm_belief": "TEXT",
+    # 변경 알림이 실은 적용 방식(auto, approval). 옛 노드와 옛 줄은 NULL
+    "apply_policy": "TEXT",
 }
 
 ATTEMPT_COLUMNS = {
@@ -161,6 +163,12 @@ ATTEMPT_COLUMNS = {
     "deadline_kind": "TEXT",
     # 닫힘의 종류(not_executed, execution_unknown, failed). 「아니오」 닫힘인가를 계획 답의 실패 저널 규칙이 본다
     "closure": "TEXT",
+    # 노드가 진행 알림으로 보낸 가장 최근 단계(DeployProgress.stage). 알림이 오지 않았으면 NULL
+    "progress_stage": "TEXT",
+    # 처음 들어온 recovering 직전의 progress_stage. recovering이 첫 알림이었으면 NULL. 복구 알림이 없었어도 NULL
+    "failed_stage": "TEXT",
+    # recovering 알림을 받았으면 1. 처음 받을 때만 적고 다시 건드리지 않는다. 받지 못했으면 NULL
+    "recovery_seen": "INTEGER",
 }
 
 

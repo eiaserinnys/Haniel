@@ -71,6 +71,13 @@ class HeldAttempt(BaseModel):
         return self
 
 
+class RepoFetchStatus(BaseModel):
+    """저장소 하나의 마지막 fetch 성공 시각(ISO 8601). 아직 한 번도 성공하지 못했으면 None."""
+
+    repo: str
+    last_fetch: str | None = None
+
+
 class NodeHello(BaseModel):
     """First message sent by a node after WebSocket connect.
 
@@ -88,6 +95,8 @@ class NodeHello(BaseModel):
     services: list[dict] | None = None  # optional service list from node
     deploy_protocol: int | None = None
     held_attempts: list[HeldAttempt] | None = None
+    repos: list[RepoFetchStatus] | None = None  # 새 노드만 싣는다. 옛 노드는 None
+    poll_interval: float | None = None
 
 
 class ChangeNotification(BaseModel):
@@ -107,6 +116,8 @@ class ChangeNotification(BaseModel):
     expected_manifest_identity: str | None = None
     expected_manifest_digest: str | None = None
     is_self_update: bool | None = None
+    # 그 노드가 이 변경을 스스로 적용하는지(auto), 승인을 기다리는지(approval). 이 칸이 없는 옛 노드는 None
+    apply_policy: Literal["auto", "approval"] | None = None
 
     @model_validator(mode="after")
     def validate_manifest_snapshot(self) -> "ChangeNotification":
@@ -121,11 +132,16 @@ class ChangeNotification(BaseModel):
 
 
 class NodeStatus(BaseModel):
-    """Heartbeat message — indicates node is alive. Optionally carries service state."""
+    """Heartbeat message — indicates node is alive. Optionally carries service state.
+
+    repos와 poll_interval은 새 노드만 싣는다. 없으면 None(옛 노드).
+    """
 
     type: str = "node_status"
     node_id: str
     services: list[dict] | None = None
+    repos: list[RepoFetchStatus] | None = None
+    poll_interval: float | None = None
 
 
 class DeployResult(StrictMessage):

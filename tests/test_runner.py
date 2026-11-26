@@ -1329,6 +1329,7 @@ class TestServiceRunnerPollCycle:
             expected_manifest_identity=None,
             expected_manifest_digest=None,
             is_self_update=True,
+            apply_policy="approval",
             wait=True,
         )
         assert runner._orch_client.notify_change.call_args_list == [
@@ -3999,3 +4000,123 @@ class TestStartupClone:
             if record.levelname == "ERROR"
         ]
         assert any("app" in message and url in message for message in errors)
+
+
+class TestServiceRunnerOrchestratorScreenData:
+    """승인 화면이 읽는 값: 변경 알림의 적용 방식과 노드 상태의 저장소별 fetch 시각."""
+
+    def _runner(
+        self,
+        tmp_path: Path,
+        *,
+        global_auto_apply: bool = True,
+        repo_auto_apply: bool = True,
+        self_auto_update: bool | None = None,
+    ) -> ServiceRunner:
+        from haniel.config.model import OrchestratorClientConfig, SelfUpdateConfig
+
+        for name in ["app", "haniel"]:
+            (tmp_path / name).mkdir()
+            (tmp_path / name / ".git").mkdir()
+        config = HanielConfig(
+            poll_interval=45,
+            auto_apply=global_auto_apply,
+            repos={
+                "app": RepoConfig(
+                    url="git@github.com:test/app.git",
+                    branch="main",
+                    path="./app",
+                    auto_apply=repo_auto_apply,
+                ),
+                "haniel": RepoConfig(
+                    url="git@github.com:test/haniel.git",
+                    branch="main",
+                    path="./haniel",
+                ),
+            },
+            services={},
+            orchestrator_client=OrchestratorClientConfig(
+                url="ws://localhost/ws/node", token="test", node_id="node-a"
+            ),
+            **(
+                {}
+                if self_auto_update is None
+                else {
+                    "self": SelfUpdateConfig(
+                        repo="haniel", auto_update=self_auto_update
+                    )
+                }
+            ),
+        )
+        return ServiceRunner(config, config_dir=tmp_path)
+
+    @pytest.mark.parametrize(
+        ("global_auto", "repo_auto", "expected"),
+        [(True, True, "auto"), (True, False, "approval"), (False, True, "approval")],
+    )
+    def test_repo_policy_follows_global_and_repo_auto_apply(
+        self, tmp_path: Path, global_auto, repo_auto, expected
+    ):
+        runner = self._runner(
+            tmp_path, global_auto_apply=global_auto, repo_auto_apply=repo_auto
+        )
+
+        assert (
+            runner._change_apply_policy("app", runner._snapshot_config_state())
+            == expected
+        )
+
+    @pytest.mark.parametrize(
+        ("auto_update", "expected"), [(False, "approval"), (True, "auto")]
+    )
+    def test_self_repo_policy_follows_self_update_not_auto_apply(
+        self, tmp_path: Path, auto_update, expected
+    ):
+        runner = self._runner(
+            tmp_path, global_auto_apply=True, self_auto_update=auto_update
+        )
+
+        assert (
+            runner._change_apply_policy("haniel", runner._snapshot_config_state())
+            == expected
+        )
+
+    def test_notify_sends_the_policy(self, tmp_path: Path):
+        runner = self._runner(tmp_path, repo_auto_apply=False)
+        runner._orch_client = MagicMock()
+        runner._repo_states["app"].pending_changes = {
+            "commits": ["new-head change"],
+            "stat": "1 file",
+        }
+        runner._repo_states["app"].last_head = "old-head"
+
+        with (
+            patch("haniel.core.runner.get_head", return_value="old-head"),
+            patch("haniel.core.repo_reconciliation.get_head", return_value="old-head"),
+            patch(
+                "haniel.core.repo_reconciliation.get_remote_head",
+                return_value="new-head",
+            ),
+        ):
+            runner._notify_orchestrator_change("app")
+
+        runner._orch_client.notify_change.assert_called_once()
+        assert (
+            runner._orch_client.notify_change.call_args.kwargs["apply_policy"]
+            == "approval"
+        )
+
+    def test_repo_fetch_info_lists_each_repo_with_its_last_fetch(self, tmp_path: Path):
+        from datetime import datetime, timezone
+
+        runner = self._runner(tmp_path)
+        fetched = datetime(2026, 11, 26, 9, 0, tzinfo=timezone.utc)
+        runner._repo_states["app"].last_fetch = fetched
+
+        info = runner._collect_repo_fetch_info()
+
+        assert info["poll_interval"] == 45
+        assert sorted(info["repos"], key=lambda row: row["repo"]) == [
+            {"repo": "app", "last_fetch": fetched.isoformat()},
+            {"repo": "haniel", "last_fetch": None},
+        ]

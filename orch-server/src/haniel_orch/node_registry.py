@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from starlette.websockets import WebSocket
 
 from .event_store import EventStore
-from .protocol import NodeHello
+from .protocol import NodeHello, RepoFetchStatus
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,10 @@ class ConnectedNode:
     last_heartbeat: float = field(default_factory=time.time)
     connected_at: float = field(default_factory=time.time)
     services: list[dict] | None = None  # latest service state (updated by heartbeat)
+    repos: list[RepoFetchStatus] | None = (
+        None  # latest per-repo fetch times (heartbeat)
+    )
+    poll_interval: float | None = None  # node poll interval in seconds (heartbeat)
 
 
 class NodeRegistry:
@@ -51,6 +55,8 @@ class NodeRegistry:
             connection_generation=connection_generation,
             connection_token=connection_token,
             services=hello.services,
+            repos=hello.repos,
+            poll_interval=hello.poll_interval,
         )
         self._nodes[hello.node_id] = node
         await self._store.upsert_node(
@@ -153,6 +159,8 @@ class NodeRegistry:
         node_id: str,
         services: list[dict] | None = None,
         websocket: WebSocket | None = None,
+        repos: list[RepoFetchStatus] | None = None,
+        poll_interval: float | None = None,
     ) -> None:
         """Update heartbeat timestamp and optionally service state for a node."""
         node = self._nodes.get(node_id)
@@ -164,6 +172,10 @@ class NodeRegistry:
         node.last_heartbeat = time.time()
         if services is not None:
             node.services = services
+        if repos is not None:
+            node.repos = repos
+        if poll_interval is not None:
+            node.poll_interval = poll_interval
         await self._store.update_node_heartbeat(
             node_id,
             expected_generation=node.connection_generation,

@@ -222,6 +222,8 @@ class WebSocketHub(HubCanonicalFlows, HubServiceCommands):
                         incoming.node_id,
                         services=incoming.services,
                         websocket=websocket,
+                        repos=incoming.repos,
+                        poll_interval=incoming.poll_interval,
                     )
                 elif isinstance(incoming, DeployResult):
                     await self._handle_deploy_result(incoming)
@@ -402,8 +404,24 @@ class WebSocketHub(HubCanonicalFlows, HubServiceCommands):
     async def _on_current_node_disconnect(
         self, node_id: str, reason: str, error: str
     ) -> None:
+        # 자기 갱신이 배포 중이면 곧 다시 붙는다. 화면이 장애 끊김과 가르게 그 deploy_id를 싣는다
+        try:
+            self_update_deploy_id = (
+                await self._store.get_deploying_self_updates(node_id)
+            ).get(node_id)
+        except Exception as exc:
+            logger.warning(
+                "Self-update lookup failed on disconnect of node %s: %s", node_id, exc
+            )
+            self_update_deploy_id = None
         await self.broadcast_to_dashboards(
-            {"type": "node_disconnected", "node_id": node_id, "reason": reason}
+            {
+                "type": "node_disconnected",
+                "node_id": node_id,
+                "reason": reason,
+                "self_update_deploying": self_update_deploy_id is not None,
+                "self_update_deploy_id": self_update_deploy_id,
+            }
         )
         await self._cleanup_orphan_commands(node_id, error=error)
 

@@ -28,6 +28,7 @@ from ..core.service_lifecycle import (
 
 if TYPE_CHECKING:
     from ..core.runner import ServiceRunner
+    from .ws import DashboardWebSocket
 
 logger = logging.getLogger(__name__)
 
@@ -49,11 +50,14 @@ def _write_failed(error: Exception) -> RuntimeError:
     return RuntimeError(f"Write failed: {error}")
 
 
-def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
+def create_config_api_routes(
+    runner: "ServiceRunner", ws_handler: "DashboardWebSocket | None" = None
+) -> list[Route]:
     """Create Starlette route definitions for the config management API.
 
     Args:
         runner: ServiceRunner instance whose config is exposed and mutated
+        ws_handler: Dashboard WebSocket that announces ``reload_complete``
 
     Returns:
         List of Starlette Route objects ready to be included in an app
@@ -113,6 +117,8 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
         loop = asyncio.get_running_loop()
         try:
             result = await loop.run_in_executor(None, call)
+            if ws_handler is not None:
+                ws_handler.broadcast_reload_complete()
             return JSONResponse(result)
         except KeyError as e:
             if not_found:
@@ -205,6 +211,8 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
                     start=body.get("start", True),
                 ),
             )
+            if ws_handler is not None:
+                ws_handler.broadcast_reload_complete()
             return JSONResponse(result)
         except KeyError as e:
             return _error(str(e), status=404)

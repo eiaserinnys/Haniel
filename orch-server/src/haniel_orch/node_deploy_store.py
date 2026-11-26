@@ -304,6 +304,8 @@ async def history_rows(db: aiosqlite.Connection, limit: int) -> list[dict[str, A
                 "terminal_error": attempt["error"],
                 "node_attempt_id": attempt["node_attempt_id"],
                 "journal_attempt_id": attempt["journal_attempt_id"],
+                "failed_stage": None,
+                "recovery_attempted": None,
             }
         )
     return rows

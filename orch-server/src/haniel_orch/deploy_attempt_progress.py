@@ -72,6 +72,7 @@ class DeployAttemptProgress:
             orchestrator_attempt_id=progress.orchestrator_attempt_id,
             node_id=progress.node_id,
             expected_budget_sec=progress.expected_budget_sec,
+            progress_stage=progress.stage,
             deadline_at=deadline_at,
             now=now.isoformat(),
         )
@@ -79,6 +80,16 @@ class DeployAttemptProgress:
             self._schedule_attempt(
                 progress.orchestrator_attempt_id, result["deadline_at"]
             )
+            if attempt["progress_stage"] != progress.stage:
+                await self._broadcast(
+                    {
+                        "type": "deploy_progress",
+                        "deploy_id": progress.deploy_id,
+                        "node_id": progress.node_id,
+                        "orchestrator_attempt_id": progress.orchestrator_attempt_id,
+                        "stage": progress.stage,
+                    }
+                )
 
     async def _handle_ignored_report(
         self,

@@ -624,6 +624,7 @@ async def test_progress_for_a_closed_attempt_only_notes_the_execution_start(stor
         orchestrator_attempt_id="a1",
         node_id="n",
         expected_budget_sec=None,
+        progress_stage="build",
         deadline_at=future_deadline(),
         now=iso(datetime.now(timezone.utc)),
     )
@@ -730,7 +731,7 @@ async def _send(store: EventStore, kind: str, deploy_id: str, attempt_id: str):
     attempts = store.attempts
     if kind == "progress":
         return await attempts.record_progress(
-            deploy_id=deploy_id, orchestrator_attempt_id=attempt_id, node_id="n", expected_budget_sec=None, deadline_at=future_deadline(), now=iso(datetime.now(timezone.utc))
+            deploy_id=deploy_id, orchestrator_attempt_id=attempt_id, node_id="n", expected_budget_sec=None, progress_stage="build", deadline_at=future_deadline(), now=iso(datetime.now(timezone.utc))
         )
     if kind == "result":
         return await attempts.record_result(

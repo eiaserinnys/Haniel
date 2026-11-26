@@ -18,6 +18,7 @@ class DeployAttemptProgressStore:
         orchestrator_attempt_id: str,
         node_id: str,
         expected_budget_sec: int | None,
+        progress_stage: str,
         deadline_at: str,
         now: str,
     ) -> dict[str, Any]:
@@ -53,7 +54,11 @@ class DeployAttemptProgressStore:
                 if declared_budget_sec is None:
                     declared_budget_sec = expected_budget_sec
                 await attempt_steps.renew_deadline(
-                    self._db, orchestrator_attempt_id, deadline_at, declared_budget_sec
+                    self._db,
+                    orchestrator_attempt_id,
+                    deadline_at,
+                    declared_budget_sec,
+                    progress_stage,
                 )
                 await self._db.commit()
                 return {

@@ -989,3 +989,68 @@ class TestConnectionFailureLog:
             await self._run_once(client, error)
 
         assert f"token rejected by the orchestrator (HTTP {status})" in caplog.text
+
+
+class TestScreenData:
+    """승인 화면이 읽는 값을 허브에 싣는다: 적용 방식과 저장소별 fetch 정보."""
+
+    FETCH_INFO = {
+        "repos": [{"repo": "app", "last_fetch": "2026-11-26T09:00:00+00:00"}],
+        "poll_interval": 60,
+    }
+
+    def test_change_notification_carries_apply_policy(self, config):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+        client._loop = MagicMock()
+        client._connected = True
+        client._ws = MagicMock()
+        client._send_json = AsyncMock()
+
+        def close_coroutine(coro, _loop):
+            coro.close()
+            return MagicMock()
+
+        with patch("asyncio.run_coroutine_threadsafe", side_effect=close_coroutine):
+            client.notify_change(
+                repo="app",
+                branch="main",
+                commits=["abc1234 change"],
+                affected_services=[],
+                apply_policy="approval",
+            )
+
+        assert client._send_json.call_args.args[0]["apply_policy"] == "approval"
+
+    def test_heartbeat_carries_repo_fetch_info(self, config):
+        client = OrchestratorClient(
+            config,
+            haniel_version="0.1.0",
+            get_repo_fetch_info=lambda: self.FETCH_INFO,
+        )
+        client._ws = MagicMock()
+        client._send_json = AsyncMock()
+
+        asyncio.run(client._send_heartbeat())
+
+        sent = client._send_json.await_args.args[0]
+        assert sent["repos"] == self.FETCH_INFO["repos"]
+        assert sent["poll_interval"] == 60
+
+    def test_hello_carries_repo_fetch_info(self, config):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+
+        hello = client._build_node_hello([], self.FETCH_INFO)
+
+        assert hello["repos"] == self.FETCH_INFO["repos"]
+        assert hello["poll_interval"] == 60
+
+    def test_without_a_handler_the_messages_have_no_fetch_fields(self, config):
+        client = OrchestratorClient(config, haniel_version="0.1.0")
+        client._ws = MagicMock()
+        client._send_json = AsyncMock()
+
+        asyncio.run(client._send_heartbeat())
+
+        sent = client._send_json.await_args.args[0]
+        assert "repos" not in sent and "poll_interval" not in sent
+        assert "repos" not in client._build_node_hello()
