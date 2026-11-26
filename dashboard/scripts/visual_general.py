@@ -91,7 +91,7 @@ def _colors(env: Env):
         page.wait_for_timeout(100)
         marker = lambda sel, dx=12: (lambda b: pixel_at(page, b["x"] + dx, b["y"] + b["height"] / 2))(page.locator(sel).first.bounding_box())  # noqa: E731
         r.check("g", f"{scheme}: Running은 채운 초록 네모", close(marker("#sec-services .st-ok"), pal["accent"]))
-        r.check("g", f"{scheme}: Pending(Restart pending)은 빈 ink-2 테두리 네모", close(marker(".side-restart .st-wait", 1), pal["ink2"]) and close(marker(".side-restart .st-wait", 4), pal["bg"]))
+        r.check("g", f"{scheme}: Pending(Crash restarts queued)은 빈 ink-2 테두리 네모", close(marker(".side-restart .st-wait", 1), pal["ink2"]) and close(marker(".side-restart .st-wait", 4), pal["bg"]))
         r.check("g", f"{scheme}: Stopped는 채운 ink-3 네모", close(marker("#sec-services .st-off"), pal["ink3"]))
         fail = page.locator("#sec-services .st-fail").first.bounding_box()
         r.check("g", f"{scheme}: Crashed는 먹색 바탕 칩", close(pixel_at(page, fail["x"] + fail["width"] - 3, fail["y"] + 3), pal["ink"]))

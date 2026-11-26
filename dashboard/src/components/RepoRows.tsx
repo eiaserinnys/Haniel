@@ -54,7 +54,7 @@ export function SelfRow({ repo, selfUpdate, onApprove, onRestart }: SelfRowProps
           </span>
           {selfUpdate.pending && (
             <button type="button" className="btn btn-primary" onClick={onApprove}>
-              Approve update
+              Approve
             </button>
           )}
         </>
@@ -83,8 +83,8 @@ function PullAction({ repoName, repo, isPulling, onPull }: RepoActionProps) {
   if (isPulling) return <Mark kind="busy" label="Pulling…" />
   if (!repo.pending_changes) return null
   return (
-    <button type="button" className="btn btn-outline" aria-label={`Pull ${repoName}`} onClick={() => onPull(repoName)}>
-      Pull
+    <button type="button" className="btn btn-outline" aria-label={`Deploy ${repoName}`} onClick={() => onPull(repoName)}>
+      Deploy
     </button>
   )
 }

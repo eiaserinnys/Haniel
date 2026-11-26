@@ -25,7 +25,22 @@ const SECTION_IDS = ['services', 'repos', 'deps'] as const
 
 type EditorState<T> = { open: false } | { open: true; editName?: string; editConfig?: T }
 
-type ConfirmState = { kind: 'service' | 'repo' | 'restart'; name: string } | null
+type ConfirmKind = 'service' | 'repo' | 'restart' | 'self-update'
+
+type ConfirmState = { kind: ConfirmKind; name: string } | null
+
+const SELF_CONFIRM = {
+  restart: {
+    title: 'Restart Haniel?',
+    sub: 'Every service stops until Haniel is back.',
+    action: 'Restart',
+  },
+  'self-update': {
+    title: 'Update Haniel now?',
+    sub: "Haniel restarts and this node's services pause briefly. Overlap and adopt services keep running.",
+    action: 'Approve',
+  },
+} as const
 
 export default function App() {
   const {
@@ -99,16 +114,24 @@ export default function App() {
     if (!confirm) return
     if (confirm.kind === 'service') await api.deleteService(confirm.name)
     else if (confirm.kind === 'repo') await api.deleteRepo(confirm.name)
-    else await selfRestart()
+    else if (confirm.kind === 'restart') await selfRestart()
+    else startSelfUpdateAfterClose()
     setCrudError(null)
-    if (confirm.kind !== 'restart') void refreshStatus()
+    if (confirm.kind === 'service' || confirm.kind === 'repo') void refreshStatus()
+  }
+
+  // The update overlay remembers the focused element when it opens, so let the dialog close and hand focus
+  // back to the Approve button first.
+  const startSelfUpdateAfterClose = () => {
+    setConfirm(null)
+    requestAnimationFrame(() => void approveSelfUpdate())
   }
 
   // A deleted row takes the opener with it; hand focus to its section instead of dropping it on the page.
   const closeConfirm = () => {
     const kind = confirm?.kind
     setConfirm(null)
-    if (kind === 'restart' || !kind) return
+    if (kind !== 'service' && kind !== 'repo') return
     requestAnimationFrame(() => {
       if (document.activeElement === document.body) {
         document.getElementById(kind === 'service' ? 'sec-services' : 'sec-repos')?.focus()
@@ -176,7 +199,7 @@ export default function App() {
                       <SelfRow
                         repo={groups.selfRepo}
                         selfUpdate={status.self_update}
-                        onApprove={approveSelfUpdate}
+                        onApprove={() => setConfirm({ kind: 'self-update', name: 'haniel' })}
                         onRestart={() => setConfirm({ kind: 'restart', name: 'haniel' })}
                       />
                     </div>
@@ -310,15 +333,15 @@ export default function App() {
 
       {confirm && (
         <ConfirmDialog
-          title={confirm.kind === 'restart' ? 'Restart Haniel?' : `Delete ${confirm.kind}?`}
+          title={confirm.kind === 'service' || confirm.kind === 'repo' ? `Delete ${confirm.kind}?` : SELF_CONFIRM[confirm.kind].title}
           sub={
-            confirm.kind === 'restart' ? (
-              <span>Every service stops until Haniel is back.</span>
-            ) : (
+            confirm.kind === 'service' || confirm.kind === 'repo' ? (
               <span className="mono">{confirm.name}</span>
+            ) : (
+              <span>{SELF_CONFIRM[confirm.kind].sub}</span>
             )
           }
-          action={confirm.kind === 'restart' ? 'Restart' : 'Delete'}
+          action={confirm.kind === 'service' || confirm.kind === 'repo' ? 'Delete' : SELF_CONFIRM[confirm.kind].action}
           onConfirm={runConfirmed}
           onClose={closeConfirm}
         />
