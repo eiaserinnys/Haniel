@@ -434,6 +434,28 @@ class TestFailedStage:
         finally:
             await harness.close()
 
+    async def test_a_stage_after_a_first_recovering_still_counts_as_recovery(
+        self, store
+    ):
+        harness = Harness(store)
+        try:
+            row = await self._fail_after(store, harness, "recovering", "starting")
+            assert row["failed_stage"] is None
+            assert row["recovery_attempted"] is True
+        finally:
+            await harness.close()
+
+    async def test_a_second_recovering_does_not_move_the_failed_stage(self, store):
+        harness = Harness(store)
+        try:
+            row = await self._fail_after(
+                store, harness, "recovering", "migrating", "recovering"
+            )
+            assert row["failed_stage"] is None
+            assert row["recovery_attempted"] is True
+        finally:
+            await harness.close()
+
     async def test_probe_and_node_owned_rows_carry_null_fields(self, store):
         await store._db.execute(
             "INSERT INTO node_deploy_attempts (node_attempt_id, deploy_id, node_id, repo, branch, "

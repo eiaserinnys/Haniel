@@ -12,15 +12,15 @@ from .event_store_rows import batches, history_order, row_to_dict
 def failure_stage_fields(attempt: dict[str, Any]) -> dict[str, Any]:
     """실패한 시도의 단계와 복구 여부. 노드가 보낸 진행 알림(progress_stage, failed_stage)에서만 읽는다.
 
-    recovery_attempted: recovering 알림을 받았으면 true, 알림은 받았지만 recovering이 없으면 false, 알림이 없으면 null.
-    failed_stage: 복구했으면 recovering 직전 단계, 아니면 마지막 단계. 알 수 없으면 null.
+    recovery_attempted: recovering 알림을 받았으면(recovery_seen=1) true, 알림은 받았지만 recovering이 없으면 false, 알림이 없으면 null.
+    failed_stage: 복구했으면 처음 들어온 recovering 직전 단계(없을 수 있다), 아니면 마지막 단계. 알 수 없으면 null.
     복구가 성공했는지는 노드의 error 문장에만 있어 허브는 읽지 않는다.
     """
+    if attempt["recovery_seen"]:
+        return {"failed_stage": attempt["failed_stage"], "recovery_attempted": True}
     last = attempt["progress_stage"]
     if last is None:
         return {"failed_stage": None, "recovery_attempted": None}
-    if last == "recovering" or attempt["failed_stage"] is not None:
-        return {"failed_stage": attempt["failed_stage"], "recovery_attempted": True}
     return {"failed_stage": last, "recovery_attempted": False}
 
 
