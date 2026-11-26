@@ -277,12 +277,13 @@ async def renew_deadline(
     orchestrator_attempt_id: str,
     deadline_at: str,
     expected_budget_sec: int | None,
+    progress_stage: str,
 ) -> None:
-    """실행 임대 늘림은 상태 칸이 아니라 데이터 칸이다. 마감 종류는 실행 임대가 된다(시작했다의 마감)."""
+    """실행 임대 늘림은 상태 칸이 아니라 데이터 칸이다. 마감 종류는 실행 임대가 되고, 알림의 단계는 시도별 최신 값으로 덮는다."""
     await db.execute(
-        "UPDATE deploy_attempts SET deadline_at = ?, expected_budget_sec = ?, deadline_kind = 'lease' "
-        "WHERE orchestrator_attempt_id = ? AND outcome = 'active'",
-        (deadline_at, expected_budget_sec, orchestrator_attempt_id),
+        "UPDATE deploy_attempts SET deadline_at = ?, expected_budget_sec = ?, deadline_kind = 'lease', "
+        "progress_stage = ? WHERE orchestrator_attempt_id = ? AND outcome = 'active'",
+        (deadline_at, expected_budget_sec, progress_stage, orchestrator_attempt_id),
     )
 
 

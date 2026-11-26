@@ -2671,6 +2671,7 @@ class ServiceRunner:
                 ),
                 haniel_version=haniel.__version__,
                 get_services_info=self._collect_services_info,
+                get_repo_fetch_info=self._collect_repo_fetch_info,
                 service_command_handler=self._handle_service_command,
                 deploy_approval_handler=self._handle_deploy_approval,
                 deploy_plan_probe_handler=self._handle_deploy_plan_probe,
@@ -2699,6 +2700,25 @@ class ServiceRunner:
                 "Failed to start orchestrator client: %s", config.redact_secrets(str(e))
             )
             self._orch_client = None
+
+    def _collect_repo_fetch_info(self) -> dict:
+        """Collect per-repo last fetch times and the poll interval for node_status."""
+        snapshot = self._snapshot_config_state()
+        repos = []
+        for name in snapshot.repo_identity:
+            try:
+                runtime = self._snapshot_repo_runtime(name)
+            except ValueError:
+                continue
+            repos.append(
+                {
+                    "repo": name,
+                    "last_fetch": runtime.last_fetch.isoformat()
+                    if runtime.last_fetch
+                    else None,
+                }
+            )
+        return {"repos": repos, "poll_interval": snapshot.config.poll_interval}
 
     def _collect_services_info(self) -> list[dict]:
         """Collect service info for orchestrator reporting.
@@ -5131,6 +5151,7 @@ class ServiceRunner:
                     expected_manifest_identity=manifest_identity,
                     expected_manifest_digest=manifest_digest,
                     is_self_update=name == config_snapshot.self_repo,
+                    apply_policy=self._change_apply_policy(name, config_snapshot),
                     wait=True,
                 )
         if self_restart_required:
@@ -5169,6 +5190,26 @@ class ServiceRunner:
             return self._snapshot_repo_runtime(repo_name).config.auto_apply
         except ValueError:
             return True
+
+    def _change_apply_policy(
+        self, repo_name: str, config_snapshot: RunnerConfigSnapshot
+    ) -> str:
+        """Return ``auto`` when this node applies the repo's changes itself, else ``approval``.
+
+        The self repo ignores ``auto_apply`` and follows ``self_update.auto_update``.
+        """
+        if repo_name == config_snapshot.self_repo:
+            self_update = config_snapshot.config.self_update
+            return (
+                "auto"
+                if self_update is not None and self_update.auto_update
+                else "approval"
+            )
+        return (
+            "auto"
+            if self._effective_auto_apply(repo_name, config_snapshot)
+            else "approval"
+        )
 
     def _log_pending_manual_approval(
         self,

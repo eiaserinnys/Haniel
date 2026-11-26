@@ -115,9 +115,18 @@ class DeployAttemptCoordinator(
                 event["node_id"]
             )
             if not event.get("is_self_update") and blocking_self_update is not None:
+                if blocking_self_update["status"] == "deploying":
+                    reason = (
+                        f"self-update {blocking_self_update['deploy_id']} is deploying "
+                        f"on node {event['node_id']}; approve other deployments after it finishes"
+                    )
+                else:
+                    reason = (
+                        f"self-update {blocking_self_update['deploy_id']} must be approved "
+                        f"or postponed before other deployments on node {event['node_id']}"
+                    )
                 raise PlanRejected(
-                    f"self-update {blocking_self_update['deploy_id']} must be approved "
-                    f"or postponed before other deployments on node {event['node_id']}",
+                    reason,
                     409,
                     blocking_self_update={
                         key: blocking_self_update[key]

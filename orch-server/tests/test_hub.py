@@ -270,6 +270,8 @@ class TestSendToNode:
             "type": "node_disconnected",
             "node_id": "n1",
             "reason": "send_failed",
+            "self_update_deploying": False,
+            "self_update_deploy_id": None,
         } in sent
 
 
@@ -1693,7 +1695,7 @@ class TestNodeDeployReport:
 
         store.record_node_deploy_report.assert_awaited_once_with(report)
         registry.heartbeat.assert_awaited_once_with(
-            "n1", services=None, websocket=websocket
+            "n1", services=None, websocket=websocket, repos=None, poll_interval=None
         )
         assert "poison identity" in caplog.text
 

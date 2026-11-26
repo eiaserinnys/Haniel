@@ -131,8 +131,8 @@ def setup_dashboard(
     # query-token check in that case (mirrors AuthMiddleware short-circuit).
     ws_handler = DashboardWebSocket(runner, token=token)
 
-    api_routes = create_api_routes(runner)
-    config_routes = create_config_api_routes(runner)
+    api_routes = create_api_routes(runner, ws_handler)
+    config_routes = create_config_api_routes(runner, ws_handler)
 
     routes: list[Route | WebSocketRoute] = []
     routes.extend(api_routes)

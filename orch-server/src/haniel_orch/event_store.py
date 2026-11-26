@@ -101,6 +101,7 @@ class EventStore(EventStoreLifecycleMixin, InspectionNoticeStoreMixin):
         expected_manifest_identity: str | None = None,
         expected_manifest_digest: str | None = None,
         is_self_update: bool = False,
+        apply_policy: str | None = None,
     ) -> bool:
         """Create a deploy event.
 
@@ -126,6 +127,7 @@ class EventStore(EventStoreLifecycleMixin, InspectionNoticeStoreMixin):
                     expected_manifest_digest=expected_manifest_digest,
                     is_self_update=is_self_update,
                     now=now,
+                    apply_policy=apply_policy,
                 )
                 if inserted:
                     latest_cursor = await self._db.execute(
@@ -404,8 +406,22 @@ class EventStore(EventStoreLifecycleMixin, InspectionNoticeStoreMixin):
             # 점검 필요(잎 칸은 decode가 거른다)와 직전 실패 요약. 기존 칸과 이름은 그대로다
             item["inspection_required"] = row[names.index("sm_lock")] == LOCK_ON
             item["last_failure"] = await last_failure(self._db, item["deploy_id"])
+            item["progress_stage"] = await self._running_progress_stage(item)
             deploys.append(item)
         return deploys
+
+    async def _running_progress_stage(self, deploy: dict[str, Any]) -> str | None:
+        """배포 중인 요청의 도는 시도가 노드에서 마지막으로 알린 단계. 대기 중이거나 알림이 없으면 None."""
+        if deploy["status"] != DeployStatus.DEPLOYING.value:
+            return None
+        cursor = await self._db.execute(
+            "SELECT progress_stage FROM deploy_attempts "
+            "WHERE deploy_id = ? AND outcome = 'active' "
+            "ORDER BY attempt_seq DESC, rowid DESC LIMIT 1",
+            (deploy["deploy_id"],),
+        )
+        row = await cursor.fetchone()
+        return None if row is None else row[0]
 
     async def get_active_self_update_for_node(
         self, node_id: str

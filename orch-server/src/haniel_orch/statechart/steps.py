@@ -64,8 +64,8 @@ _INSERT_REQUEST = """INSERT OR IGNORE INTO deploy_events
     (deploy_id, node_id, repo, branch, status, sm_status, sm_belief, sm_lock, sm_tag,
      commits_json, affected_services_json, diff_stat, detected_at,
      created_at, updated_at, target_head, deployment_kind,
-     expected_manifest_identity, expected_manifest_digest, is_self_update)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+     expected_manifest_identity, expected_manifest_digest, is_self_update, apply_policy)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
 
 async def create_request(
@@ -85,6 +85,7 @@ async def create_request(
     expected_manifest_digest: str | None,
     is_self_update: bool,
     now: str,
+    apply_policy: str | None = None,
 ) -> bool:
     """요청 줄을 처음 대기로 만든다. 같은 deploy_id가 있으면 아무것도 쓰지 않고 False.
 
@@ -116,6 +117,7 @@ async def create_request(
             expected_manifest_identity,
             expected_manifest_digest,
             int(is_self_update),
+            apply_policy,
         ),
     )
     if cursor.rowcount <= 0:
@@ -374,3 +376,15 @@ async def set_postponed_until(
         "WHERE deploy_id = ?",
         (postponed_until, now, deploy_id),
     )
+
+
+async def set_apply_policy(
+    db: aiosqlite.Connection, deploy_id: str, apply_policy: str
+) -> bool:
+    """대기 줄의 적용 방식을 노드가 다시 알린 값으로 맞춘다. 데이터 칸이라 잎과 updated_at은 건드리지 않는다."""
+    cursor = await db.execute(
+        "UPDATE deploy_events SET apply_policy = ? "
+        "WHERE deploy_id = ? AND status = 'pending' AND apply_policy IS NOT ?",
+        (apply_policy, deploy_id, apply_policy),
+    )
+    return cursor.rowcount > 0

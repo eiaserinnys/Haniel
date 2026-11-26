@@ -67,13 +67,31 @@ def create_api_routes(hub: WebSocketHub, store: EventStore) -> list[Route]:
           - [...]: list of service info dicts
         Distinguishing None vs [] lets the dashboard show "no services configured"
         for the empty case without conflating it with "information missing".
+
+        Screen fields (#1896): serving (per repo, the last successful deploy's
+        target_head), poll_interval and repo_fetches (latest hello/heartbeat of
+        a connected node, else null), self_update_deploying/self_update_deploy_id.
         """
         nodes = await store.get_nodes()
+        served = await store.get_served_commits()
+        self_updates = await store.get_deploying_self_updates()
         for node in nodes:
             connected_node = hub.registry.get_node(node["node_id"])
             node["connected"] = 1 if connected_node is not None else 0
             if connected_node is not None and connected_node.services is not None:
                 node["services"] = connected_node.services
+            node["serving"] = served.get(node["node_id"], [])
+            node["poll_interval"] = (
+                connected_node.poll_interval if connected_node is not None else None
+            )
+            node["repo_fetches"] = (
+                [fetch.model_dump() for fetch in connected_node.repos]
+                if connected_node is not None and connected_node.repos is not None
+                else None
+            )
+            self_update_deploy_id = self_updates.get(node["node_id"])
+            node["self_update_deploying"] = self_update_deploy_id is not None
+            node["self_update_deploy_id"] = self_update_deploy_id
         return JSONResponse({"nodes": nodes})
 
     async def get_history(request: Request) -> JSONResponse:

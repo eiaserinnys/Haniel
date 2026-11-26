@@ -198,9 +198,12 @@ class TestSelfUpdatePriority:
         )
         harness = Harness(store)
         try:
-            with pytest.raises(
-                PlanRejected, match="self-update self must be approved or postponed"
-            ) as rejected:
+            expected = (
+                "self-update self is deploying on node n; approve other deployments after it finishes"
+                if status is DeployStatus.DEPLOYING
+                else "self-update self must be approved or postponed"
+            )
+            with pytest.raises(PlanRejected, match=expected) as rejected:
                 await harness.coordinator.approve_manual(
                     regular, approved_by="director", source="manual_single"
                 )

@@ -44,8 +44,11 @@ class HubCanonicalFlows:
             expected_manifest_identity=msg.expected_manifest_identity,
             expected_manifest_digest=msg.expected_manifest_digest,
             is_self_update=is_self_update,
+            apply_policy=msg.apply_policy,
         )
         if not inserted:
+            if msg.apply_policy is not None:
+                await self._store.set_apply_policy(msg.deploy_id, msg.apply_policy)
             await self._revive_postponed_self_update(msg)
             return
 
