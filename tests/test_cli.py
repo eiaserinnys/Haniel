@@ -538,7 +538,10 @@ class TestInstallerExpectations:
             "service": {"name": "haniel"},
         }
 
-        with patch("haniel.commands.install.platform.system", return_value=system):
+        with (
+            patch("haniel.commands.install.platform.system", return_value=system),
+            patch("haniel.installer.launchd.os.getuid", create=True, return_value=501),
+        ):
             _print_completion(orchestrator, tmp_path / "haniel.yaml", config)
 
         output = capsys.readouterr().out

@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch, AsyncMock
 
@@ -3145,6 +3146,7 @@ def _self_update_config(config_dir: Path, **install_payload) -> HanielConfig:
     )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="systemd units are Linux only")
 class TestSystemdUnitSelfUpdate:
     """The Linux unit hands the process to the wrapper when self: is set."""
 
@@ -3391,25 +3393,24 @@ class TestValidateCmd:
         assert "oops" in message and "line8" in message
         assert "line1\n" not in message and "line3" not in message
 
-    def test_timeout_is_a_failure_and_leaves_no_child_running(
+    def test_timeout_is_a_failure_and_kills_the_children_it_started(
         self, tmp_path, monkeypatch
     ):
         from haniel.installer import validation
 
-        monkeypatch.setattr(validation, "VALIDATE_TIMEOUT_SECONDS", 1)
-        pid_file = tmp_path / "child.pid"
+        monkeypatch.setattr(validation, "VALIDATE_TIMEOUT_SECONDS", 0.5)
+        survivor_mark = tmp_path / "survivor"
 
         with pytest.raises(validation.ConfigValueValidationError, match="timed out"):
             validation.run_validate_cmd(
                 "app-env",
-                _validated_key(f"sleep 30 & echo $! > {pid_file}; wait"),
+                _validated_key(f"(sleep 1.5; touch {survivor_mark}) & wait"),
                 "v",
                 tmp_path,
             )
 
-        child = int(pid_file.read_text())
-        with pytest.raises(ProcessLookupError):
-            os.kill(child, 0)
+        time.sleep(2.5)
+        assert not survivor_mark.exists()
 
     def test_command_runs_in_config_dir(self, tmp_path):
         from haniel.installer.validation import run_validate_cmd
