@@ -347,7 +347,8 @@ describe('PendingView', () => {
     const manualRow = screen.getByText('manual-repo').closest('.row') as HTMLElement;
     expect(within(manualRow).getByText('Manual approval')).toBeInTheDocument();
     fireEvent.click(within(manualRow).getByRole('button', { name: /manual-repo/, expanded: false }));
-    expect(within(manualRow).getByText(/auto-apply is off for this repository/)).toBeInTheDocument();
+    expect(within(manualRow).getByText('auto-apply is off for this repository')).toBeInTheDocument();
+    expect(within(manualRow).getAllByText('Manual approval')).toHaveLength(1);
   });
 
   it('explains what approving a self-update does', () => {

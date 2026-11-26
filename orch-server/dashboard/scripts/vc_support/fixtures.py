@@ -157,7 +157,7 @@ def nodes(long=False):
          "os": "linux", "arch": "x86_64", "haniel_version": "e9416d7", "connected": 1,
          "last_seen": iso(0), "created_at": iso(9000),
          "poll_interval": 60,
-         "repo_fetches": _fetches(("haniel", 2), (long_repo, 2), ("lore-search", 3), ("serendipity", None)),
+         "repo_fetches": _fetches(("haniel", 2), (long_repo, 3060), ("lore-search", 65), ("serendipity", None)),
          "serving": [_serving("haniel", "e9416d7a1b2c3d4e5f60718293a4b5c6d7e8f901", 37),
                      _serving(long_repo, "4f2a91c0d1e2f30415263748596a7b8c9d0e1f23", 2900),
                      _serving("lore-search", "b6c0d11e22f33a44b55c66d77e88f99aa0b1c2d3", 1500)],

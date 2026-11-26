@@ -144,7 +144,7 @@ describe('App dashboard sync', () => {
     expect(apiMock.fetchHistory).toHaveBeenCalledWith({ includeSuperseded: false });
   });
 
-  it('shows the failure of a pending row and the empty-screen line when nothing waits', async () => {
+  it('shows the failure of a pending row and a Retry button', async () => {
     apiMock.fetchPending.mockResolvedValue({
       deploys: [{
         ...pendingDeploy('failed-one'),

@@ -215,7 +215,7 @@ function RepoLedger({ node }: { node: OrchestratorNode }) {
                   : 'No successful deploy recorded'}
               </span>
               <span className="mini-checked">
-                {l.checked ? <>checked {relTime(l.checked)}</> : null}
+                {l.checked ? <>checked <span className="mono">{relTime(l.checked)}</span></> : null}
               </span>
             </li>
           ))}

@@ -46,6 +46,7 @@ describe('NodesView', () => {
     expect(within(haniel).getByText('e9416d7a')).toHaveClass('mono');
     expect(haniel.textContent).toMatch(/serving e9416d7a · \d\d:\d\d/);
     expect(haniel.textContent).toContain('checked 2m ago');
+    expect(haniel.querySelector('.mini-checked .mono')?.textContent).toBe('2m ago');
     const lore = within(ledger).getByText('lore-search').closest('li') as HTMLElement;
     expect(lore.textContent).toContain('No successful deploy recorded');
     expect(lore.textContent).not.toContain('checked');

@@ -1062,7 +1062,7 @@ p {
 
 .mini-rows li {
   display: grid;
-  grid-template-columns: minmax(var(--zero), 1fr) auto var(--label-col);
+  grid-template-columns: minmax(var(--zero), 1fr) auto auto;
   align-items: baseline;
   gap: var(--space-2);
   padding: var(--space-1) var(--zero);

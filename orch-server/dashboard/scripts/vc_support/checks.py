@@ -13,7 +13,7 @@ TONE = {
     "fail": ["Crashed", "Circuit open", "Failed", "Disconnected", "Fetch error", "Error"],
 }
 LABEL_TONE = {label: tone for tone, labels in TONE.items() for label in labels}
-STAGES = ["Preparing", "Building", "Checking", "Backing up", "Migrating", "Starting services", "Verifying", "Rolling back"]
+STAGES = ["Preparing", "Building", "Checking", "Backing up", "Migrating", "Starting services", "Verifying", "Recovering"]
 
 
 def tone_of(label):
@@ -407,6 +407,17 @@ def nodes_ledger(S, rep, scene):
     if not m:
         rep.fail(scene, "no repository mini ledger in an expanded node")
         return
+    edges = S.page.evaluate(
+        """() => Array.from(document.querySelectorAll('.mini-rows li')).map((li) => {
+          const serving = li.querySelector('.mini-serving'), checked = li.querySelector('.mini-checked');
+          const range = document.createRange(); range.selectNodeContents(checked);
+          const t = range.getBoundingClientRect(), mono = checked.querySelector('.mono');
+          return { repo: li.querySelector('.r-name').textContent, checked: checked.textContent.length > 0,
+                   row_right: li.getBoundingClientRect().right, text_right: t.right, text_left: t.left,
+                   prev_right: serving.getBoundingClientRect().right,
+                   checked_font: mono ? getComputedStyle(mono).fontFamily : getComputedStyle(checked).fontFamily }; })
+          .filter((r) => r.checked)"""
+    )
     first = m[0]
     if "Polls every 60s" not in first["text"] or "Last successful deploy" not in first["text"]:
         rep.fail(scene, f"first node ledger: {first['text']!r}")
@@ -415,6 +426,16 @@ def nodes_ledger(S, rep, scene):
     sha = [c for c in first["commits"] if re.fullmatch(r"[0-9a-f]{8}", c)]
     if not sha or not all("IBM Plex Mono" in f for f in first["fonts"]):
         rep.fail(scene, f"serving commits {first['commits']} should be 8 characters in Plex Mono")
+    for want in (r"checked 1h \d+m ago", r"checked 2d \d+h ago"):
+        if not re.search(want, first["text"]):
+            rep.fail(scene, f"first node ledger should show {want!r} (65 and 3060 minutes ago): {first['text']!r}")
+    for row in edges:
+        if row["text_right"] > row["row_right"] + 0.5:
+            rep.fail(scene, f"ledger row {row['repo']!r}: checked text ends at {row['text_right']:.1f}, past the row end {row['row_right']:.1f}")
+        if row["text_left"] < row["prev_right"] - 0.5:
+            rep.fail(scene, f"ledger row {row['repo']!r}: checked text starts at {row['text_left']:.1f}, inside the serving text ending {row['prev_right']:.1f}")
+        if row["checked"] and "IBM Plex Mono" not in row["checked_font"]:
+            rep.fail(scene, f"ledger row {row['repo']!r}: the checked time is not Plex Mono ({row['checked_font']})")
     if not any("serving " in x["text"] and re.search(r"\d\d:\d\d", x["text"]) for x in m):
         rep.fail(scene, "no 'serving <commit> · HH:MM' line")
     old = [x for x in m if "No successful deploy recorded" in x["text"] and "Polls every" not in x["text"]]

@@ -424,7 +424,7 @@ function PendingRow({
             {manualApproval && (
               <>
                 <span className="dl-k">Approval</span>
-                <div className="dl-v">Manual approval: auto-apply is off for this repository</div>
+                <div className="dl-v">auto-apply is off for this repository</div>
               </>
             )}
             {deploy.affected_services.length > 0 && (

@@ -9,7 +9,7 @@ const PROGRESS_LABELS: Record<string, string> = {
   migrating: 'Migrating',
   starting: 'Starting services',
   verifying: 'Verifying',
-  recovering: 'Rolling back',
+  recovering: 'Recovering',
 };
 
 function words(code: string): string {

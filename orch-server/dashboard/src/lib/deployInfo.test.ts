@@ -94,7 +94,7 @@ describe('stage and polling labels', () => {
   it('shows Deploying alone until a stage is known', () => {
     expect(deployingLabel(null)).toBe('Deploying');
     expect(deployingLabel('build')).toBe('Deploying · Building');
-    expect(deployingLabel('recovering')).toBe('Deploying · Rolling back');
+    expect(deployingLabel('recovering')).toBe('Deploying · Recovering');
     expect(deployingLabel('some_new_stage')).toBe('Deploying · some new stage');
   });
 
