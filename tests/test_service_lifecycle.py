@@ -278,6 +278,114 @@ def test_disable_service_updates_config_and_stops_running_process(tmp_path: Path
     assert "web" not in runner._enabled_services
 
 
+def test_enable_service_undoes_disable_resets_circuit_and_starts(tmp_path: Path):
+    from haniel.core.service_lifecycle import disable_service, enable_service
+
+    config = HanielConfig(
+        poll_interval=60,
+        services={"web": ServiceConfig(run="python app.py")},
+        repos={},
+    )
+    runner = _runner(config, tmp_path)
+    runner.process_manager.is_running = MagicMock(return_value=False)
+    runner.health_manager.reset_circuit = MagicMock()
+    runner._start_service = MagicMock(return_value=True)
+
+    disable_service(runner, "web")
+    assert "web" not in runner._enabled_services
+
+    result = enable_service(runner, "web")
+
+    assert result == {
+        "ok": True,
+        "service": "web",
+        "enabled": True,
+        "was_enabled": False,
+        "circuit_reset": True,
+        "started": True,
+    }
+    assert _read_raw(runner.config_path)["services"]["web"]["enabled"] is True
+    assert "web" in runner._enabled_services
+    runner.health_manager.reset_circuit.assert_called_once_with("web")
+    runner._start_service.assert_called_once_with("web")
+
+
+def test_enable_service_already_enabled_leaves_config_and_running_service(
+    tmp_path: Path,
+):
+    from haniel.core.service_lifecycle import enable_service
+
+    config = HanielConfig(
+        poll_interval=60,
+        services={"web": ServiceConfig(run="python app.py")},
+        repos={},
+    )
+    runner = _runner(config, tmp_path)
+    before = runner.config_path.read_bytes()
+    runner.process_manager.is_running = MagicMock(return_value=True)
+    runner.health_manager.reset_circuit = MagicMock()
+    runner._start_service = MagicMock()
+
+    result = enable_service(runner, "web")
+
+    assert result["was_enabled"] is True
+    assert result["circuit_reset"] is False
+    assert result["started"] is False
+    runner.health_manager.reset_circuit.assert_not_called()
+    assert runner.config_path.read_bytes() == before
+    runner._start_service.assert_not_called()
+
+
+def test_enable_service_unknown_name_is_an_error(tmp_path: Path):
+    from haniel.core.service_lifecycle import enable_service
+
+    runner = _runner(HanielConfig(poll_interval=60, services={}, repos={}), tmp_path)
+    runner.health_manager.reset_circuit = MagicMock()
+
+    with pytest.raises(KeyError, match="Service not found: nope"):
+        enable_service(runner, "nope")
+    runner.health_manager.reset_circuit.assert_not_called()
+
+
+def test_reset_service_circuit_leaves_a_running_service_alone(tmp_path: Path):
+    from haniel.core.service_lifecycle import reset_service_circuit
+
+    config = HanielConfig(
+        poll_interval=60,
+        services={"web": ServiceConfig(run="python app.py")},
+        repos={},
+    )
+    runner = _runner(config, tmp_path)
+    runner.process_manager.is_running = MagicMock(return_value=True)
+    runner.health_manager.reset_circuit = MagicMock()
+
+    assert reset_service_circuit(runner, "web")["circuit_reset"] is False
+    runner.health_manager.reset_circuit.assert_not_called()
+
+
+def test_reset_service_circuit_only_resets_known_services(tmp_path: Path):
+    from haniel.core.service_lifecycle import reset_service_circuit
+
+    config = HanielConfig(
+        poll_interval=60,
+        services={"web": ServiceConfig(run="python app.py", enabled=False)},
+        repos={},
+    )
+    runner = _runner(config, tmp_path)
+    runner.health_manager.reset_circuit = MagicMock()
+    runner._start_service = MagicMock()
+
+    runner.process_manager.is_running = MagicMock(return_value=False)
+
+    assert reset_service_circuit(runner, "web")["circuit_reset"] is True
+    runner.health_manager.reset_circuit.assert_called_once_with("web")
+    runner._start_service.assert_not_called()
+    assert _read_raw(runner.config_path)["services"]["web"]["enabled"] is False
+
+    with pytest.raises(KeyError, match="Service not found: nope"):
+        reset_service_circuit(runner, "nope")
+
+
 def test_delete_service_config_stops_and_purges_unshared_repo_path(tmp_path: Path):
     from haniel.core.service_lifecycle import delete_service_config
 

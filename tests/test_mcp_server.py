@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from haniel.config import HanielConfig, McpConfig, ServiceConfig, RepoConfig
 from haniel.core.health import ServiceState
+from haniel.core.service_lifecycle import PullOutcome
+from haniel.integrations.mcp_server import McpToolError
 from haniel.core.thread_shutdown import DEFAULT_THREAD_JOIN_TIMEOUT_SECONDS
 
 
@@ -124,6 +126,35 @@ class TestHanielMcpServer:
             server.return_value.serve = AsyncMock()
             await mcp_server.start()
         assert config.call_args.kwargs["host"] == "192.0.2.1"
+
+
+class TestMcpPortInUse:
+    async def test_start_logs_error_and_does_not_serve_when_port_is_taken(self, caplog):
+        import socket
+
+        from haniel.integrations.mcp_server import HanielMcpServer
+
+        with socket.socket() as taken:
+            taken.bind(("127.0.0.1", 0))
+            taken.listen()
+            port = taken.getsockname()[1]
+            runner = MagicMock()
+            runner.config = HanielConfig(
+                mcp=McpConfig(enabled=True, host="127.0.0.1", port=port),
+                services={},
+                repos={},
+            )
+            server = HanielMcpServer(runner)
+
+            with patch("uvicorn.Server") as uvicorn_server:
+                with caplog.at_level("ERROR", logger="haniel.integrations.mcp_server"):
+                    await server.start()
+
+        uvicorn_server.assert_not_called()
+        assert (
+            f"MCP port {port} on 127.0.0.1 is already in use; change mcp.port"
+            in caplog.text
+        )
 
 
 class TestMcpResources:
@@ -318,8 +349,8 @@ class TestMcpTools:
             "services": {},
             "repos": {},
         }
-        result = await mcp_server.call_tool("haniel_restart", {"service": "unknown"})
-        assert "error" in result.lower() or "not found" in result.lower()
+        with pytest.raises(McpToolError, match="Service not found: unknown"):
+            await mcp_server.call_tool("haniel_restart", {"service": "unknown"})
 
     @pytest.mark.asyncio
     async def test_stop_service(self, mcp_server, mock_runner):
@@ -346,8 +377,9 @@ class TestMcpTools:
     @pytest.mark.asyncio
     async def test_pull_repo(self, mcp_server, mock_runner):
         """Test haniel_pull tool delegates to runner.trigger_pull."""
+        mock_runner.trigger_pull.return_value = PullOutcome.PULLED
         result = await mcp_server.call_tool("haniel_pull", {"repo": "main"})
-        assert "pulled" in result.lower() or "success" in result.lower()
+        assert result == "main: pulled; affected services restarted"
         mock_runner.trigger_pull.assert_called_with("main")
 
     @pytest.mark.asyncio
@@ -358,26 +390,63 @@ class TestMcpTools:
         mock_runner.get_status.return_value["services"]["web"]["config"] = {
             "repo": "main"
         }
+        mock_runner.trigger_pull.return_value = PullOutcome.PULLED
         if fails:
             mock_runner.trigger_pull.side_effect = RuntimeError("pull failed")
-
-        result = await mcp_server.call_tool("haniel_update", {"service": "web"})
+            with pytest.raises(McpToolError, match="pull failed"):
+                await mcp_server.call_tool("haniel_update", {"service": "web"})
+        else:
+            result = await mcp_server.call_tool("haniel_update", {"service": "web"})
+            assert result.startswith("web (repo main): pulled")
 
         mock_runner.trigger_pull.assert_called_once_with("main")
         mock_runner._pull_repo.assert_not_called()
         mock_runner.restart_service.assert_not_called()
-        assert ("pull failed" in result.lower()) == fails
 
     @pytest.mark.asyncio
-    async def test_pull_repo_while_pulling(self, mcp_server, mock_runner):
-        """Test haniel_pull returns success even when is_pulling guard silently returns.
-
-        trigger_pull returns None (no exception) when is_pulling is True.
-        MCP should still return a success message in this case.
-        """
-        mock_runner.trigger_pull.return_value = None  # simulates is_pulling guard
+    @pytest.mark.parametrize(
+        ("outcome", "expected"),
+        [
+            (PullOutcome.NO_CHANGES, "main: no changes to pull"),
+            (
+                PullOutcome.ALREADY_PULLING,
+                "main: already pulling; this request was ignored",
+            ),
+        ],
+    )
+    async def test_pull_repo_reports_what_actually_happened(
+        self, mcp_server, mock_runner, outcome, expected
+    ):
+        """haniel_pull must not claim a pull or restart that did not happen."""
+        mock_runner.trigger_pull.return_value = outcome
         result = await mcp_server.call_tool("haniel_pull", {"repo": "main"})
-        assert "success" in result.lower() or "pulled" in result.lower()
+        assert result == expected
+        assert "restarted" not in result
+
+    @pytest.mark.asyncio
+    async def test_pull_self_repo_warns_haniel_restarts(self, mcp_server, mock_runner):
+        mock_runner.trigger_pull.return_value = PullOutcome.SELF_UPDATE_REQUESTED
+        result = await mcp_server.call_tool("haniel_pull", {"repo": "main"})
+        assert result.startswith("main: self-update requested.")
+        assert "every service on this node stops" in result
+        assert "overlap or adopt" in result
+
+    @pytest.mark.asyncio
+    async def test_restart_haniel_warns_node_services_stop(
+        self, mcp_server, mock_runner
+    ):
+        mock_runner.request_restart.return_value = "Restart initiated."
+        result = await mcp_server.call_tool("haniel_restart", {"service": "haniel"})
+        assert result.startswith("Restart initiated.")
+        assert "every service on this node stops" in result
+
+    @pytest.mark.parametrize("tool", ["haniel_restart", "haniel_pull", "haniel_update"])
+    def test_tool_descriptions_warn_about_haniel_restart(self, mcp_server, tool):
+        description = next(
+            t["description"] for t in mcp_server.list_tools() if t["name"] == tool
+        )
+        assert "every service on this node stops" in description
+        assert "overlap or adopt" in description
 
     @pytest.mark.asyncio
     async def test_pull_unknown_repo(self, mcp_server, mock_runner):
@@ -387,15 +456,52 @@ class TestMcpTools:
             "services": {},
             "repos": {},
         }
-        result = await mcp_server.call_tool("haniel_pull", {"repo": "unknown"})
-        assert "error" in result.lower() or "not found" in result.lower()
+        with pytest.raises(McpToolError, match="Repository not found: unknown"):
+            await mcp_server.call_tool("haniel_pull", {"repo": "unknown"})
 
     @pytest.mark.asyncio
     async def test_enable_service(self, mcp_server, mock_runner):
-        """Test haniel_enable tool (circuit breaker reset)."""
-        result = await mcp_server.call_tool("haniel_enable", {"service": "web"})
-        assert "enabled" in result.lower() or "reset" in result.lower()
-        mock_runner.health_manager.reset_circuit.assert_called_with("web")
+        """haniel_enable is the pair of haniel_disable, not a circuit reset."""
+        with patch("haniel.integrations.mcp_server.enable_service") as enable:
+            enable.return_value = {"ok": True, "service": "web", "enabled": True}
+            result = await mcp_server.call_tool("haniel_enable", {"service": "web"})
+
+        assert json.loads(result)["enabled"] is True
+        enable.assert_called_once_with(mock_runner, "web")
+        mock_runner.health_manager.reset_circuit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_enable_unknown_service_is_an_error(self, mcp_server, mock_runner):
+        with patch("haniel.integrations.mcp_server.enable_service") as enable:
+            enable.side_effect = KeyError("Service not found: nope")
+            with pytest.raises(McpToolError) as error:
+                await mcp_server.call_tool("haniel_enable", {"service": "nope"})
+        assert str(error.value) == "Service not found: nope"
+
+    @pytest.mark.asyncio
+    async def test_reset_circuit_tool(self, mcp_server, mock_runner):
+        """haniel_reset_circuit only releases the circuit breaker."""
+        mock_runner._snapshot_config_state.return_value.config.services = {"web": 1}
+        mock_runner.process_manager.is_running.return_value = False
+        result = await mcp_server.call_tool("haniel_reset_circuit", {"service": "web"})
+        assert json.loads(result)["circuit_reset"] is True
+        mock_runner.health_manager.reset_circuit.assert_called_once_with("web")
+
+    @pytest.mark.asyncio
+    async def test_reset_circuit_unknown_service_is_an_error(
+        self, mcp_server, mock_runner
+    ):
+        mock_runner._snapshot_config_state.return_value.config.services = {}
+        with pytest.raises(McpToolError, match="Service not found: nope"):
+            await mcp_server.call_tool("haniel_reset_circuit", {"service": "nope"})
+        mock_runner.health_manager.reset_circuit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_read_logs_unknown_service_is_an_error(self, mcp_server, mock_runner):
+        mock_runner._snapshot_config_state.return_value.config.services = {"web": 1}
+        with pytest.raises(McpToolError, match="Service not found: nope"):
+            await mcp_server.call_tool("haniel_read_logs", {"service": "nope"})
+        mock_runner.process_manager.log_manager.get_log_tail.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_reload_config(self, mcp_server, mock_runner):
@@ -554,32 +660,32 @@ class TestMcpServerExtended:
     @pytest.mark.asyncio
     async def test_restart_empty_service_name(self, mcp_server):
         """Test restart with empty service name."""
-        result = await mcp_server.call_tool("haniel_restart", {"service": ""})
-        assert "error" in result.lower()
+        with pytest.raises(McpToolError, match="required"):
+            await mcp_server.call_tool("haniel_restart", {"service": ""})
 
     @pytest.mark.asyncio
     async def test_stop_empty_service_name(self, mcp_server):
         """Test stop with empty service name."""
-        result = await mcp_server.call_tool("haniel_stop", {"service": ""})
-        assert "error" in result.lower()
+        with pytest.raises(McpToolError, match="required"):
+            await mcp_server.call_tool("haniel_stop", {"service": ""})
 
     @pytest.mark.asyncio
     async def test_start_empty_service_name(self, mcp_server):
         """Test start with empty service name."""
-        result = await mcp_server.call_tool("haniel_start", {"service": ""})
-        assert "error" in result.lower()
+        with pytest.raises(McpToolError, match="required"):
+            await mcp_server.call_tool("haniel_start", {"service": ""})
 
     @pytest.mark.asyncio
     async def test_pull_empty_repo_name(self, mcp_server):
         """Test pull with empty repo name."""
-        result = await mcp_server.call_tool("haniel_pull", {"repo": ""})
-        assert "error" in result.lower()
+        with pytest.raises(McpToolError, match="required"):
+            await mcp_server.call_tool("haniel_pull", {"repo": ""})
 
     @pytest.mark.asyncio
     async def test_enable_empty_service_name(self, mcp_server):
         """Test enable with empty service name."""
-        result = await mcp_server.call_tool("haniel_enable", {"service": ""})
-        assert "error" in result.lower()
+        with pytest.raises(McpToolError, match="required"):
+            await mcp_server.call_tool("haniel_enable", {"service": ""})
 
     @pytest.mark.asyncio
     async def test_disable_service_tool(self, mcp_server, mock_runner):
@@ -648,82 +754,75 @@ class TestMcpServerExtended:
     @pytest.mark.asyncio
     async def test_disable_empty_service_name(self, mcp_server):
         """Test disable with empty service name."""
-        result = await mcp_server.call_tool("haniel_disable", {"service": ""})
-        assert "error" in result.lower()
+        with pytest.raises(McpToolError, match="required"):
+            await mcp_server.call_tool("haniel_disable", {"service": ""})
 
     @pytest.mark.asyncio
     async def test_reload_service_empty_name(self, mcp_server):
         """Test reload_service with empty service name."""
-        result = await mcp_server.call_tool("haniel_reload_service", {"service": ""})
-        assert "error" in result.lower()
+        with pytest.raises(McpToolError, match="required"):
+            await mcp_server.call_tool("haniel_reload_service", {"service": ""})
 
     @pytest.mark.asyncio
     async def test_call_unknown_tool(self, mcp_server):
         """Test calling unknown tool."""
-        result = await mcp_server.call_tool("unknown_tool", {})
-        assert "unknown" in result.lower()
+        with pytest.raises(McpToolError, match="Unknown tool"):
+            await mcp_server.call_tool("unknown_tool", {})
 
     @pytest.mark.asyncio
     async def test_restart_exception_handling(self, mcp_server, mock_runner):
         """Test restart with an exception from the runner restart."""
         mock_runner.restart_service.side_effect = Exception("Start failed")
 
-        result = await mcp_server.call_tool("haniel_restart", {"service": "web"})
-        data = json.loads(result)
-        assert "error" in data
+        with pytest.raises(McpToolError):
+            await mcp_server.call_tool("haniel_restart", {"service": "web"})
 
     @pytest.mark.asyncio
     async def test_stop_exception_handling(self, mcp_server, mock_runner):
         """Test stop with an exception from the runner stop."""
         mock_runner.stop_service.side_effect = Exception("Stop failed")
 
-        result = await mcp_server.call_tool("haniel_stop", {"service": "web"})
-        data = json.loads(result)
-        assert "error" in data
+        with pytest.raises(McpToolError):
+            await mcp_server.call_tool("haniel_stop", {"service": "web"})
 
     @pytest.mark.asyncio
     async def test_start_exception_handling(self, mcp_server, mock_runner):
         """Test start with exception."""
         mock_runner._start_service.side_effect = Exception("Start failed")
 
-        result = await mcp_server.call_tool("haniel_start", {"service": "web"})
-        data = json.loads(result)
-        assert "error" in data
+        with pytest.raises(McpToolError):
+            await mcp_server.call_tool("haniel_start", {"service": "web"})
 
     @pytest.mark.asyncio
     async def test_pull_failure(self, mcp_server, mock_runner):
         """Test pull when trigger_pull raises (git pull failed)."""
         mock_runner.trigger_pull.side_effect = RuntimeError("git pull failed for main")
 
-        result = await mcp_server.call_tool("haniel_pull", {"repo": "main"})
-        data = json.loads(result)
-        assert "error" in data
+        with pytest.raises(McpToolError):
+            await mcp_server.call_tool("haniel_pull", {"repo": "main"})
 
     @pytest.mark.asyncio
     async def test_pull_exception_handling(self, mcp_server, mock_runner):
         """Test pull with unexpected exception from trigger_pull."""
         mock_runner.trigger_pull.side_effect = Exception("Pull failed")
 
-        result = await mcp_server.call_tool("haniel_pull", {"repo": "main"})
-        data = json.loads(result)
-        assert "error" in data
+        with pytest.raises(McpToolError):
+            await mcp_server.call_tool("haniel_pull", {"repo": "main"})
 
     @pytest.mark.asyncio
     async def test_enable_exception_handling(self, mcp_server, mock_runner):
         """Test enable with exception."""
-        mock_runner.health_manager.reset_circuit.side_effect = Exception("Reset failed")
-
-        result = await mcp_server.call_tool("haniel_enable", {"service": "web"})
-        data = json.loads(result)
-        assert "error" in data
+        with patch("haniel.integrations.mcp_server.enable_service") as enable:
+            enable.side_effect = Exception("Enable failed")
+            with pytest.raises(McpToolError, match="Enable failed"):
+                await mcp_server.call_tool("haniel_enable", {"service": "web"})
 
     @pytest.mark.asyncio
     async def test_reload_exception_handling(self, mcp_server, mock_runner):
         """Test reload with exception."""
         mock_runner.reload_config = MagicMock(side_effect=Exception("Load failed"))
-        result = await mcp_server.call_tool("haniel_reload", {})
-        data = json.loads(result)
-        assert "error" in data
+        with pytest.raises(McpToolError, match="Load failed"):
+            await mcp_server.call_tool("haniel_reload", {})
 
     def test_enabled_property_no_mcp_config(self):
         """Test enabled property when MCP config is not set."""

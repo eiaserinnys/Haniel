@@ -11,6 +11,7 @@ import subprocess
 import threading
 from collections.abc import Callable
 from contextlib import contextmanager
+from enum import Enum
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -27,6 +28,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 CONFIG_WRITE_LOCK = threading.RLock()
+
+SELF_RESTART_NOTICE = (
+    "This restarts the Haniel process itself, so every service on this node "
+    "stops for a moment (services declared overlap or adopt are excluded)."
+)
+
+
+class PullOutcome(str, Enum):
+    """What ``ServiceRunner.trigger_pull`` actually did."""
+
+    PULLED = "pulled"
+    NO_CHANGES = "no changes"
+    ALREADY_PULLING = "already pulling"
+    SELF_UPDATE_REQUESTED = "self-update requested"
 
 
 @contextmanager
@@ -531,6 +546,72 @@ def disable_service(runner: "ServiceRunner", service: str) -> dict[str, Any]:
         "enabled": False,
         "stopped": stopped,
     }
+
+
+def _reset_circuit_unless_running(runner: "ServiceRunner", service: str) -> bool:
+    """A running service has no open circuit; resetting would mark it stopped."""
+    if runner.process_manager.is_running(service):
+        return False
+    runner.health_manager.reset_circuit(service)
+    return True
+
+
+def enable_service(runner: "ServiceRunner", service: str) -> dict[str, Any]:
+    """Undo ``disable_service``: persist enabled, reset the circuit, start it."""
+    if not service:
+        raise ValueError("Service name is required")
+
+    config_path = _require_config_path(runner)
+    with runner.service_locks.hold(service), config_write_transaction(runner):
+        config = read_config(config_path)
+        if service not in config.services:
+            raise KeyError(f"Service not found: {service}")
+
+        was_enabled = config.services[service].enabled
+        if not was_enabled:
+            config.services[service] = config.services[service].model_copy(
+                update={"enabled": True}
+            )
+            _validate_or_raise(config)
+            _commit_config(config_path, config, runner)
+
+        circuit_reset = _reset_circuit_unless_running(runner, service)
+        started = False
+        if not runner.process_manager.is_running(service):
+            started = _start_enabled_service(runner, service)
+
+    return {
+        "ok": True,
+        "service": service,
+        "enabled": True,
+        "was_enabled": was_enabled,
+        "circuit_reset": circuit_reset,
+        "started": started,
+    }
+
+
+def reset_service_circuit(runner: "ServiceRunner", service: str) -> dict[str, Any]:
+    """Reset only the circuit breaker of a configured service."""
+    if not service:
+        raise ValueError("Service name is required")
+    if service not in runner._snapshot_config_state().config.services:
+        raise KeyError(f"Service not found: {service}")
+    with runner.service_locks.hold(service):
+        circuit_reset = _reset_circuit_unless_running(runner, service)
+    return {"ok": True, "service": service, "circuit_reset": circuit_reset}
+
+
+def pull_outcome_message(label: str, outcome: PullOutcome) -> str:
+    """One line saying what a pull request actually did."""
+    if outcome == PullOutcome.PULLED:
+        return f"{label}: pulled; affected services restarted"
+    if outcome == PullOutcome.NO_CHANGES:
+        return f"{label}: no changes to pull"
+    if outcome == PullOutcome.ALREADY_PULLING:
+        return f"{label}: already pulling; this request was ignored"
+    if outcome == PullOutcome.SELF_UPDATE_REQUESTED:
+        return f"{label}: self-update requested. {SELF_RESTART_NOTICE}"
+    raise ValueError(f"Unexpected pull outcome for {label!r}: {outcome!r}")
 
 
 def _purge_allowed(config_dir: Path, path: Path) -> None:

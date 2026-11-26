@@ -111,6 +111,7 @@ from .handover_config import (
     require_handover_config_digest,
 )
 from .safety_redaction import bounded_redact_text, redact_text, sensitive_values
+from .service_lifecycle import PullOutcome, enable_service
 from .lifecycle_control import DeploymentLease, LifecycleConflict, LifecycleControl
 from .deploy_retry_planner import DeployRetryPlanner
 from .orchestrated_deploy_execution import (
@@ -1940,7 +1941,10 @@ class ServiceRunner:
                 )
                 return True
             except Exception as e:
-                logger.error(f"Failed to start service {name}: {e}")
+                failure = str(e)
+                if not failure.startswith(f"Failed to start service {name}"):
+                    failure = f"Failed to start service {name}: {failure}"
+                logger.error(failure)
                 if propagate_failure:
                     raise
                 if self.process_manager.is_running(name):
@@ -2584,8 +2588,17 @@ class ServiceRunner:
     def _start_mcp_server(self) -> None:
         """Start the MCP server if enabled."""
         config = self._snapshot_config_state().config
-        if not config.mcp or not config.mcp.enabled:
-            logger.info("MCP server is disabled")
+        if config.mcp is None:
+            logger.info(
+                "MCP server not started: there is no mcp block in the config. "
+                "To enable it, write mcp: {enabled: true}"
+            )
+            return
+        if not config.mcp.enabled:
+            logger.info(
+                "MCP server not started: mcp.enabled is false. "
+                "To enable it, write mcp: {enabled: true}"
+            )
             return
 
         try:
@@ -3317,7 +3330,7 @@ class ServiceRunner:
         branch: str | None = None,
         target_head: str | None = None,
         progress_callback: Callable[[str], None] | None = None,
-    ) -> None:
+    ) -> PullOutcome:
         """Pull changes for a repository and restart affected services.
 
         This is the canonical pull path for non-self repos and auto-update.
@@ -3341,7 +3354,7 @@ class ServiceRunner:
             with self._state_lock:
                 self._state.self_update_pending = True
             self.approve_self_update(progress_callback=progress_callback)
-            return
+            return PullOutcome.SELF_UPDATE_REQUESTED
         pull_lock = runtime.pull_lock
         if (
             orchestrator_attempt_id is not None
@@ -3360,7 +3373,7 @@ class ServiceRunner:
                     "DEPLOYMENT_LEASE_CONFLICT", f"already pulling {repo_name}"
                 )
             logger.info("Already pulling %s, ignoring duplicate request", repo_name)
-            return
+            return PullOutcome.ALREADY_PULLING
 
         captured_changes: dict | None = None
         deployment_lease: DeploymentLease | None = None
@@ -3381,7 +3394,7 @@ class ServiceRunner:
             # Guard: skip if no pending changes (e.g. pull just completed, re-entry)
             if not runtime.pending_changes:
                 logger.info("No pending changes for %s, skipping", repo_name)
-                return
+                return PullOutcome.NO_CHANGES
 
             if orchestrator_attempt_id is not None and progress_callback is not None:
                 progress_callback("preparing")
@@ -3669,7 +3682,7 @@ class ServiceRunner:
                 self._self_update_requested.set()
                 self._clear_self_update_pending_state()
                 self.stop()
-                return
+                return PullOutcome.SELF_UPDATE_REQUESTED
 
             if self._slack_bot:
                 self._slack_bot.notify_done(
@@ -3678,6 +3691,7 @@ class ServiceRunner:
                     pending_changes=captured_changes,
                     discarded_changes=discarded,
                 )
+            return PullOutcome.PULLED
 
         except Exception as e:
             code = stable_deployment_error_code(e)
@@ -5550,13 +5564,14 @@ class ServiceRunner:
             self.process_manager.stop_service(name)
 
     def enable_service(self, name: str) -> str:
-        """Reset circuit breaker for a service.
+        """Enable a service again: persist enabled, reset circuit, start it.
 
-        The poll loop will restart the service on its next cycle.
         Satisfies AppHomeController protocol (duck-typed, no import needed).
         """
-        self.health_manager.reset_circuit(name)
-        return f"Circuit reset for '{name}'. Poll loop will restart the service."
+        result = enable_service(self, name)
+        if result["started"]:
+            return f"Service '{name}' enabled and started"
+        return f"Service '{name}' enabled (already running)"
 
     @property
     def restart_requested(self) -> bool:

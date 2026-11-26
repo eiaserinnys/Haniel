@@ -876,19 +876,41 @@ class ProcessManager:
                             self.health_manager.record_crash(
                                 name, exit_code=None, reason=str(e)
                             )
-                        raise RuntimeError(
-                            f"Failed to start service {name}: {e}"
-                        ) from e
+                        raise self._start_failure(name, cmd, cwd, e) from e
 
+            error = PermissionError("permission denied")
             if record_failure:
                 self.health_manager.record_crash(
                     name, exit_code=None, reason="PermissionError"
                 )
-            raise RuntimeError(f"Failed to start service {name}: PermissionError")
+            raise self._start_failure(name, cmd, cwd, error)
         except (OSError, subprocess.SubprocessError) as e:
             if record_failure:
                 self.health_manager.record_crash(name, exit_code=None, reason=str(e))
-            raise RuntimeError(f"Failed to start service {name}: {e}") from e
+            raise self._start_failure(name, cmd, cwd, e) from e
+
+    @staticmethod
+    def _start_failure(
+        name: str, cmd: str | list[str], cwd: Path, error: Exception
+    ) -> RuntimeError:
+        """Say which service, folder, and executable failed, and what to check."""
+        if isinstance(cmd, str):
+            parts = cmd.split()
+            executable = parts[0] if parts else cmd
+        else:
+            executable = str(cmd[0]) if cmd else ""
+        message = (
+            f"Failed to start service {name} (cwd: {cwd}, executable: {executable}): "
+            f"{type(error).__name__}: {error}"
+        )
+        if not Path(cwd).is_dir():
+            message += (
+                f". services.{name}.cwd path does not exist: {cwd}; "
+                "does the repository need to be cloned?"
+            )
+        elif isinstance(error, PermissionError):
+            message += f". Check that {executable} has execute permission"
+        return RuntimeError(message)
 
     def _cleanup_stale_instance_before_start(
         self,

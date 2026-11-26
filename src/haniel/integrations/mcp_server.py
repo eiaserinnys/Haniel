@@ -11,8 +11,11 @@ through a standardized MCP interface.
 
 import asyncio
 import contextlib
+import errno
 import json
 import logging
+import os
+import socket
 import threading
 from collections.abc import AsyncIterator
 from typing import Any, TYPE_CHECKING, Optional
@@ -20,14 +23,18 @@ from typing import Any, TYPE_CHECKING, Optional
 from urllib.parse import parse_qs, urlparse
 
 from ..core.service_lifecycle import (
+    SELF_RESTART_NOTICE,
     RepoInUseError,
     create_repo_config,
     create_service_config,
     delete_repo_config,
     delete_service_config,
     disable_service,
+    enable_service,
+    pull_outcome_message,
     register_service,
     reload_service_definition,
+    reset_service_circuit,
     update_repo_config,
     update_service_config,
 )
@@ -42,6 +49,27 @@ logger = logging.getLogger(__name__)
 DEFAULT_MCP_PORT = 3200
 DEFAULT_MCP_ENABLED = True
 MAX_LOG_LINES = 10000
+
+
+def _can_bind(host: str, port: int) -> bool:
+    """Return False when something else already listens on host:port."""
+    with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET) as probe:
+        if os.name != "nt":
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind((host, port))
+        except OSError as error:
+            return error.errno != errno.EADDRINUSE
+    return True
+
+
+class McpToolError(Exception):
+    """A tool call failed; the MCP layer answers it with an error result."""
+
+
+def _error_text(error: Exception) -> str:
+    """KeyError wraps its message in quotes; show the message itself."""
+    return str(error.args[0]) if isinstance(error, KeyError) else str(error)
 
 
 class HanielMcpServer:
@@ -152,7 +180,7 @@ class HanielMcpServer:
         return [
             {
                 "name": "haniel_restart",
-                "description": "Restart a service (stop + start)",
+                "description": "Restart a service (stop + start). Service 'haniel' restarts the Haniel process itself and every service on this node stops for a moment (services declared overlap or adopt are excluded).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -194,7 +222,7 @@ class HanielMcpServer:
             },
             {
                 "name": "haniel_pull",
-                "description": "Pull a repository and restart dependent services",
+                "description": "Pull a repository and restart dependent services; do nothing if there are no pending changes. Pulling Haniel's own repository restarts the Haniel process itself and every service on this node stops for a moment (services declared overlap or adopt are excluded).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -208,13 +236,27 @@ class HanielMcpServer:
             },
             {
                 "name": "haniel_enable",
-                "description": "Reset circuit breaker for a service (re-enable after repeated failures)",
+                "description": "Undo haniel_disable: set enabled: true in haniel.yaml, reset the circuit breaker, and start the service",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "service": {
                             "type": "string",
                             "description": "Name of the service to enable",
+                        },
+                    },
+                    "required": ["service"],
+                },
+            },
+            {
+                "name": "haniel_reset_circuit",
+                "description": "Reset only the circuit breaker of a service (re-allow restarts after repeated failures); does not change haniel.yaml or start the service",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "service": {
+                            "type": "string",
+                            "description": "Name of the service whose circuit breaker to reset",
                         },
                     },
                     "required": ["service"],
@@ -285,7 +327,7 @@ class HanielMcpServer:
             },
             {
                 "name": "haniel_update",
-                "description": "Pull the service's repository and restart its affected services; do nothing if there are no pending changes. For service='haniel', update Haniel itself.",
+                "description": "Pull the service's repository and restart its affected services; do nothing if there are no pending changes. For service='haniel' (or a service from Haniel's own repository), update Haniel itself: the Haniel process restarts and every service on this node stops for a moment (services declared overlap or adopt are excluded).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -491,7 +533,7 @@ class HanielMcpServer:
         elif name == "haniel_stop":
             service = arguments.get("service", "")
             if service == "haniel":
-                return "Error: Cannot stop haniel itself via MCP"
+                raise McpToolError("Cannot stop haniel itself via MCP")
             return await self._stop_service(service)
         elif name == "haniel_start":
             return await self._start_service(arguments.get("service", ""))
@@ -499,6 +541,8 @@ class HanielMcpServer:
             return await self._pull_repo(arguments.get("repo", ""))
         elif name == "haniel_enable":
             return await self._enable_service(arguments.get("service", ""))
+        elif name == "haniel_reset_circuit":
+            return await self._reset_circuit(arguments.get("service", ""))
         elif name == "haniel_disable":
             return await self._disable_service(arguments.get("service", ""))
         elif name == "haniel_reload":
@@ -526,7 +570,7 @@ class HanielMcpServer:
         elif name == "haniel_delete_repo_config":
             return await self._delete_repo_config(arguments)
         else:
-            return f"Error: Unknown tool '{name}'"
+            raise McpToolError(f"Unknown tool '{name}'")
 
     # Resource handlers
 
@@ -565,6 +609,9 @@ class HanielMcpServer:
         lines = min(arguments.get("lines", 100), 1000)
         grep_pattern = arguments.get("grep")
 
+        if service not in self.runner._snapshot_config_state().config.services:
+            raise McpToolError(f"Service not found: {service}")
+
         log_lines = self.runner.process_manager.log_manager.get_log_tail(service, lines)
         if grep_pattern:
             log_lines = [
@@ -592,10 +639,10 @@ class HanielMcpServer:
         Uses run_in_executor to avoid blocking the event loop.
         """
         if not service:
-            return json.dumps({"error": "Service name is required"})
+            raise McpToolError("Service name is required")
 
         if service not in self._get_service_names():
-            return json.dumps({"error": f"Service not found: {service}"})
+            raise McpToolError(f"Service not found: {service}")
 
         try:
             loop = asyncio.get_running_loop()
@@ -604,7 +651,7 @@ class HanielMcpServer:
             return f"Success: Service '{service}' restarted"
         except Exception as e:
             logger.error(f"Failed to restart {service}: {e}")
-            return json.dumps({"error": f"Failed to restart '{service}': {e}"})
+            raise McpToolError(f"Failed to restart '{service}': {e}") from e
 
     async def _stop_service(self, service: str) -> str:
         """Stop a service.
@@ -612,10 +659,10 @@ class HanielMcpServer:
         Uses run_in_executor to avoid blocking the event loop.
         """
         if not service:
-            return json.dumps({"error": "Service name is required"})
+            raise McpToolError("Service name is required")
 
         if service not in self._get_service_names():
-            return json.dumps({"error": f"Service not found: {service}"})
+            raise McpToolError(f"Service not found: {service}")
 
         try:
             loop = asyncio.get_running_loop()
@@ -623,7 +670,7 @@ class HanielMcpServer:
             return f"Success: Service '{service}' stopped"
         except Exception as e:
             logger.error(f"Failed to stop {service}: {e}")
-            return json.dumps({"error": f"Failed to stop '{service}': {e}"})
+            raise McpToolError(f"Failed to stop '{service}': {e}") from e
 
     async def _start_service(self, service: str) -> str:
         """Start a service.
@@ -631,10 +678,10 @@ class HanielMcpServer:
         Uses run_in_executor to avoid blocking the event loop.
         """
         if not service:
-            return json.dumps({"error": "Service name is required"})
+            raise McpToolError("Service name is required")
 
         if service not in self._get_service_names():
-            return json.dumps({"error": f"Service not found: {service}"})
+            raise McpToolError(f"Service not found: {service}")
 
         loop = asyncio.get_running_loop()
         is_running = await loop.run_in_executor(
@@ -653,69 +700,76 @@ class HanielMcpServer:
                 )
                 if still_running:
                     return f"Warning: Service '{service}' is already running"
-                return json.dumps({"error": f"Failed to start '{service}'"})
+                raise McpToolError(f"Failed to start '{service}'")
             return f"Success: Service '{service}' started"
         except Exception as e:
             logger.error(f"Failed to start {service}: {e}")
-            return json.dumps({"error": f"Failed to start '{service}': {e}"})
+            raise McpToolError(f"Failed to start '{service}': {e}") from e
 
-    async def _pull_repo(self, repo: str) -> str:
-        """Pull a repository and restart dependent services.
+    async def _pull_repo(self, repo: str, subject: str | None = None) -> str:
+        """Pull a repository and report what the shared pull path actually did.
 
         Delegates to runner.trigger_pull(), which is the single canonical pull path
         shared by all triggers (Dashboard, Slack button, auto_apply, MCP).
-        This ensures the is_pulling guard, Slack notifications, WebSocket broadcasts,
-        and post_pull hooks are all applied consistently.
+        ``subject`` names what the caller asked about (a service for update).
         """
         if not repo:
-            return json.dumps({"error": "Repository name is required"})
+            raise McpToolError("Repository name is required")
 
         if repo not in self._get_repo_names():
-            return json.dumps({"error": f"Repository not found: {repo}"})
+            raise McpToolError(f"Repository not found: {repo}")
 
         try:
-            # Pre-fetch affected service count for the return message.
-            # trigger_pull internally calls get_affected_services again, but
-            # a discrepancy only affects the count in the message, not behavior.
-            affected = await asyncio.to_thread(self.runner.get_affected_services, repo)
-
-            # trigger_pull handles: is_pulling guard, Slack notify, WebSocket broadcast,
-            # service stop/start, and post_pull hooks.
-            # If is_pulling is already True, trigger_pull returns silently (no exception),
-            # so MCP returns a success message (duplicate-pull prevention is the intent).
-            await asyncio.to_thread(self.runner.trigger_pull, repo)
-
-            return f"Success: Repository '{repo}' pulled, {len(affected)} service(s) restarted"
+            outcome = await asyncio.to_thread(self.runner.trigger_pull, repo)
         except Exception as e:
             logger.error(f"Failed to pull {repo}: {e}")
-            return json.dumps({"error": f"Failed to pull '{repo}': {e}"})
+            raise McpToolError(f"Failed to pull '{repo}': {e}") from e
+
+        return pull_outcome_message(subject or repo, outcome)
 
     async def _enable_service(self, service: str) -> str:
-        """Reset circuit breaker for a service."""
+        """Undo disable: persist enabled, reset the circuit, start the service."""
         if not service:
-            return json.dumps({"error": "Service name is required"})
+            raise McpToolError("Service name is required")
 
         try:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None, self.runner.health_manager.reset_circuit, service
-            )
-            return f"Success: Circuit breaker reset for '{service}', service enabled"
+            result = await asyncio.to_thread(enable_service, self.runner, service)
+            return json.dumps(result, ensure_ascii=False)
+        except KeyError as e:
+            raise McpToolError(_error_text(e)) from e
         except Exception as e:
-            logger.error(f"Failed to enable {service}: {e}")
-            return json.dumps({"error": f"Failed to enable '{service}': {e}"})
+            logger.error("Failed to enable %s: %s", service, e)
+            raise McpToolError(f"Failed to enable '{service}': {e}") from e
+
+    async def _reset_circuit(self, service: str) -> str:
+        """Reset only the circuit breaker of a configured service."""
+        if not service:
+            raise McpToolError("Service name is required")
+
+        try:
+            result = await asyncio.to_thread(
+                reset_service_circuit, self.runner, service
+            )
+            return json.dumps(result, ensure_ascii=False)
+        except KeyError as e:
+            raise McpToolError(_error_text(e)) from e
+        except Exception as e:
+            logger.error("Failed to reset circuit for %s: %s", service, e)
+            raise McpToolError(f"Failed to reset circuit for '{service}': {e}") from e
 
     async def _disable_service(self, service: str) -> str:
         """Persistently disable a service and stop it if running."""
         if not service:
-            return json.dumps({"error": "Service name is required"})
+            raise McpToolError("Service name is required")
 
         try:
             result = await asyncio.to_thread(disable_service, self.runner, service)
             return json.dumps(result, ensure_ascii=False)
+        except KeyError as e:
+            raise McpToolError(_error_text(e)) from e
         except Exception as e:
             logger.error("Failed to disable %s: %s", service, e)
-            return json.dumps({"error": f"Failed to disable '{service}': {e}"})
+            raise McpToolError(f"Failed to disable '{service}': {e}") from e
 
     async def _reload_config(self) -> str:
         """Reload configuration."""
@@ -725,12 +779,12 @@ class HanielMcpServer:
             return "Success: Configuration reloaded"
         except Exception as e:
             logger.error(f"Failed to reload config: {e}")
-            return json.dumps({"error": f"Failed to reload configuration: {e}"})
+            raise McpToolError(f"Failed to reload configuration: {e}") from e
 
     async def _reload_service(self, service: str) -> str:
         """Reload one service definition and restart only that service."""
         if not service:
-            return json.dumps({"error": "Service name is required"})
+            raise McpToolError("Service name is required")
 
         try:
             result = await asyncio.to_thread(
@@ -739,18 +793,20 @@ class HanielMcpServer:
                 service,
             )
             return json.dumps(result, ensure_ascii=False)
+        except KeyError as e:
+            raise McpToolError(_error_text(e)) from e
         except Exception as e:
             logger.error("Failed to reload service %s: %s", service, e)
-            return json.dumps({"error": f"Failed to reload service '{service}': {e}"})
+            raise McpToolError(f"Failed to reload service '{service}': {e}") from e
 
     async def _register_service(self, arguments: dict[str, Any]) -> str:
         """Register a service, ensure checkout/build, then start it."""
         name = arguments.get("name", "")
         service_config = arguments.get("service_config", arguments.get("config"))
         if not name:
-            return json.dumps({"error": "Service name is required"})
+            raise McpToolError("Service name is required")
         if service_config is None:
-            return json.dumps({"error": "service_config is required"})
+            raise McpToolError("service_config is required")
 
         try:
             result = await asyncio.to_thread(
@@ -765,7 +821,7 @@ class HanielMcpServer:
             return json.dumps(result, ensure_ascii=False)
         except Exception as e:
             logger.error("Failed to register service %s: %s", name, e)
-            return json.dumps({"error": f"Failed to register service '{name}': {e}"})
+            raise McpToolError(f"Failed to register service '{name}': {e}") from e
 
     async def _update_service(self, arguments: dict[str, Any]) -> str:
         """Update the service's repository through the shared pull path."""
@@ -776,15 +832,15 @@ class HanielMcpServer:
         # Find repo for this service
         svc_names = self._get_service_names()
         if service not in svc_names:
-            return f"Error: Service not found: {service}"
+            raise McpToolError(f"Service not found: {service}")
 
         status = self.runner.get_status()
         svc_info = status.get("services", {}).get(service, {})
         repo_name = svc_info.get("config", {}).get("repo")
         if not repo_name:
-            return f"Error: Service '{service}' has no associated repo"
+            raise McpToolError(f"Service '{service}' has no associated repo")
 
-        return await self._pull_repo(repo_name)
+        return await self._pull_repo(repo_name, subject=f"{service} (repo {repo_name})")
 
     async def _self_update(self) -> str:
         """Pre-stage Haniel's exact remote target, then defer exit(10)."""
@@ -792,11 +848,11 @@ class HanielMcpServer:
 
         self_repo = getattr(self.runner, "_self_repo", None)
         if not self_repo:
-            return "Error: No self repo configured"
+            raise McpToolError("No self repo configured")
         with self.runner._state_lock:
             self.runner._state.self_update_pending = True
         result = await loop.run_in_executor(None, self.runner.approve_self_update)
-        return result
+        return f"{result} {SELF_RESTART_NOTICE}"
 
     async def _check_updates(self) -> str:
         """Check all repos for pending changes."""
@@ -850,7 +906,7 @@ class HanielMcpServer:
             await loop.run_in_executor(None, change)
             return json.dumps({"ok": True})
         except caught as e:
-            return json.dumps({"error": str(e)})
+            raise McpToolError(_error_text(e)) from e
 
     async def _update_service_config(self, arguments: dict[str, Any]) -> str:
         service = arguments["service"]
@@ -879,7 +935,7 @@ class HanielMcpServer:
             )
             return json.dumps(result, ensure_ascii=False)
         except (KeyError, ValueError) as e:
-            return json.dumps({"error": str(e)})
+            raise McpToolError(_error_text(e)) from e
 
     async def _update_repo_config(self, arguments: dict[str, Any]) -> str:
         repo = arguments["repo"]
@@ -915,7 +971,7 @@ class HanielMcpServer:
         """
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, self.runner.request_restart)
-        return result
+        return f"{result} {SELF_RESTART_NOTICE}"
 
     async def start(self) -> None:
         """Start the MCP server.
@@ -924,6 +980,17 @@ class HanielMcpServer:
         """
         if not self.enabled:
             logger.info("MCP server is disabled")
+            return
+
+        from ..config import McpConfig
+
+        host = (self.runner.config.mcp or McpConfig()).host
+        if not _can_bind(host, self.port):
+            logger.error(
+                "MCP port %d on %s is already in use; change mcp.port",
+                self.port,
+                host,
+            )
             return
 
         try:
@@ -1063,11 +1130,9 @@ class HanielMcpServer:
             logger.info(f"MCP server starting on port {self.port}")
 
             # Start uvicorn server
-            from ..config import McpConfig
-
             config = uvicorn.Config(
                 app,
-                host=(self.runner.config.mcp or McpConfig()).host,
+                host=host,
                 port=self.port,
                 log_level="warning",
             )

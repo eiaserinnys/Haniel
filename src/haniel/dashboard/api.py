@@ -14,7 +14,12 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from ..core.logs import get_log_tail
-from ..core.service_lifecycle import disable_service, reload_service_definition
+from ..core.service_lifecycle import (
+    disable_service,
+    enable_service,
+    pull_outcome_message,
+    reload_service_definition,
+)
 
 if TYPE_CHECKING:
     from ..core.runner import ServiceRunner
@@ -119,13 +124,17 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
 
     async def service_enable(request: Request) -> JSONResponse:
         name = request.path_params["name"]
-        if name not in _get_service_names():
-            return _error(f"Service not found: {name}", status=404)
         try:
-            runner.health_manager.reset_circuit(name)
-            return JSONResponse({"ok": True, "service": name, "action": "enable"})
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, enable_service, runner, name)
+            return JSONResponse({**result, "action": "enable"})
+        except KeyError as e:
+            return _error(str(e.args[0]), status=404)
+        except ValueError as e:
+            return _error(str(e), status=400)
         except Exception as e:
-            return _error(str(e))
+            logger.error("Failed to enable %s: %s", name, e)
+            return _error(str(e), status=500)
 
     # ── POST /api/services/{name}/disable ────────────────────────────────────
 
@@ -201,7 +210,7 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
             return _error(f"Repository not found: {name}", status=404)
         try:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, runner.trigger_pull, name)
+            outcome = await loop.run_in_executor(None, runner.trigger_pull, name)
 
             repo_state = runner._repo_states.get(name)
             new_head = repo_state.last_head if repo_state else None
@@ -212,6 +221,8 @@ def create_api_routes(runner: "ServiceRunner") -> list[Route]:
                     "repo": name,
                     "action": "pull",
                     "head": new_head,
+                    "outcome": outcome.value,
+                    "message": pull_outcome_message(name, outcome),
                 }
             )
         except Exception as e:

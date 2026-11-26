@@ -1666,6 +1666,80 @@ class TestServiceRunnerPollCycle:
             assert "test-service" not in runner._pending_restarts
         mock_start.assert_called_once_with("test-service")
 
+    @patch("haniel.core.runner.ServiceRunner._start_service")
+    def test_trigger_pull_returns_pulled_after_restarting(
+        self, mock_start, runner_with_mock_repo
+    ):
+        from haniel.core.service_lifecycle import PullOutcome
+
+        runner = runner_with_mock_repo
+        runner._repo_states["test-repo"].pending_changes = {"commits": ["a"]}
+
+        with patch.object(runner, "_pull_repo", return_value=(True, [])):
+            outcome = runner.trigger_pull("test-repo")
+
+        assert outcome is PullOutcome.PULLED
+
+    def test_trigger_pull_returns_no_changes_without_pulling(
+        self, runner_with_mock_repo
+    ):
+        from haniel.core.service_lifecycle import PullOutcome
+
+        runner = runner_with_mock_repo
+        runner._repo_states["test-repo"].pending_changes = None
+
+        with patch.object(runner, "_pull_repo") as pull:
+            outcome = runner.trigger_pull("test-repo")
+
+        assert outcome is PullOutcome.NO_CHANGES
+        pull.assert_not_called()
+
+    def test_trigger_pull_returns_already_pulling_for_duplicate_request(
+        self, runner_with_mock_repo
+    ):
+        from haniel.core.service_lifecycle import PullOutcome
+
+        runner = runner_with_mock_repo
+        runner._repo_states["test-repo"].pending_changes = {"commits": ["a"]}
+        pull_lock = runner._pull_locks["test-repo"]
+        assert pull_lock.acquire(blocking=False)
+        try:
+            with patch.object(runner, "_pull_repo") as pull:
+                outcome = runner.trigger_pull("test-repo")
+        finally:
+            pull_lock.release()
+
+        assert outcome is PullOutcome.ALREADY_PULLING
+        pull.assert_not_called()
+
+    def test_trigger_pull_of_self_repo_returns_self_update_requested(
+        self, runner_with_mock_repo
+    ):
+        from haniel.core.service_lifecycle import PullOutcome
+
+        runner = runner_with_mock_repo
+        runner._self_repo = "test-repo"
+
+        with patch.object(runner, "approve_self_update") as approve:
+            outcome = runner.trigger_pull("test-repo")
+
+        approve.assert_called_once()
+        assert outcome is PullOutcome.SELF_UPDATE_REQUESTED
+
+    def test_enable_service_message_comes_from_the_shared_enable(
+        self, runner_with_mock_repo
+    ):
+        runner = runner_with_mock_repo
+        with patch("haniel.core.runner.enable_service") as enable:
+            enable.return_value = {"started": True}
+            assert runner.enable_service("web") == "Service 'web' enabled and started"
+            enable.return_value = {"started": False}
+            assert (
+                runner.enable_service("web")
+                == "Service 'web' enabled (already running)"
+            )
+        enable.assert_called_with(runner, "web")
+
     @patch("haniel.core.runner.sha256_file_at_commit", return_value="manifest-digest")
     @patch("haniel.core.runner.get_remote_head", return_value="target-head")
     @patch("haniel.core.runner.run_manifest_deployment")
@@ -2224,6 +2298,39 @@ class TestServiceRunnerMcp:
 
         # MCP server should not be set
         assert runner._mcp_server is None
+
+    def test_start_mcp_server_log_tells_how_to_enable_without_block(
+        self, tmp_path: Path, caplog
+    ):
+        runner = ServiceRunner(
+            HanielConfig(poll_interval=5, repos={}, services={}), config_dir=tmp_path
+        )
+
+        with caplog.at_level("INFO", logger="haniel.core.runner"):
+            runner._start_mcp_server()
+
+        assert runner._mcp_server is None
+        assert "there is no mcp block in the config" in caplog.text
+        assert "mcp: {enabled: true}" in caplog.text
+
+    def test_start_mcp_server_log_tells_how_to_enable_when_false(
+        self, tmp_path: Path, caplog
+    ):
+        from haniel.config import McpConfig
+
+        runner = ServiceRunner(
+            HanielConfig(
+                poll_interval=5, mcp=McpConfig(enabled=False), repos={}, services={}
+            ),
+            config_dir=tmp_path,
+        )
+
+        with caplog.at_level("INFO", logger="haniel.core.runner"):
+            runner._start_mcp_server()
+
+        assert "mcp.enabled is false" in caplog.text
+        assert "mcp: {enabled: true}" in caplog.text
+        assert "there is no mcp block" not in caplog.text
 
     @patch("haniel.integrations.mcp_server.HanielMcpServer")
     def test_start_mcp_server_enabled(self, mock_mcp_class, tmp_path: Path):
