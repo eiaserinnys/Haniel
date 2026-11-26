@@ -80,7 +80,7 @@ interface RepoActionProps {
 }
 
 function PullAction({ repoName, repo, isPulling, onPull }: RepoActionProps) {
-  if (isPulling) return <Mark kind="busy" label="Pulling…" />
+  if (isPulling) return <Mark kind="busy" label="Deploying…" />
   if (!repo.pending_changes) return null
   return (
     <button type="button" className="btn btn-outline" aria-label={`Deploy ${repoName}`} onClick={() => onPull(repoName)}>

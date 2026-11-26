@@ -119,6 +119,15 @@ describe('action names', () => {
     await waitFor(() => expect(calls).toContainEqual({ path: '/api/repos/eb_lore/pull', method: 'POST' }))
   })
 
+  it('shows Deploying… on a repo that is being pulled, not Pulling…', () => {
+    render(<App />)
+    act(() => emit({ type: 'init', status: { ...status, repos: { ...status.repos, eb_lore: { ...status.repos.eb_lore, pulling: true } } } }))
+
+    expect(screen.getByText('Deploying…')).toBeInTheDocument()
+    expect(screen.queryByText(/pulling/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Deploy eb_lore' })).not.toBeInTheDocument()
+  })
+
   it('calls the self-update button Approve, not Approve update', () => {
     renderLoaded()
     expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument()

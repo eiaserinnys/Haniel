@@ -18,6 +18,9 @@ def _names(env: Env, width: int, height: int) -> None:
     deploy_group = row(page, "soulstream").get_by_role("button", name="Deploy soulstream", exact=True)
     r.check("g", f"{width}: 서비스가 딸린 저장소 줄의 단추도 Deploy", deploy_group.count() == 1)
 
+    busy = page.locator(".st-busy", has_text="Deploying…")
+    r.check("g", f"{width}: 진행 중인 저장소 줄의 표시는 Deploying…(Pulling…이 아니다)", busy.count() == 1 and not page.get_by_text("Pulling").count(), str(busy.count()))
+
     approve.click()
     dialog = page.locator(".dialog.is-confirm")
     dialog.wait_for(state="visible")
