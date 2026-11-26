@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import base64
+from urllib.parse import unquote
 
 from visual_checks import Env, label, row
 
@@ -18,6 +19,17 @@ CURRENT = "() => [...document.querySelectorAll('{scope} .nav-row[aria-current]')
 HEAD_TOP = "() => document.getElementById('sec-repos').getBoundingClientRect().top - document.querySelector('.content').getBoundingClientRect().top"
 
 
+def _icon_bytes(env: Env, page) -> tuple[str, str, bytes]:
+    """The icon the page's link[rel~=icon] receives: href, content type, bytes (a data URI is decoded)."""
+    href = page.evaluate(ICON_HREF)
+    if href.startswith("data:"):
+        head, _, data = href.partition(",")
+        body = base64.b64decode(data) if head.endswith(";base64") else unquote(data).encode()
+        return href[:40], head[5:].split(";")[0], body
+    res = page.request.get(env.base + href)
+    return href, res.headers.get("content-type", "").split(";")[0], res.body()
+
+
 def _favicon(env: Env):
     r = env.report
     expected = FAVICON.encode()
@@ -25,11 +37,10 @@ def _favicon(env: Env):
     seen = {}
     for name, path in (("대시보드(/)", "/"), ("로그인(/auth/login)", "/auth/login")):
         page.goto(env.base + path)
-        href = page.evaluate(ICON_HREF)
-        body = page.request.get(env.base + href).body()
+        href, kind, body = _icon_bytes(env, page)
         seen[name] = body
-        r.check("g", f"보완 1: {name} link[rel~=icon]이 받는 파일이 지정한 favicon과 바이트까지 같다", body.strip() == expected.strip(), f"{href} {len(body)}바이트")
-    r.check("g", "보완 1: 대시보드와 로그인이 같은 favicon을 받는다", seen["대시보드(/)"] == seen["로그인(/auth/login)"])
+        r.check("g", f"보완 1: {name} 아이콘이 운영과 같은 길로 SVG로 오고 지정한 그림과 같다", kind == "image/svg+xml" and body.strip() == expected.strip(), f"{href} {kind} {len(body)}바이트")
+    r.check("g", "보완 1: 대시보드와 로그인이 같은 그림을 받는다", seen["대시보드(/)"] == seen["로그인(/auth/login)"])
     ctx.close()
 
 

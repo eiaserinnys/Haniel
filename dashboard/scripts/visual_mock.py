@@ -1,7 +1,7 @@
 """Mock Haniel node for the dashboard visual check.
 
-Serves a built dashboard/dist plus the login page on an ephemeral port and fills
-/api/* and /ws with production-shaped fake data. Scenes change the data through
+Serves a built dashboard/dist plus the login page on an ephemeral port the way the production server does
+(/assets files, /auth/login, index.html for every other GET) and fills /api/* and /ws with production-shaped fake data. Scenes change the data through
 `Mock.scene`; nothing here talks to a real Haniel node.
 """
 
@@ -188,13 +188,17 @@ class _Handler(SimpleHTTPRequestHandler):
         return
 
     def do_GET(self) -> None:
+        """Same routes as src/haniel/dashboard/static.py: /assets files, the login page, index.html for any other GET."""
         path = urlparse(self.path).path
         if path == "/auth/login":
             self._send_file(LOGIN_HTML)
-        elif path == "/" or not (self._dist / path.lstrip("/")).is_file():
-            self._send_file(self._dist / "index.html")
+        elif path.startswith("/assets/"):
+            if (self._dist / path.lstrip("/")).is_file():
+                super().do_GET()
+            else:
+                self.send_error(404)
         else:
-            super().do_GET()
+            self._send_file(self._dist / "index.html")
 
     def _send_file(self, file: Path) -> None:
         body = file.read_bytes()
