@@ -2,6 +2,11 @@
   "schema_version": "haniel.release.v1",
   "release_id": "replace-with-release-id",
   "environment_service": "replace-with-service-name",
+  "change_ignore_paths": [
+    "*.md",
+    "docs/**",
+    "examples/**"
+  ],
   "migration": {
     "destructive": true,
     "preflight": {

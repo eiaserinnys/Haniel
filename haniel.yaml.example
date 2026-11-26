@@ -1,17 +1,30 @@
 # Full haniel configuration example — multi-service setup.
 #
+# Paths below use POSIX style (./runtime/venv/bin/python). On Windows, write the
+# venv paths as ./runtime/venv/Scripts/python.exe and ./runtime/venv/Scripts/pip.exe.
+#
 # Directory structure (see docs/adr/0003-directory-structure.md):
 #   {root}/
 #   +-- haniel.yaml            <- this file
+#   +-- logs/                  <- haniel.log and one <service>.log per service
 #   +-- .self/                 <- haniel repo (self-update)
 #   +-- .services/
 #       +-- my-app/            <- cloned repo
-#       |   +-- logs/          <- service stdout/stderr
 #       +-- my-lib/            <- cloned repo
+#
+# Service logs go to <this file's folder>/logs/<service>.log, not into the
+# service repository. Read them with the MCP tool haniel_read_logs.
+#
+# Check a copy of this file with `haniel validate haniel.yaml`. Unknown keys and
+# unusable values (a misspelled key, ready: prt:80, an unknown signal name) make
+# validate fail.
 
 poll_interval: 60
-# Create this dotenv file with WEBHOOK_URL and SLACK_BOT_TOKEN assignments.
-secrets_file: .secrets/haniel.env
+
+# To use ${secret:NAME} references, create a dotenv file with NAME=value lines
+# (for example WEBHOOK_URL and SLACK_BOT_TOKEN), uncomment the next line and the
+# webhooks block below. A missing file or name stops the configuration from loading.
+# secrets_file: .secrets/haniel.env
 
 shutdown:
   timeout: 10
@@ -23,14 +36,14 @@ backoff:
   circuit_breaker: 5
   circuit_window: 300
 
-webhooks:
-  - url: ${secret:WEBHOOK_URL}
-    format: slack
+# webhooks:
+#   - url: ${secret:WEBHOOK_URL}
+#     format: slack
 
+# Without this block the MCP server and the dashboard API are not started.
 mcp:
   enabled: true
   host: 127.0.0.1
-  transport: streamable_http
   port: 3200
 
 repos:
@@ -49,6 +62,10 @@ repos:
     branch: main
     path: ./.services/my-lib
 
+# A self: block makes the systemd unit (Linux) or LaunchAgent (macOS) run
+# haniel-runner.sh, and the Windows service run haniel-runner.ps1, so an
+# approved self-update can pull and relaunch. Self-updates always wait for
+# approval unless auto_update is true, whatever the global auto_apply says.
 self:
   repo: haniel
   auto_update: false
@@ -62,19 +79,19 @@ services:
     restart_delay: 3
 
   mcp-my-app:
-    run: ./runtime/venv/Scripts/python.exe -m my_app.mcp --port=3104
+    run: ./runtime/venv/bin/python -m my_app.mcp --port=3104
     cwd: ./.services/my-app
     repo: my-app
     ready: port:3104
     ready_timeout: 120
     restart_delay: 3
     hooks:
-      post_pull: ./runtime/venv/Scripts/pip.exe install -r ./.services/my-app/requirements.txt
+      post_pull: ./runtime/venv/bin/pip install -r ./.services/my-app/requirements.txt
       timeout: 900
 
-  # Main service (depends on MCP)
+  # Main service (starts once mcp-my-app is running and its ready condition holds)
   bot:
-    run: ./runtime/venv/Scripts/python.exe -m my_app.bot
+    run: ./runtime/venv/bin/python -m my_app.bot
     cwd: ./.services/my-app
     repo: my-app
     after: mcp-my-app
@@ -82,18 +99,17 @@ services:
       signal: SIGTERM
       timeout: 15
     hooks:
-      post_pull: ./runtime/venv/Scripts/pip.exe install -r ./.services/my-app/requirements.txt
+      post_pull: ./runtime/venv/bin/pip install -r ./.services/my-app/requirements.txt
       timeout: 900
 
 install:
   requirements:
     python: ">=3.11"
     node: ">=18"
-    winsw: true
-    claude-code: true
+    winsw: true          # Windows only; skipped on Linux and macOS
+    claude-code: true    # Needed only when the interactive phase has keys to collect
 
   directories:
-    - ./.self/logs
     - ./.services
     - ./runtime
     - ./runtime/logs
@@ -115,7 +131,10 @@ install:
       path: ./.services/my-app/.env
       keys:
         - key: SLACK_BOT_TOKEN
-          default: ${secret:SLACK_BOT_TOKEN}
+          prompt: "Slack Bot Token (xoxb-...)"
+          # validate runs before the .env file is written; {value} is pasted in as is,
+          # so a value containing ' or $ can break the command.
+          validate: "test -n '{value}'"
         - key: DEBUG
           default: "false"
 
