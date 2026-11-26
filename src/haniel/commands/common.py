@@ -3,9 +3,15 @@
 from pathlib import Path
 
 import click
+import yaml
 from pydantic import ValidationError as PydanticValidationError
 
-from haniel.config import HanielConfig, load_config, validate_config
+from haniel.config import HanielConfig, ValidationError, load_config, validate_config
+from haniel.config.input_checks import (
+    config_input_issues,
+    find_unknown_keys,
+    read_raw_config,
+)
 
 
 def validate_config_file(
@@ -34,3 +40,20 @@ def load_and_validate(config_path: Path) -> tuple[HanielConfig | None, list[str]
         return None, [f"Failed to load config: {error}"]
 
     return config, [str(error) for error in validate_config(config)]
+
+
+def input_issues(
+    config_path: Path, config: HanielConfig | None
+) -> list[ValidationError]:
+    """Unknown keys and bad values in a config file.
+
+    A config that failed to load still gets its unknown keys reported, since a
+    misspelled key is often why it failed.
+    """
+    try:
+        raw = read_raw_config(config_path)
+    except (OSError, yaml.YAMLError):
+        return []
+    if config is None:
+        return find_unknown_keys(raw, HanielConfig)
+    return config_input_issues(config, raw)

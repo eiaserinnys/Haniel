@@ -49,7 +49,10 @@ def secret_fields(config: HanielConfig) -> Iterator[tuple[str, Any, str, bool]]:
 
 
 def resolve_secret(
-    value: str | None, field_path: str, values: dict[str, str]
+    value: str | None,
+    field_path: str,
+    values: dict[str, str],
+    source: str = "no secrets_file is set",
 ) -> str | None:
     if value is None:
         return None
@@ -59,7 +62,9 @@ def resolve_secret(
         if not _NAME.fullmatch(name):
             raise SecretReferenceError(f"Invalid secret reference at {field_path}")
         if name not in values:
-            raise SecretReferenceError(f"Unresolved secret at {field_path}: {name}")
+            raise SecretReferenceError(
+                f"Unresolved secret at {field_path}: {name} ({source})"
+            )
         return values[name]
 
     result = _REFERENCE.sub(replace, value)
@@ -77,19 +82,23 @@ def parse_config(data: Any, config_dir: Path) -> HanielConfig:
         # Reuse the service dotenv parser without importing its values into the process.
         from ..core.service_environment import read_service_environment_file
 
+        secrets_path = (
+            (config_dir / config.secrets_file).expanduser().resolve(strict=False)
+        )
         try:
-            config._secret_values = read_service_environment_file(
-                config_dir / config.secrets_file
-            ).values
+            config._secret_values = read_service_environment_file(secrets_path).values
+            config._secret_source = f"looked in {secrets_path}"
         except (OSError, RuntimeError) as error:
+            config._secret_source = f"cannot read {secrets_path}"
             for field_path, owner, attribute, _ in fields:
                 value = getattr(owner, attribute)
                 match = _REFERENCE.search(value or "")
                 if match and _NAME.fullmatch(match.group(1)):
                     raise SecretReferenceError(
-                        f"Unresolved secret at {field_path}: {match.group(1)}"
+                        f"Unresolved secret at {field_path}: {match.group(1)} "
+                        f"({config._secret_source})"
                     ) from None
-            raise ValueError("Cannot read secrets_file") from error
+            raise ValueError(f"Cannot read secrets_file: {secrets_path}") from error
     for field_path, owner, attribute, _ in fields:
         config.resolve_secret(getattr(owner, attribute), field_path)
     return config

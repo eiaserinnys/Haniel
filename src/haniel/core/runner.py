@@ -633,6 +633,7 @@ class ServiceRunner:
             RuntimeError: If config_path was not provided at construction time.
         """
         from ..config import load_config
+        from ..config.input_checks import log_config_issues
         from .service_lifecycle import CONFIG_WRITE_LOCK
 
         if not self.config_path:
@@ -641,6 +642,7 @@ class ServiceRunner:
         with CONFIG_WRITE_LOCK:
             snapshot = self._snapshot_config_state()
             new_config = load_config(self.config_path)
+            log_config_issues(self.config_path, new_config)
             self._replace_config_snapshot(new_config, snapshot.generation)
 
         logger.info("Configuration reloaded from %s", self.config_path)

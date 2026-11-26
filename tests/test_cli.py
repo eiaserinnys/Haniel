@@ -786,3 +786,72 @@ class TestStatusReportsRuntime:
         assert data["source"] == "config"
         assert data["runtime_status"] == "unavailable"
         assert data["services"]["old"] == {"enabled": False, "run": "python old.py"}
+
+
+class TestValidateInputChecks:
+    """validate rejects misspelled keys and unusable values; run only warns."""
+
+    def test_validate_rejects_top_level_typo(self, cli_runner: CliRunner, tmp_path):
+        config = tmp_path / "haniel.yaml"
+        config.write_text("serivces: {}\n", encoding="utf-8")
+        result = cli_runner.invoke(main, ["validate", str(config)])
+        assert result.exit_code == 1
+        assert "unknown key serivces (did you mean services?)" in result.output
+        assert "no services are defined" in result.output
+
+    def test_validate_lists_every_problem(self, cli_runner: CliRunner, tmp_path):
+        config = tmp_path / "haniel.yaml"
+        config.write_text(
+            "shutdown: {signal: SIGTRM}\n"
+            "services:\n  api:\n    run: x\n    redy: 'port:80'\n"
+            "    ready: 'prt:80'\n    restart_delay: -5\n",
+            encoding="utf-8",
+        )
+        result = cli_runner.invoke(main, ["validate", str(config)])
+        assert result.exit_code == 1
+        assert "unknown key services.api.redy (did you mean ready?)" in result.output
+        assert "unknown signal 'SIGTRM'" in result.output
+        assert "services.api.ready" in result.output
+        assert "services.api.restart_delay" in result.output
+
+    def test_validate_reports_unknown_keys_when_the_schema_fails(
+        self, cli_runner: CliRunner, tmp_path
+    ):
+        config = tmp_path / "haniel.yaml"
+        config.write_text("services:\n  api:\n    rn: x\n", encoding="utf-8")
+        result = cli_runner.invoke(main, ["validate", str(config)])
+        assert result.exit_code == 1
+        assert "unknown key services.api.rn (did you mean run?)" in result.output
+
+    def test_zero_services_warns_and_passes(self, cli_runner: CliRunner, tmp_config):
+        result = cli_runner.invoke(main, ["validate", str(tmp_config)])
+        assert result.exit_code == 0
+        assert "no services are defined" in result.output
+
+    def test_run_warns_and_still_starts(
+        self, cli_runner: CliRunner, tmp_path, caplog: pytest.LogCaptureFixture
+    ):
+        config = tmp_path / "haniel.yaml"
+        config.write_text(
+            "services:\n  api:\n    run: x\n    redy: 'port:80'\n    ready: 'prt:80'\n",
+            encoding="utf-8",
+        )
+        root = logging.getLogger()
+        handlers = list(root.handlers)
+        try:
+            with patch(
+                "haniel.core.runner.ServiceRunner", side_effect=RuntimeError("stop")
+            ):
+                result = cli_runner.invoke(main, ["run", str(config)])
+        finally:
+            for handler in list(root.handlers):
+                if handler not in handlers:
+                    root.removeHandler(handler)
+                    handler.close()
+        assert "Configuration errors" not in result.output
+        assert "Starting haniel with config" in result.output
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any("unknown key services.api.redy" in w for w in warnings)
+        assert any("services.api.ready" in w for w in warnings)

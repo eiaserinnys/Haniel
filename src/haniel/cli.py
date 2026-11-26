@@ -20,7 +20,12 @@ from uuid import uuid4
 import click
 
 from haniel import __version__, EXIT_SELF_UPDATE, EXIT_RESTART
-from haniel.commands.common import load_and_validate, validate_config_file
+from haniel.commands.common import (
+    input_issues,
+    load_and_validate,
+    validate_config_file,
+)
+from haniel.config.input_checks import log_config_issues
 from haniel.commands.handover import handover_command
 from haniel.commands.install import install_command
 from haniel.commands.install import print_dry_run_install as print_dry_run_install
@@ -226,6 +231,7 @@ def run(
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logger = logging.getLogger("haniel")
+    log_config_issues(config, haniel_config)
 
     click.echo(f"Starting haniel with config: {config}")
     click.echo(f"Poll interval: {haniel_config.poll_interval}s")
@@ -481,6 +487,7 @@ def validate(config: Path | None, no_plain_secrets: bool) -> None:
     - Port conflicts (ready: port:*)
     - Duplicate repository paths
     - Missing references (non-existent services/repos)
+    - Unknown keys and unusable values (ready, signal, delays, empty url/token)
     """
     if config is None:
         click.echo(click.get_current_context().get_help())
@@ -490,6 +497,9 @@ def validate(config: Path | None, no_plain_secrets: bool) -> None:
     click.echo()
 
     haniel_config, errors = load_and_validate(config)
+    warnings = []
+    for issue in input_issues(config, haniel_config):
+        (errors if issue.severity == "error" else warnings).append(str(issue))
 
     if not errors and no_plain_secrets:
         from .config.secrets import plain_secret_errors
@@ -503,11 +513,17 @@ def validate(config: Path | None, no_plain_secrets: bool) -> None:
         click.echo()
         for error in errors:
             click.echo(f"  {click.style('✗', fg='red')} {error}")
+        for warning in warnings:
+            click.echo(f"  {click.style('!', fg='yellow')} {warning}")
         sys.exit(1)
 
     # Print summary
     click.echo(click.style("Validation passed!", fg="green", bold=True))
     click.echo()
+    for warning in warnings:
+        click.echo(f"  {click.style('!', fg='yellow')} {warning}")
+    if warnings:
+        click.echo()
     click.echo("Configuration summary:")
     click.echo(f"  - Poll interval: {haniel_config.poll_interval}s")
     click.echo(f"  - Repositories: {len(haniel_config.repos)}")

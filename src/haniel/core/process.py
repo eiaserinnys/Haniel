@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..config import ServiceConfig, ShutdownConfig
+from ..config.input_checks import ready_format_error
 from ..platform import get_platform_handler
 from .health import HealthManager, ServiceState
 from .logs import LogCapture, LogManager, StreamReader
@@ -1263,6 +1264,10 @@ class ProcessManager:
             if on_ready:
                 on_ready()
             return
+
+        problem = ready_format_error(ready_str)
+        if problem:
+            logger.warning("Service %s: %s", managed.name, problem)
 
         try:
             condition = ReadyCondition.parse(ready_str)

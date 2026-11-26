@@ -19,6 +19,7 @@ from .child_env import sanitized_child_env
 
 from ..config.io import backup_config, read_config, restore_config, write_config
 from ..config.model import HanielConfig, HooksConfig, RepoConfig, ServiceConfig
+from ..config.input_checks import entry_input_errors
 from ..config.validators import validate_config
 from .git import clone_repo
 
@@ -90,6 +91,19 @@ def _validate_or_raise(config: HanielConfig) -> None:
     errors = validate_config(config)
     if errors:
         raise ValueError(str(errors[0]))
+
+
+def _checked_entry(model: type[Any], section: str, name: str, raw: Any) -> Any:
+    """Validate one service or repo entry and refuse unknown keys and bad values.
+
+    Only the entry being written is checked; old problems elsewhere in the
+    file do not block the save.
+    """
+    entry = model.model_validate(raw)
+    errors = entry_input_errors(f"{section}.{name}", raw, model, entry)
+    if errors:
+        raise ValueError("; ".join(error.message for error in errors))
+    return entry
 
 
 def _repo_path(config_dir: Path, repo_config: RepoConfig) -> Path:
@@ -220,7 +234,11 @@ def _resolve_repo_for_registration(
     if not service.repo:
         service = service.model_copy(update={"repo": repo_name})
 
-    supplied_repo = RepoConfig.model_validate(repo_config) if repo_config else None
+    supplied_repo = (
+        _checked_entry(RepoConfig, "repos", repo_name, repo_config)
+        if repo_config
+        else None
+    )
     if repo_name in config.repos:
         existing = config.repos[repo_name]
         if not existing.path.strip():
@@ -263,7 +281,7 @@ def register_service(
         if name in config.services:
             raise ValueError(f"Service already exists: {name}")
 
-        service = ServiceConfig.model_validate(service_config)
+        service = _checked_entry(ServiceConfig, "services", name, service_config)
         service, repo_name, resolved_repo = _resolve_repo_for_registration(
             config,
             service,
@@ -343,7 +361,7 @@ def register_repo(
         if name in config.repos:
             raise ValueError(f"Repo already exists: {name}")
 
-        config.repos[name] = RepoConfig.model_validate(repo_config)
+        config.repos[name] = _checked_entry(RepoConfig, "repos", name, repo_config)
         _validate_or_raise(config)
         _commit_config(config_path, config, runner)
 
@@ -397,7 +415,7 @@ def update_service_config(
         lambda config: config.services,
         "Service",
         name,
-        ServiceConfig.model_validate(service_config),
+        _checked_entry(ServiceConfig, "services", name, service_config),
         must_exist=True,
         wrap_write_error=wrap_write_error,
     )
@@ -416,7 +434,7 @@ def create_service_config(
         lambda config: config.services,
         "Service",
         name,
-        ServiceConfig.model_validate(service_config),
+        _checked_entry(ServiceConfig, "services", name, service_config),
         must_exist=False,
         wrap_write_error=wrap_write_error,
     )
@@ -435,7 +453,7 @@ def update_repo_config(
         lambda config: config.repos,
         "Repo",
         name,
-        RepoConfig.model_validate(repo_config),
+        _checked_entry(RepoConfig, "repos", name, repo_config),
         must_exist=True,
         wrap_write_error=wrap_write_error,
     )
@@ -454,7 +472,7 @@ def create_repo_config(
         lambda config: config.repos,
         "Repo",
         name,
-        RepoConfig.model_validate(repo_config),
+        _checked_entry(RepoConfig, "repos", name, repo_config),
         must_exist=False,
         wrap_write_error=wrap_write_error,
     )

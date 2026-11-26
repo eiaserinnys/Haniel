@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 
 from haniel.config import load_config
 from haniel.config.validators import (
@@ -190,3 +192,162 @@ class TestValidationErrorDetails:
         assert len(errors) > 0
         # Should mention services involved
         assert errors[0].location is not None
+
+
+class TestInputChecks:
+    """Unknown keys and bad values that the models read leniently."""
+
+    @staticmethod
+    def _issues(text: str, tmp_path: Path):
+        import yaml
+
+        from haniel.config.input_checks import config_input_issues
+
+        path = tmp_path / "haniel.yaml"
+        path.write_text(text, encoding="utf-8")
+        return config_input_issues(load_config(path), yaml.safe_load(text))
+
+    @staticmethod
+    def _errors(issues) -> list[str]:
+        return [i.message for i in issues if i.severity == "error"]
+
+    def test_repo_fixtures_have_no_unknown_keys(self):
+        import yaml
+
+        from haniel.config.input_checks import config_input_issues
+
+        for name in ("valid_config.yaml", "invalid_circular.yaml"):
+            path = FIXTURES_DIR / name
+            issues = config_input_issues(
+                load_config(path), yaml.safe_load(path.read_text(encoding="utf-8"))
+            )
+            assert self._errors(issues) == [], name
+
+    def test_unknown_service_key_names_path_and_close_match(self, tmp_path):
+        issues = self._issues(
+            "services:\n  api:\n    run: x\n    redy: 'port:80'\n", tmp_path
+        )
+        assert self._errors(issues) == [
+            "unknown key services.api.redy (did you mean ready?)"
+        ]
+
+    def test_unknown_top_level_key(self, tmp_path):
+        issues = self._issues("serivces: {}\n", tmp_path)
+        assert self._errors(issues) == ["unknown key serivces (did you mean services?)"]
+
+    def test_unknown_key_without_close_match_has_no_hint(self, tmp_path):
+        issues = self._issues("services:\n  a:\n    run: x\n    zzzzzz: 1\n", tmp_path)
+        assert self._errors(issues) == ["unknown key services.a.zzzzzz"]
+
+    def test_unknown_keys_in_lists_maps_and_aliased_sections(self, tmp_path):
+        issues = self._issues(
+            "webhooks:\n  - url: http://x\n    formt: json\n"
+            "repos:\n  r:\n    url: u\n    path: p\n    brnch: main\n"
+            "self:\n  repo: r\n  auto_updat: true\n"
+            "install:\n  configs:\n    c:\n      path: p\n"
+            "      keys:\n        - key: k\n          validate_cmd: x\n",
+            tmp_path,
+        )
+        assert self._errors(issues) == [
+            "unknown key webhooks.0.formt (did you mean format?)",
+            "unknown key repos.r.brnch (did you mean branch?)",
+            "unknown key self.auto_updat (did you mean auto_update?)",
+            "unknown key install.configs.c.keys.0.validate_cmd (did you mean validate?)",
+        ]
+
+    def test_unused_but_known_keys_are_not_unknown(self, tmp_path):
+        issues = self._issues(
+            "mcp: {transport: streamable_http}\ndashboard: {port: 1}\n"
+            "services:\n  a:\n    run: x\n    reflect: true\n",
+            tmp_path,
+        )
+        assert self._errors(issues) == []
+
+    @pytest.mark.parametrize(
+        "ready",
+        [
+            "port:8080",
+            "port:1",
+            "port:65535",
+            "delay:3",
+            "delay:0",
+            "delay:0.1",
+            "log:Ready",
+            "http:/health",
+            "http:localhost:8080/health",
+            "http://localhost:8080/health",
+        ],
+    )
+    def test_usable_ready_values(self, ready):
+        from haniel.config.input_checks import ready_format_error
+
+        assert ready_format_error(ready) is None
+
+    @pytest.mark.parametrize(
+        "ready",
+        [
+            "prt:80",
+            "80",
+            "port:",
+            "port:abc",
+            "port:0",
+            "port:65536",
+            "port:-1",
+            "delay:",
+            "delay:-1",
+            "delay:abc",
+            "delay:nan",
+            "delay:inf",
+            "log:",
+            "log:   ",
+            "http:",
+        ],
+    )
+    def test_unusable_ready_values(self, ready):
+        from haniel.config.input_checks import ready_format_error
+
+        assert ready_format_error(ready)
+
+    def test_ready_prefix_typo_suggests_prefix(self):
+        from haniel.config.input_checks import ready_format_error
+
+        assert "did you mean port:?" in ready_format_error("prt:80")
+
+    def test_value_errors_name_their_field(self, tmp_path):
+        issues = self._issues(
+            "shutdown: {signal: SIGTRM}\n"
+            "backoff: {base_delay: -1, max_delay: -2}\n"
+            "orchestrator_client: {url: '', token: '', node_id: n}\n"
+            "repos:\n  r: {url: '', path: ./r}\n"
+            "services:\n"
+            "  a: {run: x, ready: 'port:0', restart_delay: -5,"
+            " shutdown: {signal: sigterm}}\n",
+            tmp_path,
+        )
+        errors = self._errors(issues)
+        assert (
+            "shutdown.signal: unknown signal 'SIGTRM' (did you mean SIGTERM?)" in errors
+        )
+        assert "backoff.base_delay must be 0 or more: -1" in errors
+        assert "backoff.max_delay must be 0 or more: -2" in errors
+        assert "orchestrator_client.url must not be empty" in errors
+        assert "orchestrator_client.token must not be empty" in errors
+        assert "repos.r.url must not be empty" in errors
+        assert any(e.startswith("services.a.ready: ") for e in errors)
+        assert "services.a.restart_delay must be 0 or more: -5" in errors
+        assert (
+            "services.a.shutdown.signal: unknown signal 'sigterm' "
+            "(did you mean SIGTERM?)" in errors
+        )
+
+    def test_os_signal_names_are_accepted(self, tmp_path):
+        issues = self._issues(
+            "shutdown: {signal: SIGINT}\nservices:\n  a: {run: x}\n", tmp_path
+        )
+        assert self._errors(issues) == []
+
+    def test_no_services_is_only_a_warning(self, tmp_path):
+        issues = self._issues("poll_interval: 60\n", tmp_path)
+        assert [(i.severity, i.message) for i in issues] == [
+            ("warning", "no services are defined")
+        ]
