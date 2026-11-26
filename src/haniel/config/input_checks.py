@@ -224,6 +224,23 @@ def read_raw_config(path: Path) -> Any:
         return yaml.safe_load(stream)
 
 
+def input_issues(
+    config_path: Path, config: HanielConfig | None
+) -> list[ValidationError]:
+    """Unknown keys and bad values in a config file.
+
+    A config that failed to load still gets its unknown keys reported, since a
+    misspelled key is often why it failed.
+    """
+    try:
+        raw = read_raw_config(config_path)
+    except (OSError, yaml.YAMLError):
+        return []
+    if config is None:
+        return find_unknown_keys(raw, HanielConfig)
+    return config_input_issues(config, raw)
+
+
 def log_config_issues(config_path: Path, config: HanielConfig) -> None:
     """Log what ``haniel validate`` would report, without stopping anything."""
     try:

@@ -20,12 +20,8 @@ from uuid import uuid4
 import click
 
 from haniel import __version__, EXIT_SELF_UPDATE, EXIT_RESTART
-from haniel.commands.common import (
-    input_issues,
-    load_and_validate,
-    validate_config_file,
-)
-from haniel.config.input_checks import log_config_issues
+from haniel.commands.common import load_and_validate, validate_config_file
+from haniel.config.input_checks import input_issues, log_config_issues
 from haniel.commands.handover import handover_command
 from haniel.commands.install import install_command
 from haniel.commands.install import print_dry_run_install as print_dry_run_install
