@@ -4120,3 +4120,42 @@ class TestServiceRunnerOrchestratorScreenData:
             {"repo": "app", "last_fetch": fetched.isoformat()},
             {"repo": "haniel", "last_fetch": None},
         ]
+
+    def test_repo_fetch_info_reports_aware_last_fetch_in_utc(self, tmp_path: Path):
+        from datetime import datetime, timedelta, timezone
+
+        runner = self._runner(tmp_path)
+        kst = timezone(timedelta(hours=9))
+        runner._repo_states["app"].last_fetch = datetime(
+            2026, 11, 26, 18, 0, tzinfo=kst
+        )
+
+        rows = {r["repo"]: r for r in runner._collect_repo_fetch_info()["repos"]}
+
+        assert rows["app"]["last_fetch"] == "2026-11-26T09:00:00+00:00"
+
+    @pytest.mark.skipif(
+        not hasattr(time, "tzset"), reason="time.tzset is not available on Windows"
+    )
+    def test_repo_fetch_info_reports_naive_local_last_fetch_in_utc(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from datetime import datetime, timezone
+
+        monkeypatch.setenv("TZ", "Asia/Seoul")
+        time.tzset()
+        try:
+            runner = self._runner(tmp_path)
+            local_naive = datetime(2026, 11, 26, 22, 23, 16, 292007)
+            runner._repo_states["app"].last_fetch = local_naive
+
+            rows = {r["repo"]: r for r in runner._collect_repo_fetch_info()["repos"]}
+        finally:
+            monkeypatch.undo()
+            time.tzset()
+
+        sent = rows["app"]["last_fetch"]
+        assert sent == "2026-11-26T13:23:16.292007+00:00"
+        assert datetime.fromisoformat(sent) == datetime(
+            2026, 11, 26, 13, 23, 16, 292007, tzinfo=timezone.utc
+        )
