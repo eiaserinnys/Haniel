@@ -229,9 +229,15 @@ def test_legacy_pull_runs_post_pull_only_for_services_owned_by_repo(
 ) -> None:
     runner = _runner(tmp_path)
     runner.execute_hook = MagicMock(return_value=True)
-    runner.process_manager.is_running = MagicMock(return_value=False)
+    running: set[str] = set()
+    runner.process_manager.is_running = MagicMock(
+        side_effect=lambda service: service in running
+    )
+    runner.process_manager.wait_for_ready = MagicMock(return_value=True)
     runner._blocked_start_dependencies = MagicMock(return_value=[])
-    runner._start_service = MagicMock(return_value=True)
+    runner._start_service = MagicMock(
+        side_effect=lambda service: running.add(service) or True
+    )
 
     runner._restart_after_pull_legacy(
         "app", ["owner", "same-repo-dependent", "other-repo-dependent"]

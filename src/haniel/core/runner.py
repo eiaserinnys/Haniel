@@ -22,6 +22,7 @@ import shlex
 import subprocess
 import threading
 import time
+from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -50,6 +51,7 @@ from .change_evidence import get_applied_change_evidence
 from .git import (
     GitError,
     activate_repo_target,
+    clone_repo,
     fetch_repo,
     get_changed_paths,
     get_changed_paths_between,
@@ -382,6 +384,76 @@ class _StartupLane:
     services: tuple[str, ...]
 
 
+class _StartupStarts:
+    """Startup service starts, where a service with dependencies waits on its own.
+
+    A service without ``after`` starts inline. One with ``after`` waits in its
+    own thread until its dependencies' starts have settled, so it never holds
+    back a service that does not depend on it.
+    """
+
+    def __init__(self) -> None:
+        self._settled: dict[str, threading.Event] = {}
+        self._threads: list[threading.Thread] = []
+        self._errors: list[BaseException] = []
+        self._lock = threading.Lock()
+
+    def submit(
+        self,
+        name: str,
+        dependencies: Sequence[str],
+        start: Callable[[], None],
+    ) -> None:
+        settled = threading.Event()
+        with self._lock:
+            self._settled[name] = settled
+        if not dependencies:
+            try:
+                start()
+            finally:
+                settled.set()
+            return
+
+        def wait_then_start() -> None:
+            try:
+                for dependency in dependencies:
+                    with self._lock:
+                        dependency_settled = self._settled.get(dependency)
+                    if dependency_settled is not None:
+                        dependency_settled.wait()
+                start()
+            except BaseException as error:
+                with self._lock:
+                    self._errors.append(error)
+            finally:
+                settled.set()
+
+        thread = threading.Thread(
+            target=wait_then_start, name=f"startup-after-{name}", daemon=True
+        )
+        with self._lock:
+            self._threads.append(thread)
+        thread.start()
+
+    def wait_settled(self, names: Iterable[str]) -> None:
+        for name in names:
+            with self._lock:
+                settled = self._settled.get(name)
+            if settled is not None:
+                settled.wait()
+
+    def join(self) -> None:
+        with self._lock:
+            threads = list(self._threads)
+        for thread in threads:
+            thread.join()
+        with self._lock:
+            errors = list(self._errors)
+            self._errors.clear()
+        if errors:
+            raise errors[0]
+
+
 class ServiceRunner:
     """Manages the poll → pull → restart cycle.
 
@@ -391,6 +463,8 @@ class ServiceRunner:
     - Restart affected services when repos change
     - Handle process crashes (via HealthManager)
     """
+
+    DEFERRED_RESTART_RETRY_SECONDS = 1.0
 
     def __init__(
         self,
@@ -471,6 +545,8 @@ class ServiceRunner:
 
         # Restart scheduling
         self._pending_restarts: dict[str, float] = {}  # service -> restart_time
+        self._poll_wakeup = threading.Event()
+        self._startup_starts = _StartupStarts()
         self._restart_suppressed: set[str] = set()
         self._restart_lock = threading.Lock()
 
@@ -1020,23 +1096,29 @@ class ServiceRunner:
                 "Starting services without startup repository updates: %s",
                 immediate_services,
             )
-        for name in immediate_services:
-            if self._stop_event.is_set():
-                logger.info("Stopping service startup because shutdown was requested")
-                return
-            self._start_startup_service(
-                name, enabled_services, set(), startup_report_errors
-            )
+        self._startup_starts = _StartupStarts()
+        try:
+            for name in immediate_services:
+                if self._stop_event.is_set():
+                    logger.info(
+                        "Stopping service startup because shutdown was requested"
+                    )
+                    return
+                self._start_startup_service(
+                    name, enabled_services, set(), startup_report_errors
+                )
 
-        if lanes:
-            self._run_startup_lanes(
-                lanes,
-                enabled_services,
-                startup_order,
-                startup_report_errors,
-                run_startup_hooks=run_startup_hooks,
-                marker_repos=marker_repos,
-            )
+            if lanes:
+                self._run_startup_lanes(
+                    lanes,
+                    enabled_services,
+                    startup_order,
+                    startup_report_errors,
+                    run_startup_hooks=run_startup_hooks,
+                    marker_repos=marker_repos,
+                )
+        finally:
+            self._startup_starts.join()
 
     def _split_startup_service_groups(
         self,
@@ -1367,7 +1449,33 @@ class ServiceRunner:
         blocked_repos: set[str],
         startup_report_errors: dict[str, list[str]],
     ) -> None:
-        """Start one non-manifest service during startup."""
+        """Start one non-manifest service during startup.
+
+        A service with ``after`` is started once its dependencies are ready,
+        without holding back services that do not depend on it.
+        """
+        dependencies = [
+            dependency
+            for dependency in enabled_services[name].after
+            if dependency in enabled_services
+        ]
+        self._startup_starts.submit(
+            name,
+            dependencies,
+            lambda: self._start_startup_service_now(
+                name, enabled_services, blocked_repos, startup_report_errors
+            ),
+        )
+
+    def _start_startup_service_now(
+        self,
+        name: str,
+        enabled_services: dict[str, ServiceConfig],
+        blocked_repos: set[str],
+        startup_report_errors: dict[str, list[str]],
+    ) -> None:
+        if self._stop_event.is_set():
+            return
         if self.process_manager.is_running(name):
             logger.info("Service already running after handover: %s", name)
             return
@@ -1382,10 +1490,59 @@ class ServiceRunner:
                 f"service start skipped for {name}"
             )
             return
+        unready = self._unready_dependencies(name, enabled_services)
+        if unready:
+            if self._stop_event.is_set():
+                return
+            logger.error("%s skipped: dependency %s failed", name, ", ".join(unready))
+            startup_report_errors.setdefault(repo_name, []).append(
+                f"service start skipped for {name}: dependency "
+                f"{', '.join(unready)} failed"
+            )
+            not_running = [
+                dependency
+                for dependency in unready
+                if not self.process_manager.is_running(dependency)
+            ]
+            if not_running:
+                self._schedule_restart_after_dependency_block(name, not_running)
+            return
         if not self._start_service(name):
             startup_report_errors.setdefault(repo_name, []).append(
                 f"service start failed for {name}"
             )
+
+    def _unready_dependencies(
+        self,
+        name: str,
+        services: dict[str, ServiceConfig],
+    ) -> list[str]:
+        """Wait for each enabled ``after`` dependency; return those that failed.
+
+        A dependency is ready when it is running and, if it has a ``ready``
+        condition, that condition holds within its ``ready_timeout``.
+        """
+        return [
+            dependency
+            for dependency in services[name].after
+            if dependency in services
+            and not self._wait_for_service_ready(dependency, services[dependency])
+        ]
+
+    def _wait_for_service_ready(self, name: str, config: ServiceConfig) -> bool:
+        timeout = effective_ready_timeout(
+            config, self.process_manager.DEFAULT_READY_TIMEOUT
+        )
+        deadline = time.monotonic() + timeout
+        while self.process_manager.is_running(name):
+            remaining = deadline - time.monotonic()
+            if self.process_manager.wait_for_ready(
+                name, timeout=min(1.0, max(remaining, 0.05))
+            ):
+                return self.process_manager.is_running(name)
+            if remaining <= 0 or self._stop_event.is_set():
+                return False
+        return False
 
     def _start_lane_services(
         self,
@@ -1407,7 +1564,7 @@ class ServiceRunner:
         for name in lane.services:
             if self._stop_event.is_set():
                 logger.info("Stopping service startup because shutdown was requested")
-                return
+                break
             if name in handled_manifest_services:
                 continue
             repo_name = enabled_services[name].repo
@@ -1427,6 +1584,7 @@ class ServiceRunner:
             self._start_startup_service(
                 name, enabled_services, blocked_repos, startup_report_errors
             )
+        self._startup_starts.wait_settled(lane.services)
 
     def _run_startup_manifest_deployment(
         self,
@@ -2097,6 +2255,7 @@ class ServiceRunner:
         with self._restart_lock:
             restart_time = time.time() + delay
             self._pending_restarts[name] = restart_time
+        self._poll_wakeup.set()
 
     def _cancel_pending_restart(self, name: str) -> bool:
         """Cancel a pending service restart if one is queued.
@@ -2378,6 +2537,7 @@ class ServiceRunner:
 
         logger.info("Stopping ServiceRunner")
         self._stop_event.set()
+        self._poll_wakeup.set()
         try:
             self._self_update_prestager.cancel()
 
@@ -3632,6 +3792,14 @@ class ServiceRunner:
                 self._schedule_restart_after_dependency_block(service, blockers)
                 continue
 
+            unready = self._unready_dependencies(service, snapshot.enabled_services)
+            if unready:
+                logger.error(
+                    "%s skipped: dependency %s failed", service, ", ".join(unready)
+                )
+                skipped_starts[service] = unready
+                continue
+
             if self.process_manager.is_running(service):
                 logger.warning(
                     "%s is already running before post-pull restart; "
@@ -3777,6 +3945,55 @@ class ServiceRunner:
                     )
         return prefetched
 
+    def _clone_missing_startup_repos(
+        self,
+        startup_snapshot: RunnerConfigSnapshot,
+        startup_repo_names: tuple[str, ...],
+    ) -> set[str]:
+        """Clone configured repositories whose path does not exist yet.
+
+        Returns the repos cloned now. A failed clone is logged and leaves the
+        path missing, so the repo's services fail to start as they do for any
+        missing path.
+        """
+        cloned: set[str] = set()
+        for name in startup_repo_names:
+            if self._stop_event.is_set():
+                break
+            if name == startup_snapshot.self_repo:
+                continue
+            try:
+                runtime = self._snapshot_repo_runtime(name)
+            except ValueError:
+                continue
+            repo_path = self.config_dir / runtime.config.path
+            if repo_path.exists() or not runtime.config.url:
+                continue
+            logger.info(
+                "Cloning missing repository %s from %s to %s",
+                name,
+                runtime.config.url,
+                repo_path,
+            )
+            try:
+                clone_repo(
+                    url=runtime.config.url,
+                    branch=runtime.config.branch,
+                    path=repo_path,
+                )
+            except Exception as error:
+                logger.error(
+                    "Failed to clone repository %s from %s: %s",
+                    name,
+                    runtime.config.url,
+                    bounded_redact_text(str(error)),
+                )
+                continue
+            self._initialize_repo_state(name, self._snapshot_repo_runtime(name))
+            if not runtime.config.release_manifest:
+                cloned.add(name)
+        return cloned
+
     def _apply_startup_updates(self) -> None:
         """Fetch and pull repos whose effective auto_apply allows it.
 
@@ -3807,6 +4024,9 @@ class ServiceRunner:
 
         startup_snapshot = self._snapshot_config_state()
         startup_repo_names = tuple(startup_snapshot.repo_identity)
+        self._startup_updated_repos.update(
+            self._clone_missing_startup_repos(startup_snapshot, startup_repo_names)
+        )
         marker_repos = self._legacy_post_pull_marker_repos(startup_snapshot)
         markers = read_legacy_post_pull_commits(self.config_dir)
         prefetched_updates = self._prefetch_startup_repo_updates(
@@ -4405,9 +4625,14 @@ class ServiceRunner:
             self._startup_manifest_reload_plans[repo_name] = reload_plan
 
     def _poll_loop(self) -> None:
-        """Main poll loop."""
+        """Main poll loop.
+
+        A poll starts ``poll_interval`` after the previous poll started, not
+        after it finished. Scheduled restarts do not wait for the next poll.
+        """
         while not self._stop_event.is_set():
             interval = self.poll_interval
+            cycle_started = time.monotonic()
             try:
                 self._poll_cycle()
                 interval = self._snapshot_config_state().config.poll_interval
@@ -4433,8 +4658,43 @@ class ServiceRunner:
                     bounded_redact_text(str(error)),
                 )
 
-            # Wait for next poll interval (interruptible)
-            self._stop_event.wait(timeout=interval)
+            self._wait_for_next_poll(cycle_started + interval)
+
+    def _wait_for_next_poll(self, next_poll_at: float) -> None:
+        """Wait until ``next_poll_at`` (monotonic), running due restarts early.
+
+        A scheduled restart wakes the wait and runs alone: the repository
+        fetch stays on the poll schedule.
+        """
+        while not self._stop_event.is_set():
+            self._poll_wakeup.clear()
+            wait = next_poll_at - time.monotonic()
+            if wait <= 0:
+                return
+            restart_in = self._seconds_until_next_restart()
+            if restart_in is not None and restart_in <= 0:
+                try:
+                    self._process_pending_restarts()
+                except Exception:
+                    logger.exception("Scheduled restart processing failed")
+                restart_in = self._seconds_until_next_restart()
+                if restart_in is not None:
+                    restart_in = max(restart_in, self.DEFERRED_RESTART_RETRY_SECONDS)
+            if restart_in is not None:
+                wait = min(wait, restart_in)
+            self._poll_wakeup.wait(timeout=wait)
+
+    def _seconds_until_next_restart(self) -> float | None:
+        """Seconds until the earliest scheduled restart, or None if none."""
+        with self._restart_lock:
+            times = [
+                restart_time
+                for name, restart_time in self._pending_restarts.items()
+                if name not in self._restart_suppressed
+            ]
+        if not times:
+            return None
+        return min(times) - time.time()
 
     def _poll_cycle(self) -> None:
         """Execute one poll cycle.
