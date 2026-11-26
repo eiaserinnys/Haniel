@@ -1,12 +1,12 @@
 """
-Phase 3 tests: crash notification + deploy notification deduplication.
+Crash notification + deploy notification deduplication.
 
 Covers:
 - DashboardWebSocket._on_state_change: diagnosis triggered on CRASHED/CIRCUIT_OPEN,
   not re-triggered while already diagnosing
 - DashboardWebSocket._on_state_change: READY/RUNNING does NOT clear _diagnosing_services
   (cleanup is exclusively _run_diagnosis's finally block)
-- DashboardWebSocket._on_state_change: no duplicate session on rapid crash-recovery-crash
+- DashboardWebSocket._on_state_change: no duplicate notification on rapid crash-recovery-crash
 - DashboardWebSocket._run_diagnosis: calls notify_crash when slack_bot is available
 - DashboardWebSocket._run_diagnosis: cleans up _diagnosing_services on exception
 - ServiceRunner._hash_pending: stable hash for same/different input
@@ -35,16 +35,11 @@ def _make_runner_mock():
     return runner
 
 
-def _make_ws_handler(session_manager=None, slack_bot=None, broadcaster=None):
-    """Create a DashboardWebSocket with optional chat integration wired up."""
+def _make_ws_handler(slack_bot=None):
+    """Create a DashboardWebSocket, optionally wired to a Slack bot."""
     runner = _make_runner_mock()
-    ws_handler = DashboardWebSocket(runner)
+    ws_handler = DashboardWebSocket(runner, slack_bot=slack_bot)
     ws_handler._loop = asyncio.get_event_loop()
-    ws_handler.configure_chat(
-        slack_bot=slack_bot,
-        broadcaster=broadcaster,
-        session_manager=session_manager,
-    )
     return ws_handler
 
 
@@ -108,7 +103,7 @@ class TestDiagnosisLifecycle:
 
         Cleanup is the exclusive responsibility of _run_diagnosis's finally block.
         Clearing the flag here would allow a rapid crash-recovery-crash cycle to
-        spawn a duplicate diagnosis session before the first one finishes.
+        spawn a duplicate crash notification before the first one finishes.
         """
         ws = _make_ws_handler()
         ws._diagnosing_services.add("svc-d")
@@ -129,11 +124,11 @@ class TestDiagnosisLifecycle:
 
     @pytest.mark.asyncio
     async def test_no_duplicate_session_on_rapid_crash_recovery_crash(self):
-        """Rapid CRASHED→READY→CRASHED cycle does not spawn a duplicate diagnosis session.
+        """Rapid CRASHED→READY→CRASHED cycle does not spawn a duplicate crash notification.
 
         Regression test for: _on_state_change previously called discard() on READY/RUNNING,
         which cleared the guard flag while _run_diagnosis was still executing, allowing the
-        subsequent CRASHED event to schedule a second concurrent diagnosis session.
+        subsequent CRASHED event to schedule a second concurrent crash notification.
         """
         ws = _make_ws_handler()
         scheduled_coros = []
@@ -147,15 +142,15 @@ class TestDiagnosisLifecycle:
         ws._on_state_change("svc-f", ServiceState.RUNNING, ServiceState.CRASHED)
         # Service briefly recovers — must NOT clear the flag
         ws._on_state_change("svc-f", ServiceState.CRASHED, ServiceState.READY)
-        # Service crashes again — guard flag still set, so no second session
+        # Service crashes again — guard flag still set, so no second notification
         ws._on_state_change("svc-f", ServiceState.READY, ServiceState.CRASHED)
 
         for coro in scheduled_coros:
             coro.close()
 
         assert len(scheduled_coros) == 1, (
-            "Expected exactly one diagnosis session; "
-            f"got {len(scheduled_coros)} (duplicate session bug)"
+            "Expected exactly one crash notification; "
+            f"got {len(scheduled_coros)} (duplicate notification bug)"
         )
 
 

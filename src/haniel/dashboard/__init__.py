@@ -24,7 +24,6 @@ from .static import setup_static
 
 if TYPE_CHECKING:
     from ..core.runner import ServiceRunner
-    from ..core.claude_session import ClaudeSessionManager
     from ..integrations.slack_bot import SlackBot
 
 logger = logging.getLogger(__name__)
@@ -103,7 +102,6 @@ def _login_handler(request: Request) -> FileResponse:
 def setup_dashboard(
     runner: "ServiceRunner",
     token: str | None = None,
-    claude_session_manager: "ClaudeSessionManager | None" = None,
     slack_bot: "SlackBot | None" = None,
 ) -> tuple[list[Route | WebSocketRoute], list[Middleware], DashboardWebSocket]:
     """Create dashboard routes, middleware, and WebSocket handler.
@@ -113,7 +111,7 @@ def setup_dashboard(
         token: Bearer token for authentication. If None/empty, dashboard is
                accessible without auth (a warning is logged) — backward compat
                with existing noauth deployments and tests.
-        claude_session_manager: Optional ClaudeSessionManager for the chat panel
+        slack_bot: Optional SlackBot that receives service crash notifications
 
     Returns:
         Tuple of (routes, middleware_list, ws_handler)
@@ -129,7 +127,7 @@ def setup_dashboard(
 
     # token=None when auth disabled — DashboardWebSocket.handle_ws skips the
     # query-token check in that case (mirrors AuthMiddleware short-circuit).
-    ws_handler = DashboardWebSocket(runner, token=token)
+    ws_handler = DashboardWebSocket(runner, token=token, slack_bot=slack_bot)
 
     api_routes = create_api_routes(runner, ws_handler)
     config_routes = create_config_api_routes(runner, ws_handler)
@@ -144,37 +142,11 @@ def setup_dashboard(
     # catch-all swallows the path.
     routes.append(Route("/auth/login", _login_handler, methods=["GET"]))
 
-    if claude_session_manager is not None:
-        from .chat_ws import ChatWebSocket
-        from .chat_broadcast import ChatBroadcaster
-
-        broadcaster = ChatBroadcaster()
-        chat_ws_handler = ChatWebSocket(
-            claude_session_manager,
-            slack_bot=slack_bot,
-            broadcaster=broadcaster,
-            token=token,
-        )
-        routes.append(WebSocketRoute("/ws/chat", chat_ws_handler.handle_ws))
-
-        # Bind chat deps to DashboardWebSocket for deferred DM handler registration
-        ws_handler.configure_chat(
-            slack_bot=slack_bot,
-            broadcaster=broadcaster,
-            session_manager=claude_session_manager,
-        )
-
-        logger.info(
-            "Dashboard routes registered: %d API + %d config API + WebSocket + Chat WebSocket",
-            len(api_routes),
-            len(config_routes),
-        )
-    else:
-        logger.info(
-            "Dashboard routes registered: %d API + %d config API + WebSocket",
-            len(api_routes),
-            len(config_routes),
-        )
+    logger.info(
+        "Dashboard routes registered: %d API + %d config API + WebSocket",
+        len(api_routes),
+        len(config_routes),
+    )
 
     # Static file routes (SPA fallback must come last — catch-all)
     static_routes = setup_static()

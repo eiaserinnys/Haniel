@@ -21,8 +21,6 @@ if TYPE_CHECKING:
     from ..core.runner import ServiceRunner
     from ..core.health import ServiceState
     from ..integrations.slack_bot import SlackBot
-    from ..dashboard.chat_broadcast import ChatBroadcaster
-    from ..core.claude_session import ClaudeSessionManager
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +35,12 @@ class DashboardWebSocket:
     4. On connection, current full status is sent as initial message
     """
 
-    def __init__(self, runner: "ServiceRunner", token: str | None = None):
+    def __init__(
+        self,
+        runner: "ServiceRunner",
+        token: str | None = None,
+        slack_bot: "SlackBot | None" = None,
+    ):
         """Construct the dashboard WS handler.
 
         Args:
@@ -46,49 +49,22 @@ class DashboardWebSocket:
                 URL (``/ws?token=...``). When ``None`` or empty, WS auth is
                 disabled (noauth mode — matches AuthMiddleware short-circuit
                 and the backward-compat path used by existing tests).
+            slack_bot: Optional SlackBot that receives service crash notifications
         """
         self.runner = runner
         self._token = token or ""
         self._clients: set[WebSocket] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
 
-        # Chat integration (set by configure_chat before setup())
-        self._chat_slack_bot = None
-        self._chat_broadcaster = None
-        self._chat_session_manager = None
+        self._slack_bot = slack_bot
 
         # Auto-diagnosis: tracks services currently being diagnosed
         self._diagnosing_services: set[str] = set()
 
-    def configure_chat(
-        self,
-        slack_bot: "SlackBot | None",
-        broadcaster: "ChatBroadcaster | None",
-        session_manager: "ClaudeSessionManager | None",
-    ) -> None:
-        """Store chat integration dependencies for later binding in setup(loop)."""
-        self._chat_slack_bot = slack_bot
-        self._chat_broadcaster = broadcaster
-        self._chat_session_manager = session_manager
-
     def setup(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Bind to event loop, register health callbacks, and connect chat DM handler."""
+        """Bind to event loop and register health callbacks."""
         self._loop = loop
         self.runner.health_manager.add_callback(self._on_state_change)
-        # Register Slack DM handler once the event loop is running
-        if (
-            self._chat_slack_bot is not None
-            and self._chat_broadcaster is not None
-            and self._chat_session_manager is not None
-        ):
-            try:
-                self._chat_slack_bot._register_dm_handler(
-                    loop, self._chat_session_manager, self._chat_broadcaster
-                )
-                logger.info("Slack DM chat handler registered")
-            except Exception as e:
-                logger.warning("Failed to register Slack DM chat handler: %s", e)
-
         # If the runner consumed a self-update marker on startup, broadcast it
         # now that the loop is bound. Late-connecting clients also pick it up
         # via the init message (status.self_update.last_result).
@@ -203,88 +179,11 @@ class DashboardWebSocket:
     async def _run_diagnosis(self, service_name: str) -> None:
         """Notify via Slack when a service crashes.
 
-        Auto-diagnosis via Claude Code session is temporarily disabled.
-        Sends a crash notification instead.
         Exceptions are caught to ensure _diagnosing_services cleanup always runs.
         """
         try:
-            if self._chat_slack_bot is not None:
-                self._chat_slack_bot.notify_crash(service_name)
-
-            # ── Auto-diagnosis via Claude Code session (disabled) ──────────────
-            # if self._chat_session_manager is None:
-            #     return
-            #
-            # prompt = (
-            #     f"하니엘 서비스 '{service_name}'이 다운되었습니다. "
-            #     "원인을 진단하고 해결 방법을 제안해주세요."
-            # )
-            # session_id = self._chat_session_manager.create_session()
-            #
-            # # Bind to Slack thread if bot is available
-            # if self._chat_slack_bot is not None and self._chat_slack_bot._dm_channel:
-            #     dm_channel = self._chat_slack_bot._dm_channel
-            #     thread_ts = self._chat_slack_bot.create_chat_thread(
-            #         session_id, dm_channel
-            #     )
-            #     if thread_ts:
-            #         self._chat_session_manager.update_slack_binding(
-            #             session_id, thread_ts, dm_channel
-            #         )
-            #
-            # compaction_msg_ts: str | None = None
-            # buffer: list[str] = []
-            #
-            # async for evt in self._chat_session_manager.stream_message(session_id, prompt):
-            #     evt_type = evt.get("type")
-            #
-            #     if evt_type == "text_delta":
-            #         buffer.append(evt.get("delta", ""))
-            #
-            #     elif evt_type == "message_end":
-            #         full_text = "".join(buffer)
-            #         if full_text and self._chat_slack_bot is not None:
-            #             session = self._chat_session_manager.get_session(session_id)
-            #             if session and session.get("slack_thread_ts"):
-            #                 self._chat_slack_bot.post_chat_message(
-            #                     session["slack_channel_id"],
-            #                     session["slack_thread_ts"],
-            #                     full_text,
-            #                 )
-            #         buffer.clear()
-            #
-            #     elif evt_type == "compact_start":
-            #         if self._chat_slack_bot is not None:
-            #             session = self._chat_session_manager.get_session(session_id)
-            #             if session and session.get("slack_thread_ts"):
-            #                 compaction_msg_ts = self._chat_slack_bot.post_compaction_start(
-            #                     session["slack_channel_id"], session["slack_thread_ts"]
-            #                 )
-            #
-            #     elif evt_type == "compact_end":
-            #         if compaction_msg_ts and self._chat_slack_bot is not None:
-            #             session = self._chat_session_manager.get_session(session_id)
-            #             if session and session.get("slack_thread_ts"):
-            #                 self._chat_slack_bot.update_compaction_done(
-            #                     session["slack_channel_id"],
-            #                     session["slack_thread_ts"],
-            #                     compaction_msg_ts,
-            #                 )
-            #             compaction_msg_ts = None
-            #
-            #     elif evt_type == "error":
-            #         if self._chat_slack_bot is not None:
-            #             session = self._chat_session_manager.get_session(session_id)
-            #             if session and session.get("slack_thread_ts"):
-            #                 self._chat_slack_bot.post_error(
-            #                     session["slack_channel_id"],
-            #                     session["slack_thread_ts"],
-            #                     evt.get("error", ""),
-            #                 )
-            #
-            #     # Broadcast all events to watching dashboard WS clients
-            #     if self._chat_broadcaster is not None:
-            #         await self._chat_broadcaster.broadcast(session_id, evt)
+            if self._slack_bot is not None:
+                self._slack_bot.notify_crash(service_name)
 
         except Exception as e:
             logger.warning("Crash notification failed for %s: %s", service_name, e)

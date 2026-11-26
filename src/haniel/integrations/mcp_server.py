@@ -88,7 +88,6 @@ class HanielMcpServer:
         self.runner = runner
         self._server: Optional[Any] = None  # uvicorn.Server
         self._server_thread: Optional[threading.Thread] = None
-        self._session_manager: Optional[Any] = None
         self._stop_requested = threading.Event()
 
     @property
@@ -1071,24 +1070,11 @@ class HanielMcpServer:
             if dashboard_cfg is not None and dashboard_cfg.enabled:
                 try:
                     from ..dashboard import setup_dashboard
-                    from ..core.claude_session import ClaudeSessionManager
-
-                    # Initialise Claude session manager.
-                    # The SDK bundles its own CLI, so no PATH detection needed.
-                    sm = None
-                    try:
-                        sm = ClaudeSessionManager(self.runner)
-                        self._session_manager = sm
-                    except Exception as sm_err:
-                        logger.warning(
-                            "Failed to initialise ClaudeSessionManager: %s", sm_err
-                        )
 
                     dashboard_routes, dashboard_middleware, ws_handler = (
                         setup_dashboard(
                             self.runner,
                             token=token,
-                            claude_session_manager=sm,
                             slack_bot=self.runner._slack_bot,
                         )
                     )
@@ -1150,13 +1136,6 @@ class HanielMcpServer:
     async def stop(self) -> None:
         """Stop the MCP server."""
         self._stop_requested.set()
-        # Disconnect all cached Claude SDK clients first
-        if self._session_manager is not None:
-            try:
-                await self._session_manager.shutdown()
-            except Exception as e:
-                logger.warning(f"Error shutting down session manager: {e}")
-
         if self._server:
             self._server.should_exit = True
 

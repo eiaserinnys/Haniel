@@ -18,10 +18,7 @@ async def test_mcp_bearer_auth(tmp_path, dashboard_enabled):
     )
     config._secret_values = {"MCP": "resolved-test-token"}
     runner = ServiceRunner(config, config_dir=tmp_path)
-    with (
-        patch("uvicorn.Server") as server,
-        patch("haniel.core.claude_session.ClaudeSessionManager"),
-    ):
+    with patch("uvicorn.Server") as server:
         server.return_value.serve = AsyncMock()
         await HanielMcpServer(runner).start()
         app = server.call_args.args[0].app
@@ -57,3 +54,23 @@ async def test_mcp_without_token_passes_through(tmp_path):
         app = server.call_args.args[0].app
     with TestClient(app) as client:
         assert client.get("/mcp").status_code not in (401, 403)
+
+
+async def test_dashboard_has_no_chat_websocket(tmp_path):
+    from starlette.websockets import WebSocketDisconnect
+
+    runner = ServiceRunner(
+        HanielConfig(mcp=McpConfig(), dashboard=DashboardConfig(enabled=True)),
+        config_dir=tmp_path,
+    )
+    with patch("uvicorn.Server") as server:
+        server.return_value.serve = AsyncMock()
+        await HanielMcpServer(runner).start()
+        app = server.call_args.args[0].app
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as ws:
+            assert ws.receive_json()["type"] == "init"
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/ws/chat"):
+                pass
