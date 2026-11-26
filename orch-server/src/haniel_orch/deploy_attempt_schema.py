@@ -165,6 +165,8 @@ ATTEMPT_COLUMNS = {
     "closure": "TEXT",
     # 노드가 진행 알림으로 보낸 가장 최근 단계(DeployProgress.stage). 알림이 오지 않았으면 NULL
     "progress_stage": "TEXT",
+    # recovering 알림이 처음 들어올 때 그 직전의 progress_stage. 한 번 적으면 덮지 않는다. 복구 알림이 없었으면 NULL
+    "failed_stage": "TEXT",
 }
 
 

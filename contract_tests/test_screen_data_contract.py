@@ -150,3 +150,48 @@ async def test_self_update_blocks_others_and_marks_the_disconnect(
     node = await node_row(http)
     assert node["self_update_deploying"] is False
     assert {row["repo"] for row in node["serving"]} == {SELF_REPO}
+
+
+async def test_failed_rollback_reports_stage_and_recovery_in_history(
+    dashboard, http, nodes
+):
+    def failing_rollback(approval: dict, progress) -> None:
+        progress("build")
+        progress("starting")
+        progress("recovering")
+        raise RuntimeError("deployment failed: services did not start")
+
+    client = nodes.start(approval_handler=failing_rollback)
+    await connect(dashboard, client)
+
+    deploy_id = await announce(dashboard, client, REPO, TARGET)
+    response = await http.post(
+        "/api/orch/approve", json={"deploy_id": deploy_id, "approved_by": "contract"}
+    )
+    assert response.status_code == 200, response.text
+    await dashboard.wait_for(
+        lambda e: (
+            e["type"] == "deploy_progress"
+            and e["deploy_id"] == deploy_id
+            and e["stage"] == "recovering"
+        ),
+        timeout=15,
+    )
+    await dashboard.wait_for(
+        lambda e: (
+            e["type"] == "status_change"
+            and e["deploy_id"] == deploy_id
+            and e["status"] in {"failed", "pending"}
+        ),
+        timeout=15,
+    )
+
+    rows = (await http.get("/api/orch/history")).json()["deploys"]
+    failed = next(
+        row
+        for row in rows
+        if row["deploy_id"].startswith("attempt:")
+        and row["canonical_deploy_id"] == deploy_id
+    )
+    assert failed["failed_stage"] == "starting"
+    assert failed["recovery_attempted"] is True

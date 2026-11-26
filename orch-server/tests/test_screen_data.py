@@ -18,6 +18,7 @@ from haniel_orch.node_registry import NodeRegistry
 from haniel_orch.protocol import (
     ChangeNotification,
     DeployProgress,
+    DeployResult,
     NodeHello,
     NodeStatus,
     RepoFetchStatus,
@@ -360,6 +361,91 @@ class TestProgressStage:
         await to_deploying(store, deploy_id)
         (item,) = await store.get_active_deploys()
         assert item["progress_stage"] is None
+
+
+class TestFailedStage:
+    _deploying = TestProgressStage._deploying
+    _progress = TestProgressStage._progress
+
+    async def _fail_after(self, store, harness, *stages: str):
+        await self._deploying(store)
+        for stage in stages:
+            await harness.coordinator.handle_progress(self._progress(stage))
+        await harness.coordinator.handle_result(
+            DeployResult(
+                deploy_id="n:r:main:target",
+                node_id="n",
+                status="failed",
+                error="deployment failed: boom",
+                orchestrator_attempt_id="a1",
+                connection_generation="g1",
+            )
+        )
+        rows = await store.get_deploy_history()
+        return next(row for row in rows if row["deploy_id"] == "attempt:a1")
+
+    async def test_rollback_keeps_the_stage_it_failed_in(self, store):
+        harness = Harness(store)
+        try:
+            row = await self._fail_after(
+                store, harness, "build", "starting", "recovering", "recovering"
+            )
+            assert row["failed_stage"] == "starting"
+            assert row["recovery_attempted"] is True
+            assert (await store.attempts.get_attempt("a1"))["progress_stage"] == "recovering"
+        finally:
+            await harness.close()
+
+    async def test_failure_without_recovering_reports_the_last_stage(self, store):
+        harness = Harness(store)
+        try:
+            row = await self._fail_after(store, harness, "build", "preflight")
+            assert row["failed_stage"] == "preflight"
+            assert row["recovery_attempted"] is False
+        finally:
+            await harness.close()
+
+    async def test_failure_without_any_progress_reports_null(self, store):
+        harness = Harness(store)
+        try:
+            row = await self._fail_after(store, harness)
+            assert row["failed_stage"] is None
+            assert row["recovery_attempted"] is None
+        finally:
+            await harness.close()
+
+    async def test_recovering_as_the_first_report_has_no_failed_stage(self, store):
+        harness = Harness(store)
+        try:
+            row = await self._fail_after(store, harness, "recovering")
+            assert row["failed_stage"] is None
+            assert row["recovery_attempted"] is True
+        finally:
+            await harness.close()
+
+    async def test_first_recovering_wins_over_later_stages(self, store):
+        harness = Harness(store)
+        try:
+            row = await self._fail_after(
+                store, harness, "migrating", "recovering", "starting"
+            )
+            assert row["failed_stage"] == "migrating"
+            assert row["recovery_attempted"] is True
+        finally:
+            await harness.close()
+
+    async def test_probe_and_node_owned_rows_carry_null_fields(self, store):
+        await store._db.execute(
+            "INSERT INTO node_deploy_attempts (node_attempt_id, deploy_id, node_id, repo, branch, "
+            "target_head, trigger, outcome, started_local_head, started_at, completed_at, error) "
+            "VALUES ('na1','n:r:main:t','n','r','main','t','startup','failed','p',"
+            "'2026-11-26T00:00:00Z','2026-11-26T00:01:00Z','boom')"
+        )
+        await store._db.commit()
+        rows = await store.get_deploy_history()
+        node_row = next(r for r in rows if r["deploy_id"] == "node-attempt:na1")
+        assert node_row["failed_stage"] is None
+        assert node_row["recovery_attempted"] is None
 
 
 class TestBlockedBySelfUpdate:
