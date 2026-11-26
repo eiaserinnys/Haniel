@@ -582,7 +582,7 @@ When changes are detected in the self-repo:
 - `auto_update: true` — Immediately shuts down services and exits with code 10
 - `auto_update: false` — Sends webhook, enters pending state, and waits for approval. The global `auto_apply` does not change this: a self-update waits for approval by default
 
-Approve a pending self-update from the orchestrator's Pending screen (web hub or iOS app) when the node is connected to one, with `haniel_update(service="haniel")` or `haniel_pull(repo=<self repo>)` over MCP, or with "Approve update" in the local dashboard (`POST /api/self-update/approve`).
+Approve a pending self-update from the orchestrator's Pending screen (web hub or iOS app) when the node is connected to one, with `haniel_update(service="haniel")` or `haniel_pull(repo=<self repo>)` over MCP, or with "Approve" in the local dashboard (`POST /api/self-update/approve`).
 
 **Approving restarts the Haniel process, so every service on this node stops for a moment.** Services that the active release manifest declares `overlap` or `adopt` are kept running and handed over to the next Haniel. `haniel_restart(service="haniel")` restarts Haniel without an update (exit code 11) with the same effect on services.
 
