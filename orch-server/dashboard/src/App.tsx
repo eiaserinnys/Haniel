@@ -14,6 +14,7 @@ import {
   SERVICE_SPINNER_MIN_MS,
 } from '@/hooks/useInFlightCommands';
 import * as api from '@/lib/api';
+import { approveAllNotices, describeApiError, failureReason } from '@/lib/deployInfo';
 import { useTheme } from '@/lib/theme';
 import type {
   LoadState,
@@ -22,7 +23,6 @@ import type {
   OrchestratorNode,
   Toast,
   WsEvent,
-  ApproveResponse,
 } from '@/types';
 
 const DASHBOARD_SYNC_INTERVAL_MS = 10_000;
@@ -89,6 +89,8 @@ function App() {
 
   const deploySyncSeq = useRef(0);
   const nodeSyncSeq = useRef(0);
+  // The last pending list on screen, to see a deploy come back from deploying.
+  const pendingRef = useRef<Deploy[]>([]);
 
   const refreshDeploys = useCallback(() => {
     const seq = ++deploySyncSeq.current;
@@ -98,7 +100,20 @@ function App() {
     ]).then(([pendingResult, historyResult]) => {
       if (seq !== deploySyncSeq.current) return;
       if (pendingResult.status === 'fulfilled') {
-        setPending(pendingResult.value.deploys);
+        const next = pendingResult.value.deploys;
+        // A request that was deploying and is pending again failed; the hub
+        // keeps no 'failed' status for it, only last_failure.
+        for (const was of pendingRef.current) {
+          const now = next.find(d => d.deploy_id === was.deploy_id);
+          if (was.status === 'deploying' && now?.status === 'pending') {
+            pushToast(
+              `Deploy failed${now.last_failure ? `: ${failureReason(now.last_failure)}` : ''}`,
+              'error',
+            );
+          }
+        }
+        pendingRef.current = next;
+        setPending(next);
         setPendingLoad({ status: 'ready' });
       } else {
         setPendingLoad(cur => failedLoad(cur, '/api/orch/pending', pendingResult.reason));
@@ -110,7 +125,7 @@ function App() {
         setHistoryLoad(cur => failedLoad(cur, '/api/orch/history', historyResult.reason));
       }
     });
-  }, [includeSupersededHistory]);
+  }, [includeSupersededHistory, pushToast]);
 
   const refreshNodes = useCallback(() => {
     const seq = ++nodeSyncSeq.current;
@@ -162,11 +177,6 @@ function App() {
           pushToast(`Deploying ${event.deploy_id.split(':')[1] || ''}`, 'busy');
         } else if (event.status === 'success') {
           pushToast(`Deploy succeeded`, 'success');
-        } else if (event.status === 'failed') {
-          pushToast(
-            `Deploy failed${event.reject_reason ? `: ${event.reject_reason}` : ''}`,
-            'error',
-          );
         } else if (
           event.status === 'rejected' &&
           event.reject_reason &&
@@ -187,7 +197,19 @@ function App() {
       case 'node_disconnected':
         refreshNodes();
         refreshDeploys();
-        pushToast(`Node disconnected: ${event.node_id}`, 'warn');
+        if (event.self_update_deploying) {
+          pushToast(`${event.node_id} is restarting for a self-update`, 'busy');
+        } else {
+          pushToast(`Node disconnected: ${event.node_id}`, 'warn');
+        }
+        break;
+      case 'deploy_progress':
+        // The stage is on the event; the row changes without fetching the list again.
+        setPending(ps => ps.map(p => (
+          p.deploy_id === event.deploy_id
+            ? { ...p, progress_stage: event.stage as Deploy['progress_stage'] }
+            : p
+        )));
         break;
       case 'service_command_result':
         // Release the matching button regardless of success/failure, but
@@ -261,20 +283,13 @@ function App() {
   // Action handlers
   const handleApprove = useCallback(async (deployId: string) => {
     try {
-      const res = await api.approveDeploy(deployId);
+      await api.approveDeploy(deployId);
       // Don't filter setPending here. The status_change WS event handles
-      // visibility: 'deploying' keeps the card visible, terminal states
-      // (or 'approved' with offline node) remove it.
-      if (res.warning) {
-        // Server returned 200 but the node was offline — surface the warning
-        // instead of pretending the deploy started.
-        pushToast(`Approved (deferred): ${res.warning}`, 'warn');
-      } else {
-        pushToast(`Approved deploy`, 'success');
-      }
+      // visibility: 'deploying' keeps the card visible.
+      pushToast(`Approved deploy`, 'success');
       return true;
     } catch (e) {
-      pushToast(`Approve failed: ${e instanceof api.ApiError ? e.body : 'Unknown error'}`, 'error');
+      pushToast(`Approve failed: ${describeApiError(e)}`, 'error');
       return false;
     } finally {
       refreshDeploys();
@@ -287,7 +302,7 @@ function App() {
       setPending(ps => ps.filter(p => p.deploy_id !== deployId));
       pushToast(`Rejected deploy`, 'neutral');
     } catch (e) {
-      pushToast(`Reject failed: ${e instanceof api.ApiError ? e.body : 'Unknown error'}`, 'error');
+      pushToast(`Reject failed: ${describeApiError(e)}`, 'error');
     } finally {
       refreshDeploys();
     }
@@ -307,40 +322,28 @@ function App() {
       pushToast(`${action} ${serviceName} sent`, 'busy');
     } catch (e) {
       // 503 (node not connected), 400, etc. — no in-flight added, button stays idle.
-      pushToast(`${action} failed: ${e instanceof api.ApiError ? e.body : 'Unknown error'}`, 'error');
+      pushToast(`${action} failed: ${describeApiError(e)}`, 'error');
     }
   }, [pushToast, addInFlight]);
 
   const handleApproveAll = useCallback(async (ids: string[]) => {
     if (ids.length > 0) {
-      // Approve selected items individually. Classify each result as
-      // succeeded / deferred (200 + warning) / failed (HTTP error).
+      // Approve selected items individually.
       const results = await Promise.allSettled(ids.map(id => api.approveDeploy(id)));
-      const fulfilled = results.filter(
-        (r): r is PromiseFulfilledResult<ApproveResponse> => r.status === 'fulfilled',
-      );
       const acceptedIds = ids.filter((_, index) => results[index].status === 'fulfilled');
-      const deferred = fulfilled.filter(r => !!r.value.warning).length;
-      const succeeded = fulfilled.length - deferred;
-      const failed = results.length - fulfilled.length;
+      const succeeded = acceptedIds.length;
+      const failed = results.length - succeeded;
       // Don't filter setPending here — the status_change WS events drive
       // visibility (deploying → keep, terminal → remove, failed approve →
       // stays as pending so the user can retry).
-      if (failed === 0 && deferred === 0) {
+      if (failed === 0) {
         pushToast(`Approved ${succeeded} deploys`, 'success');
-      } else if (failed === 0) {
-        pushToast(`Approved ${succeeded}, deferred ${deferred} (node not connected)`, 'warn');
       } else {
         const firstRejected = results.find(
           (r): r is PromiseRejectedResult => r.status === 'rejected',
         );
-        const firstFailureReason = firstRejected
-          ? (firstRejected.reason instanceof api.ApiError
-              ? firstRejected.reason.body
-              : String(firstRejected.reason))
-          : '';
-        const tail = firstFailureReason ? ` (first failure: ${firstFailureReason})` : '';
-        pushToast(`Approved ${succeeded}, deferred ${deferred}, failed ${failed}${tail}`, 'warn');
+        const tail = firstRejected ? ` (first failure: ${describeApiError(firstRejected.reason)})` : '';
+        pushToast(`Approved ${succeeded}, failed ${failed}${tail}`, 'warn');
       }
       refreshDeploys();
       return acceptedIds;
@@ -349,20 +352,10 @@ function App() {
       try {
         const result = await api.approveAll();
         // Don't clear setPending — status_change events handle visibility.
-        if (result.message === 'no pending deploys') {
-          pushToast('No pending deploys', 'neutral');
-        } else if (result.failed.length === 0) {
-          pushToast(`Approved ${result.approved.length} deploys`, 'success');
-        } else {
-          const reasons = result.failed.map(f => f.reason).join(', ');
-          pushToast(
-            `Approved ${result.approved.length}, failed ${result.failed.length} (${reasons})`,
-            'warn',
-          );
-        }
+        for (const notice of approveAllNotices(result)) pushToast(notice.text, notice.kind);
         return result.approved;
       } catch (e) {
-        pushToast(`Approve all failed: ${e instanceof api.ApiError ? e.body : 'Unknown error'}`, 'error');
+        pushToast(`Approve all failed: ${describeApiError(e)}`, 'error');
         return [];
       } finally {
         refreshDeploys();

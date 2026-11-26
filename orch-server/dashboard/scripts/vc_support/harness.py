@@ -60,20 +60,24 @@ class FakeApi:
     def __init__(self):
         self.mode = {"pending": "ok", "nodes": "ok", "history": "ok"}
         self.long = False
+        self.returned = False
+        self.approve_error = None
         self.held = []
         self.calls = []
 
     def reset(self):
         self.mode = {"pending": "ok", "nodes": "ok", "history": "ok"}
         self.long = False
+        # the deploying self-update came back as a pending request with last_failure
+        self.returned = False
+        # (status, body) the next approve answers with; None approves
+        self.approve_error = None
         self.held = []
         self.calls = []
-        self.approve_warning = None
-        self.approve_warning = None
 
     def _body(self, ep, query):
         if ep == "pending":
-            return {"deploys": [] if self.mode[ep] == "empty" else fixtures.pending(self.long)}
+            return {"deploys": [] if self.mode[ep] == "empty" else fixtures.pending(self.long, self.returned)}
         if ep == "nodes":
             return {"nodes": [] if self.mode[ep] == "empty" else fixtures.nodes(self.long)}
         sup = "include_superseded=1" in query
@@ -94,8 +98,9 @@ class FakeApi:
                 route.fulfill(json={"command_id": "cmd-1", "status": "sent"})
             elif name == "approve-all":
                 route.fulfill(json={"approved": [], "failed": []})
-            elif name == "approve" and self.approve_warning:
-                route.fulfill(json={"deploy_id": "x", "status": "approved", "warning": self.approve_warning})
+            elif name == "approve" and self.approve_error:
+                status, body = self.approve_error
+                route.fulfill(status=status, content_type="application/json", body=body)
             else:
                 route.fulfill(json={"deploy_id": "x", "status": "ok"})
             return

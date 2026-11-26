@@ -7,12 +7,20 @@ BODY_BG = {"light": "rgb(255, 255, 255)", "dark": "rgb(12, 13, 12)"}
 
 TONE = {
     "ok": ["Running", "Ready", "Connected", "Success"],
-    "busy": ["Starting", "Stopping", "Deploying", "Pulling", "Reconnecting…", "Connecting…"],
-    "wait": ["Pending", "Restart pending"],
+    "busy": ["Starting", "Stopping", "Deploying", "Pulling", "Reconnecting…", "Connecting…", "Restarting (self-update)"],
+    "wait": ["Pending", "Restart pending", "Manual approval"],
     "off": ["Stopped", "Rejected", "Disabled", "Offline"],
     "fail": ["Crashed", "Circuit open", "Failed", "Disconnected", "Fetch error", "Error"],
 }
 LABEL_TONE = {label: tone for tone, labels in TONE.items() for label in labels}
+STAGES = ["Preparing", "Building", "Checking", "Backing up", "Migrating", "Starting services", "Verifying", "Recovering"]
+
+
+def tone_of(label):
+    """A deploying row with a reported stage reads "Deploying · <stage>" and keeps the Deploying marker."""
+    if label.startswith("Deploying · ") and label[len("Deploying · "):] in STAGES:
+        return "busy"
+    return LABEL_TONE.get(label)
 
 PROBE_JS = """(names) => {
   const probe = document.createElement('i'); document.body.append(probe);
@@ -137,7 +145,7 @@ def nodes(S, rep, scene):
         (m["table"] == (not narrow) and m["list"] == narrow, f"service table={m['table']} list={m['list']} (narrow={narrow})"),
         (m["act"] == [size, size], f"service action button {m['act']} (want {size})"),
         (any("Last seen" in t for t in m["off"]), "offline notice missing"),
-        (all(l in LABEL_TONE for l in m["labels"]), f"unknown status labels {[l for l in m['labels'] if l not in LABEL_TONE]}"),
+        (all(tone_of(l) for l in m["labels"]), f"unknown status labels {[l for l in m['labels'] if not tone_of(l)]}"),
     ]
     for ok, msg in expect:
         if not ok:
@@ -148,8 +156,9 @@ def status_markers(S, rep, scene):
     """Every visible status chip: right tone for its label, 8px marker, no red, yellow, or blue."""
     p = S.page
     tok = p.evaluate(PROBE_JS, ["accent", "ink", "ink-2", "ink-3", "bg"])
+    # toast chips are measured by toast_markers
     chips = p.evaluate(
-        """() => Array.from(document.querySelectorAll('.st')).filter((e) => e.getClientRects().length).map((e) => {
+        """() => Array.from(document.querySelectorAll('.st:not(.toast .st)')).filter((e) => e.getClientRects().length).map((e) => {
           const b = getComputedStyle(e, '::before'), c = getComputedStyle(e);
           return { label: e.textContent.trim(), cls: e.className, w: b.width, h: b.height, bg: b.backgroundColor,
                    border: b.borderTopColor, bw: b.borderTopWidth, chipBg: c.backgroundColor, color: c.color };
@@ -157,7 +166,7 @@ def status_markers(S, rep, scene):
     )
     seen = set()
     for c in chips:
-        tone = LABEL_TONE.get(c["label"])
+        tone = tone_of(c["label"])
         seen.add(c["label"])
         if tone is None or f"st-{tone}" not in c["cls"]:
             rep.fail(scene, f"chip {c['label']!r} has class {c['cls']!r}, want tone {tone}")
@@ -280,13 +289,24 @@ def native_clear_button(S, rep, scene):
 
 
 TOAST_WANT = {
-    "Approved (deferred)": "wait", "Node disconnected": "wait", "Superseded": "wait", "New pending": "wait",
+    "Approved deploy": "ok",
+    "Node disconnected": "wait", "Superseded": "wait", "New pending": "wait",
     "Deploy succeeded": "ok", "Node connected": "ok", "restart soulstream-orch: success": "ok",
-    "Deploying": "busy", "Deploy failed": "fail", "restart soulstream-orch: timeout": "fail",
+    "Deploying": "busy", "restart soulstream-orch: timeout": "fail",
+}
+
+# A failed approve and a failed deploy are failure chips; a node restarting for its own self-update is the
+# hollow green marker of a state that is going to end.
+TOAST_WANT_FAILURES = {
+    "Deploy failed: ": "fail",
+    "Approve failed: node not connected": "fail",
+    "Approve failed: self-update ": "fail",
+    "Approve failed: 502 ": "fail",
+    "silent-manari-ts is restarting for a self-update": "busy",
 }
 
 
-def toast_markers(S, rep, scene):
+def toast_markers(S, rep, scene, want=TOAST_WANT):
     """Toast marker shape follows the state: filled green only for finished success."""
     p = S.page
     tok = p.evaluate(PROBE_JS, ["accent", "ink", "ink-2", "bg"])
@@ -299,12 +319,12 @@ def toast_markers(S, rep, scene):
     )
     seen = set()
     for t in toasts:
-        key = next((k for k in TOAST_WANT if t["text"].startswith(k)), None)
+        key = next((k for k in want if t["text"].startswith(k)), None)
         if key is None:
             rep.fail(scene, f"unexpected toast {t['text']!r}")
             continue
         seen.add(key)
-        tone = TOAST_WANT[key]
+        tone = want[key]
         hollow = lambda col: t["bw"] == "2px" and t["border"] == col and t["bg"] in ("rgba(0, 0, 0, 0)", "transparent")
         ok = {
             "ok": t["bg"] == tok["accent"],
@@ -314,6 +334,169 @@ def toast_markers(S, rep, scene):
         }[tone]
         if not ok:
             rep.fail(scene, f"toast {t['text']!r} should have the {tone} marker, got bg={t['bg']} border={t['border']} {t['bw']}")
-    for k in TOAST_WANT:
+    for k in want:
         if k not in seen:
             rep.fail(scene, f"toast {k!r} never appeared")
+    texts = [t["text"] for t in toasts]
+    if any("{" in x or '"error"' in x for x in texts):
+        rep.fail(scene, f"a toast shows raw JSON: {texts}")
+    if want is TOAST_WANT_FAILURES:
+        reason = [x for x in texts if x.startswith("Deploy failed: ")]
+        if not reason or "Rolled back to d143f0d" not in reason[0]:
+            rep.fail(scene, f"the failure toast should carry the reason from last_failure, got {reason}")
+
+
+def toast_markers_failures(S, rep, scene):
+    toast_markers(S, rep, scene, TOAST_WANT_FAILURES)
+
+
+def pending_failed(S, rep, scene):
+    """Failure rows: chip and one-line reason in the head, Retry in place of Approve, services next to commits."""
+    rows = S.page.evaluate(
+        """() => Array.from(document.querySelectorAll('.row')).filter((r) => r.querySelector('.r-metric.has-sub')).map((r) => {
+          const fail = r.querySelector('.r-fail'), text = r.querySelector('.r-fail-text');
+          const btns = Array.from(r.querySelectorAll('.r-actions .btn')).map((b) => b.textContent.trim());
+          const chip = fail ? fail.querySelector('.st') : null;
+          const act = r.querySelector('.r-actions .st');
+          return { name: r.querySelector('.r-name').textContent.slice(0, 24), hasFail: !!fail,
+                   chip: chip ? chip.textContent.trim() : null, line: text ? text.textContent : null,
+                   oneLine: text ? text.getBoundingClientRect().height < 24 : null,
+                   btns, sub: r.querySelector('.m-sub').textContent.trim(),
+                   manual: Array.from(r.querySelectorAll('.r-meta .st')).some((s) => s.textContent.trim() === 'Manual approval'),
+                   deploying: act ? act.textContent.trim() : null };
+        })"""
+    )
+    if not rows:
+        rep.fail(scene, "no pending rows to measure")
+    if not any(r["hasFail"] for r in rows):
+        rep.fail(scene, "no failed pending row in the fake data")
+    for r in rows:
+        if r["hasFail"]:
+            if r["chip"] != "Failed" or not (r["line"] or "").startswith("Last deploy failed: "):
+                rep.fail(scene, f"{r['name']}: failure head is {r['chip']!r} {r['line']!r}")
+            if not r["oneLine"]:
+                rep.fail(scene, f"{r['name']}: the failure line wraps to more than one line")
+            if "Retry" not in r["btns"] or "Approve" in r["btns"]:
+                rep.fail(scene, f"{r['name']}: buttons {r['btns']}, want Retry in place of Approve")
+        elif r["deploying"] is None and "Approve" not in r["btns"]:
+            rep.fail(scene, f"{r['name']}: buttons {r['btns']}, want Approve")
+        if not re.fullmatch(r"\d+ services?|Restarts Haniel", r["sub"]):
+            rep.fail(scene, f"{r['name']}: services line {r['sub']!r}")
+    if not any(r["manual"] for r in rows):
+        rep.fail(scene, "no Manual approval chip shown")
+    if not any(r["deploying"] and r["deploying"].startswith("Deploying · ") for r in rows):
+        rep.fail(scene, "no deploying row with a stage")
+
+
+def history_outcome(S, rep, scene):
+    got = S.page.evaluate("() => Array.from(document.querySelectorAll('.h-outcome')).map((e) => e.textContent)")
+    want = {"Failed while starting services · recovery attempted", "Failed while migrating · recovery attempted",
+            "Failed while verifying", "No response from node"}
+    if not want <= set(got):
+        rep.fail(scene, f"history failure lines {got}, want {sorted(want)}")
+
+
+def nodes_ledger(S, rep, scene):
+    """Expanded connected nodes: the mini ledger of serving, fetch, and polling; an old node says none is recorded."""
+    m = S.page.evaluate(
+        """() => Array.from(document.querySelectorAll('.mini')).map((m) => ({
+          text: m.textContent.replace(/\\s+/g, ' ').trim(),
+          commits: Array.from(m.querySelectorAll('.mini-serving .mono')).map((e) => e.textContent),
+          fonts: Array.from(m.querySelectorAll('.mini-serving .mono')).map((e) => getComputedStyle(e).fontFamily) }))"""
+    )
+    if not m:
+        rep.fail(scene, "no repository mini ledger in an expanded node")
+        return
+    edges = S.page.evaluate(
+        """() => Array.from(document.querySelectorAll('.mini-rows li')).map((li) => {
+          const serving = li.querySelector('.mini-serving'), checked = li.querySelector('.mini-checked');
+          const range = document.createRange(); range.selectNodeContents(checked);
+          const t = range.getBoundingClientRect(), mono = checked.querySelector('.mono');
+          const sr = document.createRange(); sr.selectNodeContents(serving);
+          const st = sr.getBoundingClientRect();
+          return { repo: li.querySelector('.r-name').textContent, checked: checked.textContent.length > 0,
+                   row_right: li.getBoundingClientRect().right, text_right: t.right, text_left: t.left,
+                   serving_text_right: st.right, serving_text_top: st.top, checked_top: t.top, line_h: t.height,
+                   gap_token: parseFloat(getComputedStyle(li).columnGap),
+                   checked_font: mono ? getComputedStyle(mono).fontFamily : getComputedStyle(checked).fontFamily }; })
+          .filter((r) => r.checked)"""
+    )
+    first = m[0]
+    if "Polls every 60s" not in first["text"] or "Last successful deploy" not in first["text"]:
+        rep.fail(scene, f"first node ledger: {first['text']!r}")
+    if not re.search(r"checked \d+m ago", first["text"]):
+        rep.fail(scene, f"first node ledger shows no fetch time: {first['text']!r}")
+    sha = [c for c in first["commits"] if re.fullmatch(r"[0-9a-f]{8}", c)]
+    if not sha or not all("IBM Plex Mono" in f for f in first["fonts"]):
+        rep.fail(scene, f"serving commits {first['commits']} should be 8 characters in Plex Mono")
+    for want in (r"checked 1h \d+m ago", r"checked 2d \d+h ago"):
+        if not re.search(want, first["text"]):
+            rep.fail(scene, f"first node ledger should show {want!r} (65 and 3060 minutes ago): {first['text']!r}")
+    for row in edges:
+        if row["text_right"] > row["row_right"] + 0.5:
+            rep.fail(scene, f"ledger row {row['repo']!r}: checked text ends at {row['text_right']:.1f}, past the row end {row['row_right']:.1f}")
+        same_line = abs(row["checked_top"] - row["serving_text_top"]) < row["line_h"] / 2
+        gap = row["text_left"] - row["serving_text_right"]
+        if same_line and gap < row["gap_token"] - 0.5:
+            rep.fail(scene, f"ledger row {row['repo']!r}: serving and checked sit on one line with a {gap:.1f}px gap, want at least {row['gap_token']:.1f}px (the column gap token)")
+        if row["checked"] and "IBM Plex Mono" not in row["checked_font"]:
+            rep.fail(scene, f"ledger row {row['repo']!r}: the checked time is not Plex Mono ({row['checked_font']})")
+    if not any("serving " in x["text"] and re.search(r"\d\d:\d\d", x["text"]) for x in m):
+        rep.fail(scene, "no 'serving <commit> · HH:MM' line")
+    old = [x for x in m if "No successful deploy recorded" in x["text"] and "Polls every" not in x["text"]]
+    if len(m) > 1 and not old:
+        rep.fail(scene, "the old node should say 'No successful deploy recorded' with no polling line")
+
+
+def batch_dialog(S, rep, scene):
+    """The batch confirmation: count, restart warning, targets, the skipped note, Cancel and Approve."""
+    d = S.page.evaluate(
+        """() => { const dlg = document.querySelector('[role=dialog]'); if (!dlg) return null;
+          return { title: dlg.querySelector('.dialog-title').textContent, sub: dlg.querySelector('.dialog-sub').textContent,
+                   targets: dlg.querySelectorAll('.targets li').length,
+                   notes: Array.from(dlg.querySelectorAll('.dialog-note')).map((n) => n.textContent),
+                   btns: Array.from(dlg.querySelectorAll('.dialog-foot .btn')).map((b) => [b.textContent.trim(), b.offsetHeight]) }; }"""
+    )
+    if d is None:
+        rep.fail(scene, "no confirmation dialog")
+        return
+    if not re.fullmatch(r"Approve \d+ deployments?\?", d["title"]) or d["sub"] != "Services on those nodes restart.":
+        rep.fail(scene, f"dialog heading {d['title']!r} {d['sub']!r}")
+    if not any(re.fullmatch(r"\d+ needs? a look first — retry them one by one", n) for n in d["notes"]):
+        rep.fail(scene, f"missing the skipped-requests note: {d['notes']}")
+    if [b[0] for b in d["btns"]] != ["Cancel", "Approve"]:
+        rep.fail(scene, f"dialog buttons {d['btns']}")
+    want_h = 36 if S.width > 760 else 44
+    if any(b[1] != want_h for b in d["btns"]):
+        rep.fail(scene, f"dialog button heights {d['btns']}, want {want_h}")
+
+
+def dialog_note(want):
+    def check(S, rep, scene):
+        text = S.page.locator("[role=dialog] .dialog-note").first.inner_text()
+        if text != want:
+            rep.fail(scene, f"dialog note {text!r}, want {want!r}")
+    return check
+
+
+def empty_line(S, rep, scene):
+    text = S.page.locator(".empty-text").inner_text()
+    want = "Nothing waiting. Auto-applied repositories deploy without stopping here — see History."
+    if text != want:
+        rep.fail(scene, f"empty pending line {text!r}")
+
+
+def self_update_note(S, rep, scene):
+    note = S.page.locator(".sect-note").first.inner_text()
+    if not note.startswith("Approving restarts Haniel on that node.") or "overlap and adopt services keep running" not in note:
+        rep.fail(scene, f"self-update section note {note!r}")
+
+
+def restarting_node(S, rep, scene):
+    """A disconnected node whose self-update is deploying reads Restarting, not Disconnected."""
+    chips = S.page.evaluate(
+        """() => Object.fromEntries(Array.from(document.querySelectorAll('.row')).map((r) =>
+          [r.querySelector('.r-name').textContent, r.querySelector('.r-meta .st').textContent.trim()]))"""
+    )
+    if chips.get("eiaserinnys-canary") != "Restarting (self-update)" or chips.get("silent-manari-ts") != "Disconnected":
+        rep.fail(scene, f"node chips {chips}")

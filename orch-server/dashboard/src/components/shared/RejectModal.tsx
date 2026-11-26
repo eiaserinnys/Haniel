@@ -9,6 +9,9 @@ const PRESETS = [
   '오프시간 외 배포 금지',
 ] as const;
 
+const POSTPONE_NOTE = 'Haniel asks again in 6 hours by default.';
+const REJECT_NOTE = "This commit won't come back. The next commit on this branch brings these changes again.";
+
 interface RejectModalProps {
   deploy: Deploy;
   onConfirm: (reason: string) => void;
@@ -43,6 +46,7 @@ export function RejectModal({ deploy, onConfirm, onClose }: RejectModalProps) {
             </Dialog.Description>
           </div>
           <div className="dialog-body">
+            <p className="dialog-note">{isPostpone ? POSTPONE_NOTE : REJECT_NOTE}</p>
             <label className="field">
               <span className="field-label">Reason</span>
               <textarea

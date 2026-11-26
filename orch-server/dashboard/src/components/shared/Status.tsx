@@ -19,13 +19,17 @@ const STATES: Record<string, [Tone, string]> = {
   reconnecting: ['busy', 'Reconnecting…'],
   offline: ['off', 'Offline'],
   error: ['fail', 'Error'],
+  manual: ['wait', 'Manual approval'],
+  restarting: ['busy', 'Restarting (self-update)'],
 };
 
 interface StatusProps {
   state: string;
+  // Replaces the default label, e.g. "Deploying · Building".
+  label?: string;
 }
 
-export function Status({ state }: StatusProps) {
+export function Status({ state, label: custom }: StatusProps) {
   const [tone, label] = STATES[state] ?? ['off', state];
-  return <span className={`st st-${tone}`}>{label}</span>;
+  return <span className={`st st-${tone}`}>{custom ?? label}</span>;
 }

@@ -2,6 +2,27 @@
 
 export type DeployStatus = 'pending' | 'rejected' | 'deploying' | 'success' | 'failed';
 
+// Summary of the latest failed attempt for a request (deploy_last_failure.py).
+export interface LastFailure {
+  kind: string;
+  attempt_id: string | null;
+  reason: string | null;
+  error: string | null;
+  at: string | null;
+}
+
+// Node-reported deploy stage (deploy_attempts.progress_stage and the
+// dashboard WS deploy_progress event).
+export type ProgressStage =
+  | 'preparing'
+  | 'build'
+  | 'preflight'
+  | 'backing_up'
+  | 'migrating'
+  | 'starting'
+  | 'verifying'
+  | 'recovering';
+
 export interface Deploy {
   deploy_id: string;
   node_id: string;
@@ -19,6 +40,18 @@ export interface Deploy {
   created_at: string;
   updated_at: string;
   is_self_update?: boolean;
+  // Pending rows only; absent on History rows.
+  inspection_required?: boolean;
+  last_failure?: LastFailure | null;
+  // 'approval' = the repository's auto-apply is off; null on rows from old nodes.
+  apply_policy?: 'auto' | 'approval' | null;
+  // Deploying rows only; null until the node reports a stage.
+  progress_stage?: ProgressStage | null;
+  // History failure rows. failed_stage is a node stage (the PR #114 v2 field);
+  // recovery_attempted says the node entered recovery (not that it recovered); null when the node did not say.
+  terminal_reason?: string | null;
+  failed_stage?: string | null;
+  recovery_attempted?: boolean | null;
 }
 
 // Service status is split into three axes so the dashboard can show process
@@ -47,6 +80,19 @@ export interface NodeService {
   deps: string[];
 }
 
+export interface RepoFetch {
+  repo: string;
+  last_fetch: string | null;  // ISO 8601
+}
+
+export interface ServingCommit {
+  repo: string;
+  branch: string;
+  target_head: string;
+  deployed_at: string;  // ISO 8601
+  deploy_id: string;
+}
+
 export interface OrchestratorNode {
   node_id: string;
   hostname: string;
@@ -57,6 +103,13 @@ export interface OrchestratorNode {
   last_seen: string;
   created_at: string;
   services?: NodeService[];
+  // Seconds. null when the node is not connected or too old to report it.
+  poll_interval?: number | null;
+  repo_fetches?: RepoFetch[] | null;
+  // Last successful deploy per repository; [] when none is recorded.
+  serving?: ServingCommit[];
+  self_update_deploying?: boolean;
+  self_update_deploy_id?: string | null;
 }
 
 // WebSocket connection status
@@ -95,6 +148,16 @@ export interface NodeDisconnectedEvent {
   type: 'node_disconnected';
   node_id: string;
   reason: string;
+  self_update_deploying?: boolean;
+  self_update_deploy_id?: string | null;
+}
+
+export interface DeployProgressEvent {
+  type: 'deploy_progress';
+  deploy_id: string;
+  node_id: string;
+  orchestrator_attempt_id: string;
+  stage: string;
 }
 
 export interface ServiceCommandResultEvent {
@@ -108,22 +171,28 @@ export interface ServiceCommandResultEvent {
   result?: unknown;
 }
 
-export type WsEvent = NewPendingEvent | StatusChangeEvent | NodeConnectedEvent | NodeDisconnectedEvent | ServiceCommandResultEvent;
+export type WsEvent =
+  | NewPendingEvent
+  | StatusChangeEvent
+  | NodeConnectedEvent
+  | NodeDisconnectedEvent
+  | DeployProgressEvent
+  | ServiceCommandResultEvent;
 
-// API response types — for in-flight tracking and warning surfaces.
-// Mirror api.py exactly so that warning/failed are not silently swallowed.
+// API response types — mirror orch-server api.py.
 
 export interface ApproveResponse {
   deploy_id: string;
-  status: string; // 'deploying' | 'approved'
-  warning?: string; // 'node not connected, will deploy on reconnect'
+  status: string; // 'deploying'
 }
 
-// api.py L142-180 approve_all: always returns approved/failed arrays;
-// `message` is added only when there are no pending deploys.
+// approve_all always returns approved/failed arrays; `message` is added only
+// when there are no pending deploys, `needs_inspection` only when a request
+// whose last deploy failed was skipped.
 export interface ApproveAllResponse {
   approved: string[];
   failed: Array<{ deploy_id: string; reason: string }>;
+  needs_inspection?: Array<{ deploy_id: string; reason: string }>;
   message?: string; // 'no pending deploys'
 }
 
