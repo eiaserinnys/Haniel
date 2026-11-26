@@ -122,7 +122,7 @@ describe('action names', () => {
   it('calls the self-update button Approve, not Approve update', () => {
     renderLoaded()
     expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument()
-    expect(screen.queryByText('Approve update')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /approve update/i })).not.toBeInTheDocument()
   })
 
   it('labels queued crash restarts as Crash restarts queued', () => {
@@ -130,7 +130,7 @@ describe('action names', () => {
     const label = screen.getAllByText('Crash restarts queued')
     expect(label.length).toBeGreaterThan(0)
     expect(screen.getAllByText('serendipity-api').length).toBeGreaterThan(0)
-    expect(screen.queryByText('Restart pending')).not.toBeInTheDocument()
+    expect(screen.queryByText(/restart pending/i)).not.toBeInTheDocument()
   })
 
   it('keeps the pending metric as the count of commits waiting to deploy', () => {
