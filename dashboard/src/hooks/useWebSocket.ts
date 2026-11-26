@@ -1,7 +1,7 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 import type { WsEvent } from "@/lib/types";
 
-type ConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected";
+export type ConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected";
 
 interface UseWebSocketOptions {
   onEvent: (event: WsEvent) => void;

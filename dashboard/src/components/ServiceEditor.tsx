@@ -2,13 +2,11 @@
 
 import { useState } from 'react'
 import type { ServiceConfig, ServiceConfigInput } from '@/lib/types'
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from '@/components/ui/dialog'
+import { errorMessage } from '@/lib/utils'
+import { Field } from './Field'
+import { Icon } from './Icon'
+import { Modal } from './Modal'
+import { Notice } from './states'
 
 interface ServiceEditorProps {
   editName?: string
@@ -18,13 +16,7 @@ interface ServiceEditorProps {
   onCancel: () => void
 }
 
-export function ServiceEditor({
-  editName,
-  editConfig,
-  availableRepos,
-  onSave,
-  onCancel,
-}: ServiceEditorProps) {
+export function ServiceEditor({ editName, editConfig, availableRepos, onSave, onCancel }: ServiceEditorProps) {
   const isEdit = editName !== undefined
 
   const [name, setName] = useState(editName ?? '')
@@ -38,6 +30,7 @@ export function ServiceEditor({
   const [saveError, setSaveError] = useState<string | null>(null)
 
   const handleSave = async () => {
+    if (saving) return
     if (!run.trim()) {
       setSaveError('Run command is required.')
       return
@@ -59,164 +52,70 @@ export function ServiceEditor({
     setSaving(true)
     setSaveError(null)
     try {
-      await onSave(isEdit ? editName! : name.trim(), config)
+      await onSave(isEdit ? editName : name.trim(), config)
     } catch (e) {
-      setSaveError(e instanceof Error ? e.message : String(e))
+      setSaveError(errorMessage(e))
       setSaving(false)
     }
   }
 
   return (
-    <Dialog open onOpenChange={(open) => { if (!open) onCancel() }}>
-      <DialogContent className="bg-zinc-900 border-zinc-700 text-zinc-100 max-w-lg">
-        <DialogHeader>
-          <DialogTitle className="text-zinc-100">
-            {isEdit ? `Edit Service: ${editName}` : 'Add New Service'}
-          </DialogTitle>
-        </DialogHeader>
-
-        <div className="flex flex-col gap-4 py-2">
-          {/* Name */}
-          <Field label="Name" required={!isEdit}>
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              disabled={isEdit}
-              placeholder="my-service"
-              className={inputClass(isEdit)}
-            />
-          </Field>
-
-          {/* Run */}
-          <Field label="Run Command" required>
-            <input
-              type="text"
-              value={run}
-              onChange={(e) => setRun(e.target.value)}
-              placeholder="python -m myservice"
-              className={inputClass(false)}
-            />
-          </Field>
-
-          {/* CWD */}
-          <Field label="Working Directory (cwd)">
-            <input
-              type="text"
-              value={cwd}
-              onChange={(e) => setCwd(e.target.value)}
-              placeholder="./myrepo"
-              className={inputClass(false)}
-            />
-          </Field>
-
-          {/* Repo */}
-          <Field label="Linked Repo">
-            <select
-              value={repo}
-              onChange={(e) => setRepo(e.target.value)}
-              className={selectClass}
-            >
-              <option value="">None</option>
-              {availableRepos.map((r) => (
-                <option key={r} value={r}>{r}</option>
-              ))}
-            </select>
-          </Field>
-
-          {/* After */}
-          <Field label="Dependencies (after)" hint="comma-separated">
-            <input
-              type="text"
-              value={after}
-              onChange={(e) => setAfter(e.target.value)}
-              placeholder="other-service, another-service"
-              className={inputClass(false)}
-            />
-          </Field>
-
-          {/* Ready */}
-          <Field label="Ready Condition" hint="port:3000 / delay:5 / log:started">
-            <input
-              type="text"
-              value={ready}
-              onChange={(e) => setReady(e.target.value)}
-              placeholder="port:3000"
-              className={inputClass(false)}
-            />
-          </Field>
-
-          {/* Enabled */}
-          <label className="flex items-center gap-3 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={enabled}
-              onChange={(e) => setEnabled(e.target.checked)}
-              className="w-4 h-4 rounded accent-blue-500"
-            />
-            <span className="text-sm text-zinc-300">Enabled</span>
-          </label>
-
-          {/* Error */}
-          {saveError && (
-            <div className="text-sm text-red-400 bg-red-900/20 border border-red-700/40 rounded px-3 py-2">
-              {saveError}
-            </div>
-          )}
-        </div>
-
-        <DialogFooter className="gap-2">
-          <button
-            onClick={onCancel}
-            disabled={saving}
-            className="px-4 py-2 text-sm text-zinc-400 hover:text-zinc-200 transition-colors disabled:opacity-50"
-          >
+    <Modal
+      title={isEdit ? 'Edit service' : 'Add service'}
+      sub={isEdit ? <span className="mono">{editName}</span> : undefined}
+      onClose={onCancel}
+      onSubmit={handleSave}
+      footer={
+        <>
+          <button type="button" className="btn btn-outline" onClick={onCancel} aria-disabled={saving || undefined}>
             Cancel
           </button>
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors disabled:opacity-50"
-          >
+          <button type="submit" className="btn btn-primary" aria-disabled={saving || undefined}>
             {saving ? 'Saving…' : 'Save'}
           </button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function inputClass(disabled: boolean) {
-  return [
-    'w-full rounded px-3 py-1.5 text-sm bg-zinc-800 border border-zinc-600',
-    'text-zinc-100 placeholder:text-zinc-500',
-    'focus:outline-none focus:border-blue-500',
-    disabled ? 'opacity-50 cursor-not-allowed' : '',
-  ].join(' ')
-}
-
-const selectClass =
-  'w-full rounded px-3 py-1.5 text-sm bg-zinc-800 border border-zinc-600 ' +
-  'text-zinc-100 focus:outline-none focus:border-blue-500'
-
-interface FieldProps {
-  label: string
-  required?: boolean
-  hint?: string
-  children: React.ReactNode
-}
-
-function Field({ label, required, hint, children }: FieldProps) {
-  return (
-    <div className="flex flex-col gap-1.5">
-      <label className="text-xs text-zinc-400">
-        {label}
-        {required && <span className="text-red-400 ml-1">*</span>}
-        {hint && <span className="ml-1 text-zinc-600">({hint})</span>}
+        </>
+      }
+    >
+      {saveError && <Notice summary="Couldn't save" detail={saveError} />}
+      {!isEdit && (
+        <Field label="Name" required>
+          <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-service" />
+        </Field>
+      )}
+      <Field label="Run command" required>
+        <input className="input mono-in" value={run} onChange={(e) => setRun(e.target.value)} placeholder="python -m myservice" />
+      </Field>
+      <Field label="Working directory">
+        <input className="input mono-in" value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="./myrepo" />
+      </Field>
+      <Field label="Linked repo">
+        <span className="select-wrap">
+          <select className="select" value={repo} onChange={(e) => setRepo(e.target.value)}>
+            <option value="">None</option>
+            {availableRepos.map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
+          </select>
+          <Icon name="chev" small />
+        </span>
+      </Field>
+      <Field label="Depends on" hint="comma-separated" hintIsText>
+        <input
+          className="input mono-in"
+          value={after}
+          onChange={(e) => setAfter(e.target.value)}
+          placeholder="other-service, another-service"
+        />
+      </Field>
+      <Field label="Ready condition" hint="port:3000 delay:5 log:started">
+        <input className="input mono-in" value={ready} onChange={(e) => setReady(e.target.value)} placeholder="port:3000" />
+      </Field>
+      <label className="check-label">
+        <input type="checkbox" className="check" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+        Enabled
       </label>
-      {children}
-    </div>
+    </Modal>
   )
 }

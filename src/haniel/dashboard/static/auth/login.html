@@ -3,73 +3,460 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Haniel Dashboard — Sign in</title>
+  <!-- The server only serves /assets and index.html, so the icon is inline (same picture as dashboard/src/assets/favicon.svg). -->
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+PHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiBmaWxsPSIjMEI3QTRCIi8+PHBhdGggZD0iTTkgOHYxNk0yMyA4djE2TTkgMTZoMTQiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI0ZGRkZGRiIgc3Ryb2tlLXdpZHRoPSIzIi8+PC9zdmc+Cg==">
+  <meta name="haniel-ui" content="index">
+  <meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0C0D0C" media="(prefers-color-scheme: dark)">
+  <title>Haniel Local — Sign in</title>
+  <script>
+    // Apply the saved theme before the first paint (same script as the dashboard) so sign-in does not flash the other theme.
+    try {
+      var theme = localStorage.getItem('haniel-theme')
+      if (theme === 'light' || theme === 'dark') document.documentElement.setAttribute('data-theme', theme)
+    } catch (e) {}
+  </script>
   <style>
-    * { box-sizing: border-box; }
-    html, body { margin: 0; padding: 0; height: 100%; }
+  /* Same tokens as dashboard/src/index.css. The page is static, so it uses the system fonts when Pretendard is not installed and follows the saved theme, then the system theme. */
+  :root {
+    color-scheme: light;
+    --bg: #FFFFFF;
+    --bg-2: #F5F5F3;
+    --ink: #0F0F0F;
+    --ink-2: #5C5C5C;
+    --ink-3: #9A9A9A;
+    --rule: #E4E4E1;
+    --rule-strong: #0F0F0F;
+    --accent: #0B7A4B;
+    --accent-hover: #096841;
+    --accent-soft: rgb(11 122 75 / 8%);
+    --accent-press: rgb(11 122 75 / 14%);
+    --focus: #0B7A4B;
+    --control-rule: #8A8A8A;
+    --scrim: rgb(15 15 15 / 40%);
+    --skeleton: #ECECE9;
+    --scrollbar-thumb: #8A8A8A;
+    --scrollbar-thumb-hover: var(--ink-2);
+    --scrollbar-thumb-active: var(--accent);
+
+    --on-accent: var(--bg);
+    --state-ok: var(--accent);
+    --state-busy: var(--accent);
+    --state-wait: var(--ink-2);
+    --state-off: var(--ink-3);
+    --state-fail-bg: var(--ink);
+    --state-fail-ink: var(--bg);
+    --danger-bg: var(--ink);
+    --danger-ink: var(--bg);
+    --danger-hover: var(--ink-2);
+
+    --font-body: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, "Apple SD Gothic Neo", "Segoe UI", "Malgun Gothic", sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+    --zero: 0px;
+    --line: 1px;
+    --line-strong: 2px;
+    --space-0: 4px;
+    --space-1: 8px;
+    --space-h: 12px;
+    --space-2: 16px;
+    --space-3: 24px;
+    --space-4: 32px;
+    --space-5: 48px;
+    --space-6: 64px;
+    --gutter: 32px;
+    --gutter-m: 20px;
+    --icon-inset: 12px;
+
+    --meta-size: 13px;
+    --ui-size: 15px;
+    --row-title-size: 16px;
+    --section-size: 18px;
+    --metric-size: 20px;
+    --overlay-title-size: 22px;
+    --page-title-size: 32px;
+    --page-title-m-size: 28px;
+    --brand-size: 18px;
+    --brand-m-size: 16px;
+    --title-tracking: -0.03em;
+    --claim-tracking: -0.015em;
+    --eyebrow-tracking: 0.04em;
+
+    --topbar-h: 64px;
+    --tabbar-h: 64px;
+    --sidebar-w: 240px;
+    --drawer-w: 280px;
+    --nav-row-h: 40px;
+    --tap: 44px;
+    --icon-btn: 40px;
+    --icon: 20px;
+    --icon-sm: 16px;
+    --btn-h: 36px;
+    --input-h: 40px;
+    --chip-h: 24px;
+    --marker: 8px;
+    --marker-big: 24px;
+    --check: 16px;
+    --check-mark-w: 5px;
+    --check-mark-h: 9px;
+    --lead-col: 24px;
+    --chev-col: 24px;
+    --metric-col: 176px;
+    --time-col: 64px;
+    --state-col: 136px;
+    --label-col: 96px;
+    --kv-min: 160px;
+    --container-max: 1280px;
+    --dialog-w: 480px;
+    --confirm-w: 400px;
+    --login-w: 360px;
+    --menu-w: 200px;
+    --filter-w: 280px;
+    --toast-w: 380px;
+    --log-max: 320px;
+    --files-max: 240px;
+    --table-fade: 32px;
+    --sk-title: 16px;
+    --sk-meta: 13px;
+    --sk-w-1: 40%;
+    --sk-w-2: 64%;
+    --sk-w-3: 28%;
+    --sk-metric: 72px;
+    --graph-node-w: 216px;
+    --graph-node-h: 40px;
+
+    --frame-wide: 1440px;
+    --frame-mid: 900px;
+    --frame-narrow: 390px;
+    --frame-h-wide: 900px;
+    --frame-h-mid: 1000px;
+    --frame-h-narrow: 844px;
+
+    --disabled-opacity: 0.4;
+    --focus-offset: 2px;
+    --scrollbar-size: 12px;
+    --scrollbar-thin: 8px;
+    --scrollbar-thumb-min: 48px;
+    --motion-fast: 150ms;
+    --motion-mid: 220ms;
+    --motion-busy: 1200ms;
+
+    --z-sticky: 2;
+    --z-menu: 20;
+    --z-drawer: 30;
+    --z-dialog: 40;
+    --z-toast: 50;
+    --z-chrome: 60;
+  }
+
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0C0D0C;
+    --bg-2: #141614;
+    --ink: #ECEDEA;
+    --ink-2: #A0A39E;
+    --ink-3: #666A64;
+    --rule: #242724;
+    --rule-strong: #ECEDEA;
+    --accent: #4FD69C;
+    --accent-hover: #74E0B2;
+    --accent-soft: rgb(79 214 156 / 10%);
+    --accent-press: rgb(79 214 156 / 18%);
+    --focus: #4FD69C;
+    --control-rule: #666A64;
+    --scrim: rgb(0 0 0 / 60%);
+    --skeleton: #1C1F1C;
+    --scrollbar-thumb: #666A64;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme]) {
+      color-scheme: dark;
+      --bg: #0C0D0C;
+      --bg-2: #141614;
+      --ink: #ECEDEA;
+      --ink-2: #A0A39E;
+      --ink-3: #666A64;
+      --rule: #242724;
+      --rule-strong: #ECEDEA;
+      --accent: #4FD69C;
+      --accent-hover: #74E0B2;
+      --accent-soft: rgb(79 214 156 / 10%);
+      --accent-press: rgb(79 214 156 / 18%);
+      --focus: #4FD69C;
+      --control-rule: #666A64;
+      --scrim: rgb(0 0 0 / 60%);
+      --skeleton: #1C1F1C;
+      --scrollbar-thumb: #666A64;
+    }
+  }
+
+  @media (prefers-contrast: more) {
+    :root {
+      --ink-2: var(--ink);
+      --rule: var(--rule-strong);
+      --control-rule: var(--ink);
+      --accent-soft: transparent;
+      --scrollbar-thumb: var(--ink);
+    }
+  }
+
+  @media (forced-colors: active) {
+    :root {
+      --bg: Canvas;
+      --bg-2: Canvas;
+      --ink: CanvasText;
+      --ink-2: CanvasText;
+      --ink-3: GrayText;
+      --rule: CanvasText;
+      --rule-strong: CanvasText;
+      --accent: Highlight;
+      --accent-soft: Canvas;
+      --accent-press: Highlight;
+      --focus: Highlight;
+      --control-rule: CanvasText;
+      --skeleton: GrayText;
+      --state-fail-bg: CanvasText;
+      --state-fail-ink: Canvas;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    :root {
+      --motion-fast: 0ms;
+      --motion-mid: 0ms;
+    }
+  }
+
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+    }
+
+    html,
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: #18181b;
-      color: #e4e4e7;
+      height: 100%;
+    }
+
+    body {
+      display: grid;
+      grid-template-rows: var(--topbar-h) minmax(var(--zero), 1fr);
+      margin: var(--zero);
+      background: var(--bg);
+      color: var(--ink);
+      font-family: var(--font-body);
+      font-size: var(--ui-size);
+      line-height: 1.5;
+      word-break: keep-all;
+      overflow-wrap: anywhere;
+    }
+
+    button,
+    input {
+      font: inherit;
+      color: inherit;
+    }
+
+    h1,
+    p {
+      margin: var(--zero);
+    }
+
+    :focus-visible {
+      outline: var(--line-strong) solid var(--focus);
+      outline-offset: var(--focus-offset);
+    }
+
+    .mono {
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .topbar {
       display: flex;
       align-items: center;
+      padding: var(--zero) var(--gutter);
+      border-bottom: var(--line) solid var(--rule);
+    }
+
+    .brand {
+      display: flex;
+      align-items: baseline;
+      gap: var(--space-1);
+      white-space: nowrap;
+    }
+
+    .brand-name {
+      font-size: var(--brand-size);
+      font-weight: 700;
+      letter-spacing: var(--claim-tracking);
+      line-height: 1;
+    }
+
+    .brand-sub {
+      color: var(--accent);
+      font-size: var(--meta-size);
+      font-weight: 600;
+      letter-spacing: var(--eyebrow-tracking);
+      line-height: 1;
+    }
+
+    .login {
+      display: grid;
+      place-items: center;
+      padding: var(--space-5) var(--gutter-m);
+    }
+
+    .login-panel {
+      display: grid;
+      gap: var(--space-3);
+      width: min(100%, var(--login-w));
+      padding-top: var(--space-3);
+      border-top: var(--line-strong) solid var(--rule-strong);
+    }
+
+    .login-title {
+      font-size: var(--overlay-title-size);
+      font-weight: 600;
+      letter-spacing: var(--claim-tracking);
+      line-height: 1.35;
+    }
+
+    .field {
+      display: grid;
+      gap: var(--space-1);
+    }
+
+    .field-label {
+      color: var(--ink-2);
+      font-size: var(--meta-size);
+      font-weight: 600;
+    }
+
+    .input {
+      width: 100%;
+      min-width: var(--zero);
+      height: var(--input-h);
+      padding: var(--zero) var(--space-h);
+      border: var(--line) solid var(--control-rule);
+      border-radius: var(--zero);
+      background: var(--bg);
+      color: var(--ink);
+      font-family: var(--font-mono);
+      font-size: var(--meta-size);
+    }
+
+    .input:focus-visible {
+      border-color: var(--focus);
+      outline-offset: calc(var(--line) * -1);
+    }
+
+    .hint {
+      color: var(--ink-2);
+      font-size: var(--meta-size);
+    }
+
+    .hint .mono {
+      color: var(--ink);
+    }
+
+    .btn {
+      justify-self: start;
+      display: inline-flex;
+      align-items: center;
       justify-content: center;
-    }
-    .card {
-      background: #27272a;
-      border: 1px solid #3f3f46;
-      border-radius: 8px;
-      padding: 28px 32px;
-      width: 100%;
-      max-width: 360px;
-      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
-    }
-    h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
-    p.hint { color: #a1a1aa; font-size: 13px; margin: 0 0 20px; }
-    label { display: block; font-size: 12px; color: #a1a1aa; margin-bottom: 6px; }
-    input[type="password"] {
-      width: 100%;
-      padding: 9px 11px;
-      background: #18181b;
-      border: 1px solid #3f3f46;
-      border-radius: 6px;
-      color: #e4e4e7;
-      font-size: 14px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    }
-    input[type="password"]:focus {
-      outline: none;
-      border-color: #3b82f6;
-    }
-    button {
-      margin-top: 16px;
-      width: 100%;
-      padding: 9px 12px;
-      background: #2563eb;
-      border: 0;
-      border-radius: 6px;
-      color: #f8fafc;
-      font-size: 14px;
-      font-weight: 500;
+      height: var(--btn-h);
+      padding: var(--zero) var(--space-2);
+      border: var(--line) solid var(--accent);
+      background: var(--accent);
+      color: var(--on-accent);
+      font-size: var(--ui-size);
+      font-weight: 600;
+      line-height: 1;
       cursor: pointer;
     }
-    button:hover { background: #1d4ed8; }
-    .footer { font-size: 11px; color: #71717a; margin-top: 16px; line-height: 1.5; }
+
+    .btn:hover {
+      border-color: var(--accent-hover);
+      background: var(--accent-hover);
+    }
+
+    .notice {
+      display: grid;
+      grid-template-columns: auto minmax(var(--zero), 1fr);
+      align-items: center;
+      gap: var(--space-2);
+      padding: var(--space-h) var(--space-2);
+      border-left: var(--line-strong) solid var(--state-fail-bg);
+      background: var(--bg-2);
+    }
+
+    .notice[hidden] {
+      display: none;
+    }
+
+    .st {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-1);
+      height: var(--chip-h);
+      padding: var(--zero) var(--space-1);
+      background: var(--state-fail-bg);
+      color: var(--state-fail-ink);
+      font-size: var(--meta-size);
+      font-weight: 600;
+      line-height: 1;
+    }
+
+    .st::before {
+      content: "";
+      width: var(--marker);
+      height: var(--marker);
+      background: var(--state-fail-ink);
+    }
+
+    @media (forced-colors: active) {
+      .st {
+        border: var(--line) solid CanvasText;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .topbar {
+        padding-inline: var(--gutter-m);
+      }
+
+      .btn {
+        height: var(--tap);
+      }
+    }
   </style>
 </head>
 <body>
-  <form class="card" id="login-form" autocomplete="off">
-    <h1>Haniel Dashboard</h1>
-    <p class="hint">Enter the dashboard token from <code>haniel.yaml</code>.</p>
-    <label for="token">Bearer token</label>
-    <input id="token" type="password" required autofocus>
-    <button type="submit">Sign in</button>
-    <p class="footer">The token is stored in <code>localStorage</code> on this device and sent as <code>Authorization: Bearer</code> for REST and as <code>?token=</code> for WebSocket. Pattern matches the orchestrator dashboard.</p>
-  </form>
+  <header class="topbar">
+    <div class="brand"><span class="brand-name">Haniel</span><span class="brand-sub">Local</span></div>
+  </header>
+  <main class="login">
+    <form class="login-panel" id="login-form" autocomplete="off">
+      <h1 class="login-title">Sign in</h1>
+      <div class="notice" id="login-error" role="alert" hidden>
+        <span class="st">Error</span>
+        <p>localStorage is unavailable, so the token cannot be stored.</p>
+      </div>
+      <label class="field">
+        <span class="field-label">Dashboard token</span>
+        <input class="input" id="token" type="password" required autofocus>
+        <span class="hint">From <span class="mono">haniel.yaml</span></span>
+      </label>
+      <button class="btn" type="submit">Sign in</button>
+    </form>
+  </main>
   <script>
     (function () {
       var form = document.getElementById('login-form');
       var input = document.getElementById('token');
+      var error = document.getElementById('login-error');
       form.addEventListener('submit', function (ev) {
         ev.preventDefault();
         var value = input.value.trim();
@@ -78,7 +465,7 @@
           localStorage.setItem('haniel-token', value);
         } catch (e) {
           /* localStorage unavailable (private browsing) — surface and stop */
-          alert('localStorage is unavailable. Cannot store token.');
+          error.hidden = false;
           return;
         }
         window.location.href = '/';

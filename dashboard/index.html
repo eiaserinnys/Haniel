@@ -2,9 +2,19 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/svg+xml" href="/src/assets/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Haniel Dashboard</title>
+    <meta name="haniel-ui" content="index" />
+    <meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0C0D0C" media="(prefers-color-scheme: dark)" />
+    <title>Haniel Local</title>
+    <script>
+      // Apply the saved theme before the first paint so the page does not flash.
+      try {
+        var theme = localStorage.getItem('haniel-theme')
+        if (theme === 'light' || theme === 'dark') document.documentElement.setAttribute('data-theme', theme)
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>
