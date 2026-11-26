@@ -493,3 +493,128 @@ class TestRunDryRunDetailed:
         )
         assert result.exit_code != 0
         assert "Configuration errors" in result.output
+
+
+class TestInstallerExpectations:
+    """Install command guidance and Claude Code requirement (card 1896)."""
+
+    @staticmethod
+    def _write_config(directory, *, key_lines: str = "", service: bool = False):
+        install = ""
+        if key_lines:
+            install += (
+                "  configs:\n    app-env:\n      path: ./app.env\n      keys:\n"
+                f"{key_lines}"
+            )
+        if service:
+            install += "  service:\n    name: haniel\n    working_directory: '{root}'\n"
+        config = directory / "haniel.yaml"
+        config.write_text(
+            "repos: {}\nservices: {}\n" + (f"install:\n{install}" if install else "")
+        )
+        return config
+
+    @pytest.mark.parametrize(
+        ("system", "expected"),
+        [
+            ("Linux", "Start with: sudo systemctl start haniel"),
+            ("Windows", "Start with: sc start haniel"),
+            ("Darwin", "Start with: launchctl bootstrap gui/"),
+        ],
+    )
+    def test_completion_start_command_matches_the_os(
+        self, system, expected, tmp_path, capsys
+    ):
+        from haniel.commands.install import _print_completion
+        from haniel.config import HanielConfig
+
+        config = HanielConfig.model_validate(
+            {"install": {"service": {"name": "haniel"}}}
+        )
+        orchestrator = MagicMock()
+        orchestrator.state.is_step_complete.return_value = False
+        orchestrator.finalizer.get_completion_summary.return_value = {
+            "generated_files": [],
+            "service": {"name": "haniel"},
+        }
+
+        with (
+            patch("haniel.commands.install.platform.system", return_value=system),
+            patch("haniel.installer.launchd.os.getuid", create=True, return_value=501),
+        ):
+            _print_completion(orchestrator, tmp_path / "haniel.yaml", config)
+
+        output = capsys.readouterr().out
+        assert expected in output
+        if system != "Windows":
+            assert "sc start" not in output
+        if system == "Darwin":
+            assert "com.haniel.haniel.plist" in output
+
+    def test_skip_interactive_installs_without_claude_code(
+        self, cli_runner: CliRunner, tmp_path
+    ):
+        config = self._write_config(
+            tmp_path, key_lines="        - key: TOKEN\n          default: abc\n"
+        )
+
+        with patch("haniel.installer.orchestrator.find_tool", return_value=None):
+            result = cli_runner.invoke(
+                main, ["install", "--skip-interactive", str(config)]
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Installation Complete" in result.output
+        assert (tmp_path / "app.env").read_text() == "TOKEN=abc\n"
+
+    def test_interactive_install_without_pending_keys_does_not_need_claude_code(
+        self, cli_runner: CliRunner, tmp_path
+    ):
+        config = self._write_config(
+            tmp_path, key_lines="        - key: TOKEN\n          default: abc\n"
+        )
+
+        with (
+            patch("haniel.installer.orchestrator.find_tool", return_value=None),
+            patch("haniel.commands.install.os.isatty", return_value=True),
+        ):
+            result = cli_runner.invoke(main, ["install", str(config)])
+
+        assert result.exit_code == 0, result.output
+
+    def test_interactive_install_with_pending_keys_stops_without_claude_code(
+        self, cli_runner: CliRunner, tmp_path
+    ):
+        config = self._write_config(tmp_path, key_lines="        - key: TOKEN\n")
+
+        with (
+            patch("haniel.installer.orchestrator.find_tool", return_value=None),
+            patch("haniel.commands.install.os.isatty", return_value=True),
+        ):
+            result = cli_runner.invoke(main, ["install", str(config)])
+
+        assert result.exit_code == 1
+        assert "--skip-interactive" in result.output
+
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="validate commands run through sh"
+    )
+    def test_rejected_default_stops_install_and_reports_key_command_and_output(
+        self, cli_runner: CliRunner, tmp_path
+    ):
+        config = self._write_config(
+            tmp_path,
+            key_lines=(
+                "        - key: TOKEN\n          default: abc\n"
+                '          validate: "echo token-rejected >&2; exit 4"\n'
+            ),
+        )
+
+        result = cli_runner.invoke(main, ["install", "--skip-interactive", str(config)])
+
+        assert result.exit_code == 1
+        assert "app-env.TOKEN" in result.output
+        assert "echo token-rejected" in result.output
+        assert "exit code 4" in result.output
+        assert "token-rejected" in result.output
+        assert not (tmp_path / "app.env").exists()

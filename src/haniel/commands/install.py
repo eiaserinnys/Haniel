@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import logging
+import platform
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Literal
@@ -12,6 +13,7 @@ import click
 
 from haniel.config import HanielConfig
 from haniel.installer import InstallOrchestrator, InstallPhase
+from haniel.installer.launchd import launchd_start_command
 from haniel.installer.state import InstallState
 
 from .common import load_and_validate, validate_config_file
@@ -66,7 +68,8 @@ def select_install_state(
         if noninteractive:
             raise InstallStatePolicyError(
                 "STATE_POLICY_REQUIRED",
-                "install.state exists; choose resume or start-fresh",
+                "install.state exists; rerun with --state-policy resume or "
+                "--state-policy start-fresh",
             )
         policy = (
             "start-fresh"
@@ -85,7 +88,8 @@ def select_install_state(
         except Exception as error:
             raise InstallStatePolicyError(
                 "INSTALL_STATE_INVALID",
-                "install.state is malformed or schema-invalid; choose start-fresh",
+                "install.state is malformed or schema-invalid; "
+                "rerun with --state-policy start-fresh",
             ) from error
     else:
         if exists:
@@ -296,8 +300,14 @@ def _run_install_phases(
 ) -> None:
     if state.phase in (InstallPhase.NOT_STARTED, InstallPhase.BOOTSTRAP):
         click.echo(click.style("=== Phase 0: Bootstrap ===", bold=True))
-        if not orchestrator.run_bootstrap_phase():
-            raise RuntimeError("Bootstrap failed. Claude Code is required.")
+        needs_claude_code = (
+            not skip_interactive and orchestrator.interactive.has_pending_configs()
+        )
+        if not orchestrator.run_bootstrap_phase(require_claude_code=needs_claude_code):
+            raise RuntimeError(
+                "Claude Code is required for the interactive phase. Install it "
+                "or rerun with --skip-interactive."
+            )
         click.echo(click.style("✓ Bootstrap complete\n", fg="green"))
 
     if state.phase == InstallPhase.MECHANICAL:
@@ -367,7 +377,9 @@ def _print_completion(
     )
     if summary["service"] and not service_registration_deferred:
         click.echo(f"\nService registered: {summary['service']['name']}")
-        click.echo(f"Start with: sc start {summary['service']['name']}")
+        start_command = _service_start_command(haniel_config)
+        if start_command:
+            click.echo(f"Start with: {start_command}")
         click.echo(f"Or manually: haniel run {config}")
     elif summary["service"]:
         click.echo("\nService registration deferred to manifest handover")
@@ -378,3 +390,18 @@ def _print_completion(
                 click.echo(
                     f"  {name}: http://localhost:{service.ready.split(':', 1)[1]}"
                 )
+
+
+def _service_start_command(haniel_config: HanielConfig) -> str | None:
+    """Return the command that starts the registered service on this OS."""
+    service = haniel_config.install.service if haniel_config.install else None
+    if service is None:
+        return None
+    system = platform.system()
+    if system == "Windows":
+        return f"sc start {service.name}"
+    if system == "Linux":
+        return f"sudo systemctl start {service.name}"
+    if system == "Darwin":
+        return launchd_start_command(service)
+    return None

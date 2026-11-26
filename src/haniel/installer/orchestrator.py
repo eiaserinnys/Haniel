@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Callable
 from ..config import HanielConfig
 from .state import InstallState, InstallPhase
 from .utils import find_tool
+from .validation import ConfigValueValidationError
 
 if TYPE_CHECKING:
     from .finalize import Finalizer
@@ -113,11 +114,15 @@ class InstallOrchestrator:
         """Save the current state."""
         self.state.save(self._state_file)
 
-    def run_bootstrap_phase(self) -> bool:
+    def run_bootstrap_phase(self, *, require_claude_code: bool = True) -> bool:
         """Run Phase 0: Bootstrap checks.
 
+        Args:
+            require_claude_code: Check for Claude Code. Callers pass False when
+                the interactive phase will not run.
+
         Returns:
-            True if bootstrap passed, False if Claude Code is missing
+            True if bootstrap passed, False if Claude Code is required but missing
         """
         logger.info("=== Phase 0: Bootstrap ===")
 
@@ -125,13 +130,16 @@ class InstallOrchestrator:
             self.state.start_installation()
             self.save_state()
 
-        # Check Claude Code (required for Phase 2)
-        if not self.check_claude_code():
-            logger.error("Claude Code is required but not found")
-            logger.error("Please install it: npm install -g @anthropic-ai/claude-code")
-            return False
+        # Claude Code is only needed when Phase 2 actually runs
+        if require_claude_code:
+            if not self.check_claude_code():
+                logger.error("Claude Code is required but not found")
+                logger.error(
+                    "Please install it: npm install -g @anthropic-ai/claude-code"
+                )
+                return False
+            self.state.mark_complete("claude-code-check")
 
-        self.state.mark_complete("claude-code-check")
         self.state.transition_to(InstallPhase.MECHANICAL)
         self.save_state()
         return True
@@ -272,6 +280,10 @@ class InstallOrchestrator:
         try:
             self.finalizer.generate_config_files()
             self.state.mark_complete("config-generation")
+        except ConfigValueValidationError as e:
+            self.state.mark_failed("config-generation", str(e))
+            self.save_state()
+            raise
         except Exception as e:
             logger.error(f"Failed to generate config files: {e}")
             self.state.mark_failed("config-generation", str(e))

@@ -8,9 +8,12 @@ Handles the final installation steps:
 haniel doesn't care what the configs contain - it just writes files.
 """
 
+import getpass
 import json
 import logging
+import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -26,8 +29,11 @@ from .state import InstallState
 from .utils import (
     detect_tool_paths,
     find_winsw,
+    require_self_update_runner,
+    resolve_self_update_runner,
     write_private_text as _write_private_text,
 )
+from .validation import run_validate_cmd
 
 logger = logging.getLogger(__name__)
 
@@ -93,48 +99,60 @@ class Finalizer:
         return True
 
     def generate_config_files(self) -> None:
-        """Generate config files from collected values."""
+        """Generate config files from collected values.
+
+        Every value is settled and validated before the first file is
+        written, so a rejected value leaves no partial output.
+
+        Raises:
+            ConfigValueValidationError: a value failed its key's ``validate``
+                command.
+        """
         if not self.config.install or not self.config.install.configs:
             return
 
-        for name, cfg in self.config.install.configs.items():
-            if cfg.keys:
-                self._generate_config_file(name, cfg)
+        collected = [
+            (cfg, self._collect_config_values(name, cfg))
+            for name, cfg in self.config.install.configs.items()
+            if cfg.keys
+        ]
+        for cfg, values in collected:
+            self._write_config_file(cfg, values)
 
-    def _generate_config_file(self, name: str, cfg) -> None:
-        """Generate a single config file.
+    def _collect_config_values(self, name: str, cfg) -> dict[str, str]:
+        """Gather the values of one config file from state and defaults.
 
-        Args:
-            name: Config name
-            cfg: ConfigFileConfig
+        State holds values from the interactive phase, defaults copied in by the
+        mechanical phase and values read back from an existing file, so every
+        final value runs its key's validate command here.
         """
+        values: dict[str, str] = {}
+
+        for index, key_cfg in enumerate(cfg.keys):
+            value = self.state.config_values.get(name, {}).get(key_cfg.key)
+            if value is None:
+                value = key_cfg.default
+
+            if value is None:
+                continue
+            if value == key_cfg.default:
+                value = self.config.resolve_secret(
+                    value, f"install.configs.{name}.keys.{index}.default"
+                )
+            # Substitute {root} placeholder in all values, not just defaults.
+            # Interactive phase may store default values (containing {root})
+            # into state as-is.
+            value = value.replace("{root}", str(self.config_dir))
+            run_validate_cmd(name, key_cfg, value, self.config_dir)
+            values[key_cfg.key] = value
+
+        return values
+
+    def _write_config_file(self, cfg, values: dict[str, str]) -> None:
+        """Write one config file in the format its extension selects."""
         config_path = self._resolve_path(cfg.path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Gather all values (from state and defaults)
-        values: dict[str, str] = {}
-
-        if cfg.keys:
-            for index, key_cfg in enumerate(cfg.keys):
-                # Get from state first
-                value = self.state.config_values.get(name, {}).get(key_cfg.key)
-
-                # Fall back to default
-                if value is None and key_cfg.default is not None:
-                    value = key_cfg.default
-
-                if value is not None:
-                    if value == key_cfg.default:
-                        value = self.config.resolve_secret(
-                            value, f"install.configs.{name}.keys.{index}.default"
-                        )
-                    # Substitute {root} placeholder in all values, not just defaults.
-                    # Interactive phase may store default values (containing {root})
-                    # into state as-is.
-                    value = value.replace("{root}", str(self.config_dir))
-                    values[key_cfg.key] = value
-
-        # Generate file based on extension
         suffix = config_path.suffix.lower()
 
         if suffix == ".env":
@@ -204,6 +222,8 @@ class Finalizer:
         if platform.system() == "Windows":
             self._register_winsw_service(service_cfg)
         elif platform.system() == "Linux":
+            if self.config.self_update is not None:
+                self._generate_runner_conf()
             self._register_systemd_service(service_cfg)
         elif platform.system() == "Darwin":
             if self.config.self_update is not None:
@@ -456,6 +476,32 @@ class Finalizer:
         _write_private_text(conf_path, "\n".join(lines) + "\n")
         logger.info(f"Generated wrapper configuration: {conf_path}")
 
+    def _systemd_install_user(self) -> str:
+        """Return the user the unit runs as: whoever ran the installer.
+
+        Registering a unit needs root, so the installer is usually started with
+        sudo; the service then belongs to the user who invoked sudo.
+        """
+        sudo_user = os.environ.get("SUDO_USER")
+        if sudo_user and os.geteuid() == 0:
+            return sudo_user
+        return getpass.getuser()
+
+    def _systemd_exec_start(self) -> str:
+        """Return the unit's ExecStart command line.
+
+        With self-update the wrapper script owns the process so exit code 10
+        pulls the new release and relaunches; otherwise haniel runs directly.
+        """
+        if self.config.self_update is not None:
+            runner = resolve_self_update_runner(self.config, self.config_dir)
+            conf = self.config_dir / "haniel-runner.conf"
+            return f"/bin/bash {shlex.quote(str(runner))} {shlex.quote(str(conf))}"
+        # Use a display placeholder when haniel CLI is not yet installed (e.g. log-only paths).
+        # _register_systemd_service validates the binary separately before writing.
+        haniel_bin = shutil.which("haniel") or "haniel"
+        return f"{haniel_bin} run haniel.yaml"
+
     def _generate_systemd_unit(self, service_cfg) -> str:
         """Generate systemd unit file content for Haniel service."""
         service_name = service_cfg.name
@@ -471,24 +517,25 @@ class Finalizer:
             env_lines = "\n" + "\n".join(
                 f"Environment={k}={v}" for k, v in resolved_env.items()
             )
-        # Use a display placeholder when haniel CLI is not yet installed (e.g. log-only paths).
-        # _register_systemd_service validates the binary separately before writing.
-        haniel_bin = shutil.which("haniel") or "haniel"
         return (
             f"[Unit]\nDescription={service_cfg.display or service_name}\n"
             f"After=network.target\n\n"
-            f"[Service]\nType=simple\nWorkingDirectory={working_dir}\n"
-            f"ExecStart={haniel_bin} run haniel.yaml{env_lines}\n"
+            f"[Service]\nType=simple\nUser={self._systemd_install_user()}\n"
+            f"WorkingDirectory={working_dir}\n"
+            f"ExecStart={self._systemd_exec_start()}{env_lines}\n"
             f"Restart=always\nRestartSec=5\n\n"
             f"[Install]\nWantedBy=multi-user.target\n"
         )
 
     def _register_systemd_service(self, service_cfg) -> None:
         """Write systemd unit file and enable it."""
-        if not shutil.which("haniel"):
+        if self.config.self_update is not None:
+            require_self_update_runner(self.config, self.config_dir)
+        elif not shutil.which("haniel"):
             raise RuntimeError(
-                "haniel CLI not found in PATH. "
-                "Ensure haniel is installed (pip install haniel) before registering the service."
+                "haniel CLI not found in PATH. Ensure haniel is installed "
+                "(pip install git+https://github.com/eiaserinnys/haniel.git) "
+                "before registering the service."
             )
         unit_content = self._generate_systemd_unit(service_cfg)
         service_name = service_cfg.name
@@ -498,6 +545,9 @@ class Finalizer:
             subprocess.run(["systemctl", "daemon-reload"], check=True)
             subprocess.run(["systemctl", "enable", service_name], check=True)
             logger.info(f"systemd service '{service_name}' enabled")
+            logger.info(f"  Unit file: {unit_path}")
+            logger.info("  Already ran: systemctl daemon-reload, systemctl enable")
+            logger.info(f"  Start with: systemctl start {service_name}")
         except PermissionError:
             logger.warning(
                 f"Permission denied writing to {unit_path}. "
@@ -506,6 +556,14 @@ class Finalizer:
             self._log_service_instructions(service_cfg)
         except subprocess.CalledProcessError as e:
             logger.warning(f"systemctl failed: {e}. Unit file written but not enabled.")
+            self._log_systemd_commands(service_name)
+
+    @staticmethod
+    def _log_systemd_commands(service_name: str) -> None:
+        logger.info("Then run:")
+        logger.info("  sudo systemctl daemon-reload")
+        logger.info(f"  sudo systemctl enable {service_name}")
+        logger.info(f"  sudo systemctl start {service_name}")
 
     def _log_service_instructions(self, service_cfg) -> None:
         """Log instructions for setting up service on non-Windows.
@@ -529,10 +587,7 @@ class Finalizer:
         logger.info(f"For systemd, create /etc/systemd/system/{service_name}.service:")
         logger.info(self._generate_systemd_unit(service_cfg))
         logger.info("")
-        logger.info("Then run:")
-        logger.info("  sudo systemctl daemon-reload")
-        logger.info(f"  sudo systemctl enable {service_name}")
-        logger.info(f"  sudo systemctl start {service_name}")
+        self._log_systemd_commands(service_name)
 
     def get_completion_summary(self) -> dict[str, Any]:
         """Get a summary of the completed installation.

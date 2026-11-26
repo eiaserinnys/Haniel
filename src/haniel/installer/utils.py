@@ -9,6 +9,10 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..config import HanielConfig
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +26,34 @@ def write_private_text(path: Path, text: str) -> None:
     os.fchmod(descriptor, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
         stream.write(text)
+
+
+def resolve_self_update_runner(config: "HanielConfig", config_dir: Path) -> Path:
+    """Return the absolute haniel-runner.sh path of the self-update repo."""
+    self_update = config.self_update
+    assert self_update is not None
+    repo_config = config.repos.get(self_update.repo)
+    if repo_config is None:
+        raise RuntimeError(
+            f"Self-update repo is not configured in repos: {self_update.repo}"
+        )
+    repo_path = Path(repo_config.path)
+    if not repo_path.is_absolute():
+        repo_path = config_dir / repo_path
+    if not repo_path.is_absolute():
+        repo_path = repo_path.absolute()
+    return repo_path / "haniel-runner.sh"
+
+
+def require_self_update_runner(config: "HanielConfig", config_dir: Path) -> Path:
+    """Resolve the wrapper script and require it and its release helper to exist."""
+    runner_path = resolve_self_update_runner(config, config_dir)
+    helper_path = runner_path.parent / "scripts" / "haniel_atomic_release.py"
+    if not runner_path.is_file():
+        raise FileNotFoundError(f"Self-update wrapper not found: {runner_path}")
+    if not helper_path.is_file():
+        raise FileNotFoundError(f"Atomic release helper not found: {helper_path}")
+    return runner_path
 
 
 def _darwin_tool_directories() -> list[Path]:
