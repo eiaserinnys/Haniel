@@ -83,3 +83,21 @@ export function parseCommit(raw: string): { hash: string; message: string } {
     message: raw.slice(8) || raw.slice(7),
   };
 }
+
+/**
+ * Absolute time for offline notices: "Nov 26, 12:41"
+ */
+export function absTime(ts: string): string {
+  const d = new Date(ts);
+  const date = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return `${date}, ${timeOfDay(ts).slice(0, 5)}`;
+}
+
+/**
+ * Summarize a git diff stat's last line: "2 files changed, 47 insertions(+), 13 deletions(-)"
+ */
+export function parseDiffSummary(line: string): { files: number; add: number; del: number } | null {
+  const m = /(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?/.exec(line);
+  if (!m) return null;
+  return { files: Number(m[1]), add: Number(m[2] ?? 0), del: Number(m[3] ?? 0) };
+}

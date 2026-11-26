@@ -1,24 +1,37 @@
 import { useState, useMemo } from 'react';
 import { Icon } from '@/components/shared/Icon';
-import { StatusPill } from '@/components/shared/StatusPill';
-import { relTime, uptimeStr, cn } from '@/lib/utils';
-import type { OrchestratorNode, InFlightCommand } from '@/types';
+import { RowToggle } from '@/components/shared/RowToggle';
+import { Status } from '@/components/shared/Status';
+import { Empty, LoadError, Skeleton } from '@/components/shared/LoadStates';
+import { absTime, relTime, uptimeStr } from '@/lib/utils';
+import type { InFlightCommand, LoadState, NodeService, OrchestratorNode } from '@/types';
+
+type ServiceCommand = (nodeId: string, serviceName: string, action: 'restart' | 'stop') => void;
+type LookupInFlight = (nodeId: string, serviceName: string) => InFlightCommand | null;
 
 interface NodesViewProps {
   nodes: OrchestratorNode[];
-  onServiceCommand?: (nodeId: string, serviceName: string, action: 'restart' | 'stop') => void;
-  lookupInFlight?: (nodeId: string, serviceName: string) => InFlightCommand | null;
+  load?: LoadState;
+  onRetry?: () => void;
+  onServiceCommand?: ServiceCommand;
+  lookupInFlight?: LookupInFlight;
 }
 
-export function NodesView({ nodes, onServiceCommand, lookupInFlight }: NodesViewProps) {
+const READY: LoadState = { status: 'ready' };
+
+export function NodesView({
+  nodes,
+  load = READY,
+  onRetry = () => undefined,
+  onServiceCommand,
+  lookupInFlight,
+}: NodesViewProps) {
   const [filter, setFilter] = useState('');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
-  const connected = nodes.filter(n => n.connected === 1).length;
-
   const filtered = useMemo(() => {
     if (!filter.trim()) return nodes;
-    const q = filter.toLowerCase();
+    const q = filter.trim().toLowerCase();
     return nodes.filter(n =>
       n.hostname.toLowerCase().includes(q) ||
       n.node_id.toLowerCase().includes(q) ||
@@ -34,44 +47,18 @@ export function NodesView({ nodes, onServiceCommand, lookupInFlight }: NodesView
     });
   };
 
-  if (nodes.length === 0) {
-    return (
-      <div className="view-nodes">
-        <h1>Nodes</h1>
-        <div className="empty-state">
-          <div className="empty-icon">
-            <Icon name="wifi-off" size={28} />
-          </div>
-          <h2 className="empty-title">No nodes</h2>
-          <p className="empty-desc">No orchestrator nodes have connected yet.</p>
-        </div>
-      </div>
-    );
-  }
+  const showTools = load.status === 'ready' && nodes.length > 0;
 
-  return (
-    <div className="view-nodes">
-      <h1>Nodes</h1>
-      <p className="view-subtitle">
-        {connected} connected · {nodes.length} total
-      </p>
-
-      <div className="nodes-toolbar">
-        <div className="filter-input-wrap">
-          <Icon name="search" size={13} />
-          <input
-            type="text"
-            className="filter-input"
-            placeholder="Filter nodes..."
-            value={filter}
-            onChange={e => setFilter(e.target.value)}
-          />
-        </div>
-      </div>
-
-      <div className="nodes-list">
+  let body;
+  if (load.status === 'loading') body = <Skeleton rows={3} />;
+  else if (load.status === 'error') body = <LoadError what="nodes" detail={load.detail} onRetry={onRetry} />;
+  else if (nodes.length === 0) {
+    body = <div className="ledger"><Empty title="No nodes yet" text="Nodes appear when they connect." /></div>;
+  } else {
+    body = (
+      <div className="ledger">
         {filtered.map(node => (
-          <NodeCard
+          <NodeRow
             key={node.node_id}
             node={node}
             isExpanded={expanded.has(node.node_id)}
@@ -80,199 +67,250 @@ export function NodesView({ nodes, onServiceCommand, lookupInFlight }: NodesView
             lookupInFlight={lookupInFlight}
           />
         ))}
-        {filtered.length === 0 && (
-          <div className="empty-state-inline">
-            <p>No nodes match "{filter}"</p>
+        {filtered.length === 0 && <Empty inline text={`No nodes match “${filter.trim()}”`} />}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="page-head">
+        <h1 className="page-title">Nodes</h1>
+        {showTools && (
+          <div className="page-tools">
+            <label className="search">
+              <span className="sr-only">Filter nodes</span>
+              <Icon name="search" small />
+              <input
+                className="input"
+                type="search"
+                placeholder="Filter nodes"
+                value={filter}
+                onChange={e => setFilter(e.target.value)}
+              />
+            </label>
           </div>
         )}
       </div>
-    </div>
+      {body}
+    </>
   );
 }
 
-/* ── NodeCard ────────────────────────────────────────── */
-
-interface NodeCardProps {
+interface NodeRowProps {
   node: OrchestratorNode;
   isExpanded: boolean;
   onToggleExpand: () => void;
-  onServiceCommand?: (nodeId: string, serviceName: string, action: 'restart' | 'stop') => void;
-  lookupInFlight?: (nodeId: string, serviceName: string) => InFlightCommand | null;
+  onServiceCommand?: ServiceCommand;
+  lookupInFlight?: LookupInFlight;
 }
 
-function NodeCard({ node, isExpanded, onToggleExpand, onServiceCommand, lookupInFlight }: NodeCardProps) {
+function NodeRow({ node, isExpanded, onToggleExpand, onServiceCommand, lookupInFlight }: NodeRowProps) {
   const isConnected = node.connected === 1;
-  const osIcon = node.os.toLowerCase().includes('windows') ? 'windows' : 'linux';
+  const serviceCount = node.services ? String(node.services.length) : '…';
 
   return (
-    <div className={cn('node-card', !isConnected && 'is-disconnected')}>
-      <div className="node-card-header" onClick={onToggleExpand}>
-        <span className={cn('node-led', isConnected && 'is-on')} />
-
-        <div className="node-card-info">
-          <div className="node-card-title">
-            <span className="node-name">{node.node_id}</span>
-            <span className="node-tag os-tag">
-              <Icon name={osIcon} size={11} />
-              {node.os}
-            </span>
-          </div>
-          <div className="node-card-meta">
-            <span>haniel {node.haniel_version}</span>
-            <span className="pending-sep">·</span>
-            {isConnected ? (
-              <span style={{ color: 'var(--green)' }}>connected</span>
-            ) : (
-              <>
-                <span style={{ color: 'var(--red)' }}>disconnected</span>
-                <span className="pending-sep">·</span>
-                <span>last seen {relTime(node.last_seen)}</span>
-              </>
-            )}
-          </div>
-        </div>
-
-        <button
-          className={cn('expand-btn', isExpanded && 'is-expanded')}
-          aria-label={isExpanded ? 'Collapse' : 'Expand'}
-        >
-          <Icon name="chevron" size={12} />
-        </button>
+    <div className="row no-lead" data-open={isExpanded ? '' : undefined}>
+      <RowToggle open={isExpanded} onToggle={onToggleExpand}>
+        <span className="r-title">
+          <span className="r-name">{node.node_id}</span>
+          <span className="r-branch">{node.os}</span>
+        </span>
+        <span className="r-meta">
+          <Status state={isConnected ? 'connected' : 'disconnected'} />
+          <span>haniel <span className="mono">{node.haniel_version}</span></span>
+          {!isConnected && <span>last seen <span className="mono">{relTime(node.last_seen)}</span></span>}
+        </span>
+      </RowToggle>
+      <div className="r-actions" />
+      <div className="r-metric">
+        <span className="m-label">services</span>
+        <span className="m-num">{serviceCount}</span>
       </div>
-
       {isExpanded && (
-        <div className="node-card-body">
-          {!isConnected ? (
-            <div className="node-offline-banner">
-              <Icon name="wifi-off" size={14} />
-              <span>This node was last seen {relTime(node.last_seen)}</span>
-            </div>
+        <div className="r-body">
+          {isConnected ? (
+            <NodeDetail node={node} onServiceCommand={onServiceCommand} lookupInFlight={lookupInFlight} />
           ) : (
-            <div className="node-detail-grid">
-              <div className="node-detail-row">
-                <span className="node-detail-label">Node ID</span>
-                <code className="node-detail-value">{node.node_id}</code>
-              </div>
-              <div className="node-detail-row">
-                <span className="node-detail-label">OS / Arch</span>
-                <span className="node-detail-value">{node.os} / {node.arch}</span>
-              </div>
-              <div className="node-detail-row">
-                <span className="node-detail-label">Haniel</span>
-                <span className="node-detail-value">{node.haniel_version}</span>
-              </div>
-              <div className="node-detail-row">
-                <span className="node-detail-label">Last seen</span>
-                <span className="node-detail-value">{relTime(node.last_seen)}</span>
-              </div>
-              {node.services === undefined && (
-                <div className="node-services-hint">
-                  <Icon name="loader" size={12} />
-                  <span>Awaiting service info from node…</span>
-                </div>
-              )}
-              {node.services && node.services.length === 0 && (
-                <div className="node-services-hint">
-                  <span>No services configured on this node.</span>
-                </div>
-              )}
-              {node.services && node.services.length > 0 && (
-                <div className="node-services">
-                  <table className="services-table">
-                    <thead>
-                      <tr>
-                        <th>Service</th>
-                        <th>Port</th>
-                        <th>PID</th>
-                        <th>Uptime</th>
-                        <th className="hide-mobile">Role</th>
-                        <th>Status</th>
-                        {onServiceCommand && <th>Actions</th>}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {node.services.map(svc => (
-                        <tr key={svc.name} className={cn(!svc.enabled && 'svc-dim')}>
-                          <td className="svc-name">
-                            {svc.name}
-                            {svc.deps && svc.deps.length > 0 && (
-                              <span className="svc-deps">{'\u2190'} {svc.deps.join(', ')}</span>
-                            )}
-                          </td>
-                          <td>{svc.port ?? '\u2014'}</td>
-                          <td>{svc.pid ?? '\u2014'}</td>
-                          <td>{uptimeStr(svc.uptime_ms)}</td>
-                          <td className="hide-mobile">{svc.role || '\u2014'}</td>
-                          <td>
-                            {/* process_status=stopped takes precedence over health state — covers
-                                the pid=None + health=ready race window (atom 260519.01). */}
-                            <StatusPill
-                              status={svc.process_status === 'stopped' ? 'stopped' : svc.health_status}
-                              size="sm"
-                            />
-                          </td>
-                          {onServiceCommand && (
-                            <td className="svc-actions">
-                              {(() => {
-                                // Cell wrapper guarantees onServiceCommand is defined here.
-                                // Action visibility is driven by process_status only — health
-                                // state (ready/starting/…) must not hide the buttons.
-                                const inFlightCmd = lookupInFlight?.(node.node_id, svc.name) ?? null;
-                                const isInFlight = inFlightCmd !== null;
-                                if (svc.enabled && svc.process_status === 'running') {
-                                  return (
-                                    <>
-                                      <button
-                                        className="svc-btn"
-                                        disabled={isInFlight}
-                                        data-in-flight={isInFlight ? inFlightCmd.action : undefined}
-                                        onClick={() => onServiceCommand!(node.node_id, svc.name, 'restart')}
-                                        title={isInFlight ? `${inFlightCmd.action} in progress…` : 'Restart'}
-                                        aria-label={`Restart ${svc.name}`}
-                                      >
-                                        <Icon name={isInFlight && inFlightCmd.action === 'restart' ? 'loader' : 'refresh'} size={15} />
-                                      </button>
-                                      <button
-                                        className="svc-btn svc-btn-danger"
-                                        disabled={isInFlight}
-                                        data-in-flight={isInFlight ? inFlightCmd.action : undefined}
-                                        onClick={() => onServiceCommand!(node.node_id, svc.name, 'stop')}
-                                        title={isInFlight ? `${inFlightCmd.action} in progress…` : 'Stop'}
-                                        aria-label={`Stop ${svc.name}`}
-                                      >
-                                        <Icon name={isInFlight && inFlightCmd.action === 'stop' ? 'loader' : 'stop'} size={15} />
-                                      </button>
-                                    </>
-                                  );
-                                }
-                                if (svc.enabled && svc.process_status === 'stopped') {
-                                  return (
-                                    <button
-                                      className="svc-btn"
-                                      disabled={isInFlight}
-                                      data-in-flight={isInFlight ? inFlightCmd.action : undefined}
-                                      onClick={() => onServiceCommand!(node.node_id, svc.name, 'restart')}
-                                      title={isInFlight ? `${inFlightCmd.action} in progress…` : 'Start'}
-                                      aria-label={`Start ${svc.name}`}
-                                    >
-                                      <Icon name={isInFlight ? 'loader' : 'play'} size={15} />
-                                    </button>
-                                  );
-                                }
-                                return null;
-                              })()}
-                            </td>
-                          )}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+            <div className="notice">
+              <Status state="offline" />
+              <p className="notice-text">Last seen <span className="mono">{absTime(node.last_seen)}</span></p>
             </div>
           )}
         </div>
       )}
     </div>
+  );
+}
+
+function NodeDetail({ node, onServiceCommand, lookupInFlight }: Omit<NodeRowProps, 'isExpanded' | 'onToggleExpand'>) {
+  const kv: [string, string, boolean][] = [
+    ['Node ID', node.node_id, true],
+    ['OS / Arch', `${node.os} / ${node.arch}`, false],
+    ['Haniel', node.haniel_version, true],
+    ['Last seen', relTime(node.last_seen), false],
+  ];
+  return (
+    <>
+      <div className="kv">
+        {kv.map(([k, v, mono]) => (
+          <div className="kv-item" key={k}>
+            <span className="kv-k">{k}</span>
+            <span className={mono ? 'kv-v mono' : 'kv-v'}>{v}</span>
+          </div>
+        ))}
+      </div>
+      <Services node={node} onServiceCommand={onServiceCommand} lookupInFlight={lookupInFlight} />
+    </>
+  );
+}
+
+function serviceState(svc: NodeService): string {
+  if (!svc.enabled) return 'disabled';
+  // process_status=stopped takes precedence over health state — covers the
+  // pid=None + health=ready race window (atom 260519.01).
+  return svc.process_status === 'stopped' ? 'stopped' : svc.health_status;
+}
+
+function Services({ node, onServiceCommand, lookupInFlight }: Omit<NodeRowProps, 'isExpanded' | 'onToggleExpand'>) {
+  const services = node.services;
+  if (services === undefined) {
+    return (
+      <div>
+        <table className="table" aria-busy="true">
+          <thead>
+            <tr>
+              <th>Service</th><th className="num">Port</th><th className="num">PID</th>
+              <th className="num">Uptime</th><th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[1, 2, 3].map(i => (
+              <tr key={i} aria-hidden="true">
+                <td><span className="sk w2" /></td>
+                <td><span className="sk meta" /></td>
+                <td><span className="sk meta" /></td>
+                <td><span className="sk meta" /></td>
+                <td><span className="sk meta w2" /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className="empty-text">Waiting for service info from the node</p>
+      </div>
+    );
+  }
+  if (services.length === 0) return <p className="empty-text">No services configured on this node.</p>;
+
+  return (
+    <>
+      <div className="svc-list">
+        {services.map(svc => (
+          <div className={svc.enabled ? 'svc-item' : 'svc-item is-dim'} key={svc.name}>
+            <div className="svc-main">
+              <span className="r-title">
+                <span className="r-name" title={svc.name}>{svc.name}</span>
+                <Status state={serviceState(svc)} />
+              </span>
+              {(svc.deps?.length ?? 0) > 0 && <span className="r-meta"><span>after {(svc.deps ?? []).join(', ')}</span></span>}
+              <span className="r-meta">
+                <span>Port <span className="mono">{svc.port ?? '—'}</span></span>
+                <span>PID <span className="mono">{svc.pid ?? '—'}</span></span>
+                <span>Uptime <span className="mono">{uptimeStr(svc.uptime_ms)}</span></span>
+              </span>
+            </div>
+            <div className="svc-act">
+              <ServiceActions nodeId={node.node_id} svc={svc} onServiceCommand={onServiceCommand} lookupInFlight={lookupInFlight} />
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="table-wrap scroll scroll-x">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Service</th><th className="num">Port</th><th className="num">PID</th>
+              <th className="num">Uptime</th><th>Role</th><th>Status</th>
+              <th><span className="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {services.map(svc => (
+              <tr key={svc.name} className={svc.enabled ? undefined : 'is-dim'}>
+                <td>
+                  <span className="svc-name" title={svc.name}>{svc.name}</span>
+                  {(svc.deps?.length ?? 0) > 0 && <span className="svc-deps">after {(svc.deps ?? []).join(', ')}</span>}
+                </td>
+                <td className="num mono">{svc.port ?? '—'}</td>
+                <td className="num mono">{svc.pid ?? '—'}</td>
+                <td className="num mono">{uptimeStr(svc.uptime_ms)}</td>
+                <td>{svc.role || '—'}</td>
+                <td><Status state={serviceState(svc)} /></td>
+                <td className="act">
+                  <ServiceActions nodeId={node.node_id} svc={svc} onServiceCommand={onServiceCommand} lookupInFlight={lookupInFlight} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+interface ServiceActionsProps {
+  nodeId: string;
+  svc: NodeService;
+  onServiceCommand?: ServiceCommand;
+  lookupInFlight?: LookupInFlight;
+}
+
+function ServiceActions({ nodeId, svc, onServiceCommand, lookupInFlight }: ServiceActionsProps) {
+  if (!onServiceCommand || !svc.enabled) return null;
+  // Action visibility is driven by process_status only — health state
+  // (ready/starting/…) must not hide the buttons.
+  const inFlight = lookupInFlight?.(nodeId, svc.name) ?? null;
+  const busy = inFlight !== null;
+  const progress = busy ? `${inFlight.action} in progress` : undefined;
+
+  if (svc.process_status === 'running') {
+    return (
+      <span className="act-group">
+        <button
+          type="button"
+          className="icon-btn"
+          disabled={busy}
+          title={progress ?? 'Restart'}
+          aria-label={`Restart ${svc.name}`}
+          onClick={() => onServiceCommand(nodeId, svc.name, 'restart')}
+        >
+          <Icon name={busy && inFlight.action === 'restart' ? 'loader' : 'restart'} className={busy && inFlight.action === 'restart' ? 'spin' : undefined} />
+        </button>
+        <button
+          type="button"
+          className="icon-btn"
+          disabled={busy}
+          title={progress ?? 'Stop'}
+          aria-label={`Stop ${svc.name}`}
+          onClick={() => onServiceCommand(nodeId, svc.name, 'stop')}
+        >
+          <Icon name={busy && inFlight.action === 'stop' ? 'loader' : 'stop'} className={busy && inFlight.action === 'stop' ? 'spin' : undefined} />
+        </button>
+      </span>
+    );
+  }
+  return (
+    <span className="act-group">
+      <button
+        type="button"
+        className="icon-btn"
+        disabled={busy}
+        title={progress ?? 'Start'}
+        aria-label={`Start ${svc.name}`}
+        onClick={() => onServiceCommand(nodeId, svc.name, 'restart')}
+      >
+        <Icon name={busy ? 'loader' : 'play'} className={busy ? 'spin' : undefined} />
+      </button>
+    </span>
   );
 }

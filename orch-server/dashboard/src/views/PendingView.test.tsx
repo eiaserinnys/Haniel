@@ -45,14 +45,14 @@ describe('PendingView', () => {
     const repoHeading = screen.getByRole('heading', { name: 'Repository updates' });
     expect(selfHeading.compareDocumentPosition(repoHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
-    const selfCard = screen.getByText('haniel').closest('.pending-card') as HTMLElement;
-    const blockedCard = screen.getByText('soulstream').closest('.pending-card') as HTMLElement;
-    const otherCard = screen.getByText('website').closest('.pending-card') as HTMLElement;
+    const selfCard = screen.getByText('haniel').closest('.row') as HTMLElement;
+    const blockedCard = screen.getByText('soulstream').closest('.row') as HTMLElement;
+    const otherCard = screen.getByText('website').closest('.row') as HTMLElement;
 
     expect(within(selfCard).getByRole('button', { name: 'Postpone' })).toBeEnabled();
     expect(within(blockedCard).getByRole('button', { name: 'Approve' })).toBeDisabled();
     expect(within(blockedCard).getByRole('checkbox')).toBeDisabled();
-    expect(within(blockedCard).getByText('Self-update required first')).toBeInTheDocument();
+    expect(within(blockedCard).getByText('Waits for self-update')).toBeInTheDocument();
     expect(within(otherCard).getByRole('button', { name: 'Approve' })).toBeEnabled();
 
     fireEvent.click(screen.getByText('Select all'));
@@ -72,8 +72,9 @@ describe('PendingView', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Postpone' }));
 
-    expect(screen.getByRole('heading', { name: 'Postpone self-update' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Postpone self-update' })).toBeDisabled();
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByRole('heading', { name: 'Postpone self-update' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Postpone' })).toBeDisabled();
   });
 
   it('preserves line breaks for git diff stat in expanded deploy cards', () => {
@@ -94,7 +95,7 @@ describe('PendingView', () => {
       />,
     );
 
-    fireEvent.click(screen.getByLabelText('Expand'));
+    fireEvent.click(screen.getByRole('button', { name: /repo/, expanded: false }));
 
     const diffStat = screen.getByLabelText('Git changes');
     expect(diffStat.textContent).toBe(
@@ -104,7 +105,7 @@ describe('PendingView', () => {
         ' 2 files changed, 8 insertions(+), 8 deletions(-)',
       ].join('\n'),
     );
-    expect(screen.getByText('2 files changed, 8 insertions(+), 8 deletions(-)')).toBeInTheDocument();
+    expect(screen.getByText('+8 −8')).toBeInTheDocument();
   });
 
   it('clears accepted selections and keeps HTTP-rejected selections only', async () => {
@@ -143,7 +144,7 @@ describe('PendingView', () => {
     );
     fireEvent.click(screen.getByText('Select all'));
     fireEvent.click(screen.getByRole('button', { name: /Approve 1 selected/ }));
-    await waitFor(() => expect(screen.queryByRole('button', { name: /selected/ })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Approve selected' })).toBeDisabled());
 
     rerender(<PendingView deploys={[]} {...props} />);
     rerender(
@@ -183,7 +184,7 @@ describe('PendingView', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
 
-    await waitFor(() => expect(screen.queryByRole('button', { name: /selected/ })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Approve selected' })).toBeDisabled());
     expect(onApprove).toHaveBeenCalledWith('single');
   });
 

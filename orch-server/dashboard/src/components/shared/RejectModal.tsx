@@ -1,13 +1,5 @@
-import { useState } from 'react';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogFooter,
-} from '@/components/ui/dialog';
-import { Button } from '@/components/ui/button';
+import { useRef, useState } from 'react';
+import { Dialog } from '@base-ui/react/dialog';
 import type { Deploy } from '@/types';
 
 const PRESETS = [
@@ -25,61 +17,58 @@ interface RejectModalProps {
 
 export function RejectModal({ deploy, onConfirm, onClose }: RejectModalProps) {
   const [reason, setReason] = useState('');
+  const reasonRef = useRef<HTMLTextAreaElement>(null);
   const isPostpone = Boolean(deploy.is_self_update);
-
-  const handlePreset = (preset: string) => {
-    setReason(preset);
-  };
+  const action = isPostpone ? 'Postpone' : 'Reject deploy';
 
   const handleSubmit = () => {
-    if (reason.trim()) {
-      onConfirm(reason.trim());
-    }
+    if (reason.trim()) onConfirm(reason.trim());
   };
 
   return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent className="sm:max-w-md" showCloseButton={false}>
-        <DialogHeader>
-          <DialogTitle>{isPostpone ? 'Postpone self-update' : 'Reject deploy'}</DialogTitle>
-          <DialogDescription>
-            {deploy.repo} · {deploy.node_id} · {deploy.commits.length} commit{deploy.commits.length !== 1 ? 's' : ''}
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="reject-body">
-          <textarea
-            className="reject-textarea"
-            placeholder={isPostpone ? 'Reason for postponing...' : 'Reason for rejection...'}
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-            rows={3}
-            autoFocus
-          />
-          <div className="reject-presets">
-            {PRESETS.map(preset => (
-              <button
-                key={preset}
-                className="reject-preset-btn"
-                onClick={() => handlePreset(preset)}
-              >
-                {preset}
-              </button>
-            ))}
+    <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Backdrop className="scrim" />
+        <Dialog.Popup className="dialog" initialFocus={reasonRef}>
+          <div className="dialog-head">
+            <Dialog.Title className="dialog-title">
+              {isPostpone ? 'Postpone self-update' : 'Reject deploy'}
+            </Dialog.Title>
+            <Dialog.Description className="dialog-sub" render={<p />}>
+              <span>{deploy.repo}</span>
+              <span>{deploy.node_id}</span>
+              <span>
+                <span className="mono">{deploy.commits.length}</span> commit{deploy.commits.length !== 1 ? 's' : ''}
+              </span>
+            </Dialog.Description>
           </div>
-        </div>
-
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button
-            variant="destructive"
-            disabled={!reason.trim()}
-            onClick={handleSubmit}
-          >
-            {isPostpone ? 'Postpone self-update' : 'Reject deploy'}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+          <div className="dialog-body">
+            <label className="field">
+              <span className="field-label">Reason</span>
+              <textarea
+                ref={reasonRef}
+                className="textarea"
+                rows={3}
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+              />
+            </label>
+            <div className="presets">
+              {PRESETS.map(preset => (
+                <button key={preset} type="button" className="preset" onClick={() => setReason(preset)}>
+                  {preset}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="dialog-foot">
+            <button type="button" className="btn btn-outline" onClick={onClose}>Cancel</button>
+            <button type="button" className="btn btn-danger" disabled={!reason.trim()} onClick={handleSubmit}>
+              {action}
+            </button>
+          </div>
+        </Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

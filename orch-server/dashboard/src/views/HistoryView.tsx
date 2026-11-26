@@ -1,11 +1,13 @@
-import { useState, useMemo } from 'react';
-import { Icon } from '@/components/shared/Icon';
-import { StatusPill } from '@/components/shared/StatusPill';
-import { timeOfDay, dateLabel, durMs, parseCommit, cn } from '@/lib/utils';
-import type { Deploy, DeployStatus } from '@/types';
+import { useState, useMemo, type KeyboardEvent } from 'react';
+import { Status } from '@/components/shared/Status';
+import { Empty, LoadError, Skeleton } from '@/components/shared/LoadStates';
+import { timeOfDay, dateLabel, durMs, parseCommit } from '@/lib/utils';
+import type { Deploy, DeployStatus, LoadState } from '@/types';
 
 interface HistoryViewProps {
   deploys: Deploy[];
+  load?: LoadState;
+  onRetry?: () => void;
   // Controlled by App.tsx so the toggle survives unmounts and the same
   // checkbox state drives the next fetchHistory query. Default off — auto-
   // supersede entries are noise unless the operator is auditing chains.
@@ -24,8 +26,12 @@ const TABS: { key: FilterTab; label: string }[] = [
   { key: 'rejected', label: 'Rejected' },
 ];
 
+const READY: LoadState = { status: 'ready' };
+
 export function HistoryView({
   deploys,
+  load = READY,
+  onRetry = () => undefined,
   includeSuperseded,
   onToggleSuperseded,
 }: HistoryViewProps) {
@@ -62,125 +68,141 @@ export function HistoryView({
     });
   };
 
-  if (deploys.length === 0) {
-    return (
-      <div className="view-history">
-        <h1>Deploy History</h1>
-        <div className="empty-state">
-          <div className="empty-icon">
-            <Icon name="history" size={28} />
-          </div>
-          <h2 className="empty-title">No history</h2>
-          <p className="empty-desc">Deploy events will appear here.</p>
+  // Roving focus for the tab list: arrows, Home, End.
+  const handleTabKeys = (e: KeyboardEvent<HTMLDivElement>) => {
+    const index = TABS.findIndex(t => t.key === activeTab);
+    let next: number;
+    if (e.key === 'ArrowRight') next = (index + 1) % TABS.length;
+    else if (e.key === 'ArrowLeft') next = (index - 1 + TABS.length) % TABS.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = TABS.length - 1;
+    else return;
+    e.preventDefault();
+    setActiveTab(TABS[next].key);
+    e.currentTarget.querySelectorAll<HTMLElement>('[role="tab"]')[next]?.focus();
+  };
+
+  const showTools = load.status === 'ready' && (deploys.length > 0 || includeSuperseded);
+
+  let body;
+  if (load.status === 'loading') body = <Skeleton rows={5} />;
+  else if (load.status === 'error') body = <LoadError what="history" detail={load.detail} onRetry={onRetry} />;
+  else if (deploys.length === 0) {
+    body = <div className="ledger"><Empty title="No history" text="Deploy events show up here." /></div>;
+  } else {
+    body = (
+      <div className="hist-wrap">
+        <div className="tabs" role="tablist" aria-label="Status" onKeyDown={handleTabKeys}>
+          {TABS.map(tab => (
+            <button
+              key={tab.key}
+              type="button"
+              role="tab"
+              className="tab"
+              aria-selected={activeTab === tab.key}
+              tabIndex={activeTab === tab.key ? 0 : -1}
+              onClick={() => setActiveTab(tab.key)}
+            >
+              {tab.label}
+              <span className="nav-count">{counts[tab.key]}</span>
+            </button>
+          ))}
+        </div>
+        <div className="hist" role="tabpanel">
+          {groups.length === 0 && (
+            <div className="ledger"><Empty inline text="No events match this filter." /></div>
+          )}
+          {groups.map(([label, items]) => (
+            <section key={label} aria-label={label}>
+              <h2 className="group-label">{label}</h2>
+              <div className="ledger">
+                {items.map(item => (
+                  <HistoryRow
+                    key={item.deploy_id}
+                    deploy={item}
+                    showError={expandedErrors.has(item.deploy_id)}
+                    onToggleError={() => toggleError(item.deploy_id)}
+                  />
+                ))}
+              </div>
+            </section>
+          ))}
         </div>
       </div>
     );
   }
 
   return (
-    <div className="view-history">
-      <h1>Deploy History</h1>
-      <p className="view-subtitle">
-        {deploys.length} events · {counts.success} success · {counts.failed} failed · {counts.rejected} rejected
-      </p>
-
-      <div className="history-tabs">
-        {TABS.map(tab => (
-          <button
-            key={tab.key}
-            className={cn('history-tab', activeTab === tab.key && 'is-active')}
-            onClick={() => setActiveTab(tab.key)}
-          >
-            {tab.label}
-            <span className="tab-count">{counts[tab.key]}</span>
-          </button>
-        ))}
-      </div>
-
-      <label className="history-superseded-toggle">
-        <input
-          type="checkbox"
-          checked={includeSuperseded}
-          onChange={e => onToggleSuperseded(e.target.checked)}
-        />
-        <span> superseded 포함</span>
-      </label>
-
-      {groups.length === 0 && (
-        <div className="empty-state-inline">
-          <p>No events match this filter.</p>
-        </div>
-      )}
-
-      {groups.map(([label, items]) => (
-        <div key={label} className="history-group">
-          <div className="history-date-label">{label}</div>
-          <div className="history-items">
-            {items.map(item => (
-              <HistoryItem
-                key={item.deploy_id}
-                deploy={item}
-                showError={expandedErrors.has(item.deploy_id)}
-                onToggleError={() => toggleError(item.deploy_id)}
+    <>
+      <div className="page-head">
+        <h1 className="page-title">Deploy History</h1>
+        {showTools && (
+          <div className="page-tools">
+            <label className="check-label">
+              <input
+                type="checkbox"
+                className="check"
+                checked={includeSuperseded}
+                onChange={e => onToggleSuperseded(e.target.checked)}
               />
-            ))}
+              Include superseded
+            </label>
           </div>
-        </div>
-      ))}
-    </div>
+        )}
+      </div>
+      {body}
+    </>
   );
 }
 
-/* ── HistoryItem ─────────────────────────────────────── */
-
-interface HistoryItemProps {
+interface HistoryRowProps {
   deploy: Deploy;
   showError: boolean;
   onToggleError: () => void;
 }
 
-function HistoryItem({ deploy, showError, onToggleError }: HistoryItemProps) {
+function HistoryRow({ deploy, showError, onToggleError }: HistoryRowProps) {
   const firstCommit = deploy.commits.length > 0 ? parseCommit(deploy.commits[0]) : null;
-  const hasError = deploy.error || deploy.reject_reason;
+  const superseded = deploy.status === 'rejected' && Boolean(deploy.reject_reason?.startsWith('superseded by '));
+  const detail = deploy.error || (!superseded ? deploy.reject_reason : null);
+  const hasMeta = deploy.approved_by || superseded || detail;
 
   return (
-    <div className="history-item">
-      <div className="history-rail">
-        <span className={cn('history-dot', `dot-${deploy.status}`)} />
-        <div className="history-rail-line" />
-      </div>
-      <div className="history-content">
-        <div className="history-row-1">
-          <span className="history-time">{timeOfDay(deploy.created_at)}</span>
-          <StatusPill status={deploy.status} size="sm" />
-          <span className="history-repo">{deploy.repo}</span>
-          <span className="pending-sep">·</span>
-          <span className="history-node">{deploy.node_id}</span>
-          {firstCommit && (
-            <>
-              <span className="pending-sep">·</span>
-              <code className="commit-hash">{firstCommit.hash}</code>
-              <span className="history-commit-msg">{firstCommit.message}</span>
-            </>
-          )}
-        </div>
-        <div className="history-row-2">
-          {deploy.approved_by && <span>approved by {deploy.approved_by}</span>}
-          {deploy.duration_ms != null && (
-            <span>{deploy.status === 'deploying' ? 'running' : 'took'} {durMs(deploy.duration_ms)}</span>
-          )}
-          {hasError && (
-            <button className="history-error-btn" onClick={onToggleError}>
-              {showError ? 'hide' : 'show'} {deploy.error ? 'error' : 'reason'}
-            </button>
-          )}
-        </div>
-        {showError && hasError && (
-          <pre className="history-error-block">
-            {deploy.error || deploy.reject_reason}
-          </pre>
+    <div className="row h-row">
+      <span className="h-time mono">{timeOfDay(deploy.created_at).slice(0, 5)}</span>
+      <span className="h-state"><Status state={deploy.status} /></span>
+      <div className="h-main">
+        <span className="r-title">
+          <span className="r-name">{deploy.repo}</span>
+          <span className="r-node">{deploy.node_id}</span>
+        </span>
+        {firstCommit && (
+          <span className="r-meta h-line">
+            <span className="mono">{firstCommit.hash}</span>
+            <span className="h-msg">{firstCommit.message}</span>
+          </span>
         )}
+        {hasMeta && (
+          <span className="r-meta">
+            {deploy.approved_by && <span>approved by {deploy.approved_by}</span>}
+            {superseded && <span>{deploy.reject_reason}</span>}
+            {detail && (
+              <button type="button" className="link-btn" aria-expanded={showError} onClick={onToggleError}>
+                {showError ? 'Hide' : 'Show'} {deploy.error ? 'error' : 'reason'}
+              </button>
+            )}
+          </span>
+        )}
+        {showError && detail && <pre className="err-block">{detail}</pre>}
       </div>
+      {deploy.duration_ms != null ? (
+        <div className="r-metric">
+          <span className="m-label">{deploy.status === 'deploying' ? 'running' : 'took'}</span>
+          <span className="m-num">{durMs(deploy.duration_ms)}</span>
+        </div>
+      ) : (
+        <div className="r-metric" />
+      )}
     </div>
   );
 }

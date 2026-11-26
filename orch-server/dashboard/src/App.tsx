@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { Topbar } from '@/components/layout/Topbar';
 import { MobileNav } from '@/components/layout/MobileNav';
+import { Drawer } from '@/components/layout/Drawer';
 import { Toaster } from '@/components/shared/Toaster';
 import { PendingView } from '@/views/PendingView';
 import { NodesView } from '@/views/NodesView';
@@ -13,8 +14,9 @@ import {
   SERVICE_SPINNER_MIN_MS,
 } from '@/hooks/useInFlightCommands';
 import * as api from '@/lib/api';
-import { cn } from '@/lib/utils';
+import { useTheme } from '@/lib/theme';
 import type {
+  LoadState,
   Page,
   Deploy,
   OrchestratorNode,
@@ -24,12 +26,27 @@ import type {
 } from '@/types';
 
 const DASHBOARD_SYNC_INTERVAL_MS = 10_000;
+const LOADING: LoadState = { status: 'loading' };
+
+function describeFailure(path: string, e: unknown): string {
+  if (e instanceof api.ApiError) return `GET ${path} → ${e.status}`;
+  return `GET ${path} → ${e instanceof Error ? e.message : 'request failed'}`;
+}
+
+// A failed refresh only replaces the screen while nothing has loaded yet;
+// once data is on screen, the next sync repairs it.
+function failedLoad(current: LoadState, path: string, e: unknown): LoadState {
+  return current.status === 'ready' ? current : { status: 'error', detail: describeFailure(path, e) };
+}
 
 function App() {
   const [page, setPageRaw] = useState<Page>('pending');
   const [pending, setPending] = useState<Deploy[]>([]);
   const [nodes, setNodes] = useState<OrchestratorNode[]>([]);
   const [history, setHistory] = useState<Deploy[]>([]);
+  const [pendingLoad, setPendingLoad] = useState<LoadState>(LOADING);
+  const [historyLoad, setHistoryLoad] = useState<LoadState>(LOADING);
+  const [nodesLoad, setNodesLoad] = useState<LoadState>(LOADING);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const {
     inFlight,
@@ -38,10 +55,7 @@ function App() {
     clear: clearInFlight,
     lookupByService,
   } = useInFlightCommands();
-  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
-    const stored = localStorage.getItem('haniel-theme');
-    return (stored === 'light' || stored === 'dark') ? stored : 'dark';
-  });
+  const [theme, setTheme] = useTheme();
   const [showSidebar, setShowSidebar] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   // History 'include superseded' toggle — default off. Same value drives both
@@ -63,11 +77,15 @@ function App() {
   }, []);
 
   // Toast helper
+  const dismissToast = useCallback((id: string) => {
+    setToasts(ts => ts.filter(x => x.id !== id));
+  }, []);
+
   const pushToast = useCallback((text: string, kind: Toast['kind'] = 'info') => {
     const id = Math.random().toString(36).slice(2);
     setToasts(ts => [...ts, { id, text, kind }]);
-    setTimeout(() => setToasts(ts => ts.filter(x => x.id !== id)), 4200);
-  }, []);
+    setTimeout(() => dismissToast(id), 4200);
+  }, [dismissToast]);
 
   const deploySyncSeq = useRef(0);
   const nodeSyncSeq = useRef(0);
@@ -81,8 +99,16 @@ function App() {
       if (seq !== deploySyncSeq.current) return;
       if (pendingResult.status === 'fulfilled') {
         setPending(pendingResult.value.deploys);
+        setPendingLoad({ status: 'ready' });
+      } else {
+        setPendingLoad(cur => failedLoad(cur, '/api/orch/pending', pendingResult.reason));
       }
-      if (historyResult.status === 'fulfilled') setHistory(historyResult.value.deploys);
+      if (historyResult.status === 'fulfilled') {
+        setHistory(historyResult.value.deploys);
+        setHistoryLoad({ status: 'ready' });
+      } else {
+        setHistoryLoad(cur => failedLoad(cur, '/api/orch/history', historyResult.reason));
+      }
     });
   }, [includeSupersededHistory]);
 
@@ -90,10 +116,25 @@ function App() {
     const seq = ++nodeSyncSeq.current;
     void api.fetchNodes()
       .then(r => {
-        if (seq === nodeSyncSeq.current) setNodes(r.nodes);
+        if (seq !== nodeSyncSeq.current) return;
+        setNodes(r.nodes);
+        setNodesLoad({ status: 'ready' });
       })
-      .catch(() => {});
+      .catch((e: unknown) => {
+        if (seq === nodeSyncSeq.current) setNodesLoad(cur => failedLoad(cur, '/api/orch/nodes', e));
+      });
   }, []);
+
+  const retryDeploys = useCallback(() => {
+    setPendingLoad(LOADING);
+    setHistoryLoad(LOADING);
+    refreshDeploys();
+  }, [refreshDeploys]);
+
+  const retryNodes = useCallback(() => {
+    setNodesLoad(LOADING);
+    refreshNodes();
+  }, [refreshNodes]);
 
   const refreshAll = useCallback(() => {
     refreshDeploys();
@@ -106,7 +147,7 @@ function App() {
       case 'new_pending':
         // Refetch full deploy lists (event doesn't include commits/services).
         refreshDeploys();
-        pushToast(`New pending: ${event.repo} on ${event.node_id}`, 'amber');
+        pushToast(`New pending: ${event.repo} on ${event.node_id}`, 'warn');
         break;
       case 'status_change':
         // Pending and deploying are both shown in PendingView — keep the
@@ -118,7 +159,7 @@ function App() {
         }
         refreshDeploys();
         if (event.status === 'deploying') {
-          pushToast(`Deploying ${event.deploy_id.split(':')[1] || ''}`, 'amber');
+          pushToast(`Deploying ${event.deploy_id.split(':')[1] || ''}`, 'warn');
         } else if (event.status === 'success') {
           pushToast(`Deploy succeeded`, 'success');
         } else if (event.status === 'failed') {
@@ -136,7 +177,7 @@ function App() {
           // Auto-supersede triggered by approving a newer deploy on the
           // same (node, repo, branch). User-driven rejects already toast
           // from handleReject.
-          pushToast(`Superseded: newer deploy queued`, 'amber');
+          pushToast(`Superseded: newer deploy queued`, 'warn');
         }
         break;
       case 'node_connected':
@@ -146,7 +187,7 @@ function App() {
       case 'node_disconnected':
         refreshNodes();
         refreshDeploys();
-        pushToast(`Node disconnected: ${event.node_id}`, 'amber');
+        pushToast(`Node disconnected: ${event.node_id}`, 'warn');
         break;
       case 'service_command_result':
         // Release the matching button regardless of success/failure, but
@@ -186,17 +227,11 @@ function App() {
       const n = inFlightRef.current.size;
       if (n > 0) {
         clearInFlight();
-        pushToast(`Lost connection — ${n} in-flight command(s) cleared`, 'amber');
+        pushToast(`Lost connection — ${n} in-flight command(s) cleared`, 'warn');
       }
     }
     prevWsStatus.current = wsStatus;
   }, [wsStatus, clearInFlight, pushToast, refreshAll]);
-
-  // Apply theme to <html>
-  useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('haniel-theme', theme);
-  }, [theme]);
 
   // Initial data fetch, and history refetch when the superseded toggle changes.
   useEffect(() => {
@@ -233,7 +268,7 @@ function App() {
       if (res.warning) {
         // Server returned 200 but the node was offline — surface the warning
         // instead of pretending the deploy started.
-        pushToast(`Approved (deferred): ${res.warning}`, 'amber');
+        pushToast(`Approved (deferred): ${res.warning}`, 'warn');
       } else {
         pushToast(`Approved deploy`, 'success');
       }
@@ -294,7 +329,7 @@ function App() {
       if (failed === 0 && deferred === 0) {
         pushToast(`Approved ${succeeded} deploys`, 'success');
       } else if (failed === 0) {
-        pushToast(`Approved ${succeeded}, deferred ${deferred} (node not connected)`, 'amber');
+        pushToast(`Approved ${succeeded}, deferred ${deferred} (node not connected)`, 'warn');
       } else {
         const firstRejected = results.find(
           (r): r is PromiseRejectedResult => r.status === 'rejected',
@@ -305,7 +340,7 @@ function App() {
               : String(firstRejected.reason))
           : '';
         const tail = firstFailureReason ? ` (first failure: ${firstFailureReason})` : '';
-        pushToast(`Approved ${succeeded}, deferred ${deferred}, failed ${failed}${tail}`, 'amber');
+        pushToast(`Approved ${succeeded}, deferred ${deferred}, failed ${failed}${tail}`, 'warn');
       }
       refreshDeploys();
       return acceptedIds;
@@ -322,7 +357,7 @@ function App() {
           const reasons = result.failed.map(f => f.reason).join(', ');
           pushToast(
             `Approved ${result.approved.length}, failed ${result.failed.length} (${reasons})`,
-            'amber',
+            'warn',
           );
         }
         return result.approved;
@@ -335,75 +370,80 @@ function App() {
     }
   }, [pushToast, refreshDeploys]);
 
-  // Toggle theme
-  const toggleTheme = useCallback(() => {
-    setTheme(t => t === 'dark' ? 'light' : 'dark');
-  }, []);
-
   // Menu toggle
   const handleMenuToggle = useCallback(() => {
     if (isMobile) setMobileMenuOpen(o => !o);
     else setShowSidebar(s => !s);
   }, [isMobile]);
 
+  // Leaving the phone width closes the drawer for good, so it does not
+  // reopen when the window narrows again.
+  if (!isMobile && mobileMenuOpen) setMobileMenuOpen(false);
+
   const nodesConnected = nodes.filter(n => n.connected === 1).length;
-  const drawerOpen = isMobile && mobileMenuOpen;
-  const sidebarVisible = isMobile ? drawerOpen : showSidebar;
+  const sidebarVisible = !isMobile && showSidebar;
+  const menuLabel = isMobile ? 'Open menu' : showSidebar ? 'Hide sidebar' : 'Show sidebar';
+  const navCounts = {
+    pendingCount: pending.length,
+    nodesConnected,
+    historyCount: history.length,
+  };
 
   return (
-    <div className={cn('app', drawerOpen && 'is-drawer-open')}>
-      {sidebarVisible && (
-        <Sidebar
-          page={page}
-          setPage={setPage}
-          pendingCount={pending.length}
-          nodesConnected={nodesConnected}
-          historyCount={history.length}
-          wsStatus={wsStatus}
-        />
-      )}
+    <div className="app">
+      <Topbar
+        wsStatus={wsStatus}
+        theme={theme}
+        onThemeChange={setTheme}
+        menuLabel={menuLabel}
+        onMenuToggle={handleMenuToggle}
+      />
 
-      {drawerOpen && (
-        <button className="sidebar-scrim" aria-label="Close menu" onClick={() => setMobileMenuOpen(false)} />
-      )}
-
-      <div className="main">
-        <Topbar
-          page={page}
-          pendingCount={pending.length}
-          theme={theme}
-          onToggleTheme={toggleTheme}
-          onMenuToggle={handleMenuToggle}
-        />
-
-        <main className="page">
-          {page === 'pending' && (
-            <PendingView
-              deploys={pending}
-              onApprove={handleApprove}
-              onReject={handleReject}
-              onApproveAll={handleApproveAll}
-            />
-          )}
-          {page === 'nodes' && (
-            <NodesView
-              nodes={nodes}
-              onServiceCommand={handleServiceCommand}
-              lookupInFlight={lookupByService}
-            />
-          )}
-          {page === 'history' && (
-            <HistoryView
-              deploys={history}
-              includeSuperseded={includeSupersededHistory}
-              onToggleSuperseded={setIncludeSupersededHistory}
-            />
-          )}
+      <div className={sidebarVisible ? 'shell has-side' : 'shell'}>
+        {sidebarVisible && <Sidebar page={page} setPage={setPage} {...navCounts} />}
+        <main className="content scroll">
+          <div className="content-inner">
+            {page === 'pending' && (
+              <PendingView
+                deploys={pending}
+                load={pendingLoad}
+                onRetry={retryDeploys}
+                onApprove={handleApprove}
+                onReject={handleReject}
+                onApproveAll={handleApproveAll}
+              />
+            )}
+            {page === 'nodes' && (
+              <NodesView
+                nodes={nodes}
+                load={nodesLoad}
+                onRetry={retryNodes}
+                onServiceCommand={handleServiceCommand}
+                lookupInFlight={lookupByService}
+              />
+            )}
+            {page === 'history' && (
+              <HistoryView
+                deploys={history}
+                load={historyLoad}
+                onRetry={retryDeploys}
+                includeSuperseded={includeSupersededHistory}
+                onToggleSuperseded={setIncludeSupersededHistory}
+              />
+            )}
+          </div>
         </main>
       </div>
 
       <MobileNav page={page} setPage={setPage} pendingCount={pending.length} />
-      <Toaster toasts={toasts} />
+      <Toaster toasts={toasts} onDismiss={dismissToast} />
+      <Drawer
+        open={isMobile && mobileMenuOpen}
+        onClose={() => setMobileMenuOpen(false)}
+        page={page}
+        setPage={setPage}
+        {...navCounts}
+      />
     </div>
   );
 }
