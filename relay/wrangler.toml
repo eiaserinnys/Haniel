@@ -1,8 +1,9 @@
 name = "haniel-push-relay"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
+workers_dev = false
+routes = [{ pattern = "haniel-push.eiaserinnys.me", custom_domain = true }]
 
 [[kv_namespaces]]
 binding = "DEVICE_TOKENS"
-id = "placeholder"
-preview_id = "placeholder"
+id = "6f3bdcffb5194b42ad55dae0dcea9393"

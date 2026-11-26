@@ -24,10 +24,10 @@ Cloudflare Worker가 허브(orch-server)의 푸시 요청을 받아 iOS 앱 기�
 
 ## 배포 순서
 
-1. KV 네임스페이스를 만든다. `wrangler kv namespace create DEVICE_TOKENS`와 `wrangler kv namespace create DEVICE_TOKENS --preview`가 id를 알려 준다.
-2. `wrangler.toml`의 `[[kv_namespaces]]`에 있는 `id`와 `preview_id`를 1에서 받은 값으로 바꾼다. 지금 저장소에는 `placeholder`가 들어 있다.
-3. 비밀값 다섯을 등록한다. 각 이름마다 `wrangler secret put <이름>`을 실행해 값을 붙여 넣는다.
-4. `npm install` 뒤 `npm run deploy`로 배포한다. 출력된 Worker 주소(`https://haniel-push-relay.<서브도메인>.workers.dev` 꼴)가 중계 서버 URL이다.
+1. KV 네임스페이스를 하나만 만든다. `wrangler kv namespace create DEVICE_TOKENS`가 id를 알려 준다. 미리보기 네임스페이스는 만들지 않는다. 로컬 `wrangler dev`는 로컬 KV를 쓴다.
+2. `wrangler.toml`의 `[[kv_namespaces]]`에 있는 `id`를 1에서 받은 값으로 둔다. 이 id는 비밀이 아니며 `wrangler.toml`에만 적는다.
+3. 비밀값 다섯을 등록한다. 각 이름마다 `wrangler secret put <이름>`을 실행해 값을 붙여 넣는다. `INSTANCE_KEY`가 없거나 비어 있으면 중계 서버는 모든 요청을 401로 막는다.
+4. `npm ci` 뒤 `npm run deploy`로 배포한다. 중계 서버 주소는 `wrangler.toml`의 `routes`에 적은 사용자 지정 도메인(`https://haniel-push.eiaserinnys.me`) 하나다. `workers_dev = false`라 workers.dev 주소는 열리지 않는다.
 
 비밀값의 실제 값, 저장 위치, 계정 id는 이 저장소에 적지 않는다.
 
@@ -36,7 +36,7 @@ Cloudflare Worker가 허브(orch-server)의 푸시 요청을 받아 iOS 앱 기�
 허브 환경변수 두 개를 모두 설정하고 허브를 다시 시작한다. 허브는 다른 `ORCH_*` 값과 같은 방식으로 시작할 때 읽는다.
 
 ```
-ORCH_PUSH_RELAY_URL=https://haniel-push-relay.<서브도메인>.workers.dev
+ORCH_PUSH_RELAY_URL=https://haniel-push.eiaserinnys.me
 ORCH_PUSH_INSTANCE_KEY=<INSTANCE_KEY와 같은 값>
 ```
 

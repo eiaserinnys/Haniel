@@ -128,6 +128,30 @@ describe("Authentication", () => {
     const resp = await worker.fetch(req, env, {} as ExecutionContext);
     expect(resp.status).toBe(401);
   });
+
+  it("returns 401 when INSTANCE_KEY is not set", async () => {
+    const env = { ...createMockEnv(), INSTANCE_KEY: undefined } as unknown as Env;
+    const req = makeRequest("POST", "/v1/push", { title: "t", body: "b" }, {
+      Authorization: "Bearer undefined",
+    });
+
+    const resp = await worker.fetch(req, env, {} as ExecutionContext);
+    expect(resp.status).toBe(401);
+    const data = await resp.json<{ error: string }>();
+    expect(data.error).toBe("unauthorized");
+  });
+
+  it("returns 401 when INSTANCE_KEY is an empty string", async () => {
+    const env = { ...createMockEnv(), INSTANCE_KEY: "" };
+    const req = makeRequest("POST", "/v1/push", { title: "t", body: "b" }, {
+      Authorization: "Bearer ",
+    });
+
+    const resp = await worker.fetch(req, env, {} as ExecutionContext);
+    expect(resp.status).toBe(401);
+    const data = await resp.json<{ error: string }>();
+    expect(data.error).toBe("unauthorized");
+  });
 });
 
 describe("POST /v1/devices", () => {
