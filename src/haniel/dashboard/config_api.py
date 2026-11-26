@@ -10,19 +10,20 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
-from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from ..config.model import HanielConfig, RepoConfig, ServiceConfig
-from ..config.validators import validate_config
-from ..config.io import backup_config, read_config, restore_config, write_config
+from ..config.model import HanielConfig
+from ..config.io import read_config
 from ..core.service_lifecycle import (
-    config_write_transaction,
+    create_service_config,
+    delete_repo_config,
     delete_service_config,
     register_repo,
     register_service,
+    update_repo_config,
+    update_service_config,
 )
 
 if TYPE_CHECKING:
@@ -44,21 +45,8 @@ def _config_to_response(config: HanielConfig) -> dict:
     return config.model_dump(by_alias=True, mode="json")
 
 
-def _commit_config(config_path, config: HanielConfig, runner: "ServiceRunner") -> None:
-    """Atomically backup, write, and reload config.
-
-    Must be called inside config_write_transaction(runner).
-
-    Raises:
-        RuntimeError: If writing the config file fails (restores from backup first)
-    """
-    _ = backup_config(config_path)
-    try:
-        write_config(config_path, config)
-    except Exception as write_err:
-        restore_config(config_path)
-        raise RuntimeError(f"Write failed: {write_err}") from write_err
-    runner.reload_config()
+def _write_failed(error: Exception) -> RuntimeError:
+    return RuntimeError(f"Write failed: {error}")
 
 
 def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
@@ -119,11 +107,32 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
             logger.error("Failed to read config repos: %s", e)
             return _error(str(e), status=500)
 
+    async def _apply_change(
+        call, label: str, *, runtime_status: int, not_found: bool = True
+    ) -> JSONResponse:
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(None, call)
+            return JSONResponse(result)
+        except KeyError as e:
+            if not_found:
+                return _error(str(e), status=404)
+            return _internal_error(label, e)
+        except ValueError as e:
+            return _error(str(e), status=400)
+        except RuntimeError as e:
+            return _error(str(e), status=runtime_status)
+        except Exception as e:
+            return _internal_error(label, e)
+
+    def _internal_error(label: str, error: Exception) -> JSONResponse:
+        logger.error("%s failed: %s", label, error)
+        return _error(str(error), status=500)
+
     # ── PUT /api/config/services/{name} ───────────────────────────────────────
 
     async def put_service(request: Request) -> JSONResponse:
-        config_path = _get_config_path()
-        if not config_path:
+        if not _get_config_path():
             return _error("config_path not set", status=501)
 
         name = request.path_params["name"]
@@ -132,44 +141,18 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
         except Exception:
             return _error("Invalid JSON body")
 
-        loop = asyncio.get_running_loop()
-
         def _do_put():
-            try:
-                new_svc = ServiceConfig.model_validate(body)
-            except ValidationError as e:
-                raise ValueError(str(e)) from e
+            update_service_config(runner, name, body, wrap_write_error=_write_failed)
+            return {"ok": True}
 
-            with config_write_transaction(runner):
-                config = read_config(config_path)
-
-                if name not in config.services:
-                    raise KeyError(f"Service not found: {name}")
-
-                config.services[name] = new_svc
-
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
-
-                _commit_config(config_path, config, runner)
-
-        try:
-            await loop.run_in_executor(None, _do_put)
-            return JSONResponse({"ok": True})
-        except KeyError as e:
-            return _error(str(e), status=404)
-        except (ValueError, RuntimeError) as e:
-            return _error(str(e), status=400)
-        except Exception as e:
-            logger.error("PUT /api/config/services/%s failed: %s", name, e)
-            return _error(str(e), status=500)
+        return await _apply_change(
+            _do_put, f"PUT /api/config/services/{name}", runtime_status=400
+        )
 
     # ── POST /api/config/services ─────────────────────────────────────────────
 
     async def post_service(request: Request) -> JSONResponse:
-        config_path = _get_config_path()
-        if not config_path:
+        if not _get_config_path():
             return _error("config_path not set", status=501)
 
         try:
@@ -177,43 +160,20 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
         except Exception:
             return _error("Invalid JSON body")
 
-        loop = asyncio.get_running_loop()
-
         def _do_post():
             svc_name = body.get("name")
             svc_data = body.get("config")
             if not svc_name or svc_data is None:
                 raise ValueError("Body must contain 'name' and 'config' fields")
 
-            try:
-                new_svc = ServiceConfig.model_validate(svc_data)
-            except ValidationError as e:
-                raise ValueError(str(e)) from e
+            create_service_config(
+                runner, svc_name, svc_data, wrap_write_error=_write_failed
+            )
+            return {"ok": True}
 
-            with config_write_transaction(runner):
-                config = read_config(config_path)
-
-                if svc_name in config.services:
-                    raise ValueError(f"Service already exists: {svc_name}")
-
-                config.services[svc_name] = new_svc
-
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
-
-                _commit_config(config_path, config, runner)
-
-        try:
-            await loop.run_in_executor(None, _do_post)
-            return JSONResponse({"ok": True})
-        except ValueError as e:
-            return _error(str(e), status=400)
-        except RuntimeError as e:
-            return _error(str(e), status=500)
-        except Exception as e:
-            logger.error("POST /api/config/services failed: %s", e)
-            return _error(str(e), status=500)
+        return await _apply_change(
+            _do_post, "POST /api/config/services", runtime_status=500, not_found=False
+        )
 
     # ── POST /api/config/services/register ───────────────────────────────────
 
@@ -286,8 +246,7 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
     # ── PUT /api/config/repos/{name} ──────────────────────────────────────────
 
     async def put_repo(request: Request) -> JSONResponse:
-        config_path = _get_config_path()
-        if not config_path:
+        if not _get_config_path():
             return _error("config_path not set", status=501)
 
         name = request.path_params["name"]
@@ -296,52 +255,24 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
         except Exception:
             return _error("Invalid JSON body")
 
-        loop = asyncio.get_running_loop()
-
         def _do_put():
-            try:
-                new_repo = RepoConfig.model_validate(body)
-            except ValidationError as e:
-                raise ValueError(str(e)) from e
+            update_repo_config(runner, name, body, wrap_write_error=_write_failed)
+            return {"ok": True}
 
-            with config_write_transaction(runner):
-                config = read_config(config_path)
-
-                if name not in config.repos:
-                    raise KeyError(f"Repo not found: {name}")
-
-                config.repos[name] = new_repo
-
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
-
-                _commit_config(config_path, config, runner)
-
-        try:
-            await loop.run_in_executor(None, _do_put)
-            return JSONResponse({"ok": True})
-        except KeyError as e:
-            return _error(str(e), status=404)
-        except (ValueError, RuntimeError) as e:
-            return _error(str(e), status=400)
-        except Exception as e:
-            logger.error("PUT /api/config/repos/%s failed: %s", name, e)
-            return _error(str(e), status=500)
+        return await _apply_change(
+            _do_put, f"PUT /api/config/repos/{name}", runtime_status=400
+        )
 
     # ── POST /api/config/repos ────────────────────────────────────────────────
 
     async def post_repo(request: Request) -> JSONResponse:
-        config_path = _get_config_path()
-        if not config_path:
+        if not _get_config_path():
             return _error("config_path not set", status=501)
 
         try:
             body = await request.json()
         except Exception:
             return _error("Invalid JSON body")
-
-        loop = asyncio.get_running_loop()
 
         def _do_post():
             repo_name = body.get("name")
@@ -349,70 +280,27 @@ def create_config_api_routes(runner: "ServiceRunner") -> list[Route]:
             if not repo_name or repo_data is None:
                 raise ValueError("Body must contain 'name' and 'config' fields")
 
-            try:
-                return register_repo(runner, name=repo_name, repo_config=repo_data)
-            except ValidationError as e:
-                raise ValueError(str(e)) from e
+            return register_repo(runner, name=repo_name, repo_config=repo_data)
 
-        try:
-            result = await loop.run_in_executor(None, _do_post)
-            return JSONResponse(result)
-        except ValueError as e:
-            return _error(str(e), status=400)
-        except RuntimeError as e:
-            return _error(str(e), status=500)
-        except Exception as e:
-            logger.error("POST /api/config/repos failed: %s", e)
-            return _error(str(e), status=500)
+        return await _apply_change(
+            _do_post, "POST /api/config/repos", runtime_status=500, not_found=False
+        )
 
     # ── DELETE /api/config/repos/{name} ───────────────────────────────────────
 
     async def delete_repo(request: Request) -> JSONResponse:
-        config_path = _get_config_path()
-        if not config_path:
+        if not _get_config_path():
             return _error("config_path not set", status=501)
 
         name = request.path_params["name"]
-        loop = asyncio.get_running_loop()
 
         def _do_delete():
-            with config_write_transaction(runner):
-                config = read_config(config_path)
+            delete_repo_config(runner, name, wrap_write_error=_write_failed)
+            return {"ok": True}
 
-                if name not in config.repos:
-                    raise KeyError(f"Repo not found: {name}")
-
-                # Reference check: services whose `repo` field points to this repo
-                using_services = [
-                    svc_name
-                    for svc_name, svc_cfg in config.services.items()
-                    if svc_cfg.repo == name
-                ]
-                if using_services:
-                    raise ValueError(
-                        f"Cannot delete repo '{name}': used by services {using_services}"
-                    )
-
-                del config.repos[name]
-
-                errors = validate_config(config)
-                if errors:
-                    raise ValueError(str(errors[0]))
-
-                _commit_config(config_path, config, runner)
-
-        try:
-            await loop.run_in_executor(None, _do_delete)
-            return JSONResponse({"ok": True})
-        except KeyError as e:
-            return _error(str(e), status=404)
-        except ValueError as e:
-            return _error(str(e), status=400)
-        except RuntimeError as e:
-            return _error(str(e), status=500)
-        except Exception as e:
-            logger.error("DELETE /api/config/repos/%s failed: %s", name, e)
-            return _error(str(e), status=500)
+        return await _apply_change(
+            _do_delete, f"DELETE /api/config/repos/{name}", runtime_status=500
+        )
 
     return [
         Route("/api/config", get_config, methods=["GET"]),
