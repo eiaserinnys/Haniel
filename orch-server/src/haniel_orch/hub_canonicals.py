@@ -7,6 +7,15 @@ import logging
 from typing import Any
 
 from .protocol import ChangeNotification, DeployResult, DeployStatus, NodeDeployReport
+from .push_text import (
+    FAILED_ACTION,
+    FAILED_TITLE,
+    PENDING_ACTION,
+    PENDING_TITLE,
+    SUCCESS_ACTION,
+    SUCCESS_TITLE,
+    build_push,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,15 +104,18 @@ class HubCanonicalFlows:
         )
 
         # Fire-and-forget push notification
-        self._spawn_push(
-            title=f"배포 대기: {msg.repo}",
-            body=f"{msg.node_id}에서 {msg.repo} ({msg.branch}) 변경 감지",
-            data={
-                "deploy_id": msg.deploy_id,
-                "type": "new_pending",
-                "node_id": msg.node_id,
-            },
+        title, body, data = build_push(
+            title_prefix=PENDING_TITLE,
+            action=PENDING_ACTION,
+            deploy_id=msg.deploy_id,
+            node_id=msg.node_id,
+            repo=msg.repo,
+            branch=msg.branch,
+            affected_services=msg.affected_services,
+            commits=msg.commits,
+            extra_data={"type": "new_pending"},
         )
+        self._spawn_push(title=title, body=body, data=data)
 
     async def _revive_postponed_self_update(self, msg: ChangeNotification) -> None:
         """Return a due postponed self-update to pending on a repeat notification.
@@ -172,16 +184,36 @@ class HubCanonicalFlows:
         """Preserve terminal push UX without making it a state authority."""
         if result["status"] not in {"success", "failed"}:
             return
-        status_text = "성공" if result["status"] == "success" else "실패"
-        self._spawn_push(
-            title=f"배포 {status_text}: {result['node_id']}",
-            body=f"{result['node_id']}의 배포가 {status_text}했습니다",
-            data={
-                "deploy_id": result["deploy_id"],
-                "type": "status_change",
-                "status": result["status"],
-            },
-        )
+        succeeded = result["status"] == "success"
+        status_text = "성공" if succeeded else "실패"
+        node_id = result["node_id"]
+        title = f"배포 {status_text}: {node_id}"
+        body = f"{node_id}의 배포가 {status_text}했습니다"
+        data = {
+            "deploy_id": result["deploy_id"],
+            "type": "status_change",
+            "status": result["status"],
+        }
+        try:
+            event = await self._store.get_deploy_event(result["deploy_id"])
+        except Exception:
+            logger.exception(
+                "Failed to load deploy event %s for push", result["deploy_id"]
+            )
+            event = None
+        if event is not None:
+            title, body, data = build_push(
+                title_prefix=SUCCESS_TITLE if succeeded else FAILED_TITLE,
+                action=SUCCESS_ACTION if succeeded else FAILED_ACTION,
+                deploy_id=result["deploy_id"],
+                node_id=node_id,
+                repo=event["repo"],
+                branch=event["branch"],
+                affected_services=event["affected_services"],
+                commits=event["commits"],
+                extra_data={"type": "status_change", "status": result["status"]},
+            )
+        self._spawn_push(title=title, body=body, data=data)
 
     def _spawn_push(self, title: str, body: str, data: dict[str, Any]) -> None:
         """Spawn a fire-and-forget push task. Task ref is held to prevent GC."""

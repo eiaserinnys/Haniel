@@ -1261,18 +1261,18 @@ class TestPushIntegration:
     """Tests for push notification integration in WebSocketHub."""
 
     async def test_change_notification_fires_push(self, store: EventStore):
-        """ChangeNotification triggers push_service.notify with new_pending data."""
+        """ChangeNotification push carries repo, branch, services and change summary."""
         push = AsyncMock()
         registry = NodeRegistry(store)
         hub = WebSocketHub(registry, store, token="t", push_service=push)
 
         notification = ChangeNotification(
-            deploy_id="n1:repo:main:abc",
+            deploy_id="n1:r:main:abc",
             node_id="n1",
-            repo="myrepo",
+            repo="r",
             branch="main",
-            commits=["abc fix"],
-            affected_services=["svc"],
+            commits=["abc1234 첫 변경", "def5678 둘째 변경"],
+            affected_services=["svc-a", "svc-b"],
             detected_at="2026-05-05T00:00:00Z",
         )
 
@@ -1283,13 +1283,17 @@ class TestPushIntegration:
         push.notify.assert_called_once()
         args, kwargs = push.notify.call_args
         title = kwargs.get("title", args[0])
+        body = kwargs.get("body", args[1])
         data = kwargs.get("data", args[2])
-        assert "myrepo" in title
+        assert title == "배포 대기: r"
+        assert body == "n1에서 r (main) 변경 감지\n서비스: svc-a, svc-b\n변경: 첫 변경 외 1건"
         assert data["type"] == "new_pending"
-        assert data["deploy_id"] == "n1:repo:main:abc"
+        assert data["deploy_id"] == "n1:r:main:abc"
+        assert data["node_id"] == "n1"
+        assert data["repo"] == "r"
 
     async def test_deploy_result_success_fires_push(self, store: EventStore):
-        """DeployResult(success) triggers push notification."""
+        """DeployResult(success) push carries the same fields as the change push."""
         push = AsyncMock()
         registry = NodeRegistry(store)
         hub = WebSocketHub(registry, store, token="t", push_service=push)
@@ -1299,8 +1303,8 @@ class TestPushIntegration:
             node_id="n1",
             repo="r",
             branch="main",
-            commits=["h msg"],
-            affected_services=[],
+            commits=["abc1234 첫 변경", "def5678 둘째 변경"],
+            affected_services=["svc-a", "svc-b"],
             diff_stat=None,
             detected_at="2026-01-01T00:00:00Z",
         )
@@ -1315,11 +1319,17 @@ class TestPushIntegration:
 
         push.notify.assert_called_once()
         args, kwargs = push.notify.call_args
+        title = kwargs.get("title", args[0])
+        body = kwargs.get("body", args[1])
         data = kwargs.get("data", args[2])
+        assert title == "배포 성공: r"
+        assert body == "n1에서 r (main) 배포 완료\n서비스: svc-a, svc-b\n변경: 첫 변경 외 1건"
         assert data["status"] == "success"
+        assert data["node_id"] == "n1"
+        assert data["repo"] == "r"
 
     async def test_deploy_result_failed_fires_push(self, store: EventStore):
-        """DeployResult(failed) triggers push notification."""
+        """DeployResult(failed) push omits empty services and extra-commit suffix."""
         push = AsyncMock()
         registry = NodeRegistry(store)
         hub = WebSocketHub(registry, store, token="t", push_service=push)
@@ -1342,8 +1352,14 @@ class TestPushIntegration:
 
         push.notify.assert_called_once()
         args, kwargs = push.notify.call_args
+        title = kwargs.get("title", args[0])
+        body = kwargs.get("body", args[1])
         data = kwargs.get("data", args[2])
+        assert title == "배포 실패: r"
+        assert body == "n1에서 r (main) 배포 실패\n변경: msg"
         assert data["status"] == "failed"
+        assert data["node_id"] == "n1"
+        assert data["repo"] == "r"
 
     async def test_push_failure_does_not_break_broadcast(self, store: EventStore):
         """Push failure does not prevent dashboard broadcast."""
