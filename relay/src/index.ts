@@ -223,7 +223,7 @@ async function handleDeleteDevice(token: string, env: Env): Promise<Response> {
 
 function authenticate(request: Request, env: Env): Response | null {
   const auth = request.headers.get("Authorization");
-  if (!auth || auth !== `Bearer ${env.INSTANCE_KEY}`) {
+  if (!env.INSTANCE_KEY || !auth || auth !== `Bearer ${env.INSTANCE_KEY}`) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
   return null; // auth passed
